@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "ccrecall",
+  "displayName": "ccrecall",
+  "version": "0.9.0",
+  "description": "Conversation history and semantic search for Claude Code",
+  "author": {
+    "name": "Jessica Smith",
+    "email": "12jessicasmith34@gmail.com"
+  },
+  "repository": "https://github.com/NodeJSmith/claude-code-recall",
+  "license": "MIT",
+  "keywords": [
+    "claude-code",
+    "conversation-history",
+    "search",
+    "recall",
+    "transcripts",
+    "semantic-search"
+  ]
+}

@@ -1,0 +1,47 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'command -v cm-memory-setup >/dev/null 2>&1 && cm-memory-setup || true'",
+            "timeout": 10000
+          },
+          {
+            "type": "command",
+            "command": "bash -c 'command -v cm-onboarding >/dev/null 2>&1 && cm-onboarding || true'",
+            "timeout": 10000
+          },
+          {
+            "type": "command",
+            "command": "bash -c 'command -v cm-memory-context >/dev/null 2>&1 && cm-memory-context || true'",
+            "timeout": 10000
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'command -v cm-clear-handoff >/dev/null 2>&1 && cm-clear-handoff || true'",
+            "timeout": 10000
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'command -v cm-memory-sync >/dev/null 2>&1 && cm-memory-sync || true'",
+            "timeout": 30000
+          }
+        ]
+      }
+    ]
+  }
+}
