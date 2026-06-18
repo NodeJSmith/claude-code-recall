@@ -1,5 +1,5 @@
 ---
-name: cm-recall-conversations
+name: ccr-recall
 user-invocable: true
 description: >
   Use when the user asks to recall, search, or continue past conversations.

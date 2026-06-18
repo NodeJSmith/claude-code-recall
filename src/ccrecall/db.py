@@ -13,10 +13,10 @@ from pathlib import Path
 
 import sqlite_vec
 
-from claude_memory.content import parse_origin
-from claude_memory.embeddings import EMBEDDING_DIM, EMBEDDING_MODEL, EMBEDDING_VERSION
-from claude_memory.parsing import build_aggregated_content
-from claude_memory.summarizer import truncate_mid
+from ccrecall.content import parse_origin
+from ccrecall.embeddings import EMBEDDING_DIM, EMBEDDING_MODEL, EMBEDDING_VERSION
+from ccrecall.parsing import build_aggregated_content
+from ccrecall.summarizer import truncate_mid
 
 # Default paths
 DEFAULT_DB_PATH = Path.home() / ".claude-memory" / "conversations.db"

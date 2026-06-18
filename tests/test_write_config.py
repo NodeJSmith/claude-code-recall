@@ -1,4 +1,4 @@
-"""Tests for claude_memory.hooks.write_config."""
+"""Tests for ccrecall.hooks.write_config."""
 
 import json
 import os
@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-import claude_memory.hooks.write_config as write_config
-from claude_memory.db import CURRENT_ONBOARDING_VERSION
+import ccrecall.hooks.write_config as write_config
+from ccrecall.db import CURRENT_ONBOARDING_VERSION
 
 
 # ---------------------------------------------------------------------------
@@ -16,11 +16,11 @@ from claude_memory.db import CURRENT_ONBOARDING_VERSION
 # ---------------------------------------------------------------------------
 
 
-import claude_memory.db as _db_mod
+import ccrecall.db as _db_mod
 
 
 def _patch_config_path(monkeypatch, path: Path) -> None:
-    """Patch CONFIG_PATH in both claude_memory.db and the imported write_config module."""
+    """Patch CONFIG_PATH in both ccrecall.db and the imported write_config module."""
     monkeypatch.setattr(_db_mod, "CONFIG_PATH", path)
     monkeypatch.setattr(write_config, "CONFIG_PATH", path)
 

@@ -4,7 +4,7 @@ import math
 from pathlib import Path
 import pytest
 
-from claude_memory.embeddings import (
+from ccrecall.embeddings import (
     DEFAULT_EMBED_THREADS,
     EMBEDDING_DIM,
     EMBEDDING_MODEL,
@@ -34,19 +34,19 @@ class TestModelAvailable:
     def test_missing_cache(self, tmp_path, monkeypatch):
         """model_available returns False (no raise) when cache dir is missing."""
         missing = tmp_path / "nonexistent_snapshots"
-        monkeypatch.setattr("claude_memory.embeddings._SNAPSHOTS_DIR", missing)
+        monkeypatch.setattr("ccrecall.embeddings._SNAPSHOTS_DIR", missing)
         # Reset module-level cache so the monkeypatched path is used
-        monkeypatch.setattr("claude_memory.embeddings._session", None)
-        monkeypatch.setattr("claude_memory.embeddings._tokenizer", None)
+        monkeypatch.setattr("ccrecall.embeddings._session", None)
+        monkeypatch.setattr("ccrecall.embeddings._tokenizer", None)
         assert model_available() is False
 
     def test_empty_snapshot_dir(self, tmp_path, monkeypatch):
         """model_available returns False when snapshots dir exists but is empty."""
         snapshots = tmp_path / "snapshots"
         snapshots.mkdir()
-        monkeypatch.setattr("claude_memory.embeddings._SNAPSHOTS_DIR", snapshots)
-        monkeypatch.setattr("claude_memory.embeddings._session", None)
-        monkeypatch.setattr("claude_memory.embeddings._tokenizer", None)
+        monkeypatch.setattr("ccrecall.embeddings._SNAPSHOTS_DIR", snapshots)
+        monkeypatch.setattr("ccrecall.embeddings._session", None)
+        monkeypatch.setattr("ccrecall.embeddings._tokenizer", None)
         assert model_available() is False
 
     def test_partial_snapshot(self, tmp_path, monkeypatch):
@@ -57,9 +57,9 @@ class TestModelAvailable:
         snap.mkdir()
         # Only tokenizer.json, no model_quantized.onnx
         (snap / "tokenizer.json").write_bytes(b'{"version":"1"}')
-        monkeypatch.setattr("claude_memory.embeddings._SNAPSHOTS_DIR", snapshots)
-        monkeypatch.setattr("claude_memory.embeddings._session", None)
-        monkeypatch.setattr("claude_memory.embeddings._tokenizer", None)
+        monkeypatch.setattr("ccrecall.embeddings._SNAPSHOTS_DIR", snapshots)
+        monkeypatch.setattr("ccrecall.embeddings._session", None)
+        monkeypatch.setattr("ccrecall.embeddings._tokenizer", None)
         assert model_available() is False
 
     def test_zero_size_files(self, tmp_path, monkeypatch):
@@ -70,18 +70,18 @@ class TestModelAvailable:
         snap.mkdir()
         (snap / "tokenizer.json").write_bytes(b"")
         (snap / "model_quantized.onnx").write_bytes(b"")
-        monkeypatch.setattr("claude_memory.embeddings._SNAPSHOTS_DIR", snapshots)
-        monkeypatch.setattr("claude_memory.embeddings._session", None)
-        monkeypatch.setattr("claude_memory.embeddings._tokenizer", None)
+        monkeypatch.setattr("ccrecall.embeddings._SNAPSHOTS_DIR", snapshots)
+        monkeypatch.setattr("ccrecall.embeddings._session", None)
+        monkeypatch.setattr("ccrecall.embeddings._tokenizer", None)
         assert model_available() is False
 
     def test_no_raise_on_bad_path(self, tmp_path, monkeypatch):
         """model_available never raises; returns False on any error."""
         monkeypatch.setattr(
-            "claude_memory.embeddings._SNAPSHOTS_DIR", Path("/this/does/not/exist/ever")
+            "ccrecall.embeddings._SNAPSHOTS_DIR", Path("/this/does/not/exist/ever")
         )
-        monkeypatch.setattr("claude_memory.embeddings._session", None)
-        monkeypatch.setattr("claude_memory.embeddings._tokenizer", None)
+        monkeypatch.setattr("ccrecall.embeddings._session", None)
+        monkeypatch.setattr("ccrecall.embeddings._tokenizer", None)
         # Must not raise
         assert model_available() is False
 

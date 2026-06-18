@@ -1,4 +1,4 @@
-"""Tests for claude_memory.summarizer — context summary extraction and rendering."""
+"""Tests for ccrecall.summarizer — context summary extraction and rendering."""
 
 import inspect
 import json
@@ -6,8 +6,8 @@ import sqlite3
 
 import pytest
 
-from claude_memory.hooks import backfill_summaries, memory_setup
-from claude_memory.summarizer import (
+from ccrecall.hooks import backfill_summaries, memory_setup
+from ccrecall.summarizer import (
     build_exchange_pairs,
     detect_disposition,
     truncate_mid,
@@ -15,7 +15,7 @@ from claude_memory.summarizer import (
     compute_context_summary,
     render_context_summary,
 )
-from claude_memory.db import SCHEMA, _migrate_columns
+from ccrecall.db import SCHEMA, _migrate_columns
 
 
 class TestTruncateMid:

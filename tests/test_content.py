@@ -1,6 +1,6 @@
-"""Tests for claude_memory.content — message content extraction and tool detection."""
+"""Tests for ccrecall.content — message content extraction and tool detection."""
 
-from claude_memory.content import (
+from ccrecall.content import (
     extract_commits,
     extract_files_modified,
     extract_text_content,

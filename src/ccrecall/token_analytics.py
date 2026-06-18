@@ -7,7 +7,7 @@ for the token ingest pipeline.
 import json
 import sqlite3
 
-from claude_memory.token_parser import (
+from ccrecall.token_parser import (
     JnlFile,
     ParsedSession,
     compute_session_analytics,

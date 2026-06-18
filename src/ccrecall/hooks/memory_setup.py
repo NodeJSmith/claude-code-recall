@@ -10,7 +10,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from claude_memory.db import DEFAULT_DB_PATH, get_db_connection, load_settings
+from ccrecall.db import DEFAULT_DB_PATH, get_db_connection, load_settings
 
 # PID files live in the same directory as the DB
 _PID_DIR = DEFAULT_DB_PATH.parent

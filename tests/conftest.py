@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 import sqlite_vec
 
-from claude_memory.db import SCHEMA, _ensure_vec_schema, _migrate_columns
+from ccrecall.db import SCHEMA, _ensure_vec_schema, _migrate_columns
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures"
 

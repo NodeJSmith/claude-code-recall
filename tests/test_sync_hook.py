@@ -10,11 +10,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from claude_memory.db import SCHEMA, _migrate_columns
-from claude_memory.hooks import memory_setup, memory_sync
-from claude_memory.hooks.sync_current import sync_session, validate_session_id
-from claude_memory.recent_chats import main as recent_chats_main
-from claude_memory.search_conversations import main as search_conversations_main
+from ccrecall.db import SCHEMA, _migrate_columns
+from ccrecall.hooks import memory_setup, memory_sync
+from ccrecall.hooks.sync_current import sync_session, validate_session_id
+from ccrecall.recent_chats import main as recent_chats_main
+from ccrecall.search_conversations import main as search_conversations_main
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures"
 

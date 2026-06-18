@@ -1,9 +1,9 @@
-"""Tests for claude_memory.session_tail — prior-session tail recovery."""
+"""Tests for ccrecall.session_tail — prior-session tail recovery."""
 
 import json
 import os
 
-from claude_memory.session_tail import (
+from ccrecall.session_tail import (
     build_tail,
     find_pending_question,
     format_pending_block,

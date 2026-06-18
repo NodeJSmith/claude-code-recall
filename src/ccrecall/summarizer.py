@@ -11,7 +11,7 @@ import json
 import re
 import sqlite3
 
-from claude_memory.formatting import format_time, format_time_full
+from ccrecall.formatting import format_time, format_time_full
 
 # Truncation limits
 _FRONT_CHARS = 300

@@ -21,17 +21,17 @@ import json
 import sqlite3
 from pathlib import Path
 
-from claude_memory.content import (
+from ccrecall.content import (
     extract_text_content,
     is_task_notification,
     is_teammate_message,
     is_tool_result,
     parse_origin,
 )
-from claude_memory.db import branch_vec_queryable, write_branch_embedding
-from claude_memory.embeddings import embed_text
-from claude_memory.formatting import normalize_project_key
-from claude_memory.parsing import (
+from ccrecall.db import branch_vec_queryable, write_branch_embedding
+from ccrecall.embeddings import embed_text
+from ccrecall.formatting import normalize_project_key
+from ccrecall.parsing import (
     build_aggregated_content,
     compute_branch_metadata,
     extract_session_metadata,
@@ -39,8 +39,8 @@ from claude_memory.parsing import (
     parse_all_with_uuids,
     parse_jsonl_file,
 )
-from claude_memory.project_ops import upsert_project
-from claude_memory.summarizer import SUMMARY_VERSION, compute_context_summary
+from ccrecall.project_ops import upsert_project
+from ccrecall.summarizer import SUMMARY_VERSION, compute_context_summary
 
 
 def sync_session(

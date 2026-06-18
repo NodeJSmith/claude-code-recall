@@ -1,4 +1,4 @@
-"""Tests for claude_memory.hooks.onboarding.
+"""Tests for ccrecall.hooks.onboarding.
 
 onboarding.py is a SessionStart hook: it must either inject onboarding
 instructions (first-run / version upgrade) or exit silently (already
@@ -12,9 +12,9 @@ import json
 import sys
 from pathlib import Path
 
-import claude_memory.db as _db_mod
-import claude_memory.hooks.onboarding as onboarding
-from claude_memory.db import CURRENT_ONBOARDING_VERSION
+import ccrecall.db as _db_mod
+import ccrecall.hooks.onboarding as onboarding
+from ccrecall.db import CURRENT_ONBOARDING_VERSION
 
 
 # ---------------------------------------------------------------------------
@@ -23,7 +23,7 @@ from claude_memory.db import CURRENT_ONBOARDING_VERSION
 
 
 def _patch_config_path(monkeypatch, path: Path) -> None:
-    """Patch CONFIG_PATH in both claude_memory.db and the onboarding module."""
+    """Patch CONFIG_PATH in both ccrecall.db and the onboarding module."""
     monkeypatch.setattr(_db_mod, "CONFIG_PATH", path)
     monkeypatch.setattr(onboarding, "CONFIG_PATH", path)
 

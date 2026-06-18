@@ -8,7 +8,7 @@ import sqlite3
 import sys
 from pathlib import Path
 
-from claude_memory.token_parser import _WORKTREE_MARKERS
+from ccrecall.token_parser import _WORKTREE_MARKERS
 
 SCHEMA_VERSION = 4
 

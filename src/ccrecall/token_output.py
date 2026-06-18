@@ -9,8 +9,8 @@ import sqlite3
 from datetime import datetime, timezone
 from itertools import groupby
 
-from claude_memory.token_insights import build_insights_and_trends
-from claude_memory.token_parser import (
+from ccrecall.token_insights import build_insights_and_trends
+from ccrecall.token_parser import (
     _BASH_ANTIPATTERN_PREDICATE,
     _get_pricing,
     _project_slug,

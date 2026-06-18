@@ -7,13 +7,13 @@ Processes branches in batches, commits between batches, and marks errors
 with summary_version = -1 to avoid infinite retry.
 """
 
-from claude_memory.db import (
+from ccrecall.db import (
     DEFAULT_DB_PATH,
     get_db_connection,
     load_settings,
     setup_logging,
 )
-from claude_memory.summarizer import compute_context_summary
+from ccrecall.summarizer import compute_context_summary
 
 BATCH_SIZE = 50
 

@@ -11,7 +11,7 @@ import sqlite3
 
 import pytest
 
-from claude_memory.recent_chats import get_recent_sessions
+from ccrecall.recent_chats import get_recent_sessions
 from conftest import make_vec_conn
 
 

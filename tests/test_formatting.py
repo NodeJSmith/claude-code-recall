@@ -1,8 +1,8 @@
-"""Tests for claude_memory.formatting — time formatting, project paths, session rendering."""
+"""Tests for ccrecall.formatting — time formatting, project paths, session rendering."""
 
 import re
 
-from claude_memory.formatting import (
+from ccrecall.formatting import (
     extract_project_name,
     format_markdown_session,
     format_time,

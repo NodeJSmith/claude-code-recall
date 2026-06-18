@@ -9,10 +9,10 @@ from unittest.mock import patch
 
 import pytest
 
-from claude_memory.db import SCHEMA, _ensure_vec_schema, _migrate_columns, vec_available
-from claude_memory.embeddings import EMBEDDING_MODEL, EMBEDDING_VERSION
-from claude_memory.session_ops import sync_session
-from claude_memory.summarizer import SUMMARY_VERSION
+from ccrecall.db import SCHEMA, _ensure_vec_schema, _migrate_columns, vec_available
+from ccrecall.embeddings import EMBEDDING_MODEL, EMBEDDING_VERSION
+from ccrecall.session_ops import sync_session
+from ccrecall.summarizer import SUMMARY_VERSION
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures"
 
@@ -444,7 +444,7 @@ class TestEmbedOnWriteModelUnavailable:
         _migrate_columns(conn)
 
         with patch(
-            "claude_memory.session_ops.embed_text", side_effect=RuntimeError("no model")
+            "ccrecall.session_ops.embed_text", side_effect=RuntimeError("no model")
         ):
             with tempfile.TemporaryDirectory() as tmpdir:
                 result = sync_session(conn, fixture_path, Path(tmpdir))
@@ -492,7 +492,7 @@ class TestEmbedOnWriteOrderingInvariant:
 
         fake_vec = [0.1] * 1024
 
-        with patch("claude_memory.session_ops.embed_text", return_value=fake_vec):
+        with patch("ccrecall.session_ops.embed_text", return_value=fake_vec):
             with tempfile.TemporaryDirectory() as tmpdir:
                 result = sync_session(conn, fixture_path, Path(tmpdir))
                 conn.commit()
@@ -534,7 +534,7 @@ class TestEmbedOnWriteSuccess:
 
         fake_vec = [0.1] * 1024
 
-        with patch("claude_memory.session_ops.embed_text", return_value=fake_vec):
+        with patch("ccrecall.session_ops.embed_text", return_value=fake_vec):
             with tempfile.TemporaryDirectory() as tmpdir:
                 result = sync_session(conn, fixture_path, Path(tmpdir))
                 conn.commit()

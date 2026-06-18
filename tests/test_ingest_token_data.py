@@ -9,8 +9,8 @@ import sqlite3
 from pathlib import Path
 
 import pytest
-from claude_memory.token_analytics import import_session
-from claude_memory.token_parser import (
+from ccrecall.token_analytics import import_session
+from ccrecall.token_parser import (
     JnlFile,
     ParsedSession,
     Turn,
@@ -19,7 +19,7 @@ from claude_memory.token_parser import (
     record_import,
     should_skip_file,
 )
-from claude_memory.token_schema import (
+from ccrecall.token_schema import (
     SCHEMA_SQL,
     SCHEMA_VERSION,
     ensure_schema,

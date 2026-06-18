@@ -3,9 +3,9 @@ requires = ["setuptools>=80", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "claude-memory"
+name = "ccrecall"
 version = "0.9.0"
-description = "Persistent conversation memory for Claude Code"
+description = "Conversation history and semantic search for Claude Code"
 requires-python = ">=3.10"
 # Pinned to the versions in uv.lock: `uv tool install -e` (how install.py
 # installs this package) ignores uv.lock and resolves fresh, so an unbounded
@@ -23,22 +23,22 @@ dependencies = [
 
 [project.scripts]
 # Hook entry points (wired in settings.json)
-cm-memory-setup          = "claude_memory.hooks.memory_setup:main"
-cm-memory-sync           = "claude_memory.hooks.memory_sync:main"
-cm-memory-context        = "claude_memory.hooks.memory_context:main"
-cm-onboarding            = "claude_memory.hooks.onboarding:main"
-cm-clear-handoff         = "claude_memory.hooks.clear_handoff:main"
+cm-memory-setup          = "ccrecall.hooks.memory_setup:main"
+cm-memory-sync           = "ccrecall.hooks.memory_sync:main"
+cm-memory-context        = "ccrecall.hooks.memory_context:main"
+cm-onboarding            = "ccrecall.hooks.onboarding:main"
+cm-clear-handoff         = "ccrecall.hooks.clear_handoff:main"
 # Internal helpers (called as subprocesses by hooks above)
-cm-sync-current          = "claude_memory.hooks.sync_current:main"
-cm-backfill-summaries    = "claude_memory.hooks.backfill_summaries:main"
-cm-backfill-embeddings   = "claude_memory.hooks.backfill_embeddings:main"
-cm-import-conversations  = "claude_memory.hooks.import_conversations:main"
-cm-write-config          = "claude_memory.hooks.write_config:main"
+cm-sync-current          = "ccrecall.hooks.sync_current:main"
+cm-backfill-summaries    = "ccrecall.hooks.backfill_summaries:main"
+cm-backfill-embeddings   = "ccrecall.hooks.backfill_embeddings:main"
+cm-import-conversations  = "ccrecall.hooks.import_conversations:main"
+cm-write-config          = "ccrecall.hooks.write_config:main"
 # Skill CLI tools (called from SKILL.md files)
-cm-recent-chats          = "claude_memory.recent_chats:main"
-cm-search-conversations  = "claude_memory.search_conversations:main"
-cm-ingest-token-data     = "claude_memory.token_dashboard:main"
-cm-session-tail          = "claude_memory.session_tail:main"
+cm-recent-chats          = "ccrecall.recent_chats:main"
+cm-search-conversations  = "ccrecall.search_conversations:main"
+cm-ingest-token-data     = "ccrecall.token_dashboard:main"
+cm-session-tail          = "ccrecall.session_tail:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

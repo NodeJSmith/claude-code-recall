@@ -22,8 +22,8 @@ from unittest.mock import patch
 
 import pytest
 
-import claude_memory.hooks.clear_handoff as _clear_handoff
-import claude_memory.hooks.memory_context as _memory_context
+import ccrecall.hooks.clear_handoff as _clear_handoff
+import ccrecall.hooks.memory_context as _memory_context
 
 _find_cleared_from_session_uuid = _memory_context._find_cleared_from_session_uuid
 

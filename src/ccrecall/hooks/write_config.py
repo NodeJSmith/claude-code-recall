@@ -11,7 +11,7 @@ import os
 import tempfile
 from pathlib import Path
 
-from claude_memory.db import CONFIG_PATH, CURRENT_ONBOARDING_VERSION, DEFAULT_SETTINGS
+from ccrecall.db import CONFIG_PATH, CURRENT_ONBOARDING_VERSION, DEFAULT_SETTINGS
 
 
 def main():

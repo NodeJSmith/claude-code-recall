@@ -3,14 +3,14 @@
 import sqlite3
 from pathlib import Path
 
-from claude_memory.content import (
+from ccrecall.content import (
     extract_text_content,
     is_task_notification,
     is_teammate_message,
     is_tool_result,
 )
-from claude_memory.db import SCHEMA, _migrate_columns
-from claude_memory.parsing import (
+from ccrecall.db import SCHEMA, _migrate_columns
+from ccrecall.parsing import (
     aggregate_branch_content,
     compute_branch_metadata,
     find_all_branches,

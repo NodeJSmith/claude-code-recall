@@ -9,7 +9,7 @@ a silent no-op.
 
 import json
 
-from claude_memory.db import CONFIG_PATH, CURRENT_ONBOARDING_VERSION, load_config  # noqa: F401 — CONFIG_PATH re-exported for test monkeypatching
+from ccrecall.db import CONFIG_PATH, CURRENT_ONBOARDING_VERSION, load_config  # noqa: F401 — CONFIG_PATH re-exported for test monkeypatching
 
 
 def _build_onboarding_context() -> str:

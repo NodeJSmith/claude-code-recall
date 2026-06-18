@@ -8,10 +8,10 @@ import json
 import sys
 from pathlib import Path
 
-from claude_memory.db import get_db_path
-from claude_memory.token_analytics import backfill_token_snapshots, import_session
-from claude_memory.token_output import build_output
-from claude_memory.token_parser import (
+from ccrecall.db import get_db_path
+from ccrecall.token_analytics import backfill_token_snapshots, import_session
+from ccrecall.token_output import build_output
+from ccrecall.token_parser import (
     BATCH_SIZE,
     PROGRESS_INTERVAL,
     discover_jsonl_files,
@@ -19,7 +19,7 @@ from claude_memory.token_parser import (
     record_import,
     should_skip_file,
 )
-from claude_memory.token_schema import connect_token_db, ensure_schema
+from ccrecall.token_schema import connect_token_db, ensure_schema
 
 DASHBOARD_TEMPLATE_PATH = Path(__file__).parent / "templates" / "dashboard.html"
 

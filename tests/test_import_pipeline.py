@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from claude_memory.hooks.import_conversations import import_session, import_project
-from claude_memory.db import SCHEMA, _migrate_columns
+from ccrecall.hooks.import_conversations import import_session, import_project
+from ccrecall.db import SCHEMA, _migrate_columns
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures"
 

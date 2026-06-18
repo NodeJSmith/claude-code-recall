@@ -23,25 +23,25 @@ from pathlib import Path
 
 # Add path to shared utils
 
-from claude_memory.db import (
+from ccrecall.db import (
     get_db_path,
     load_config,
     load_settings,
     setup_logging,
     get_db_connection,
 )
-from claude_memory.formatting import (
+from ccrecall.formatting import (
     format_time_full,
     get_project_key,
     normalize_cwd,
 )
-from claude_memory.session_tail import (
+from ccrecall.session_tail import (
     find_pending_question,
     format_pending_block,
     load_tail_entries,
     transcript_for_uuid,
 )
-from claude_memory.summarizer import (
+from ccrecall.summarizer import (
     build_exchange_pairs,
     detect_disposition,
     render_context_summary,

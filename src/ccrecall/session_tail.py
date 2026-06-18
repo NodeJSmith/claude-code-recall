@@ -2,7 +2,7 @@
 """Recover a prior session's tail for fast resume.
 
 Powers two things:
-  - the ``cm-session-tail`` CLI (invoked by the mine-resume skill), and
+  - the ``cm-session-tail`` CLI (invoked by the ccr-resume skill), and
   - the SessionStart context injection's "unresolved decision" warning
     (``memory_context.py``).
 
@@ -26,14 +26,14 @@ import sys
 from collections import deque
 from pathlib import Path
 
-from claude_memory.content import (
+from ccrecall.content import (
     extract_text_content,
     is_task_notification,
     is_teammate_message,
     is_tool_result,
 )
-from claude_memory.db import DEFAULT_PROJECTS_DIR
-from claude_memory.parsing import (
+from ccrecall.db import DEFAULT_PROJECTS_DIR
+from ccrecall.parsing import (
     extract_session_metadata,
     parse_all_with_uuids,
     parse_lines_with_uuids,
@@ -272,7 +272,7 @@ def resolve_target(pdir: Path, selector: str | None) -> Path | None:
     """Pick the transcript to show.
 
     With a selector, match by session-id substring. Without one, assume this runs
-    inside the live session (as the mine-resume skill does): the newest file by
+    inside the live session (as the ccr-resume skill does): the newest file by
     mtime is the current session, so the prior session is the second-newest.
     Invoked outside an active session this is off by one — pass a selector there.
     """

@@ -1,5 +1,5 @@
 ---
-name: cm-get-token-insights
+name: ccr-tokens
 user-invocable: true
 description: >
   Use when the user asks about Claude token usage, wants to see how much they are

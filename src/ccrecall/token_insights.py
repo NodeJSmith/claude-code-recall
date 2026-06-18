@@ -6,7 +6,7 @@ for the token ingest pipeline.
 
 import sqlite3
 
-from claude_memory.token_parser import (
+from ccrecall.token_parser import (
     _BASH_ANTIPATTERN_PREDICATE,
     _get_pricing,
     _project_slug,

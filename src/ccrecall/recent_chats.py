@@ -12,8 +12,8 @@ import sys
 from pathlib import Path
 
 # Local imports
-from claude_memory.db import DEFAULT_DB_PATH, get_db_connection
-from claude_memory.formatting import format_markdown_session, format_json_sessions
+from ccrecall.db import DEFAULT_DB_PATH, get_db_connection
+from ccrecall.formatting import format_markdown_session, format_json_sessions
 
 
 def get_recent_sessions(

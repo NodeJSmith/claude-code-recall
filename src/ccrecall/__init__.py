@@ -1,5 +1,5 @@
 """
-claude_memory — conversation memory package for Claude Code.
+ccrecall — conversation memory package for Claude Code.
 
 Submodules:
   db                — Database connection, schema, settings, logging

@@ -3,12 +3,12 @@
 import sqlite3
 from uuid import uuid4
 
-from claude_memory.hooks.memory_context import (
+from ccrecall.hooks.memory_context import (
     select_sessions,
     build_context,
     _build_fallback_context,
 )
-from claude_memory.summarizer import (
+from ccrecall.summarizer import (
     build_exchange_pairs,
     detect_disposition,
     render_context_summary,

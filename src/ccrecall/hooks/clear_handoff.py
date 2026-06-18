@@ -5,7 +5,7 @@ import json
 import sys
 from datetime import datetime, timezone
 
-from claude_memory.db import get_db_path, load_settings
+from ccrecall.db import get_db_path, load_settings
 
 
 def main():

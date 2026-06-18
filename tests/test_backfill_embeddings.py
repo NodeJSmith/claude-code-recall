@@ -17,9 +17,9 @@ from unittest.mock import patch
 import pytest
 import sqlite_vec
 
-from claude_memory.embeddings import EMBEDDING_MODEL, EMBEDDING_VERSION
-from claude_memory.hooks.backfill_embeddings import BATCH_SIZE, _main
-from claude_memory.summarizer import SUMMARY_VERSION
+from ccrecall.embeddings import EMBEDDING_MODEL, EMBEDDING_VERSION
+from ccrecall.hooks.backfill_embeddings import BATCH_SIZE, _main
+from ccrecall.summarizer import SUMMARY_VERSION
 from conftest import make_vec_conn
 
 # A fixed 1024-dim float vector for stubbing embed_text.
@@ -132,18 +132,18 @@ def _run_backfill_with_stub(conn: sqlite3.Connection, argv: list[str] | None = N
     """
     with (
         patch(
-            "claude_memory.hooks.backfill_embeddings.model_available", return_value=True
+            "ccrecall.hooks.backfill_embeddings.model_available", return_value=True
         ),
         patch(
-            "claude_memory.hooks.backfill_embeddings.embed_text",
+            "ccrecall.hooks.backfill_embeddings.embed_text",
             return_value=_FIXED_VEC,
         ),
         patch(
-            "claude_memory.hooks.backfill_embeddings.get_db_connection",
+            "ccrecall.hooks.backfill_embeddings.get_db_connection",
             return_value=_NoCloseConn(conn),
         ),
-        patch("claude_memory.hooks.backfill_embeddings.load_settings", return_value={}),
-        patch("claude_memory.hooks.backfill_embeddings.time.sleep"),
+        patch("ccrecall.hooks.backfill_embeddings.load_settings", return_value={}),
+        patch("ccrecall.hooks.backfill_embeddings.time.sleep"),
     ):
         _main(argv if argv is not None else [])
 
@@ -236,21 +236,21 @@ class TestBackfillResume:
 
         with (
             patch(
-                "claude_memory.hooks.backfill_embeddings.model_available",
+                "ccrecall.hooks.backfill_embeddings.model_available",
                 return_value=True,
             ),
             patch(
-                "claude_memory.hooks.backfill_embeddings.embed_text",
+                "ccrecall.hooks.backfill_embeddings.embed_text",
                 side_effect=counting_embed,
             ),
             patch(
-                "claude_memory.hooks.backfill_embeddings.get_db_connection",
+                "ccrecall.hooks.backfill_embeddings.get_db_connection",
                 return_value=_NoCloseConn(conn),
             ),
             patch(
-                "claude_memory.hooks.backfill_embeddings.load_settings", return_value={}
+                "ccrecall.hooks.backfill_embeddings.load_settings", return_value={}
             ),
-            patch("claude_memory.hooks.backfill_embeddings.time.sleep"),
+            patch("ccrecall.hooks.backfill_embeddings.time.sleep"),
         ):
             _main([])
 
@@ -261,21 +261,21 @@ class TestBackfillResume:
         call_count[0] = 0
         with (
             patch(
-                "claude_memory.hooks.backfill_embeddings.model_available",
+                "ccrecall.hooks.backfill_embeddings.model_available",
                 return_value=True,
             ),
             patch(
-                "claude_memory.hooks.backfill_embeddings.embed_text",
+                "ccrecall.hooks.backfill_embeddings.embed_text",
                 side_effect=counting_embed,
             ),
             patch(
-                "claude_memory.hooks.backfill_embeddings.get_db_connection",
+                "ccrecall.hooks.backfill_embeddings.get_db_connection",
                 return_value=_NoCloseConn(conn),
             ),
             patch(
-                "claude_memory.hooks.backfill_embeddings.load_settings", return_value={}
+                "ccrecall.hooks.backfill_embeddings.load_settings", return_value={}
             ),
-            patch("claude_memory.hooks.backfill_embeddings.time.sleep"),
+            patch("ccrecall.hooks.backfill_embeddings.time.sleep"),
         ):
             _main([])
 
@@ -442,24 +442,24 @@ class TestBackfillNoProgressGuard:
         # _main() must return (not hang).
         with (
             patch(
-                "claude_memory.hooks.backfill_embeddings.model_available",
+                "ccrecall.hooks.backfill_embeddings.model_available",
                 return_value=True,
             ),
             patch(
-                "claude_memory.hooks.backfill_embeddings.embed_text",
+                "ccrecall.hooks.backfill_embeddings.embed_text",
                 return_value=_FIXED_VEC,
             ),
             patch(
-                "claude_memory.hooks.backfill_embeddings.write_branch_embedding"
+                "ccrecall.hooks.backfill_embeddings.write_branch_embedding"
             ),  # no-op: row never stamped done
             patch(
-                "claude_memory.hooks.backfill_embeddings.get_db_connection",
+                "ccrecall.hooks.backfill_embeddings.get_db_connection",
                 return_value=_NoCloseConn(conn),
             ),
             patch(
-                "claude_memory.hooks.backfill_embeddings.load_settings", return_value={}
+                "ccrecall.hooks.backfill_embeddings.load_settings", return_value={}
             ),
-            patch("claude_memory.hooks.backfill_embeddings.time.sleep"),
+            patch("ccrecall.hooks.backfill_embeddings.time.sleep"),
         ):
             _main([])  # must return, not hang
 
@@ -485,15 +485,15 @@ class TestBackfillFailureModes:
 
         with (
             patch(
-                "claude_memory.hooks.backfill_embeddings.model_available",
+                "ccrecall.hooks.backfill_embeddings.model_available",
                 return_value=False,
             ),
             patch(
-                "claude_memory.hooks.backfill_embeddings.get_db_connection",
+                "ccrecall.hooks.backfill_embeddings.get_db_connection",
                 return_value=_NoCloseConn(conn),
             ),
             patch(
-                "claude_memory.hooks.backfill_embeddings.load_settings", return_value={}
+                "ccrecall.hooks.backfill_embeddings.load_settings", return_value={}
             ),
         ):
             _main([])
@@ -518,21 +518,21 @@ class TestBackfillFailureModes:
 
         with (
             patch(
-                "claude_memory.hooks.backfill_embeddings.model_available",
+                "ccrecall.hooks.backfill_embeddings.model_available",
                 return_value=True,
             ),
             patch(
-                "claude_memory.hooks.backfill_embeddings.embed_text",
+                "ccrecall.hooks.backfill_embeddings.embed_text",
                 side_effect=selective_embed,
             ),
             patch(
-                "claude_memory.hooks.backfill_embeddings.get_db_connection",
+                "ccrecall.hooks.backfill_embeddings.get_db_connection",
                 return_value=_NoCloseConn(conn),
             ),
             patch(
-                "claude_memory.hooks.backfill_embeddings.load_settings", return_value={}
+                "ccrecall.hooks.backfill_embeddings.load_settings", return_value={}
             ),
-            patch("claude_memory.hooks.backfill_embeddings.time.sleep"),
+            patch("ccrecall.hooks.backfill_embeddings.time.sleep"),
         ):
             _main([])
 
@@ -556,21 +556,21 @@ class TestBackfillFailureModes:
 
         with (
             patch(
-                "claude_memory.hooks.backfill_embeddings.model_available",
+                "ccrecall.hooks.backfill_embeddings.model_available",
                 return_value=True,
             ),
             patch(
-                "claude_memory.hooks.backfill_embeddings.embed_text",
+                "ccrecall.hooks.backfill_embeddings.embed_text",
                 side_effect=infra_fail,
             ),
             patch(
-                "claude_memory.hooks.backfill_embeddings.get_db_connection",
+                "ccrecall.hooks.backfill_embeddings.get_db_connection",
                 return_value=_NoCloseConn(conn),
             ),
             patch(
-                "claude_memory.hooks.backfill_embeddings.load_settings", return_value={}
+                "ccrecall.hooks.backfill_embeddings.load_settings", return_value={}
             ),
-            patch("claude_memory.hooks.backfill_embeddings.time.sleep"),
+            patch("ccrecall.hooks.backfill_embeddings.time.sleep"),
         ):
             _main([])
 
@@ -595,21 +595,21 @@ class TestBackfillFailureModes:
 
         with (
             patch(
-                "claude_memory.hooks.backfill_embeddings.model_available",
+                "ccrecall.hooks.backfill_embeddings.model_available",
                 return_value=True,
             ),
             patch(
-                "claude_memory.hooks.backfill_embeddings.embed_text",
+                "ccrecall.hooks.backfill_embeddings.embed_text",
                 side_effect=counting_embed,
             ),
             patch(
-                "claude_memory.hooks.backfill_embeddings.get_db_connection",
+                "ccrecall.hooks.backfill_embeddings.get_db_connection",
                 return_value=_NoCloseConn(conn),
             ),
             patch(
-                "claude_memory.hooks.backfill_embeddings.load_settings", return_value={}
+                "ccrecall.hooks.backfill_embeddings.load_settings", return_value={}
             ),
-            patch("claude_memory.hooks.backfill_embeddings.time.sleep"),
+            patch("ccrecall.hooks.backfill_embeddings.time.sleep"),
         ):
             _main([])
 
@@ -686,10 +686,10 @@ def _run_status(conn: sqlite3.Connection, argv: list[str], capsys):
     """Invoke `_main(--status ...)` against `conn`; return captured stdout."""
     with (
         patch(
-            "claude_memory.hooks.backfill_embeddings.get_db_connection",
+            "ccrecall.hooks.backfill_embeddings.get_db_connection",
             return_value=_NoCloseConn(conn),
         ),
-        patch("claude_memory.hooks.backfill_embeddings.load_settings", return_value={}),
+        patch("ccrecall.hooks.backfill_embeddings.load_settings", return_value={}),
     ):
         code = _main(["--status", *argv])
     assert code == 0

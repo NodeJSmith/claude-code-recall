@@ -24,7 +24,7 @@ import os
 import sys
 import time
 
-from claude_memory.db import (
+from ccrecall.db import (
     CONTENT_ERROR_VERSION,
     DEFAULT_DB_PATH,
     EMBEDDABLE_BRANCH_FILTER,
@@ -34,14 +34,14 @@ from claude_memory.db import (
     setup_logging,
     write_branch_embedding,
 )
-from claude_memory.embeddings import (
+from ccrecall.embeddings import (
     DEFAULT_EMBED_THREADS,
     EMBEDDING_MODEL,
     EMBEDDING_VERSION,
     embed_text,
     model_available,
 )
-from claude_memory.summarizer import SUMMARY_VERSION
+from ccrecall.summarizer import SUMMARY_VERSION
 
 BATCH_SIZE = 20
 BACKFILL_BATCH_DELAY_SECONDS = 0.05

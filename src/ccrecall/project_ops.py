@@ -13,13 +13,13 @@ into the projects table. Two path strategies are supported:
 import sqlite3
 from pathlib import Path
 
-from claude_memory.formatting import (
+from ccrecall.formatting import (
     extract_project_name,
     normalize_cwd,
     normalize_project_key,
     parse_project_key,
 )
-from claude_memory.parsing import extract_session_metadata, parse_all_with_uuids
+from ccrecall.parsing import extract_session_metadata, parse_all_with_uuids
 
 
 def upsert_project(

@@ -14,8 +14,8 @@ import sqlite3
 import sys
 from pathlib import Path
 
-from claude_memory.content import sanitize_fts_term
-from claude_memory.db import (
+from ccrecall.content import sanitize_fts_term
+from ccrecall.db import (
     DEFAULT_DB_PATH,
     DEFAULT_PROJECTS_DIR,
     detect_fts_support,
@@ -24,9 +24,9 @@ from claude_memory.db import (
     load_settings,
     setup_logging,
 )
-from claude_memory.formatting import extract_project_name, normalize_project_key
-from claude_memory.project_ops import upsert_project
-from claude_memory.session_ops import sync_session
+from ccrecall.formatting import extract_project_name, normalize_project_key
+from ccrecall.project_ops import upsert_project
+from ccrecall.session_ops import sync_session
 
 
 def get_file_hash(filepath: Path) -> str:

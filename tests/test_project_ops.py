@@ -4,7 +4,7 @@ import shutil
 import tempfile
 from pathlib import Path
 
-from claude_memory.project_ops import upsert_project
+from ccrecall.project_ops import upsert_project
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures"
 

@@ -8,7 +8,7 @@ import sqlite3
 from pathlib import Path
 from typing import Generator, Iterable
 
-from claude_memory.content import (
+from ccrecall.content import (
     extract_commits,
     extract_files_modified,
     is_task_notification,

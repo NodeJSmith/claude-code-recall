@@ -6,5 +6,5 @@
 
 | User says something like... | Invoke |
 |---|---|
-| "what did we discuss", "continue where we left off", "remember when", "search my conversations", "what did we work on", "find the conversation where" | `/cm-recall-conversations` |
-| "analyze Claude token usage", "how much am I spending on Claude", "token insights", "cache hit rates", "cost optimization" | `/cm-get-token-insights` |
+| "what did we discuss", "continue where we left off", "remember when", "search my conversations", "what did we work on", "find the conversation where" | `/ccr-recall` |
+| "analyze Claude token usage", "how much am I spending on Claude", "token insights", "cache hit rates", "cost optimization" | `/ccr-tokens` |

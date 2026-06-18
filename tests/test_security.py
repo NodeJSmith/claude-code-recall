@@ -1,6 +1,6 @@
 """Tests for sanitize_fts_term — FTS injection prevention."""
 
-from claude_memory.content import sanitize_fts_term
+from ccrecall.content import sanitize_fts_term
 
 
 class TestSanitizeFtsTerm:

@@ -16,13 +16,13 @@ import re
 import sys
 from pathlib import Path
 
-from claude_memory.db import (
+from ccrecall.db import (
     DEFAULT_PROJECTS_DIR,
     get_db_connection,
     load_settings,
     setup_logging,
 )
-from claude_memory.session_ops import sync_session
+from ccrecall.session_ops import sync_session
 
 _UUID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE

@@ -1,4 +1,4 @@
-"""Tests for claude_memory.db — schema creation, migration, settings."""
+"""Tests for ccrecall.db — schema creation, migration, settings."""
 
 import inspect
 import json
@@ -9,11 +9,11 @@ from unittest.mock import patch
 
 import pytest
 
-import claude_memory.db as db_module
+import ccrecall.db as db_module
 import sqlite_vec
 
 from conftest import make_vec_conn
-from claude_memory.db import (
+from ccrecall.db import (
     CURRENT_ONBOARDING_VERSION,
     DEFAULT_SETTINGS,
     SCHEMA,
@@ -814,7 +814,7 @@ class TestLoadConfig:
         cfg.write_text(
             json.dumps({"auto_inject_context": False, "onboarding_completed": True})
         )
-        monkeypatch.setattr("claude_memory.db.CONFIG_PATH", cfg)
+        monkeypatch.setattr("ccrecall.db.CONFIG_PATH", cfg)
 
         result = load_config()
         assert result == {"auto_inject_context": False, "onboarding_completed": True}
@@ -823,7 +823,7 @@ class TestLoadConfig:
         """A JSON array (not a dict) must return {} — prevents callers from crashing on .get()."""
         cfg = tmp_path / "config.json"
         cfg.write_text(json.dumps([1, 2, 3]))
-        monkeypatch.setattr("claude_memory.db.CONFIG_PATH", cfg)
+        monkeypatch.setattr("ccrecall.db.CONFIG_PATH", cfg)
 
         assert load_config() == {}
 
@@ -831,7 +831,7 @@ class TestLoadConfig:
         """A JSON string must return {} — not a dict, should not propagate."""
         cfg = tmp_path / "config.json"
         cfg.write_text(json.dumps("hello"))
-        monkeypatch.setattr("claude_memory.db.CONFIG_PATH", cfg)
+        monkeypatch.setattr("ccrecall.db.CONFIG_PATH", cfg)
 
         assert load_config() == {}
 
@@ -839,14 +839,14 @@ class TestLoadConfig:
         """JSON null must return {} — null is not a valid settings container."""
         cfg = tmp_path / "config.json"
         cfg.write_text("null")
-        monkeypatch.setattr("claude_memory.db.CONFIG_PATH", cfg)
+        monkeypatch.setattr("ccrecall.db.CONFIG_PATH", cfg)
 
         assert load_config() == {}
 
     def test_returns_empty_dict_for_missing_file(self, tmp_path, monkeypatch):
         """Missing config file returns {} without raising."""
         monkeypatch.setattr(
-            "claude_memory.db.CONFIG_PATH", tmp_path / "nonexistent.json"
+            "ccrecall.db.CONFIG_PATH", tmp_path / "nonexistent.json"
         )
 
         assert load_config() == {}
@@ -855,7 +855,7 @@ class TestLoadConfig:
         """Corrupt JSON returns {} without raising."""
         cfg = tmp_path / "config.json"
         cfg.write_text("{bad json}")
-        monkeypatch.setattr("claude_memory.db.CONFIG_PATH", cfg)
+        monkeypatch.setattr("ccrecall.db.CONFIG_PATH", cfg)
 
         assert load_config() == {}
 
@@ -867,7 +867,7 @@ class TestLoadSettingsWithConfig:
         """load_settings() returns DEFAULT_SETTINGS when config.json is a JSON array."""
         cfg = tmp_path / "config.json"
         cfg.write_text(json.dumps([]))
-        monkeypatch.setattr("claude_memory.db.CONFIG_PATH", cfg)
+        monkeypatch.setattr("ccrecall.db.CONFIG_PATH", cfg)
 
         result = load_settings()
         assert result == DEFAULT_SETTINGS
@@ -878,7 +878,7 @@ class TestLoadSettingsWithConfig:
         cfg.write_text(
             json.dumps({"auto_inject_context": False, "max_context_sessions": 5})
         )
-        monkeypatch.setattr("claude_memory.db.CONFIG_PATH", cfg)
+        monkeypatch.setattr("ccrecall.db.CONFIG_PATH", cfg)
 
         result = load_settings()
         assert result["auto_inject_context"] is False
@@ -888,7 +888,7 @@ class TestLoadSettingsWithConfig:
     def test_missing_config_returns_defaults(self, tmp_path, monkeypatch):
         """load_settings() returns DEFAULT_SETTINGS when config.json does not exist."""
         monkeypatch.setattr(
-            "claude_memory.db.CONFIG_PATH", tmp_path / "nonexistent.json"
+            "ccrecall.db.CONFIG_PATH", tmp_path / "nonexistent.json"
         )
 
         result = load_settings()
@@ -1519,7 +1519,7 @@ class TestVecAvailable:
 
     def test_never_raises_on_operational_error(self):
         """When sqlite_vec.load raises OperationalError, vec_available returns False."""
-        with patch("claude_memory.db.sqlite_vec") as mock_vec:
+        with patch("ccrecall.db.sqlite_vec") as mock_vec:
             mock_vec.load.side_effect = sqlite3.OperationalError(
                 "cannot load extension"
             )

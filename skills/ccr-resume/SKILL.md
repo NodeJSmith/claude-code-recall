@@ -1,5 +1,5 @@
 ---
-name: mine-resume
+name: ccr-resume
 description: "Use when picking up a fresh session after /clear, a stop, or an unanswered AskUserQuestion — reconstructs the prior session's intent from its transcript tail and surfaces any unresolved decision. User-invoked only (never auto-fired); for a hand-written end-of-day handoff use /mine-good-morning instead."
 user-invocable: true
 disable-model-invocation: true
@@ -33,7 +33,7 @@ cm-session-tail $ARGUMENTS
 ```
 
 - Auto-detect picks the second-newest session (the newest is *this* one, live). If the wrong session comes up or you need to choose, run `cm-session-tail --list` and re-run with the right id substring.
-- If `cm-session-tail` finds nothing (no project dir, only the current session, or a moved cwd), fall back to `/cm-recall-conversations` to retrieve the tail — never substitute disk artifacts for the transcript.
+- If `cm-session-tail` finds nothing (no project dir, only the current session, or a moved cwd), fall back to `/ccr-recall` to retrieve the tail — never substitute disk artifacts for the transcript.
 - A clear/startup may already have surfaced an "Unresolved Decision From Prior Session" block at the top of context — if so, this confirms and expands it; reconcile and proceed to Phase 2.
 
 Read the output fully before doing anything else.

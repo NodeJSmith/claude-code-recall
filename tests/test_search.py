@@ -7,15 +7,15 @@ from unittest.mock import patch
 
 import pytest
 
-from claude_memory.search_conversations import (
+from ccrecall.search_conversations import (
     _dedup_by_session,
     _get_vec_branch_ids,
     main,
     print_status,
     search_sessions,
 )
-from claude_memory.recent_chats import get_recent_sessions
-from claude_memory.db import (
+from ccrecall.recent_chats import get_recent_sessions
+from ccrecall.db import (
     SCHEMA,
     SCHEMA_CORE,
     _migrate_columns,
@@ -23,7 +23,7 @@ from claude_memory.db import (
     upsert_branch_vec,
     vec_available,
 )
-from claude_memory.embeddings import EMBEDDING_MODEL, EMBEDDING_VERSION
+from ccrecall.embeddings import EMBEDDING_MODEL, EMBEDDING_VERSION
 from conftest import make_vec_conn
 
 
@@ -337,8 +337,8 @@ class TestFtsSearchFindsFilePath:
         agg_content = (
             "How do I fix the summarizer? Let me look at it.\n"
             "__files__\n"
-            "/home/user/myproject/src/claude_memory/summarizer.py\n"
-            "/home/user/myproject/src/claude_memory/parsing.py"
+            "/home/user/myproject/src/ccrecall/summarizer.py\n"
+            "/home/user/myproject/src/ccrecall/parsing.py"
         )
         cursor.execute(
             """
@@ -350,8 +350,8 @@ class TestFtsSearchFindsFilePath:
                 s1_id,
                 "leaf-file-1",
                 agg_content,
-                '["/home/user/myproject/src/claude_memory/summarizer.py",'
-                ' "/home/user/myproject/src/claude_memory/parsing.py"]',
+                '["/home/user/myproject/src/ccrecall/summarizer.py",'
+                ' "/home/user/myproject/src/ccrecall/parsing.py"]',
             ),
         )
         b1_id = cursor.lastrowid
@@ -551,7 +551,7 @@ class TestDegradation:
             pytest.skip("FTS not available")
 
         with patch(
-            "claude_memory.search_conversations.model_available", return_value=False
+            "ccrecall.search_conversations.model_available", return_value=False
         ):
             results = search_sessions(search_db, "pytest", fts_level, max_results=10)
         assert len(results) >= 2
@@ -567,10 +567,10 @@ class TestDegradation:
             raise AttributeError("no load_extension")
 
         with patch(
-            "claude_memory.search_conversations.model_available", return_value=True
+            "ccrecall.search_conversations.model_available", return_value=True
         ):
             with patch(
-                "claude_memory.search_conversations.embed_text", side_effect=_raise
+                "ccrecall.search_conversations.embed_text", side_effect=_raise
             ):
                 results = search_sessions(
                     search_db, "pytest", fts_level, max_results=10
@@ -584,7 +584,7 @@ class TestDegradation:
         fts_level = detect_fts_support(search_db)
 
         with patch(
-            "claude_memory.search_conversations.model_available", return_value=False
+            "ccrecall.search_conversations.model_available", return_value=False
         ):
             results = search_sessions(search_db, "database", fts_level, max_results=10)
 
@@ -603,7 +603,7 @@ class TestDegradation:
             return [0.0] * 1024
 
         with patch(
-            "claude_memory.search_conversations.embed_text",
+            "ccrecall.search_conversations.embed_text",
             side_effect=_should_not_be_called,
         ):
             results = search_sessions(
@@ -623,7 +623,7 @@ class TestDegradation:
         # search_sessions probes branch_vec before embedding, gets OperationalError,
         # and falls back to the keyword path.
         with patch(
-            "claude_memory.search_conversations.model_available", return_value=True
+            "ccrecall.search_conversations.model_available", return_value=True
         ):
             results = search_sessions(search_db, "database", fts_level, max_results=10)
 
@@ -740,7 +740,7 @@ class TestStaleVersionExclusion:
 
         # Confirm keyword path (FTS or LIKE) does surface stale session
         with patch(
-            "claude_memory.search_conversations.model_available", return_value=False
+            "ccrecall.search_conversations.model_available", return_value=False
         ):
             results = search_sessions(
                 conn, "stale", fts_level, max_results=10, keyword_only=True
@@ -891,10 +891,10 @@ class TestSessionDedup:
         conn.commit()
 
         with patch(
-            "claude_memory.search_conversations.model_available", return_value=True
+            "ccrecall.search_conversations.model_available", return_value=True
         ):
             with patch(
-                "claude_memory.search_conversations.embed_text",
+                "ccrecall.search_conversations.embed_text",
                 return_value=[0.5] * 1024,
             ):
                 results = search_sessions(

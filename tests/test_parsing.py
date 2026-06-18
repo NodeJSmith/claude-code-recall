@@ -1,4 +1,4 @@
-"""Tests for claude_memory.parsing — branch detection, JSONL parsing, metadata."""
+"""Tests for ccrecall.parsing — branch detection, JSONL parsing, metadata."""
 
 import uuid as uuid_mod
 from pathlib import Path
@@ -6,7 +6,7 @@ from pathlib import Path
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from claude_memory.parsing import (
+from ccrecall.parsing import (
     compute_branch_metadata,
     extract_session_metadata,
     find_all_branches,

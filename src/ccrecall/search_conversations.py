@@ -15,23 +15,23 @@ from pathlib import Path
 import sqlite_vec
 
 # Local imports
-from claude_memory.db import (
+from ccrecall.db import (
     DEFAULT_DB_PATH,
     EMBEDDABLE_BRANCH_FILTER,
     branch_vec_queryable,
     detect_fts_support,
     get_db_connection,
 )
-from claude_memory.content import sanitize_fts_term
-from claude_memory.formatting import format_markdown_session, format_json_sessions
-from claude_memory.embeddings import (
+from ccrecall.content import sanitize_fts_term
+from ccrecall.formatting import format_markdown_session, format_json_sessions
+from ccrecall.embeddings import (
     EMBEDDING_MODEL,
     EMBEDDING_VERSION,
     embed_text,
     model_available,
     resolve_snapshot,
 )
-from claude_memory.fusion import rrf
+from ccrecall.fusion import rrf
 
 
 def _get_fts_branch_ids(
