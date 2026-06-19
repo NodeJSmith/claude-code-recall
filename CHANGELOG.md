@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- Importing a session whose content all filters out (tool results, notifications, empty text) no longer crashes with `sqlite3.IntegrityError: FOREIGN KEY constraint failed`. `find_all_branches` inserts branch rows before content filtering, so a zero-message session still has children; the `total_messages == 0` cleanup now tears down `branch_messages → branches → sessions` in FK order instead of a bare session delete. Surfaced importing a large transcript set onto a fresh machine. The test fixtures now enable `PRAGMA foreign_keys = ON` to match production, so the existing FK-safe guard tests actually enforce the constraint.
+
 ### Added
 
 - Local semantic search fused with FTS via Reciprocal Rank Fusion (RRF). Search results from `cm-search-conversations` now combine keyword ranking (FTS5/FTS4/LIKE) with vector KNN from a locally-running bge-m3 (int8 ONNX) model. Degrades automatically to keyword-only when the model or sqlite-vec extension is unavailable.
