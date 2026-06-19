@@ -22,6 +22,7 @@ import json
 import math
 import sqlite3
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -161,19 +162,45 @@ def metrics(ranks: list[int]) -> dict:
     }
 
 
+PROGRESS_EVERY = 200  # log embedding progress every N items
+
+
+def embed_with_progress(model, texts: list[str], batch_size: int, label: str) -> np.ndarray:
+    """Consume fastembed's embed generator incrementally, logging progress.
+
+    fastembed yields one vector per input in order, so a running count is exact.
+    Without this the embed step goes silent for minutes per model.
+    """
+    out = []
+    total = len(texts)
+    t0 = time.monotonic()
+    for i, vec in enumerate(model.embed(texts, batch_size=batch_size), start=1):
+        out.append(vec)
+        if i % PROGRESS_EVERY == 0 or i == total:
+            rate = i / (time.monotonic() - t0)
+            print(f"  {label}: {i}/{total} ({rate:.0f}/s)", flush=True)
+    return np.array(out, dtype=np.float32)
+
+
 def embed_fastembed(
-    model_cfg: dict, docs: list[str], queries: list[str], batch_size: int, threads: int | None
+    model_cfg: dict, docs: list[str], queries: list[str], batch_size: int, threads: int | None, cuda: bool
 ) -> tuple[np.ndarray, np.ndarray]:
     from fastembed import TextEmbedding
 
     # batch_size must stay small: attention memory scales as batch * heads * seq^2,
     # and these summaries reach ~3000 tokens, so fastembed's default batch of 256
-    # tries to allocate ~73 GB and OOMs. threads caps onnxruntime parallelism (set 1
-    # on the shared VPS; leave None on a workstation).
-    model = TextEmbedding(model_name=model_cfg["name"], threads=threads)
+    # tries to allocate ~73 GB and OOMs. CPU-safe batch is 2; an 8 GB GPU fits ~4.
+    # cuda=True needs fastembed-gpu + the CUDA onnxruntime stack; quantized models
+    # have no CUDA kernels and silently fall back to CPU, so run those on CPU only.
+    # threads caps onnxruntime parallelism (set 1 on the shared VPS; None elsewhere).
+    if cuda:
+        model = TextEmbedding(model_name=model_cfg["name"], cuda=True)
+    else:
+        model = TextEmbedding(model_name=model_cfg["name"], threads=threads)
     pd, pq = model_cfg["prefix_doc"], model_cfg["prefix_query"]
-    doc_emb = np.array(list(model.embed([pd + d for d in docs], batch_size=batch_size)), dtype=np.float32)
-    q_emb = np.array(list(model.embed([pq + q for q in queries], batch_size=batch_size)), dtype=np.float32)
+    key = model_cfg["key"]
+    doc_emb = embed_with_progress(model, [pd + d for d in docs], batch_size, f"{key} docs")
+    q_emb = embed_with_progress(model, [pq + q for q in queries], batch_size, f"{key} queries")
     return doc_emb, q_emb
 
 
@@ -220,8 +247,9 @@ def main() -> int:
         "bge-m3 baseline is unavailable in this mode (it needs branch_vec) — run candidates only.",
     )
     ap.add_argument("--export-corpus", type=Path, help="dump the live-DB corpus to JSON and exit")
-    ap.add_argument("--batch-size", type=int, default=8, help="fastembed batch size (small: long seqs OOM at the default 256)")
+    ap.add_argument("--batch-size", type=int, default=2, help="fastembed batch size (small: long seqs OOM; CPU-safe 2, 8 GB GPU ~4)")
     ap.add_argument("--threads", type=int, default=None, help="onnxruntime threads (set 1 on a shared box)")
+    ap.add_argument("--cuda", action="store_true", help="run on GPU via fastembed-gpu (non-quantized models only)")
     args = ap.parse_args()
 
     chosen = args.models.split(",") if args.models != "all" else None
@@ -284,7 +312,7 @@ def main() -> int:
         if chosen is not None and cfg["key"] not in chosen:
             continue
         print(f"embedding with {cfg['key']} (fastembed)...", flush=True)
-        de, qe = embed_fastembed(cfg, corpus_docs, queries, args.batch_size, args.threads)
+        de, qe = embed_fastembed(cfg, corpus_docs, queries, args.batch_size, args.threads, args.cuda)
         results[cfg["key"]] = metrics(ranks_for(de, qe, target_idx))
         RESULTS_JSON.write_text(json.dumps(results, indent=2))  # checkpoint after each model
         print("  done")
