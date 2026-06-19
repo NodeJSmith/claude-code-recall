@@ -161,15 +161,19 @@ def metrics(ranks: list[int]) -> dict:
     }
 
 
-def embed_fastembed(model_cfg: dict, docs: list[str], queries: list[str]) -> tuple[np.ndarray, np.ndarray]:
+def embed_fastembed(
+    model_cfg: dict, docs: list[str], queries: list[str], batch_size: int, threads: int | None
+) -> tuple[np.ndarray, np.ndarray]:
     from fastembed import TextEmbedding
 
-    # threads=1: onnxruntime otherwise grabs every core and spikes load on the
-    # shared VPS. Single-thread keeps this process's load contribution at ~1.
-    model = TextEmbedding(model_name=model_cfg["name"], threads=1)
+    # batch_size must stay small: attention memory scales as batch * heads * seq^2,
+    # and these summaries reach ~3000 tokens, so fastembed's default batch of 256
+    # tries to allocate ~73 GB and OOMs. threads caps onnxruntime parallelism (set 1
+    # on the shared VPS; leave None on a workstation).
+    model = TextEmbedding(model_name=model_cfg["name"], threads=threads)
     pd, pq = model_cfg["prefix_doc"], model_cfg["prefix_query"]
-    doc_emb = np.array(list(model.embed([pd + d for d in docs])), dtype=np.float32)
-    q_emb = np.array(list(model.embed([pq + q for q in queries])), dtype=np.float32)
+    doc_emb = np.array(list(model.embed([pd + d for d in docs], batch_size=batch_size)), dtype=np.float32)
+    q_emb = np.array(list(model.embed([pq + q for q in queries], batch_size=batch_size)), dtype=np.float32)
     return doc_emb, q_emb
 
 
@@ -216,6 +220,8 @@ def main() -> int:
         "bge-m3 baseline is unavailable in this mode (it needs branch_vec) — run candidates only.",
     )
     ap.add_argument("--export-corpus", type=Path, help="dump the live-DB corpus to JSON and exit")
+    ap.add_argument("--batch-size", type=int, default=8, help="fastembed batch size (small: long seqs OOM at the default 256)")
+    ap.add_argument("--threads", type=int, default=None, help="onnxruntime threads (set 1 on a shared box)")
     args = ap.parse_args()
 
     chosen = args.models.split(",") if args.models != "all" else None
@@ -278,7 +284,7 @@ def main() -> int:
         if chosen is not None and cfg["key"] not in chosen:
             continue
         print(f"embedding with {cfg['key']} (fastembed)...", flush=True)
-        de, qe = embed_fastembed(cfg, corpus_docs, queries)
+        de, qe = embed_fastembed(cfg, corpus_docs, queries, args.batch_size, args.threads)
         results[cfg["key"]] = metrics(ranks_for(de, qe, target_idx))
         RESULTS_JSON.write_text(json.dumps(results, indent=2))  # checkpoint after each model
         print("  done")
