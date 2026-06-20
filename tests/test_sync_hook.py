@@ -4,6 +4,8 @@ import contextlib
 import io
 import os
 import sqlite3
+import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -370,17 +372,17 @@ class TestPidGuard:
         pid_path = tmp_path / ".pid-cm-test-cmd"
         monkeypatch.setattr(memory_setup, "_PID_DIR", tmp_path)
 
-        # Use PID 1 for kernel (always alive) — we need a truly dead PID.
-        # os.fork() gives us a real dead PID safely.
-        child_pid = os.fork()
-        if child_pid == 0:
-            # Child exits immediately
-            os._exit(0)
-        # Wait for child to die
-        os.waitpid(child_pid, 0)
+        # We need a real PID that is guaranteed dead. Spawn a trivial subprocess
+        # and reap it. Deliberately NOT os.fork(): by the time this test runs the
+        # process has usually started threads (the embedding model's onnxruntime
+        # pool), and forking a multi-threaded process can deadlock the child — an
+        # intermittent CI hang. Popen+wait gives the same dead PID with no fork.
+        proc = subprocess.Popen([sys.executable, "-c", ""])
+        proc.wait()
+        dead_pid = proc.pid
 
-        # Write the dead child's PID to the file
-        pid_path.write_text(str(child_pid))
+        # Write the dead PID to the file
+        pid_path.write_text(str(dead_pid))
 
         mock_proc = MagicMock()
         mock_proc.pid = 99999
