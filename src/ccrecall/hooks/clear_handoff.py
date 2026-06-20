@@ -3,7 +3,8 @@
 
 import json
 import sys
-from datetime import datetime, timezone
+
+from whenever import Instant
 
 from ccrecall.db import get_db_path, load_settings
 
@@ -32,7 +33,7 @@ def main():
                 {
                     "session_id": session_id,
                     "cwd": cwd,
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "timestamp": Instant.now().format_iso(),
                 }
             ),
             encoding="utf-8",
