@@ -29,9 +29,7 @@ CONFIG_PATH = Path.home() / ".claude-memory" / "config.json"
 # is the single source of truth for the embedding universe — build_selection()
 # (eligibility), count_status() (backfill progress), and search_conversations
 # print_status() (diagnostics) all build on it so their counts can't drift.
-EMBEDDABLE_BRANCH_FILTER = (
-    "is_active = 1 AND context_summary IS NOT NULL AND context_summary != ''"
-)
+EMBEDDABLE_BRANCH_FILTER = "is_active = 1 AND context_summary IS NOT NULL AND context_summary != ''"
 # Sentinel written to a branch's embedding_version or summary_version when its
 # content can't be embedded or summarized (tokenizer overflow, malformed content).
 # Excluded from eligibility so it isn't retried forever; counted separately as
@@ -278,9 +276,7 @@ def branch_vec_queryable(conn: sqlite3.Connection) -> bool:
         return False
 
 
-def upsert_branch_vec(
-    cursor: sqlite3.Cursor, branch_id: int, embedding: list[float]
-) -> None:
+def upsert_branch_vec(cursor: sqlite3.Cursor, branch_id: int, embedding: list[float]) -> None:
     """Replace a branch's vector row (DELETE+INSERT — vec0 rejects INSERT OR REPLACE)."""
     cursor.execute("DELETE FROM branch_vec WHERE branch_id = ?", (branch_id,))
     cursor.execute(
@@ -316,9 +312,7 @@ def _ensure_vec_schema(conn: sqlite3.Connection) -> None:
     # sqlite_master stores the vec0 CREATE statement verbatim, so a substring
     # check for the current float[N] reliably detects a stale dimension. Lowercase
     # both sides so a hand-created FLOAT[...] table still compares correctly.
-    row = conn.execute(
-        "SELECT sql FROM sqlite_master WHERE type='table' AND name='branch_vec'"
-    ).fetchone()
+    row = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='branch_vec'").fetchone()
     if row and f"float[{EMBEDDING_DIM}]" not in row[0].lower():
         # Drop the trigger first: SQLite does not cascade-drop a trigger when its
         # target table is dropped, so a surviving branches_vec_ad would fire
@@ -346,16 +340,12 @@ def migrate_db(conn: sqlite3.Connection) -> bool:
     cursor = conn.cursor()
 
     # Check if branches table exists (v3 indicator)
-    cursor.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='branches'"
-    )
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='branches'")
     if cursor.fetchone():
         return False  # Already on v3
 
     # Check if sessions table exists at all (could be a fresh DB)
-    cursor.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='sessions'"
-    )
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='sessions'")
     if not cursor.fetchone():
         return False  # Fresh DB, no migration needed
 
@@ -458,9 +448,7 @@ def _reaggregate_notification_branches(cursor: sqlite3.Cursor) -> None:
             (bid,),
         )
         agg = "\n".join(row[0] for row in cursor.fetchall())
-        cursor.execute(
-            "UPDATE branches SET aggregated_content = ? WHERE id = ?", (agg, bid)
-        )
+        cursor.execute("UPDATE branches SET aggregated_content = ? WHERE id = ?", (agg, bid))
         cursor.execute(
             """
             SELECT COUNT(*) FROM branch_messages bm
@@ -487,9 +475,7 @@ def _migrate_columns(conn: sqlite3.Connection) -> None:
         cursor.execute("ALTER TABLE messages ADD COLUMN tool_summary TEXT")
         conn.commit()
     if "is_notification" not in existing:
-        cursor.execute(
-            "ALTER TABLE messages ADD COLUMN is_notification INTEGER DEFAULT 0"
-        )
+        cursor.execute("ALTER TABLE messages ADD COLUMN is_notification INTEGER DEFAULT 0")
         conn.commit()
     if "origin" not in existing:
         cursor.execute("ALTER TABLE messages ADD COLUMN origin TEXT")
@@ -506,25 +492,15 @@ def _migrate_columns(conn: sqlite3.Connection) -> None:
     if "context_summary_json" not in branch_cols:
         cursor.execute("ALTER TABLE branches ADD COLUMN context_summary_json TEXT")
     if "summary_version" not in branch_cols:
-        cursor.execute(
-            "ALTER TABLE branches ADD COLUMN summary_version INTEGER DEFAULT 0"
-        )
+        cursor.execute("ALTER TABLE branches ADD COLUMN summary_version INTEGER DEFAULT 0")
     if "embedding_version" not in branch_cols:
-        cursor.execute(
-            "ALTER TABLE branches ADD COLUMN embedding_version INTEGER DEFAULT 0"
-        )
+        cursor.execute("ALTER TABLE branches ADD COLUMN embedding_version INTEGER DEFAULT 0")
     if "embedding_model" not in branch_cols:
         cursor.execute("ALTER TABLE branches ADD COLUMN embedding_model TEXT")
     if "summary_version_at_embed" not in branch_cols:
-        cursor.execute(
-            "ALTER TABLE branches ADD COLUMN summary_version_at_embed INTEGER"
-        )
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_branches_summary_version ON branches(summary_version)"
-    )
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_branches_embedding_version ON branches(embedding_version)"
-    )
+        cursor.execute("ALTER TABLE branches ADD COLUMN summary_version_at_embed INTEGER")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_branches_summary_version ON branches(summary_version)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_branches_embedding_version ON branches(embedding_version)")
     conn.commit()
 
     # Vec schema (branch_vec virtual table + trigger) is only created on
@@ -533,9 +509,7 @@ def _migrate_columns(conn: sqlite3.Connection) -> None:
     # connections used by recent-chats and token-analytics.
 
     # token_snapshots table (new table, not a column add)
-    cursor.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='token_snapshots'"
-    )
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='token_snapshots'")
     if not cursor.fetchone():
         cursor.executescript("""
 CREATE TABLE IF NOT EXISTS token_snapshots (
@@ -618,9 +592,7 @@ CREATE INDEX IF NOT EXISTS idx_token_snapshots_start ON token_snapshots(start_ti
         # parse_origin had a kind-fallback bug that leaked task-notification
         # into origin (reserved for channel sources: telegram, discord, slack).
         _backup_db_before_migration(db_path, "v4")
-        cursor.execute(
-            "UPDATE messages SET origin = NULL WHERE origin = 'task-notification'"
-        )
+        cursor.execute("UPDATE messages SET origin = NULL WHERE origin = 'task-notification'")
         conn.execute("PRAGMA user_version = 4")
         conn.commit()
 
@@ -629,7 +601,7 @@ CREATE INDEX IF NOT EXISTS idx_token_snapshots_start ON token_snapshots(start_ti
         # with file paths and commits for all existing branches.
         # Also renames INTERRUPTED→ABANDONED in stored summaries.
         # Gates _migrate_project_paths() as a pre-pass.
-        # Runs a single FTS rebuild after all batch UPDATEs.
+        # Runs a single FTS rebuild after all batch updates.
         _migrate_project_paths(conn)
         _migrate_v5(conn, cursor)
 
@@ -679,12 +651,7 @@ def _backfill_origin(conn: sqlite3.Connection, cursor: sqlite3.Cursor) -> None:
     triggering a reimport risks irrecoverable data loss.
     """
     # Guard: sessions table may not exist in minimal test DBs
-    tables = {
-        r[0]
-        for r in cursor.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'"
-        ).fetchall()
-    }
+    tables = {r[0] for r in cursor.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
     if "sessions" not in tables or "import_log" not in tables:
         return
 
@@ -697,9 +664,7 @@ def _backfill_origin(conn: sqlite3.Connection, cursor: sqlite3.Cursor) -> None:
         stem = p.stem
         if stem.startswith("agent-"):
             stem = stem[6:]
-        row = cursor.execute(
-            "SELECT id FROM sessions WHERE uuid = ?", (stem,)
-        ).fetchone()
+        row = cursor.execute("SELECT id FROM sessions WHERE uuid = ?", (stem,)).fetchone()
         if row:
             file_session_map[file_path] = row[0]
 
@@ -709,7 +674,7 @@ def _backfill_origin(conn: sqlite3.Connection, cursor: sqlite3.Cursor) -> None:
             continue
 
         try:
-            with open(p, "r", encoding="utf-8", errors="replace") as f:
+            with open(p, encoding="utf-8", errors="replace") as f:
                 for line in f:
                     line = line.strip()
                     if not line:
@@ -757,12 +722,7 @@ def _migrate_project_paths(conn: sqlite3.Connection) -> None:
     cursor = conn.cursor()
 
     # Guard: projects and sessions tables may not exist in minimal test DBs
-    tables = {
-        r[0]
-        for r in cursor.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'"
-        ).fetchall()
-    }
+    tables = {r[0] for r in cursor.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
     if "projects" not in tables or "sessions" not in tables:
         return
 
@@ -799,9 +759,7 @@ def _migrate_project_paths(conn: sqlite3.Connection) -> None:
         real_name = Path(real_cwd).name
 
         # Check if another project already has real_cwd as its path (merge conflict)
-        cursor.execute(
-            "SELECT id FROM projects WHERE path = ? AND id != ?", (real_cwd, proj_id)
-        )
+        cursor.execute("SELECT id FROM projects WHERE path = ? AND id != ?", (real_cwd, proj_id))
         existing = cursor.fetchone()
 
         if existing:
@@ -839,9 +797,7 @@ def _migrate_v5(conn: sqlite3.Connection, cursor: sqlite3.Cursor) -> None:
     After all batches, run a single FTS rebuild.  Bumps user_version to 5.
     """
     # Fetch all branch IDs in one pass; process in batches of 50
-    cursor.execute(
-        "SELECT id, files_modified, commits, context_summary_json FROM branches ORDER BY id"
-    )
+    cursor.execute("SELECT id, files_modified, commits, context_summary_json FROM branches ORDER BY id")
     all_branches = cursor.fetchall()
 
     for batch_start in range(0, len(all_branches), _MIGRATION_BATCH_SIZE):
@@ -911,7 +867,7 @@ def _migrate_v6(conn: sqlite3.Connection, cursor: sqlite3.Cursor) -> None:
 
     Queries branches where len(context_summary_json) > 50KB, parses JSON,
     applies truncate_mid() to all exchange text fields (user and assistant in
-    first_exchanges and last_exchanges), re-serializes, and UPDATEs the row.
+    first_exchanges and last_exchanges), re-serializes, and updates the row.
     Processes in batches with per-batch commits.  Bumps user_version to 6.
     """
     cursor.execute(
@@ -963,9 +919,7 @@ def _migrate_v6(conn: sqlite3.Connection, cursor: sqlite3.Cursor) -> None:
     conn.commit()
 
 
-def get_db_connection(
-    settings: dict | None = None, load_vec: bool = False
-) -> sqlite3.Connection:
+def get_db_connection(settings: dict | None = None, load_vec: bool = False) -> sqlite3.Connection:
     """Get database connection, initializing schema and running migrations if needed.
 
     Uses settings-based path if provided.
@@ -1044,9 +998,7 @@ def setup_logging(settings: dict | None = None) -> logging.Logger:
         maxBytes=1_000_000,  # 1MB
         backupCount=2,
     )
-    formatter = logging.Formatter(
-        "%(asctime)s - %(levelname)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
-    )
+    formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
     handler.setFormatter(formatter)
     logger.addHandler(handler)
     logger.setLevel(logging.INFO)

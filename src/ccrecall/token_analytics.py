@@ -13,25 +13,17 @@ from ccrecall.token_parser import (
     compute_session_analytics,
 )
 
-
 # ── DB Import ─────────────────────────────────────────────────���───────
 
 
-def import_session(
-    conn: sqlite3.Connection, session: ParsedSession, jnl: JnlFile
-) -> None:
+def import_session(conn: sqlite3.Connection, session: ParsedSession, jnl: JnlFile) -> None:
     sid = session.session_id
 
     # Append-only: insert new turns, skip existing (JSONL source expires after 30 days)
     analytics = compute_session_analytics(session)
 
     # Prefetch existing turn indices to avoid N+1 queries on reimport
-    existing_indices = {
-        row[0]
-        for row in conn.execute(
-            "SELECT turn_index FROM turns WHERE session_id = ?", (sid,)
-        )
-    }
+    existing_indices = {row[0] for row in conn.execute("SELECT turn_index FROM turns WHERE session_id = ?", (sid,))}
     for turn in session.turns:
         if turn.index in existing_indices:
             continue
@@ -137,9 +129,7 @@ def import_session(
     # recomputed from the full file, but hook_executions stays frozen at the first-import
     # count. This avoids duplicate rows for hooks that were already recorded; the aggregate
     # metric stays accurate while per-row hook analytics may undercount later hooks.
-    has_hooks = conn.execute(
-        "SELECT 1 FROM hook_executions WHERE session_id = ? LIMIT 1", (sid,)
-    ).fetchone()
+    has_hooks = conn.execute("SELECT 1 FROM hook_executions WHERE session_id = ? LIMIT 1", (sid,)).fetchone()
     if not has_hooks:
         for hc in session.hook_calls:
             conn.execute(
@@ -158,9 +148,7 @@ def backfill_token_snapshots(conn: sqlite3.Connection) -> None:
 
     # Build tool_counts JSON per session from turn_tool_calls
     tool_counts_by_session: dict[str, dict[str, int]] = {}
-    cur = conn.execute(
-        "SELECT session_id, tool_name, COUNT(*) FROM turn_tool_calls GROUP BY session_id, tool_name"
-    )
+    cur = conn.execute("SELECT session_id, tool_name, COUNT(*) FROM turn_tool_calls GROUP BY session_id, tool_name")
     for sid, tool, cnt in cur:
         if sid not in tool_counts_by_session:
             tool_counts_by_session[sid] = {}

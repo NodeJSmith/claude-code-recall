@@ -13,7 +13,6 @@ from ccrecall.token_parser import (
     _turn_cost,
 )
 
-
 # ── Public API ─────────────────────────────────────────────────────────
 
 
@@ -51,9 +50,7 @@ def build_insights_and_trends(
         FROM session_metrics WHERE is_sidechain = 0 AND cache_cliff_count > 0
         GROUP BY project_path ORDER BY cliffs DESC LIMIT 5
     """):
-        cache_cliff_projects.append(
-            {"project": _project_slug(row[0]), "cliffs": row[1], "sessions": row[2]}
-        )
+        cache_cliff_projects.append({"project": _project_slug(row[0]), "cliffs": row[1], "sessions": row[2]})
 
     # Root-cause detail: top antipattern commands
     top_bash_cmds = []
@@ -70,12 +67,8 @@ def build_insights_and_trends(
     avg_input_cpm = 5.0
     avg_output_cpm = 25.0
     if model_split:
-        weighted_in = sum(
-            m["input_tokens"] * _get_pricing(m["model"])["input"] for m in model_split
-        )
-        weighted_out = sum(
-            m["output_tokens"] * _get_pricing(m["model"])["output"] for m in model_split
-        )
+        weighted_in = sum(m["input_tokens"] * _get_pricing(m["model"])["input"] for m in model_split)
+        weighted_out = sum(m["output_tokens"] * _get_pricing(m["model"])["output"] for m in model_split)
         total_in = sum(m["input_tokens"] for m in model_split) or 1
         total_out = sum(m["output_tokens"] for m in model_split) or 1
         avg_input_cpm = weighted_in / total_in
@@ -203,9 +196,7 @@ def build_trends(conn: sqlite3.Connection) -> dict:
             "cache_ratio": cache_ratio,
             "cliffs_per_session": round(cliffs / sessions, 3),
             "antipatterns_per_session": round(bash_antipatterns / sessions, 2),
-            "tool_error_rate": round(tool_errors / total_tool_calls, 4)
-            if total_tool_calls
-            else 0,
+            "tool_error_rate": round(tool_errors / total_tool_calls, 4) if total_tool_calls else 0,
             "hook_avg_ms": round(hook_ms / turns, 1) if turns else 0,
         }
 
@@ -444,9 +435,7 @@ def _build_insights(**kw) -> list[dict]:
         top_cmds = kw.get("top_bash_antipattern_cmds", [])
 
         proj_detail = (
-            "; ".join(f"{b['project']}: {b['antipatterns']}" for b in bash_projects[:3])
-            if bash_projects
-            else "unknown"
+            "; ".join(f"{b['project']}: {b['antipatterns']}" for b in bash_projects[:3]) if bash_projects else "unknown"
         )
 
         cmd_detail = (
@@ -469,9 +458,7 @@ def _build_insights(**kw) -> list[dict]:
             prefix = cmd["command"].split()[0] if cmd.get("command") else ""
             replacement = tool_map.get(prefix)
             if replacement and prefix not in seen_prefixes:
-                suggested_rules.append(
-                    f"Use {replacement} instead of `{prefix}` command"
-                )
+                suggested_rules.append(f"Use {replacement} instead of `{prefix}` command")
                 seen_prefixes.add(prefix)
 
         insights.append(
@@ -505,10 +492,7 @@ def _build_insights(**kw) -> list[dict]:
         waste_dollars = _waste_usd(waste_tok)
         top_files = kw.get("top_redundant_files", [])
         file_detail = (
-            "; ".join(
-                f"`{f['file']}` read {f['count']}x in session {f['session_id']}"
-                for f in top_files[:3]
-            )
+            "; ".join(f"`{f['file']}` read {f['count']}x in session {f['session_id']}" for f in top_files[:3])
             if top_files
             else "various files"
         )
@@ -567,11 +551,7 @@ def _build_insights(**kw) -> list[dict]:
 
     # ── Thinking Token Overhead ──
     if kw["total_thinking"] > 0:
-        pct = (
-            round(kw["total_thinking"] / kw["total_output"] * 100, 1)
-            if kw["total_output"]
-            else 0
-        )
+        pct = round(kw["total_thinking"] / kw["total_output"] * 100, 1) if kw["total_output"] else 0
         thinking_dollars = _waste_usd(kw["total_thinking"], is_output=True)
         insights.append(
             {
@@ -600,9 +580,7 @@ def _build_insights(**kw) -> list[dict]:
     ttl_label = "5 minutes" if tier == "5m" else "1 hour"
     rtd = kw["response_time_dist"]
     if tier == "5m":
-        idle_over_ttl = (
-            rtd.get("5m_15m", 0) + rtd.get("15m_1h", 0) + rtd.get("over_1h", 0)
-        )
+        idle_over_ttl = rtd.get("5m_15m", 0) + rtd.get("15m_1h", 0) + rtd.get("over_1h", 0)
     else:
         idle_over_ttl = rtd.get("over_1h", 0)
     if idle_over_ttl > 0:

@@ -30,9 +30,7 @@ def main():
         # Background the sync
         kwargs = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
         if sys.platform == "win32":
-            kwargs["creationflags"] = (
-                subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
-            )
+            kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
         else:
             kwargs["start_new_session"] = True
         try:

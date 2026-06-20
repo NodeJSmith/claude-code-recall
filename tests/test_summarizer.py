@@ -7,16 +7,16 @@ import sqlite3
 
 import pytest
 
+from ccrecall.db import CONTENT_ERROR_VERSION, SCHEMA, _migrate_columns
 from ccrecall.hooks import backfill_summaries, memory_setup
 from ccrecall.summarizer import (
-    build_exchange_pairs,
-    detect_disposition,
-    truncate_mid,
     build_context_summary_json,
+    build_exchange_pairs,
     compute_context_summary,
+    detect_disposition,
     render_context_summary,
+    truncate_mid,
 )
-from ccrecall.db import CONTENT_ERROR_VERSION, SCHEMA, _migrate_columns
 
 
 class TestTruncateMid:
@@ -150,9 +150,7 @@ class TestBuildContextSummaryJson:
         messages = []
         for i in range(5):
             messages.append({"role": "user", "content": f"Q{i}", "timestamp": f"t{i}"})
-            messages.append(
-                {"role": "assistant", "content": f"A{i}", "timestamp": f"t{i}"}
-            )
+            messages.append({"role": "assistant", "content": f"A{i}", "timestamp": f"t{i}"})
         result = build_context_summary_json(branch_row, messages)
         # Short/medium session (<=8): all exchanges in last_exchanges
         assert len(result["last_exchanges"]) == 5
@@ -163,9 +161,7 @@ class TestBuildContextSummaryJson:
         messages = []
         for i in range(8):
             messages.append({"role": "user", "content": f"Q{i}", "timestamp": f"t{i}"})
-            messages.append(
-                {"role": "assistant", "content": f"A{i}", "timestamp": f"t{i}"}
-            )
+            messages.append({"role": "assistant", "content": f"A{i}", "timestamp": f"t{i}"})
         result = build_context_summary_json(branch_row, messages)
         # At threshold (<=8): all exchanges in last_exchanges
         assert len(result["last_exchanges"]) == 8
@@ -176,9 +172,7 @@ class TestBuildContextSummaryJson:
         messages = []
         for i in range(10):
             messages.append({"role": "user", "content": f"Q{i}", "timestamp": f"t{i}"})
-            messages.append(
-                {"role": "assistant", "content": f"A{i}", "timestamp": f"t{i}"}
-            )
+            messages.append({"role": "assistant", "content": f"A{i}", "timestamp": f"t{i}"})
         result = build_context_summary_json(branch_row, messages)
         assert len(result["last_exchanges"]) == 6
         assert result["last_exchanges"][0]["user"] == "Q4"
@@ -266,9 +260,7 @@ class TestRenderContextSummary:
         result = render_context_summary(summary)
         assert "### Earlier in This Session" in result
         assert "### Where We Left Off" in result
-        assert (
-            "[... 4 earlier exchanges covering: a.py, b.py ...]" in result
-        )  # 12 - 2 - 6 = 4
+        assert "[... 4 earlier exchanges covering: a.py, b.py ...]" in result  # 12 - 2 - 6 = 4
         assert "feat/x" in result
         assert "Modified:" in result
         assert "Tools:" in result
@@ -416,9 +408,7 @@ class TestComputeContextSummary:
         assert parsed["version"] == 3
         assert parsed["topic"] == "How do I fix the parser bug?"
         assert parsed["metadata"]["git_branch"] == "main"
-        assert (
-            len(parsed["last_exchanges"]) == 3
-        )  # Short session (3 exchanges, <=8), all in last
+        assert len(parsed["last_exchanges"]) == 3  # Short session (3 exchanges, <=8), all in last
         assert len(parsed["first_exchanges"]) == 2
 
     def test_compute_nonexistent_branch(self, db_with_session):
@@ -435,12 +425,8 @@ class TestDetectDispositionWithCommits:
     def _make_exchanges(self, count: int, last_user: str = "ok") -> list[dict]:
         exchanges = []
         for i in range(count - 1):
-            exchanges.append(
-                {"user": f"Q{i}", "assistant": f"A{i}", "timestamp": f"t{i}"}
-            )
-        exchanges.append(
-            {"user": last_user, "assistant": "Done.", "timestamp": "t_last"}
-        )
+            exchanges.append({"user": f"Q{i}", "assistant": f"A{i}", "timestamp": f"t{i}"})
+        exchanges.append({"user": last_user, "assistant": "Done.", "timestamp": "t_last"})
         return exchanges
 
     def test_detect_disposition_completed_with_commits(self):
@@ -497,9 +483,7 @@ class TestDetectDispositionWithCommits:
         ]
         # Simulate: last exchange has assistant content but no user reply after
         # We can test this by checking disposition of a last exchange where user="" and assistant is non-empty
-        exchanges_with_no_reply = exchanges[:2] + [
-            {"user": "", "assistant": "No followup.", "timestamp": "t3"}
-        ]
+        exchanges_with_no_reply = exchanges[:2] + [{"user": "", "assistant": "No followup.", "timestamp": "t3"}]
         result = detect_disposition(exchanges_with_no_reply)
         assert result == "ABANDONED"
 
@@ -542,9 +526,7 @@ class TestBuildContextSummaryJsonTruncation:
         # Exchange text should be truncated
         ex = result["last_exchanges"][0]
         assert len(ex["user"]) < len(long_user), "User text should be truncated in JSON"
-        assert len(ex["assistant"]) < len(long_asst), (
-            "Assistant text should be truncated in JSON"
-        )
+        assert len(ex["assistant"]) < len(long_asst), "Assistant text should be truncated in JSON"
         assert "[... truncated ...]" in ex["user"] or len(ex["user"]) <= 920
         assert "[... truncated ...]" in ex["assistant"] or len(ex["assistant"]) <= 920
 
@@ -597,26 +579,18 @@ class TestNeedsBackfillVersionBump:
         conn = self._make_db_with_branch(summary_version=2)
         cursor = conn.cursor()
         # This is the query used by both backfill_summaries.py and memory_setup.py
-        cursor.execute(
-            "SELECT COUNT(*) FROM branches WHERE summary_version IS NULL OR summary_version < 3"
-        )
+        cursor.execute("SELECT COUNT(*) FROM branches WHERE summary_version IS NULL OR summary_version < 3")
         count = cursor.fetchone()[0]
-        assert count == 1, (
-            "summary_version=2 branches must be detected by the < 3 backfill query"
-        )
+        assert count == 1, "summary_version=2 branches must be detected by the < 3 backfill query"
         conn.close()
 
     def test_needs_backfill_version_3_not_triggered(self):
         """Branches with summary_version=3 should NOT be picked up by the < 3 backfill query."""
         conn = self._make_db_with_branch(summary_version=3)
         cursor = conn.cursor()
-        cursor.execute(
-            "SELECT COUNT(*) FROM branches WHERE summary_version IS NULL OR summary_version < 3"
-        )
+        cursor.execute("SELECT COUNT(*) FROM branches WHERE summary_version IS NULL OR summary_version < 3")
         count = cursor.fetchone()[0]
-        assert count == 0, (
-            "summary_version=3 branches must NOT be detected by the < 3 backfill query"
-        )
+        assert count == 0, "summary_version=3 branches must NOT be detected by the < 3 backfill query"
         conn.close()
 
     def test_backfill_summaries_uses_version_constants(self):
@@ -627,19 +601,13 @@ class TestNeedsBackfillVersionBump:
         version bump from silently desyncing this hook.
         """
         source = inspect.getsource(backfill_summaries)
-        assert "SUMMARY_VERSION" in source, (
-            "backfill_summaries.py must gate on the SUMMARY_VERSION constant"
-        )
-        assert "CONTENT_ERROR_VERSION" in source, (
-            "backfill_summaries.py must use the CONTENT_ERROR_VERSION sentinel"
-        )
+        assert "SUMMARY_VERSION" in source, "backfill_summaries.py must gate on the SUMMARY_VERSION constant"
+        assert "CONTENT_ERROR_VERSION" in source, "backfill_summaries.py must use the CONTENT_ERROR_VERSION sentinel"
 
     def test_memory_setup_uses_version_constant(self):
         """_needs_backfill ties its threshold to SUMMARY_VERSION, not a literal."""
         source = inspect.getsource(memory_setup._needs_backfill)
-        assert "SUMMARY_VERSION" in source, (
-            "_needs_backfill() must check against the SUMMARY_VERSION constant"
-        )
+        assert "SUMMARY_VERSION" in source, "_needs_backfill() must check against the SUMMARY_VERSION constant"
 
 
 class TestBackfillErrorHandling:
@@ -659,20 +627,15 @@ class TestBackfillErrorHandling:
         )
         cur.execute("INSERT INTO sessions (uuid, project_id) VALUES (?, ?)", ("sess-1", 1))
         cur.execute(
-            "INSERT INTO branches (session_id, leaf_uuid, is_active, summary_version)"
-            " VALUES (1, 'leaf-1', 1, ?)",
+            "INSERT INTO branches (session_id, leaf_uuid, is_active, summary_version) VALUES (1, 'leaf-1', 1, ?)",
             (self.STARTING_VERSION,),
         )
         conn.commit()
         conn.close()
 
     def _run_with_raise(self, path, monkeypatch, exc):
-        monkeypatch.setattr(
-            backfill_summaries, "load_settings", lambda: {"db_path": str(path)}
-        )
-        monkeypatch.setattr(
-            backfill_summaries, "setup_logging", lambda s: logging.getLogger("test-backfill")
-        )
+        monkeypatch.setattr(backfill_summaries, "load_settings", lambda: {"db_path": str(path)})
+        monkeypatch.setattr(backfill_summaries, "setup_logging", lambda s: logging.getLogger("test-backfill"))
 
         def boom(cursor, branch_id):
             raise exc

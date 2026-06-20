@@ -1,6 +1,6 @@
 """Tests for the pure RRF fusion function."""
 
-from ccrecall.fusion import rrf, RRF_K
+from ccrecall.fusion import RRF_K, rrf
 
 
 class TestRrf:

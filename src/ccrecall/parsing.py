@@ -5,8 +5,8 @@ JSONL parsing, branch detection, and metadata extraction.
 
 import json
 import sqlite3
+from collections.abc import Generator, Iterable
 from pathlib import Path
-from typing import Generator, Iterable
 
 from ccrecall.content import (
     extract_commits,
@@ -19,7 +19,7 @@ from ccrecall.content import (
 
 def parse_jsonl_file(filepath: Path) -> Generator[dict, None, None]:
     """Parse JSONL file, yielding user/assistant entries for import."""
-    with open(filepath, "r", encoding="utf-8", errors="replace") as f:
+    with open(filepath, encoding="utf-8", errors="replace") as f:
         for line in f:
             line = line.strip()
             if not line:
@@ -56,7 +56,7 @@ def parse_all_with_uuids(filepath: Path) -> Generator[dict, None, None]:
     Parse JSONL file yielding ALL entries with UUIDs.
     Used for building the parentUuid chain to find branches.
     """
-    with open(filepath, "r", encoding="utf-8", errors="replace") as f:
+    with open(filepath, encoding="utf-8", errors="replace") as f:
         yield from parse_lines_with_uuids(f)
 
 
@@ -219,9 +219,7 @@ def compute_branch_metadata(
         if entry_type == "user" and is_tool_result(content):
             continue
 
-        if entry_type == "user" and (
-            is_task_notification(content) or is_teammate_message(content)
-        ):
+        if entry_type == "user" and (is_task_notification(content) or is_teammate_message(content)):
             continue
 
         if entry_type == "user":

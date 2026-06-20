@@ -16,7 +16,6 @@ import ccrecall.db as _db_mod
 import ccrecall.hooks.onboarding as onboarding
 from ccrecall.db import CURRENT_ONBOARDING_VERSION
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -64,9 +63,7 @@ class TestOnboardingAlreadyCompleted:
         result = _run_main_captured(monkeypatch, cfg)
         assert result == {}
 
-    def test_already_onboarded_higher_version_exits_silently(
-        self, tmp_path, monkeypatch
-    ):
+    def test_already_onboarded_higher_version_exits_silently(self, tmp_path, monkeypatch):
         """A config with onboarding_version > CURRENT also exits silently (forward-compat)."""
         cfg = tmp_path / "config.json"
         cfg.write_text(
@@ -89,9 +86,7 @@ class TestOnboardingTriggered:
 
         result = _run_main_captured(monkeypatch, cfg)
 
-        assert "hookSpecificOutput" in result, (
-            "Expected hookSpecificOutput on first run"
-        )
+        assert "hookSpecificOutput" in result, "Expected hookSpecificOutput on first run"
         assert result["hookSpecificOutput"]["hookEventName"] == "SessionStart"
         assert "additionalContext" in result["hookSpecificOutput"]
 

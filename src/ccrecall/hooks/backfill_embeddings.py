@@ -200,9 +200,7 @@ def main():
 
 
 def _main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        description="Embed active-leaf branch summaries (opt-in; not auto-spawned)."
-    )
+    parser = argparse.ArgumentParser(description="Embed active-leaf branch summaries (opt-in; not auto-spawned).")
     parser.add_argument(
         "--status",
         action="store_true",
@@ -264,9 +262,7 @@ def _main(argv: list[str] | None = None) -> int:
     # model_available() warms the singleton session on success — no extra cost.
     # Pass --threads here since this is the call that constructs the session.
     if not model_available(threads=args.threads):
-        logger.error(
-            "Backfill embeddings: model not available, aborting (no rows marked)"
-        )
+        logger.error("Backfill embeddings: model not available, aborting (no rows marked)")
         print(
             "cm-backfill-embeddings: model not available, aborting (no rows marked)",
             file=sys.stderr,
@@ -290,9 +286,7 @@ def _main(argv: list[str] | None = None) -> int:
     # creates when sqlite-vec loaded. Without this guard the COUNT below crashes
     # with "no such table: branch_vec" instead of exiting cleanly.
     if not branch_vec_queryable(conn):
-        logger.error(
-            "Backfill embeddings: sqlite-vec unavailable, aborting (no rows marked)"
-        )
+        logger.error("Backfill embeddings: sqlite-vec unavailable, aborting (no rows marked)")
         print(
             "cm-backfill-embeddings: sqlite-vec unavailable, aborting (no rows marked)",
             file=sys.stderr,
@@ -341,9 +335,7 @@ def _main(argv: list[str] | None = None) -> int:
 
         current_ids = [r[0] for r in rows]
         if current_ids == last_batch_ids:
-            logger.error(
-                "Backfill embeddings: no progress — same batch re-selected; aborting to avoid infinite loop"
-            )
+            logger.error("Backfill embeddings: no progress — same batch re-selected; aborting to avoid infinite loop")
             print(
                 "cm-backfill-embeddings: no progress — same batch re-selected, aborting",
                 file=sys.stderr,
@@ -401,10 +393,7 @@ def _main(argv: list[str] | None = None) -> int:
     conn.close()
     elapsed = time.monotonic() - started
     remaining = max(0, total_eligible - total_updated)
-    logger.info(
-        f"Backfill embeddings complete: {total_updated} branches embedded "
-        f"in {format_duration(elapsed)}"
-    )
+    logger.info(f"Backfill embeddings complete: {total_updated} branches embedded in {format_duration(elapsed)}")
     if args.json:
         print(
             json.dumps(
@@ -418,8 +407,7 @@ def _main(argv: list[str] | None = None) -> int:
         )
     else:
         print(
-            f"cm-backfill-embeddings: complete — {total_updated} embedded "
-            f"in {format_duration(elapsed)}",
+            f"cm-backfill-embeddings: complete — {total_updated} embedded in {format_duration(elapsed)}",
             file=sys.stderr,
         )
     return EXIT_OK

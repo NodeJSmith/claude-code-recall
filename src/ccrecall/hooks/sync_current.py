@@ -24,9 +24,7 @@ from ccrecall.db import (
 )
 from ccrecall.session_ops import sync_session
 
-_UUID_RE = re.compile(
-    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE
-)
+_UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE)
 
 
 def validate_session_id(session_id: str) -> bool:
@@ -70,9 +68,7 @@ def get_session_file(projects_dir: Path, session_id: str) -> Path | None:
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Sync current session to memory database"
-    )
+    parser = argparse.ArgumentParser(description="Sync current session to memory database")
     parser.add_argument(
         "--input-file",
         type=Path,
@@ -143,9 +139,7 @@ def main():
         conn.close()
 
         if new_messages > 0:
-            logger.info(
-                f"Synced {new_messages} new message(s) from session {session_id[:8]}"
-            )
+            logger.info(f"Synced {new_messages} new message(s) from session {session_id[:8]}")
 
         # Output for hook (continue = True means don't block)
         output = {"continue": True}

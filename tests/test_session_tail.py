@@ -38,9 +38,7 @@ def user_tool_result(tool_id: str, content) -> dict:
         "type": "user",
         "message": {
             "role": "user",
-            "content": [
-                {"type": "tool_result", "tool_use_id": tool_id, "content": content}
-            ],
+            "content": [{"type": "tool_result", "tool_use_id": tool_id, "content": content}],
         },
         "uuid": _uuid(),
     }
@@ -64,9 +62,7 @@ def ask_question(tool_id: str, question: str, options, sidechain: bool = False) 
                     "type": "tool_use",
                     "id": tool_id,
                     "name": "AskUserQuestion",
-                    "input": {
-                        "questions": [{"question": question, "options": options}]
-                    },
+                    "input": {"questions": [{"question": question, "options": options}]},
                 }
             ],
         },
@@ -80,9 +76,7 @@ OPTS = [
     {"label": "Wait", "description": "hold"},
 ]
 ANSWERED = 'Your questions have been answered: "How do you want to proceed?"="Ship it"'
-REJECTED = (
-    "The user doesn't want to proceed with this tool use. The tool use was rejected."
-)
+REJECTED = "The user doesn't want to proceed with this tool use. The tool use was rejected."
 INTERRUPT = "[Request interrupted by user for tool use]"
 
 
@@ -166,29 +160,16 @@ class TestTypedInstruction:
         assert typed_instruction(user_text(INTERRUPT)) is None
 
     def test_task_notification_filtered(self):
-        assert (
-            typed_instruction(
-                user_text("<task-notification>\ndone\n</task-notification>")
-            )
-            is None
-        )
+        assert typed_instruction(user_text("<task-notification>\ndone\n</task-notification>")) is None
 
     def test_system_reminder_filtered(self):
-        assert (
-            typed_instruction(user_text("<system-reminder>be good</system-reminder>"))
-            is None
-        )
+        assert typed_instruction(user_text("<system-reminder>be good</system-reminder>")) is None
 
     def test_skill_body_filtered(self):
-        assert (
-            typed_instruction(user_text("Base directory for this skill: /x\n# Foo"))
-            is None
-        )
+        assert typed_instruction(user_text("Base directory for this skill: /x\n# Foo")) is None
 
     def test_command_wrapper_stripped_to_empty(self):
-        entry = user_text(
-            "<command-message>x</command-message><command-name>/x</command-name>"
-        )
+        entry = user_text("<command-message>x</command-message><command-name>/x</command-name>")
         assert typed_instruction(entry) is None
 
     def test_last_typed_instruction_skips_trailing_noise(self):
@@ -228,9 +209,7 @@ class TestTranscriptDir:
     def test_worktree_path_not_normalized(self):
         # The transcript lives in the RAW-cwd dir, worktree segment included.
         cwd = "/home/j/source/hassette/.claude/worktrees/959"
-        assert (
-            transcript_dir(cwd).name == "-home-j-source-hassette--claude-worktrees-959"
-        )
+        assert transcript_dir(cwd).name == "-home-j-source-hassette--claude-worktrees-959"
 
     def test_plain_path(self):
         assert transcript_dir("/home/j/repo").name == "-home-j-repo"
@@ -265,10 +244,7 @@ class TestResolveTarget:
 class TestLoadTailEntries:
     def test_reads_only_tail(self, tmp_path):
         f = tmp_path / "s.jsonl"
-        lines = [
-            json.dumps({"uuid": f"u{i}", "type": "user", "message": {}})
-            for i in range(50)
-        ]
+        lines = [json.dumps({"uuid": f"u{i}", "type": "user", "message": {}}) for i in range(50)]
         f.write_text("\n".join(lines) + "\n")
         entries = load_tail_entries(f, tail_lines=10)
         assert len(entries) == 10

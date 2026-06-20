@@ -10,7 +10,6 @@ from ccrecall.content import (
     parse_origin,
 )
 
-
 # --- extract_text_content ---
 
 
@@ -182,9 +181,7 @@ class TestIsTaskNotification:
         assert is_task_notification(None) is False
 
     def test_whitespace_prefix(self):
-        content = (
-            "  \n  <task-notification>\n<task-id>abc</task-id>\n</task-notification>"
-        )
+        content = "  \n  <task-notification>\n<task-id>abc</task-id>\n</task-notification>"
         assert is_task_notification(content) is True
 
     def test_partial_match(self):
@@ -360,9 +357,7 @@ class TestParseOrigin:
         assert parse_origin(entry) == "discord"
 
     def test_slack_origin(self):
-        entry = {
-            "origin": {"kind": "channel", "server": "plugin:slack:slack-connector"}
-        }
+        entry = {"origin": {"kind": "channel", "server": "plugin:slack:slack-connector"}}
         assert parse_origin(entry) == "slack"
 
     def test_no_origin(self):

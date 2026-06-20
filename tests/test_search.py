@@ -6,15 +6,8 @@ import sys
 from unittest.mock import patch
 
 import pytest
+from conftest import make_vec_conn
 
-from ccrecall.search_conversations import (
-    _dedup_by_session,
-    _get_vec_branch_ids,
-    main,
-    print_status,
-    search_sessions,
-)
-from ccrecall.recent_chats import get_recent_sessions
 from ccrecall.db import (
     SCHEMA,
     SCHEMA_CORE,
@@ -24,7 +17,14 @@ from ccrecall.db import (
     vec_available,
 )
 from ccrecall.embeddings import EMBEDDING_DIM, EMBEDDING_MODEL, EMBEDDING_VERSION
-from conftest import make_vec_conn
+from ccrecall.recent_chats import get_recent_sessions
+from ccrecall.search_conversations import (
+    _dedup_by_session,
+    _get_vec_branch_ids,
+    main,
+    print_status,
+    search_sessions,
+)
 
 
 @pytest.fixture
@@ -184,9 +184,7 @@ class TestSearchSessionsFTS:
         if fts_level not in ("fts5", "fts4"):
             pytest.skip("FTS not available")
 
-        results = search_sessions(
-            search_db, "database migration", fts_level, max_results=10
-        )
+        results = search_sessions(search_db, "database migration", fts_level, max_results=10)
         assert len(results) >= 1
         assert any(r["uuid"] == "sess-alpha-2" for r in results)
 
@@ -208,12 +206,8 @@ class TestSearchSessionsFTS:
         if fts_level not in ("fts5", "fts4"):
             pytest.skip("FTS not available")
 
-        results = search_sessions(
-            search_db, "pytest", fts_level, max_results=10, projects=["alpha"]
-        )
-        assert all(r["project"] == "alpha" for r in results), (
-            "Should only return alpha project"
-        )
+        results = search_sessions(search_db, "pytest", fts_level, max_results=10, projects=["alpha"])
+        assert all(r["project"] == "alpha" for r in results), "Should only return alpha project"
         assert len(results) >= 1
 
     def test_messages_loaded(self, search_db):
@@ -221,9 +215,7 @@ class TestSearchSessionsFTS:
         if fts_level not in ("fts5", "fts4"):
             pytest.skip("FTS not available")
 
-        results = search_sessions(
-            search_db, "pytest fixtures", fts_level, max_results=5
-        )
+        results = search_sessions(search_db, "pytest fixtures", fts_level, max_results=5)
         matching = [r for r in results if r["uuid"] == "sess-alpha-1"]
         assert len(matching) == 1
         session = matching[0]
@@ -236,9 +228,7 @@ class TestSearchSessionsFTS:
         if fts_level not in ("fts5", "fts4"):
             pytest.skip("FTS not available")
 
-        results = search_sessions(
-            search_db, "pytest", fts_level, max_results=10, session_id="sess-alpha-1"
-        )
+        results = search_sessions(search_db, "pytest", fts_level, max_results=10, session_id="sess-alpha-1")
         assert len(results) == 1
         assert results[0]["uuid"] == "sess-alpha-1"
 
@@ -247,9 +237,7 @@ class TestSearchSessionsFTS:
         if fts_level not in ("fts5", "fts4"):
             pytest.skip("FTS not available")
 
-        results = search_sessions(
-            search_db, "pytest", fts_level, max_results=10, session_id="sess"
-        )
+        results = search_sessions(search_db, "pytest", fts_level, max_results=10, session_id="sess")
         uuids = {r["uuid"] for r in results}
         assert len(results) == 2
         assert "sess-alpha-1" in uuids
@@ -260,9 +248,7 @@ class TestSearchSessionsFTS:
         if fts_level not in ("fts5", "fts4"):
             pytest.skip("FTS not available")
 
-        results = search_sessions(
-            search_db, "pytest", fts_level, max_results=10, session_id="nonexistent"
-        )
+        results = search_sessions(search_db, "pytest", fts_level, max_results=10, session_id="nonexistent")
         assert len(results) == 0
 
 
@@ -278,18 +264,14 @@ class TestSearchSessionsLIKE:
 
     def test_like_multiple_terms_and_logic(self, search_db):
         # LIKE fallback uses AND between terms — only sess-alpha-1 contains both
-        results = search_sessions(
-            search_db, "pytest fixtures", fts_level=None, max_results=10
-        )
+        results = search_sessions(search_db, "pytest fixtures", fts_level=None, max_results=10)
         uuids = {r["uuid"] for r in results}
         assert "sess-alpha-1" in uuids  # has both "pytest" and "fixtures"
         assert "sess-alpha-2" not in uuids  # has neither
         assert "sess-beta-1" not in uuids  # has "pytest" but not "fixtures"
 
     def test_like_project_filter(self, search_db):
-        results = search_sessions(
-            search_db, "pytest", fts_level=None, max_results=10, projects=["beta"]
-        )
+        results = search_sessions(search_db, "pytest", fts_level=None, max_results=10, projects=["beta"])
         assert all(r["project"] == "beta" for r in results)
 
     def test_like_empty_query(self, search_db):
@@ -301,9 +283,7 @@ class TestSearchSessionsLIKE:
         assert len(results) <= 1
 
     def test_like_session_filter(self, search_db):
-        results = search_sessions(
-            search_db, "pytest", fts_level=None, max_results=10, session_id="sess-beta"
-        )
+        results = search_sessions(search_db, "pytest", fts_level=None, max_results=10, session_id="sess-beta")
         assert len(results) == 1
         assert results[0]["uuid"] == "sess-beta-1"
 
@@ -350,8 +330,7 @@ class TestFtsSearchFindsFilePath:
                 s1_id,
                 "leaf-file-1",
                 agg_content,
-                '["/home/user/myproject/src/ccrecall/summarizer.py",'
-                ' "/home/user/myproject/src/ccrecall/parsing.py"]',
+                '["/home/user/myproject/src/ccrecall/summarizer.py", "/home/user/myproject/src/ccrecall/parsing.py"]',
             ),
         )
         b1_id = cursor.lastrowid
@@ -394,19 +373,13 @@ class TestFtsSearchFindsFilePath:
         # Search for the filename — should match via aggregated_content's __files__ section
         results = search_sessions(file_path_db, "summarizer", fts_level, max_results=10)
         uuids = {r["uuid"] for r in results}
-        assert "sess-file-1" in uuids, (
-            "FTS search for 'summarizer' should find the session that edited summarizer.py"
-        )
+        assert "sess-file-1" in uuids, "FTS search for 'summarizer' should find the session that edited summarizer.py"
 
     def test_like_search_finds_file_path(self, file_path_db):
         """LIKE fallback also finds sessions by filename in aggregated_content."""
-        results = search_sessions(
-            file_path_db, "summarizer", fts_level=None, max_results=10
-        )
+        results = search_sessions(file_path_db, "summarizer", fts_level=None, max_results=10)
         uuids = {r["uuid"] for r in results}
-        assert "sess-file-1" in uuids, (
-            "LIKE search for 'summarizer' should find the session that edited summarizer.py"
-        )
+        assert "sess-file-1" in uuids, "LIKE search for 'summarizer' should find the session that edited summarizer.py"
 
 
 class TestRecentChatsSessionFilter:
@@ -452,16 +425,12 @@ class TestPathFilter:
         assert uuids == {"sess-alpha-1", "sess-alpha-2"}
 
     def test_recent_path_combined_with_project(self, search_db):
-        results = get_recent_sessions(
-            search_db, n=10, projects=["alpha"], path="ui-decomp"
-        )
+        results = get_recent_sessions(search_db, n=10, projects=["alpha"], path="ui-decomp")
         assert len(results) == 1
         assert results[0]["uuid"] == "sess-alpha-2"
 
     def test_recent_path_project_mismatch(self, search_db):
-        results = get_recent_sessions(
-            search_db, n=10, projects=["beta"], path="ui-decomp"
-        )
+        results = get_recent_sessions(search_db, n=10, projects=["beta"], path="ui-decomp")
         assert len(results) == 0
 
     def test_search_path_fts(self, search_db):
@@ -469,16 +438,12 @@ class TestPathFilter:
         if fts_level not in ("fts5", "fts4"):
             pytest.skip("FTS not available")
 
-        results = search_sessions(
-            search_db, "database", fts_level, max_results=10, path="ui-decomp"
-        )
+        results = search_sessions(search_db, "database", fts_level, max_results=10, path="ui-decomp")
         assert len(results) == 1
         assert results[0]["uuid"] == "sess-alpha-2"
 
     def test_search_path_like_fallback(self, search_db):
-        results = search_sessions(
-            search_db, "database", fts_level=None, max_results=10, path="ui-decomp"
-        )
+        results = search_sessions(search_db, "database", fts_level=None, max_results=10, path="ui-decomp")
         assert len(results) == 1
         assert results[0]["uuid"] == "sess-alpha-2"
 
@@ -488,9 +453,7 @@ class TestPathFilter:
             pytest.skip("FTS not available")
 
         all_pytest = search_sessions(search_db, "pytest", fts_level, max_results=10)
-        with_path = search_sessions(
-            search_db, "pytest", fts_level, max_results=10, path="/home/user/beta"
-        )
+        with_path = search_sessions(search_db, "pytest", fts_level, max_results=10, path="/home/user/beta")
         assert len(with_path) < len(all_pytest)
         assert all(r["uuid"] == "sess-beta-1" for r in with_path)
 
@@ -500,9 +463,7 @@ class TestPathFilter:
 # ---------------------------------------------------------------------------
 
 
-def _seed_branch(
-    conn: sqlite3.Connection, uuid: str, content: str, summary: str
-) -> tuple[int, int]:
+def _seed_branch(conn: sqlite3.Connection, uuid: str, content: str, summary: str) -> tuple[int, int]:
     """Seed one project/session/branch; returns (session_id, branch_id)."""
     cursor = conn.cursor()
     cursor.execute(
@@ -550,9 +511,7 @@ class TestDegradation:
         if fts_level not in ("fts5", "fts4"):
             pytest.skip("FTS not available")
 
-        with patch(
-            "ccrecall.search_conversations.model_available", return_value=False
-        ):
+        with patch("ccrecall.search_conversations.model_available", return_value=False):
             results = search_sessions(search_db, "pytest", fts_level, max_results=10)
         assert len(results) >= 2
         uuids = {r["uuid"] for r in results}
@@ -566,15 +525,9 @@ class TestDegradation:
         def _raise(*_a, **_kw):
             raise AttributeError("no load_extension")
 
-        with patch(
-            "ccrecall.search_conversations.model_available", return_value=True
-        ):
-            with patch(
-                "ccrecall.search_conversations.embed_text", side_effect=_raise
-            ):
-                results = search_sessions(
-                    search_db, "pytest", fts_level, max_results=10
-                )
+        with patch("ccrecall.search_conversations.model_available", return_value=True):
+            with patch("ccrecall.search_conversations.embed_text", side_effect=_raise):
+                results = search_sessions(search_db, "pytest", fts_level, max_results=10)
 
         # Should return results via keyword fallback, not raise
         assert isinstance(results, list)
@@ -583,9 +536,7 @@ class TestDegradation:
         """model_available() is False (model unavailable) → keyword path (FR#3)."""
         fts_level = detect_fts_support(search_db)
 
-        with patch(
-            "ccrecall.search_conversations.model_available", return_value=False
-        ):
+        with patch("ccrecall.search_conversations.model_available", return_value=False):
             results = search_sessions(search_db, "database", fts_level, max_results=10)
 
         assert isinstance(results, list)
@@ -606,9 +557,7 @@ class TestDegradation:
             "ccrecall.search_conversations.embed_text",
             side_effect=_should_not_be_called,
         ):
-            results = search_sessions(
-                search_db, "pytest", fts_level, max_results=10, keyword_only=True
-            )
+            results = search_sessions(search_db, "pytest", fts_level, max_results=10, keyword_only=True)
 
         assert called == [], "embed_text must not be called with keyword_only=True"
         assert len(results) >= 2
@@ -622,9 +571,7 @@ class TestDegradation:
         # search_db has no branch_vec table; model says available.
         # search_sessions probes branch_vec before embedding, gets OperationalError,
         # and falls back to the keyword path.
-        with patch(
-            "ccrecall.search_conversations.model_available", return_value=True
-        ):
+        with patch("ccrecall.search_conversations.model_available", return_value=True):
             results = search_sessions(search_db, "database", fts_level, max_results=10)
 
         assert isinstance(results, list)
@@ -651,9 +598,7 @@ class TestStaleVersionExclusion:
     def stale_db(self, vec_conn):
         """DB with one current-version branch and one stale-version branch, both in branch_vec."""
         # Current-version branch
-        _seed_branch(
-            vec_conn, "sess-current", "current version text", "current summary"
-        )
+        _seed_branch(vec_conn, "sess-current", "current version text", "current summary")
         cursor = vec_conn.cursor()
         cursor.execute("SELECT id FROM branches WHERE leaf_uuid = 'leaf-sess-current'")
         current_branch_id = cursor.fetchone()[0]
@@ -686,9 +631,7 @@ class TestStaleVersionExclusion:
             (stale_sess_id, "m-stale", "user", "stale text", "2025-01-01T00:00:00Z"),
         )
         msg_id = cursor.lastrowid
-        cursor.execute(
-            "INSERT INTO branch_messages VALUES (?, ?)", (stale_branch_id, msg_id)
-        )
+        cursor.execute("INSERT INTO branch_messages VALUES (?, ?)", (stale_branch_id, msg_id))
         vec_conn.commit()
 
         # Seed both branches into branch_vec with the same vector
@@ -709,12 +652,8 @@ class TestStaleVersionExclusion:
         cursor = conn.cursor()
         fake_vec = [0.1] * EMBEDDING_DIM
         result_ids = _get_vec_branch_ids(cursor, fake_vec, top_k=10)
-        assert stale_id not in result_ids, (
-            "Stale-version branch must not appear in vector candidates"
-        )
-        assert current_id in result_ids, (
-            "Current-version branch must appear in vector candidates"
-        )
+        assert stale_id not in result_ids, "Stale-version branch must not appear in vector candidates"
+        assert current_id in result_ids, "Current-version branch must appear in vector candidates"
 
     @pytest.mark.skipif(
         not vec_available(sqlite3.connect(":memory:")),
@@ -734,21 +673,13 @@ class TestStaleVersionExclusion:
         cursor = conn.cursor()
         fake_vec = [0.1] * EMBEDDING_DIM
         vec_ids = _get_vec_branch_ids(cursor, fake_vec, top_k=10)
-        assert stale_id not in vec_ids, (
-            "Stale-version branch must not appear in vector candidates"
-        )
+        assert stale_id not in vec_ids, "Stale-version branch must not appear in vector candidates"
 
         # Confirm keyword path (FTS or LIKE) does surface stale session
-        with patch(
-            "ccrecall.search_conversations.model_available", return_value=False
-        ):
-            results = search_sessions(
-                conn, "stale", fts_level, max_results=10, keyword_only=True
-            )
+        with patch("ccrecall.search_conversations.model_available", return_value=False):
+            results = search_sessions(conn, "stale", fts_level, max_results=10, keyword_only=True)
         uuids = {r["uuid"] for r in results}
-        assert "sess-stale" in uuids, (
-            "Stale session must still be reachable via keyword/FTS search"
-        )
+        assert "sess-stale" in uuids, "Stale session must still be reachable via keyword/FTS search"
 
 
 # ---------------------------------------------------------------------------
@@ -890,16 +821,14 @@ class TestSessionDedup:
 
         conn.commit()
 
-        with patch(
-            "ccrecall.search_conversations.model_available", return_value=True
-        ):
-            with patch(
+        with (
+            patch("ccrecall.search_conversations.model_available", return_value=True),
+            patch(
                 "ccrecall.search_conversations.embed_text",
                 return_value=[0.5] * EMBEDDING_DIM,
-            ):
-                results = search_sessions(
-                    conn, "async coroutine", fts_level, max_results=10
-                )
+            ),
+        ):
+            results = search_sessions(conn, "async coroutine", fts_level, max_results=10)
 
         session_uuids = [r["uuid"] for r in results]
         assert session_uuids.count("sess-multi-branch") == 1, (
@@ -926,9 +855,7 @@ class TestStatusFlag:
         _migrate_columns(c)
         c.close()
 
-        args = argparse.Namespace(
-            db=db_path, keyword_only=False, status=True, query=None
-        )
+        args = argparse.Namespace(db=db_path, keyword_only=False, status=True, query=None)
         settings = {"db_path": str(db_path)}
 
         with pytest.raises(SystemExit) as exc:

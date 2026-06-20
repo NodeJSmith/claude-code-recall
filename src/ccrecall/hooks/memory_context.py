@@ -23,13 +23,12 @@ from pathlib import Path
 from whenever import Instant
 
 # Add path to shared utils
-
 from ccrecall.db import (
+    get_db_connection,
     get_db_path,
     load_config,
     load_settings,
     setup_logging,
-    get_db_connection,
 )
 from ccrecall.formatting import (
     format_time_full,
@@ -155,9 +154,7 @@ def _load_messages_for(cursor, entries: list[dict]) -> None:
 
     branch_messages: dict[int, list[dict]] = {}
     for branch_id, role, content, timestamp in cursor.fetchall():
-        branch_messages.setdefault(branch_id, []).append(
-            {"role": role, "content": content, "timestamp": timestamp}
-        )
+        branch_messages.setdefault(branch_id, []).append({"role": role, "content": content, "timestamp": timestamp})
 
     for entry in entries:
         if not entry.get("context_summary"):
@@ -273,9 +270,7 @@ def select_sessions(
 
                     # If cleared-from is not substantive, add supplementary
                     if cleared_from["exchange_count"] <= 2 and max_sessions > 1:
-                        supplementary = _find_first_substantive(
-                            cursor, project_id, prev_session_uuid
-                        )
+                        supplementary = _find_first_substantive(cursor, project_id, prev_session_uuid)
                         if supplementary:
                             filtered.append(supplementary)
 
@@ -485,9 +480,7 @@ def main():
             print(json.dumps({}))
             return
 
-        logger.info(
-            f"Injecting context from {len(sessions)} session(s) for project {project_key}"
-        )
+        logger.info(f"Injecting context from {len(sessions)} session(s) for project {project_key}")
 
         # Top-of-context directive: placed first because the hook's inline
         # preview may be truncated by the harness, and because earlier tokens

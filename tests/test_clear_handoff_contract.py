@@ -80,16 +80,12 @@ class TestClearHandoffWriter:
 
     def test_does_not_write_missing_session_id(self, tmp_path):
         """Contract 2: skips write when session_id is absent."""
-        hp = _run_handoff_main(
-            tmp_path, {"end_reason": "clear", "cwd": "/some/project"}
-        )
+        hp = _run_handoff_main(tmp_path, {"end_reason": "clear", "cwd": "/some/project"})
         assert not hp.exists()
 
     def test_does_not_write_missing_cwd(self, tmp_path):
         """Contract 2: skips write when cwd is absent."""
-        hp = _run_handoff_main(
-            tmp_path, {"end_reason": "clear", "session_id": "abc-123"}
-        )
+        hp = _run_handoff_main(tmp_path, {"end_reason": "clear", "session_id": "abc-123"})
         assert not hp.exists()
 
     @pytest.mark.parametrize("end_reason", ["interrupt", "crash", "CLEAR", None])
@@ -110,9 +106,7 @@ class TestClearHandoffWriter:
         fake_db = tmp_path / "conversations.db"
         with (
             patch.object(sys, "stdin", io.StringIO("not-json")),
-            patch.object(
-                _clear_handoff, "load_settings", return_value={"db_path": str(fake_db)}
-            ),
+            patch.object(_clear_handoff, "load_settings", return_value={"db_path": str(fake_db)}),
             patch.object(_clear_handoff, "get_db_path", return_value=fake_db),
         ):
             _clear_handoff.main()
@@ -128,9 +122,7 @@ def _write_handoff(tmp_path: Path, data: dict) -> Path:
     """Write a handoff JSON file relative to a fake db_path."""
     hp = tmp_path / "clear-handoff.json"
     hp.write_text(json.dumps(data))
-    return (
-        tmp_path / "conversations.db"
-    )  # db_path; handoff is db_path.parent / "clear-handoff.json"
+    return tmp_path / "conversations.db"  # db_path; handoff is db_path.parent / "clear-handoff.json"
 
 
 class TestFindClearedFromSessionUuid:
@@ -178,9 +170,7 @@ class TestFindClearedFromSessionUuid:
         )
         handoff_path = tmp_path / "clear-handoff.json"
         _find_cleared_from_session_uuid(db_path, "/my/project")
-        assert handoff_path.exists(), (
-            "Handoff file should NOT be deleted on cwd mismatch"
-        )
+        assert handoff_path.exists(), "Handoff file should NOT be deleted on cwd mismatch"
 
     def test_file_deleted_after_valid_consumption(self, tmp_path):
         """Contract 7: file IS deleted after validation passes."""
@@ -194,9 +184,7 @@ class TestFindClearedFromSessionUuid:
         )
         handoff_path = tmp_path / "clear-handoff.json"
         _find_cleared_from_session_uuid(db_path, "/my/project")
-        assert not handoff_path.exists(), (
-            "Handoff file should be deleted after valid consumption"
-        )
+        assert not handoff_path.exists(), "Handoff file should be deleted after valid consumption"
 
     def test_returns_none_on_stale_timestamp(self, tmp_path):
         """Contract 6: timestamp older than 30s → None."""
@@ -225,9 +213,7 @@ class TestFindClearedFromSessionUuid:
         )
         handoff_path = tmp_path / "clear-handoff.json"
         _find_cleared_from_session_uuid(db_path, "/my/project")
-        assert not handoff_path.exists(), (
-            "Stale handoff file should be deleted on rejection"
-        )
+        assert not handoff_path.exists(), "Stale handoff file should be deleted on rejection"
 
     def test_returns_session_id_on_fresh_timestamp_boundary(self, tmp_path):
         """Timestamp exactly at boundary (29s) is still accepted."""
@@ -250,6 +236,4 @@ class TestFindClearedFromSessionUuid:
         db_path = tmp_path / "conversations.db"
         result = _find_cleared_from_session_uuid(db_path, "/my/project")
         assert result is None
-        assert not handoff_path.exists(), (
-            "Corrupt handoff file should be deleted immediately"
-        )
+        assert not handoff_path.exists(), "Corrupt handoff file should be deleted immediately"

@@ -1,6 +1,7 @@
 """Tests for the shared embedding module."""
 
 import math
+
 import pytest
 
 from ccrecall.embeddings import (

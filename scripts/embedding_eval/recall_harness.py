@@ -32,9 +32,7 @@ OUT_DIR = Path(__file__).resolve().parent
 FIXTURE_PATH = OUT_DIR / "fixture.json"
 RESULTS_JSON = OUT_DIR / "results.json"
 
-ACTIVE_FILTER = (
-    "is_active = 1 AND context_summary IS NOT NULL AND context_summary != ''"
-)
+ACTIVE_FILTER = "is_active = 1 AND context_summary IS NOT NULL AND context_summary != ''"
 
 # Candidate models. prefix_doc/prefix_query encode the per-model instruction
 # convention (nomic requires search_document:/search_query:; jina does not).
@@ -63,9 +61,7 @@ MIN_QUERY_LEN = 40  # drop "yes please"-style acknowledgments — they don't ide
 
 
 def load_corpus(conn: sqlite3.Connection) -> tuple[list[int], list[str]]:
-    rows = conn.execute(
-        f"SELECT id, context_summary FROM branches WHERE {ACTIVE_FILTER} ORDER BY id"
-    ).fetchall()
+    rows = conn.execute(f"SELECT id, context_summary FROM branches WHERE {ACTIVE_FILTER} ORDER BY id").fetchall()
     ids = [r[0] for r in rows]
     docs = [r[1] for r in rows]
     return ids, docs
@@ -212,7 +208,7 @@ def load_stored_bge_vectors(conn: sqlite3.Connection, corpus_ids: list[int]) -> 
     single-threaded pass that thrashed the VPS overnight). Only queries are
     embedded live.
     """
-    import sqlite_vec  # noqa: F401 - registers the extension loader
+    import sqlite_vec
 
     conn.enable_load_extension(True)
     sqlite_vec.load(conn)
@@ -247,7 +243,9 @@ def main() -> int:
         "bge-m3 baseline is unavailable in this mode (it needs branch_vec) — run candidates only.",
     )
     ap.add_argument("--export-corpus", type=Path, help="dump the live-DB corpus to JSON and exit")
-    ap.add_argument("--batch-size", type=int, default=2, help="fastembed batch size (small: long seqs OOM; CPU-safe 2, 8 GB GPU ~4)")
+    ap.add_argument(
+        "--batch-size", type=int, default=2, help="fastembed batch size (small: long seqs OOM; CPU-safe 2, 8 GB GPU ~4)"
+    )
     ap.add_argument("--threads", type=int, default=None, help="onnxruntime threads (set 1 on a shared box)")
     ap.add_argument("--cuda", action="store_true", help="run on GPU via fastembed-gpu (non-quantized models only)")
     args = ap.parse_args()
@@ -305,7 +303,7 @@ def main() -> int:
             results["bge-m3"] = metrics(ranks_for(de, qe, target_idx))
             RESULTS_JSON.write_text(json.dumps(results, indent=2))  # checkpoint
             print("  done")
-        except Exception as e:  # noqa: BLE001 - baseline optional, report and continue
+        except Exception as e:
             print(f"  bge-m3 baseline skipped: {e}")
 
     for cfg in FASTEMBED_MODELS:

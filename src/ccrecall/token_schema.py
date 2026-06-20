@@ -180,9 +180,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         )
         conn.execute("DELETE FROM token_import_log")
         if current == 0:
-            conn.execute(
-                "INSERT INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,)
-            )
+            conn.execute("INSERT INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,))
         else:
             conn.execute("UPDATE schema_version SET version = ?", (SCHEMA_VERSION,))
     # Normalize worktree paths → parent repo (idempotent, no version bump needed).

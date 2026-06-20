@@ -46,9 +46,7 @@ def extract_text_content(content) -> tuple[str, bool, bool, str | None]:
     if isinstance(content, str):
         # Clean up command artifacts
         text = re.sub(r"<command-name>.*?</command-name>", "", content, flags=re.DOTALL)
-        text = re.sub(
-            r"<command-message>.*?</command-message>", "", text, flags=re.DOTALL
-        )
+        text = re.sub(r"<command-message>.*?</command-message>", "", text, flags=re.DOTALL)
         text = re.sub(r"<command-args>.*?</command-args>", "", text, flags=re.DOTALL)
         text = re.sub(
             r"<local-command-stdout>.*?</local-command-stdout>",
@@ -56,9 +54,7 @@ def extract_text_content(content) -> tuple[str, bool, bool, str | None]:
             text,
             flags=re.DOTALL,
         )
-        text = re.sub(
-            r"<channel\b[^>]*>\n?([\s\S]*?)\n?</channel>", r"\1", text, flags=re.DOTALL
-        )
+        text = re.sub(r"<channel\b[^>]*>\n?([\s\S]*?)\n?</channel>", r"\1", text, flags=re.DOTALL)
         return text.strip(), False, False, None
 
     if isinstance(content, list):
@@ -99,11 +95,7 @@ def parse_origin(entry: dict) -> str | None:
 def is_task_notification(content) -> bool:
     """Check if content is a task-notification message (subagent result)."""
     if isinstance(content, list):
-        texts = [
-            item.get("text", "")
-            for item in content
-            if isinstance(item, dict) and item.get("type") == "text"
-        ]
+        texts = [item.get("text", "") for item in content if isinstance(item, dict) and item.get("type") == "text"]
         text = "\n".join(texts).strip()
     elif isinstance(content, str):
         text = content.strip()
@@ -115,11 +107,7 @@ def is_task_notification(content) -> bool:
 def is_teammate_message(content) -> bool:
     """Detect teammate coordination messages (team reports, idle notifications, shutdown)."""
     if isinstance(content, list):
-        texts = [
-            item.get("text", "")
-            for item in content
-            if isinstance(item, dict) and item.get("type") == "text"
-        ]
+        texts = [item.get("text", "") for item in content if isinstance(item, dict) and item.get("type") == "text"]
         text = "\n".join(texts).strip()
     elif isinstance(content, str):
         text = content.strip()

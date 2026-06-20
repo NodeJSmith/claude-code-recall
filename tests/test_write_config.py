@@ -7,16 +7,12 @@ from pathlib import Path
 
 import pytest
 
-import ccrecall.hooks.write_config as write_config
-from ccrecall.db import CURRENT_ONBOARDING_VERSION
-
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
 import ccrecall.db as _db_mod
+import ccrecall.hooks.write_config as write_config
+from ccrecall.db import CURRENT_ONBOARDING_VERSION
 
 
 def _patch_config_path(monkeypatch, path: Path) -> None:
@@ -51,9 +47,7 @@ class TestWriteConfigDefaults:
         result = json.loads(cfg.read_text())
         assert result["onboarding_completed"] is True
 
-    def test_defaults_flag_writes_current_onboarding_version(
-        self, tmp_path, monkeypatch
-    ):
+    def test_defaults_flag_writes_current_onboarding_version(self, tmp_path, monkeypatch):
         """--defaults must write the current version so the onboarding hook becomes a no-op."""
         cfg = tmp_path / "config.json"
         _patch_config_path(monkeypatch, cfg)
@@ -86,9 +80,7 @@ class TestWriteConfigDefaults:
         leaked = [k for k in result if k.startswith(prefix)]
         assert not leaked, f"Removed keys must not appear in config: {leaked}"
 
-    def test_defaults_resets_auto_inject_context_when_existing_config_has_it_false(
-        self, tmp_path, monkeypatch
-    ):
+    def test_defaults_resets_auto_inject_context_when_existing_config_has_it_false(self, tmp_path, monkeypatch):
         """--defaults must ignore existing config and restore auto_inject_context to True.
 
         Without the fix, a user who previously set auto_inject_context=false then
@@ -96,9 +88,7 @@ class TestWriteConfigDefaults:
         of --defaults being a clean reset to recommended values.
         """
         cfg = tmp_path / "config.json"
-        cfg.write_text(
-            json.dumps({"auto_inject_context": False, "onboarding_completed": True})
-        )
+        cfg.write_text(json.dumps({"auto_inject_context": False, "onboarding_completed": True}))
         _patch_config_path(monkeypatch, cfg)
 
         _run_main(["--defaults"])
@@ -185,9 +175,7 @@ class TestWriteConfigParentDirCreation:
 
         _run_main(["--defaults"])
 
-        assert cfg.exists(), (
-            "Config file should be written even when parent dirs are missing"
-        )
+        assert cfg.exists(), "Config file should be written even when parent dirs are missing"
         result = json.loads(cfg.read_text())
         assert result["onboarding_completed"] is True
 
