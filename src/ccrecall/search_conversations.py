@@ -140,7 +140,7 @@ def _get_vec_branch_ids(
     """Return ordered branch IDs from vec0 KNN, filtered to current embedding version.
 
     Only returns branches whose embedding_version == EMBEDDING_VERSION and
-    embedding_model == EMBEDDING_MODEL (FR#11 — stale-version exclusion).
+    embedding_model == EMBEDDING_MODEL (stale-version exclusion).
     Returns empty list on any error.
     """
     try:
@@ -159,7 +159,7 @@ def _get_vec_branch_ids(
     candidate_ids = [row[0] for row in rows]
     placeholders = ",".join("?" * len(candidate_ids))
 
-    # Filter to current embedding version and apply optional user filters (FR#11)
+    # Filter to current embedding version and apply optional user filters
     filter_sql = f"""
         SELECT b.id
         FROM branches b
@@ -197,7 +197,7 @@ def _get_vec_branch_ids(
 
 
 def _dedup_by_session(cursor: sqlite3.Cursor, ordered_branch_ids: list[int]) -> list[int]:
-    """Keep the highest-ranked branch per session_id (FR#12).
+    """Keep the highest-ranked branch per session_id.
 
     Returns a new list with one branch per session, preserving relative order.
     """
@@ -383,7 +383,7 @@ def format_markdown(sessions: list[dict], query: str, verbose: bool = False) -> 
 
 
 def print_status(args: argparse.Namespace, settings: dict | None) -> None:
-    """Print diagnostic status and exit 0 (FR#15 / AC#13)."""
+    """Print diagnostic status and exit 0."""
     # Open one connection with vec loaded; branch_vec_queryable probes whether
     # the vec table is usable — get_db_connection already loaded the extension
     # iff it could, so the table-existence probe is sufficient.

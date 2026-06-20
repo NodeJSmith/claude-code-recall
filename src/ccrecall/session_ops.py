@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Shared session import logic for sync and import pipelines.
 
@@ -81,7 +80,7 @@ def sync_session(
     """
     cursor = conn.cursor()
 
-    # --- import_log dedup check ---
+    # import_log dedup check
     # Only skip when: write_import_log requested, a real hash provided,
     # and the stored hash is non-NULL and matches.
     if write_import_log:
@@ -96,7 +95,7 @@ def sync_session(
     else:
         log_row = None
 
-    # --- Parse the JSONL ---
+    # Parse the JSONL
     all_entries = list(parse_all_with_uuids(filepath))
     if not all_entries:
         return 0
@@ -112,19 +111,19 @@ def sync_session(
     # Extract session-level metadata
     meta = extract_session_metadata(all_entries)
 
-    # --- Session UUID ---
+    # Session UUID
     session_uuid = filepath.stem
     if session_uuid.startswith("agent-"):
         session_uuid = session_uuid[6:]
 
-    # --- Project upsert (skip when caller pre-resolved project_id) ---
+    # Project upsert (skip when caller pre-resolved project_id)
     if _project_id is not None:
         project_id = _project_id
     else:
         project_key = normalize_project_key(project_dir.name)
         project_id = upsert_project(cursor, project_key, cwd=meta.get("cwd"))
 
-    # --- Session upsert ---
+    # Session upsert
     cursor.execute(
         """
         INSERT INTO sessions (uuid, project_id, git_branch, cwd)
@@ -138,12 +137,12 @@ def sync_session(
     cursor.execute("SELECT id FROM sessions WHERE uuid = ?", (session_uuid,))
     session_id = cursor.fetchone()[0]
 
-    # --- Build set of UUIDs claimed by any branch ---
+    # Build set of UUIDs claimed by any branch
     valid_branch_uuids: set[str] = set()
     for branch in branches:
         valid_branch_uuids.update(branch["uuids"])
 
-    # --- Message insertion with UUID dedup ---
+    # Message insertion with UUID dedup
     cursor.execute(
         "SELECT uuid FROM messages WHERE session_id = ? AND uuid IS NOT NULL",
         (session_id,),
@@ -204,14 +203,14 @@ def sync_session(
             new_count += 1
             existing_uuids.add(uuid)
 
-    # --- Build uuid -> message_id mapping ---
+    # Build uuid -> message_id mapping
     cursor.execute(
         "SELECT id, uuid FROM messages WHERE session_id = ? AND uuid IS NOT NULL",
         (session_id,),
     )
     uuid_to_msg_id = {row[1]: row[0] for row in cursor.fetchall()}
 
-    # --- Get existing branch leaf_uuids for this session ---
+    # Get existing branch leaf_uuids for this session
     cursor.execute("SELECT id, leaf_uuid FROM branches WHERE session_id = ?", (session_id,))
     existing_branches = {row[1]: row[0] for row in cursor.fetchall()}
 
@@ -362,7 +361,7 @@ def sync_session(
             except Exception:
                 pass  # Don't fail sync/import on embedding errors
 
-    # --- Update import_log ---
+    # Update import_log
     if write_import_log:
         cursor.execute("SELECT COUNT(*) FROM messages WHERE session_id = ?", (session_id,))
         total_messages = cursor.fetchone()[0]

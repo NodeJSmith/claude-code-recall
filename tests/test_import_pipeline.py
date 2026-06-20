@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Integration tests for the import pipeline with v3 schema guards."""
 
 import tempfile

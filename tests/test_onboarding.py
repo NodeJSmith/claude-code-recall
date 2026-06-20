@@ -16,9 +16,7 @@ import ccrecall.db as _db_mod
 import ccrecall.hooks.onboarding as onboarding
 from ccrecall.db import CURRENT_ONBOARDING_VERSION
 
-# ---------------------------------------------------------------------------
 # Helpers
-# ---------------------------------------------------------------------------
 
 
 def _patch_config_path(monkeypatch, path: Path) -> None:
@@ -38,9 +36,7 @@ def _run_main_captured(monkeypatch, cfg_path: Path) -> dict:
     return json.loads(buf.getvalue())
 
 
-# ---------------------------------------------------------------------------
 # Tests
-# ---------------------------------------------------------------------------
 
 
 class TestOnboardingAlreadyCompleted:

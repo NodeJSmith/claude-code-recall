@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Backfill context summaries for existing branches.
 

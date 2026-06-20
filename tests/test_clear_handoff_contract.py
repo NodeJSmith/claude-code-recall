@@ -28,9 +28,7 @@ import ccrecall.hooks.memory_context as _memory_context
 _find_cleared_from_session_uuid = _memory_context._find_cleared_from_session_uuid
 
 
-# ---------------------------------------------------------------------------
 # Helpers
-# ---------------------------------------------------------------------------
 
 
 def _run_handoff_main(tmp_path: Path, payload: dict) -> Path:
@@ -55,9 +53,7 @@ def _run_handoff_main(tmp_path: Path, payload: dict) -> Path:
     return handoff_path
 
 
-# ---------------------------------------------------------------------------
 # clear-handoff.py contract tests
-# ---------------------------------------------------------------------------
 
 
 class TestClearHandoffWriter:
@@ -113,9 +109,7 @@ class TestClearHandoffWriter:
         assert not (tmp_path / "clear-handoff.json").exists()
 
 
-# ---------------------------------------------------------------------------
 # _find_cleared_from_session_uuid contract tests
-# ---------------------------------------------------------------------------
 
 
 def _write_handoff(tmp_path: Path, data: dict) -> Path:

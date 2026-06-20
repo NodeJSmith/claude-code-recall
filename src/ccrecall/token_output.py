@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 token_output — Dashboard JSON output assembly.
 Queries the token analytics database and builds the full output dict

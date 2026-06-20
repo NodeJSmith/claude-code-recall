@@ -74,7 +74,7 @@ class TestEmbedRealModel:
     """Real-model tests — skipped when the model is unavailable."""
 
     def test_determinism(self):
-        """Same input text produces identical vector on two calls (AC#6)."""
+        """Same input text produces identical vector on two calls."""
         text = "hello world"
         assert embed_text(text) == embed_text(text)
 

@@ -14,7 +14,7 @@ from ccrecall.session_tail import (
     typed_instruction,
 )
 
-# --- entry builders (mirror the real transcript shapes) ---
+# entry builders (mirror the real transcript shapes)
 
 _counter = [0]
 

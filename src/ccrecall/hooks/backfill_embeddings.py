@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Backfill embeddings for existing active-leaf branches.
 
@@ -258,7 +257,7 @@ def _main(argv: list[str] | None = None) -> int:
     except (AttributeError, OSError):
         pass
 
-    # FR#14 ABORT level: check model availability before touching any rows.
+    # ABORT level: check model availability before touching any rows.
     # model_available() warms the singleton session on success — no extra cost.
     # Pass --threads here since this is the call that constructs the session.
     if not model_available(threads=args.threads):
@@ -281,7 +280,7 @@ def _main(argv: list[str] | None = None) -> int:
 
     cursor = conn.cursor()
 
-    # FR#14 ABORT level: vec must be queryable before any selection runs — the
+    # ABORT level: vec must be queryable before any selection runs — the
     # eligibility WHERE references branch_vec, which get_db_connection only
     # creates when sqlite-vec loaded. Without this guard the COUNT below crashes
     # with "no such table: branch_vec" instead of exiting cleanly.
@@ -373,7 +372,7 @@ def _main(argv: list[str] | None = None) -> int:
 
         conn.commit()
 
-        # Progress (FR#8): cadence-gated, with elapsed + ETA for unattended runs.
+        # Progress: cadence-gated, with elapsed + ETA for unattended runs.
         # Python arithmetic instead of a second COUNT.
         if total_updated - last_progress >= args.progress_every:
             elapsed = time.monotonic() - started

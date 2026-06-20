@@ -6,8 +6,8 @@
 # Staging: fast, always-green hooks run at pre-commit; heavier checks run at
 # pre-push. `default_install_hook_types` below wires both stages automatically.
 #
-# Phased rollout: several guards (ruff lint, pyright, and the custom AST checks)
-# are committed but COMMENTED OUT at the bottom of this file. The current tree has
+# Phased rollout: a few guards (ruff lint, pyright, check-lazy-imports) are
+# committed but COMMENTED OUT at the bottom of this file. The current tree has
 # pre-existing violations of each; every one gets fixed and flipped on in its own
 # follow-up cleanup PR. Until then, only the green hooks below are active so the
 # hook run and the lint CI stay green.
@@ -23,6 +23,7 @@ repos:
       - id: check-builtin-literals
       - id: check-case-conflict
       - id: debug-statements
+      - id: check-shebang-scripts-are-executable
 
   - repo: https://github.com/crate-ci/typos
     rev: v1.46.3
@@ -65,19 +66,31 @@ repos:
         types: [python]
         entry: '^from __future__ import annotations'
 
+  - repo: local
+    hooks:
+      - id: check-spec-tokens
+        name: Ban leaked spec-artifact tokens (AC#/FR#/T##/WP#)
+        language: system
+        entry: ./tools/check_spec_tokens.py
+        pass_filenames: false
+        files: ^(src|tests|scripts|tools)/.*\.py$
+        stages: [pre-push]
+
+      - id: check-llm-cruft
+        name: Ban AI-writing tells (section dividers, filler phrases)
+        language: system
+        entry: ./tools/check_llm_cruft.py
+        pass_filenames: false
+        files: ^(src|tests|scripts|tools)/.*\.py$
+        stages: [pre-push]
+
   # ----------------------------------------------------------------------------
   # DEFERRED — committed but staged off until each guard's cleanup PR brings the
   # tree to green. Uncomment a block in the PR that fixes its violations.
   #
   #   ruff lint            213 violations  (ruff check)
   #   pyright               30 errors
-  #   check-spec-tokens     66 leaked AC#/FR#/T0x tokens
-  #   check-llm-cruft       87 section-divider comments
   #   check-lazy-imports     8 lazy imports
-  #   shebang executability 23 modules carry a vestigial #! shebang (run via
-  #                         console-scripts, not directly) — strip them, then add
-  #                         check-shebang-scripts-are-executable to the
-  #                         pre-commit-hooks block above
   # ----------------------------------------------------------------------------
   #
   # - repo: https://github.com/astral-sh/ruff-pre-commit
@@ -94,22 +107,6 @@ repos:
   #
   # - repo: local
   #   hooks:
-  #     - id: check-spec-tokens
-  #       name: Ban leaked spec-artifact tokens (AC#/FR#/T##/WP#)
-  #       language: system
-  #       entry: ./tools/check_spec_tokens.py
-  #       pass_filenames: false
-  #       files: ^(src|tests|scripts|tools)/.*\.py$
-  #       stages: [pre-push]
-  #
-  #     - id: check-llm-cruft
-  #       name: Ban AI-writing tells (section dividers, filler phrases)
-  #       language: system
-  #       entry: ./tools/check_llm_cruft.py
-  #       pass_filenames: false
-  #       files: ^(src|tests|scripts|tools)/.*\.py$
-  #       stages: [pre-push]
-  #
   #     - id: check-lazy-imports
   #       name: Ban lazy imports (use '# lazy-import:' to defend circular-import cases)
   #       language: system

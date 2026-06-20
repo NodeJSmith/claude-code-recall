@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """SessionStart hook: first-run onboarding for claude-memory.
 
 Injects onboarding instructions into Claude's context when config.json

@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Shared project upsert logic for sync and import pipelines.
 

@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Write or update ~/.claude-memory/config.json.
 
 Called by Claude during onboarding to persist user configuration choices.

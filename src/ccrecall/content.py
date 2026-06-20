@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Message content extraction and tool detection utilities.
 """
