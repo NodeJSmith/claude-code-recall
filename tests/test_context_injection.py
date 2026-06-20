@@ -526,6 +526,33 @@ class TestBuildFallbackContext:
         assert "[Tool: Bash]" not in result
         assert "Here is the content" in result
 
+    def test_long_exchange_text_truncated(self):
+        """Fallback mid-truncates long exchange text like the cached path.
+
+        Regression: the fallback used to hand-build the summary without
+        truncate_mid, injecting unbounded exchange text into the context.
+        The marker sits in the cut zone (between the kept front and back).
+        """
+        long_assistant = "HEAD" + "x" * 350 + "ZZUNIQUEZZ" + "y" * 700 + "TAIL"
+        session = {
+            "started_at": "2025-01-15T14:30:00Z",
+            "ended_at": "2025-01-15T15:00:00Z",
+            "files_modified": [],
+            "commits": [],
+            "messages": [
+                {"role": "user", "content": "go", "timestamp": "2025-01-15T14:30:00Z"},
+                {
+                    "role": "assistant",
+                    "content": long_assistant,
+                    "timestamp": "2025-01-15T14:31:00Z",
+                },
+            ],
+        }
+        result = _build_fallback_context(session)
+        assert "[... truncated ...]" in result
+        assert "ZZUNIQUEZZ" not in result
+        assert "HEAD" + "x" * 40 in result  # distinctive front run was kept
+
     def test_no_messages(self):
         session = {
             "started_at": "2025-01-15T14:30:00Z",

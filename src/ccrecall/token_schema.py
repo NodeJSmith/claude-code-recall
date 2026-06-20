@@ -142,26 +142,27 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
       imported_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
     """)
-    # Add data_source column if missing
+    # Add columns missing on databases created before they existed. Use an
+    # explicit existence check (not catch-and-pass on OperationalError) so the
+    # ALTER only fires when genuinely needed and a real error surfaces instead
+    # of being swallowed.
+    snap_cols = {row[1] for row in conn.execute("PRAGMA table_info(token_snapshots)")}
     for col, typedef in [
         ("data_source", "TEXT"),
         ("cache_read_tokens", "INTEGER DEFAULT 0"),
         ("cache_creation_tokens", "INTEGER DEFAULT 0"),
     ]:
-        try:
+        if col not in snap_cols:
             conn.execute(f"ALTER TABLE token_snapshots ADD COLUMN {col} {typedef}")
-        except sqlite3.OperationalError:
-            pass
-    # Add new workflow-analytics columns if missing (v2 schema)
+    # Workflow-analytics columns (v2 schema) on turn_tool_calls.
+    ttc_cols = {row[1] for row in conn.execute("PRAGMA table_info(turn_tool_calls)")}
     for col, typedef in [
         ("skill_name", "TEXT"),
         ("subagent_type", "TEXT"),
         ("agent_model", "TEXT"),
     ]:
-        try:
+        if col not in ttc_cols:
             conn.execute(f"ALTER TABLE turn_tool_calls ADD COLUMN {col} {typedef}")
-        except sqlite3.OperationalError:
-            pass
     # Create indexes for new columns (safe after ALTER TABLE)
     for idx_sql in [
         "CREATE INDEX IF NOT EXISTS idx_ttc_skill ON turn_tool_calls(skill_name)",

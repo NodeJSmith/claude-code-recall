@@ -32,9 +32,10 @@ CONFIG_PATH = Path.home() / ".claude-memory" / "config.json"
 EMBEDDABLE_BRANCH_FILTER = (
     "is_active = 1 AND context_summary IS NOT NULL AND context_summary != ''"
 )
-# Sentinel written to embedding_version when a branch's summary can't be embedded
-# (tokenizer overflow, malformed content). Excluded from eligibility so it isn't
-# retried forever; counted separately as "errored".
+# Sentinel written to a branch's embedding_version or summary_version when its
+# content can't be embedded or summarized (tokenizer overflow, malformed content).
+# Excluded from eligibility so it isn't retried forever; counted separately as
+# "errored".
 CONTENT_ERROR_VERSION = -1
 
 # Default settings

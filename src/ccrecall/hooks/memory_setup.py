@@ -10,7 +10,13 @@ import tempfile
 import time
 from pathlib import Path
 
-from ccrecall.db import DEFAULT_DB_PATH, get_db_connection, load_settings
+from ccrecall.db import (
+    CONTENT_ERROR_VERSION,
+    DEFAULT_DB_PATH,
+    get_db_connection,
+    load_settings,
+)
+from ccrecall.summarizer import SUMMARY_VERSION
 
 # PID files live in the same directory as the DB
 _PID_DIR = DEFAULT_DB_PATH.parent
@@ -100,7 +106,9 @@ def _needs_backfill(settings: dict | None = None) -> bool:
             conn.close()
             return False
         cursor.execute(
-            "SELECT COUNT(*) FROM branches WHERE summary_version IS NULL OR summary_version < 3"
+            "SELECT COUNT(*) FROM branches WHERE summary_version IS NULL"
+            " OR (summary_version < ? AND summary_version != ?)",
+            (SUMMARY_VERSION, CONTENT_ERROR_VERSION),
         )
         count = cursor.fetchone()[0]
         conn.close()
