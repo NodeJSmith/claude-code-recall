@@ -151,8 +151,11 @@ def find_pending_question(entries: list[dict]) -> dict | None:
             continue
         for block in content:
             if isinstance(block, dict) and block.get("type") == "tool_result":
+                tool_use_id = block.get("tool_use_id")
+                if not isinstance(tool_use_id, str):
+                    continue
                 text, _, _, _ = extract_text_content(block.get("content"))
-                results[block.get("tool_use_id")] = text
+                results[tool_use_id] = text
 
     last = None
     for entry in entries:
@@ -168,6 +171,9 @@ def find_pending_question(entries: list[dict]) -> dict | None:
     if not last:
         return None
     tool_id, payload = last
+    # A non-str id can't index results; treat the question as unanswered and surface it.
+    if not isinstance(tool_id, str):
+        return payload
     if ANSWER_MARK in results.get(tool_id, "").lower():
         return None
     return payload
@@ -282,7 +288,8 @@ def emit(path: Path, k: int) -> int:
         print(f"cm-session-tail: transcript is empty: {path}", file=sys.stderr)
         return 1
     meta = extract_session_metadata(entries)
-    sid = next((e.get("sessionId") for e in entries if e.get("sessionId")), path.stem)
+    # sessionId is Any (untyped JSON) and the path.stem fallback is str; str() narrows for the type checker.
+    sid = str(next((e.get("sessionId") for e in entries if e.get("sessionId")), path.stem))
 
     print(f"RESUME — prior session {sid[:8]}")
     print(f"  transcript:  {path}")

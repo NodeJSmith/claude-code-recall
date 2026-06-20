@@ -113,7 +113,7 @@ MODEL_PRICING: list[tuple[str, dict[str, float]]] = [
 ]
 
 
-def _get_pricing(model: str | None) -> dict[str, float]:
+def get_pricing(model: str | None) -> dict[str, float]:
     """Return pricing dict for a model ID, falling back to Sonnet rates."""
     if model:
         m = model.lower()
@@ -123,7 +123,7 @@ def _get_pricing(model: str | None) -> dict[str, float]:
     return MODEL_PRICING[4][1]  # default: sonnet
 
 
-def _turn_cost(
+def turn_cost(
     input_tok: int,
     output_tok: int,
     cache_read: int,
@@ -586,7 +586,7 @@ def _normalize_worktree_path(path: str) -> str:
     return path
 
 
-def _project_slug(path: str | None) -> str:
+def project_slug(path: str | None) -> str:
     """Build a short but unique project label from the full path.
 
     Uses the last 2-3 meaningful path segments, skipping common prefixes

@@ -8,11 +8,8 @@ a silent no-op.
 
 import json
 
-from ccrecall.db import (  # noqa: F401 — CONFIG_PATH re-exported for test monkeypatching
-    CONFIG_PATH,
-    CURRENT_ONBOARDING_VERSION,
-    load_config,
-)
+from ccrecall.db import CONFIG_PATH as CONFIG_PATH  # noqa: F401 — re-exported for test monkeypatching
+from ccrecall.db import CURRENT_ONBOARDING_VERSION, load_config
 
 
 def _build_onboarding_context() -> str:
