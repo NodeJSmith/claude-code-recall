@@ -9,6 +9,7 @@ v3 schema: messages stored once per session, branches as separate index.
 """
 
 import argparse
+import contextlib
 import hashlib
 import sqlite3
 import sys
@@ -31,7 +32,7 @@ from ccrecall.session_ops import sync_session
 
 def get_file_hash(filepath: Path) -> str:
     """Get MD5 hash of file for change detection."""
-    h = hashlib.md5()
+    h = hashlib.md5(usedforsecurity=False)
     with open(filepath, "rb") as f:
         for chunk in iter(lambda: f.read(8192), b""):
             h.update(chunk)
@@ -106,7 +107,8 @@ def import_session(
         return -1, 0
 
     cursor.execute(
-        "SELECT COUNT(*) FROM branches WHERE session_id = ? AND aggregated_content IS NOT NULL AND aggregated_content != ''",
+        "SELECT COUNT(*) FROM branches "
+        "WHERE session_id = ? AND aggregated_content IS NOT NULL AND aggregated_content != ''",
         (session_id,),
     )
     branches_imported = cursor.fetchone()[0]
@@ -168,10 +170,8 @@ def main():
         _main()
     finally:
         # Delete PID file so _spawn_background can spawn again next session
-        try:
+        with contextlib.suppress(OSError):
             _PID_FILE.unlink(missing_ok=True)
-        except OSError:
-            pass
 
 
 def _main():
@@ -356,7 +356,7 @@ def _main():
 
     conn.close()
 
-    logger.info(f"Import complete: {total_sessions} branches, {total_messages} messages")
+    logger.info("Import complete: %s branches, %s messages", total_sessions, total_messages)
     print(f"\nTotal: {total_sessions} branches, {total_messages} messages imported ({total_skipped} unchanged)")
 
     if db_path.exists():

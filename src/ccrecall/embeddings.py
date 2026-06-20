@@ -62,7 +62,7 @@ def get_model(threads: int | None = None):
 
     # DEPS_AVAILABLE is True only when the fastembed import bound TextEmbedding; the
     # assert restates that invariant so the type checker sees a non-None constructor.
-    assert TextEmbedding is not None
+    assert TextEmbedding is not None  # noqa: S101 — type-checker narrowing; the real guard is the RuntimeError above
     _model = TextEmbedding(model_name=EMBEDDING_MODEL, threads=resolve_thread_count(threads))
     return _model
 

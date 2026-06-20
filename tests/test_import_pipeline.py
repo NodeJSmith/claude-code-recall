@@ -158,7 +158,7 @@ class TestEmptyBranchGuard:
             )
 
         try:
-            branches_imported, total_messages = import_session(memory_db, temp_path, project_id)
+            branches_imported, _total_messages = import_session(memory_db, temp_path, project_id)
 
             # Guard 2 fires because after excluding notifications, the branch
             # has only assistant text — but the notification user message IS
@@ -259,7 +259,7 @@ class TestImportLogTracking:
         memory_db.commit()
 
         # Reimport — should restore correct hash
-        branches, msg_count = import_session(memory_db, fixture_file, project_id)
+        branches, _msg_count = import_session(memory_db, fixture_file, project_id)
         assert branches > 0, "Forced reimport should succeed"
 
         cursor.execute(
@@ -313,7 +313,7 @@ class TestFKSafeReimport:
         )
         memory_db.commit()
 
-        branches2, messages2 = import_session(memory_db, fixture_file, project_id)
+        branches2, _messages2 = import_session(memory_db, fixture_file, project_id)
         assert branches2 == 3, "Reimport should produce same branch count"
         memory_db.commit()
 
@@ -378,7 +378,7 @@ class TestImportProject:
 
             shutil.copy(FIXTURE_DIR / "linear_3_exchange.jsonl", project_dir / "session1.jsonl")
 
-            sessions, messages, skipped = import_project(memory_db, project_dir)
+            sessions, _messages, skipped = import_project(memory_db, project_dir)
             assert sessions > 0 or skipped > 0, "Should process the JSONL file"
 
     def test_dotfiles_skipped(self, memory_db):
@@ -390,7 +390,7 @@ class TestImportProject:
             # Create a dotfile
             (project_dir / ".hidden.jsonl").write_text('{"type":"progress"}\n')
 
-            sessions, messages, skipped = import_project(memory_db, project_dir)
+            sessions, messages, _skipped = import_project(memory_db, project_dir)
             assert sessions == 0
             assert messages == 0
 
@@ -426,7 +426,7 @@ class TestAppendOnlyReimport:
         )
         memory_db.commit()
 
-        branches2, messages2 = import_session(memory_db, fixture_file, project_id)
+        branches2, _messages2 = import_session(memory_db, fixture_file, project_id)
         assert branches2 > 0, "Forced reimport must succeed"
 
         # Same number of message rows — append-only, no duplicates
@@ -560,7 +560,7 @@ class TestSessionWithMessagesButNoBranches:
             )
 
         try:
-            branches_imported, total_messages = import_session(memory_db, temp_path, project_id)
+            branches_imported, _total_messages = import_session(memory_db, temp_path, project_id)
 
             cursor = memory_db.cursor()
             # Session must still exist (messages present — conservative cleanup)
@@ -609,7 +609,7 @@ class TestSessionWithMessagesButNoBranches:
             )
 
         try:
-            branches_imported, total_messages = import_session(memory_db, temp_path, project_id)
+            branches_imported, _total_messages = import_session(memory_db, temp_path, project_id)
 
             # Guard 1 fires: no extractable text, session must be cleaned up
             assert branches_imported == -1, "Should trigger guard 1 (no extractable content)"

@@ -231,7 +231,7 @@ class TestComputeBranchMetadata:
             {"type": "user", "message": {"content": "How?"}},
             {"type": "assistant", "message": {"content": "Like this."}},
         ]
-        count, files, commits, _ = compute_branch_metadata(entries)
+        count, _files, _commits, _ = compute_branch_metadata(entries)
         assert count == 2
 
     def test_notifications_not_counted_as_exchanges(self):

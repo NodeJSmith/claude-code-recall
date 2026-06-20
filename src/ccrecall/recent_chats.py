@@ -154,8 +154,7 @@ def format_markdown(sessions: list[dict], verbose: bool = False) -> str:
         return "No sessions found."
 
     lines = [f"# Recent Conversations ({len(sessions)} sessions)\n"]
-    for session in sessions:
-        lines.append(format_markdown_session(session, verbose=verbose))
+    lines.extend(format_markdown_session(session, verbose=verbose) for session in sessions)
 
     return "\n".join(lines)
 

@@ -62,7 +62,7 @@ class TestExtractTextContent:
             {"type": "tool_use", "name": "Read", "input": {"file": "other.py"}},
             {"type": "tool_use", "name": "Bash", "input": {"command": "ls"}},
         ]
-        text, has_tool, has_think, summary = extract_text_content(content)
+        text, has_tool, _has_think, summary = extract_text_content(content)
         assert text == "Let me check."
         assert has_tool is True
         assert summary is not None
@@ -100,7 +100,7 @@ class TestExtractTextContent:
         assert summary is None  # No tool name -> no counts -> None
 
     def test_empty_string(self):
-        text, has_tool, has_think, summary = extract_text_content("")
+        text, _has_tool, _has_think, summary = extract_text_content("")
         assert text == ""
         assert summary is None
 
@@ -112,12 +112,12 @@ class TestExtractTextContent:
         assert summary is None
 
     def test_unexpected_type(self):
-        text, has_tool, has_think, summary = extract_text_content(42)
+        text, has_tool, _has_think, _summary = extract_text_content(42)
         assert text == ""
         assert has_tool is False
 
     def test_empty_list(self):
-        text, has_tool, has_think, summary = extract_text_content([])
+        text, has_tool, _has_think, summary = extract_text_content([])
         assert text == ""
         assert has_tool is False
         assert summary is None

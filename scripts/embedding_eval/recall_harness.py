@@ -267,7 +267,7 @@ def main() -> int:
         corpus_ids, corpus_docs = load_corpus(conn)
         if args.export_corpus:
             args.export_corpus.write_text(
-                json.dumps([{"id": i, "summary": d} for i, d in zip(corpus_ids, corpus_docs)])
+                json.dumps([{"id": i, "summary": d} for i, d in zip(corpus_ids, corpus_docs, strict=False)])
             )
             print(f"exported {len(corpus_ids)} corpus rows -> {args.export_corpus}")
             return 0

@@ -1,6 +1,5 @@
 """Tests for search_conversations.py and recent_chats.py — search and retrieval."""
 
-import argparse
 import sqlite3
 import sys
 from unittest.mock import patch
@@ -521,9 +520,11 @@ class TestDegradation:
         def _raise(*_a, **_kw):
             raise AttributeError("no load_extension")
 
-        with patch("ccrecall.search_conversations.model_available", return_value=True):
-            with patch("ccrecall.search_conversations.embed_text", side_effect=_raise):
-                results = search_sessions(search_db, "pytest", fts_level, max_results=10)
+        with (
+            patch("ccrecall.search_conversations.model_available", return_value=True),
+            patch("ccrecall.search_conversations.embed_text", side_effect=_raise),
+        ):
+            results = search_sessions(search_db, "pytest", fts_level, max_results=10)
 
         # Should return results via keyword fallback, not raise
         assert isinstance(results, list)
@@ -845,11 +846,10 @@ class TestStatusFlag:
         _migrate_columns(c)
         c.close()
 
-        args = argparse.Namespace(db=db_path, keyword_only=False, status=True, query=None)
         settings = {"db_path": str(db_path)}
 
         with pytest.raises(SystemExit) as exc:
-            print_status(args, settings)
+            print_status(settings)
 
         assert exc.value.code == 0
         captured = capsys.readouterr()

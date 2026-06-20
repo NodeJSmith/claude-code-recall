@@ -69,34 +69,34 @@ def build_output(conn: sqlite3.Connection) -> dict:
     """).fetchone()
 
     # ── Chart 1: Sessions by day ──
-    sessions_by_day = []
-    for row in cur.execute("""
+    sessions_by_day = [
+        {
+            "date": row[0],
+            "session_count": row[1],
+            "input_tokens": row[2],
+            "output_tokens": row[3],
+            "cache_read": row[4],
+            "cache_creation": row[5],
+        }
+        for row in cur.execute("""
         SELECT DATE(first_turn_ts) as day, COUNT(*),
                SUM(total_input_tokens), SUM(total_output_tokens),
                SUM(total_cache_read), SUM(total_cache_creation)
         FROM session_metrics WHERE is_sidechain = 0 AND first_turn_ts IS NOT NULL
         GROUP BY day ORDER BY day
-    """):
-        sessions_by_day.append(
-            {
-                "date": row[0],
-                "session_count": row[1],
-                "input_tokens": row[2],
-                "output_tokens": row[3],
-                "cache_read": row[4],
-                "cache_creation": row[5],
-            }
-        )
+    """)
+    ]
 
     # ── Chart 3: Top 10 tools ──
-    top_tools = []
-    for row in cur.execute("""
+    top_tools = [
+        {"tool": row[0], "count": row[1]}
+        for row in cur.execute("""
         SELECT tool_name, COUNT(*) as cnt
         FROM turn_tool_calls tc
         JOIN session_metrics sm ON tc.session_id = sm.session_id AND sm.is_sidechain = 0
         GROUP BY tool_name ORDER BY cnt DESC LIMIT 15
-    """):
-        top_tools.append({"tool": row[0], "count": row[1]})
+    """)
+    ]
 
     # ── Chart 4: Model cost split (with dollar costs) ──
     model_split = []
@@ -172,23 +172,22 @@ def build_output(conn: sqlite3.Connection) -> dict:
         ORDER BY total_cache_read + total_cache_creation DESC LIMIT 5
     """).fetchall()
     for (tsid,) in trajectory_sessions:
-        turns_data = []
-        for row in cur.execute(
-            """
+        turns_data = [
+            {
+                "turn": row[0],
+                "ratio": row[1],
+                "read": row[2],
+                "creation": row[3],
+                "gap_ms": row[4],
+            }
+            for row in cur.execute(
+                """
             SELECT turn_index, cache_read_ratio, cache_read_tokens, cache_creation_tokens, user_gap_ms
             FROM turns WHERE session_id = ? ORDER BY turn_index LIMIT 30
         """,
-            (tsid,),
-        ):
-            turns_data.append(
-                {
-                    "turn": row[0],
-                    "ratio": row[1],
-                    "read": row[2],
-                    "creation": row[3],
-                    "gap_ms": row[4],
-                }
+                (tsid,),
             )
+        ]
         proj = cur.execute("SELECT project_path FROM session_metrics WHERE session_id = ?", (tsid,)).fetchone()
         cache_trajectory.append(
             {
@@ -271,8 +270,9 @@ def build_output(conn: sqlite3.Connection) -> dict:
     context_segments_recent = _compute_seg_curve(recent_seg_sids, min_sessions=2)
 
     # ── Tool context footprint (avg tokens added per call by tool type) ──
-    tool_footprint = []
-    for row in cur.execute("""
+    tool_footprint = [
+        {"tool": row[0], "calls": row[1], "avg_tokens": int(row[2])}
+        for row in cur.execute("""
         WITH single_tool_turns AS (
             SELECT tc.turn_id, tc.tool_name, tc.session_id
             FROM turn_tool_calls tc
@@ -292,8 +292,8 @@ def build_output(conn: sqlite3.Connection) -> dict:
         GROUP BY stt.tool_name
         HAVING cnt >= 10 AND avg_footprint > 0
         ORDER BY avg_footprint DESC LIMIT 12
-    """):
-        tool_footprint.append({"tool": row[0], "calls": row[1], "avg_tokens": int(row[2])})
+    """)
+    ]
 
     seg_agg = cur.execute("""
         SELECT
@@ -322,20 +322,26 @@ def build_output(conn: sqlite3.Connection) -> dict:
     }
 
     # ── Chart 6: Ephemeral cache tier split by project ──
-    ephem_split = []
-    for row in cur.execute("""
+    ephem_split = [
+        {"project": project_slug(row[0]), "ephem_5m": row[1], "ephem_1h": row[2]}
+        for row in cur.execute("""
         SELECT sm.project_path, SUM(t.ephem_5m_tokens) as e5, SUM(t.ephem_1h_tokens) as e1
         FROM turns t
         JOIN session_metrics sm ON t.session_id = sm.session_id AND sm.is_sidechain = 0
         GROUP BY sm.project_path
         HAVING e5 + e1 > 0
         ORDER BY e5 + e1 DESC LIMIT 8
-    """):
-        ephem_split.append({"project": project_slug(row[0]), "ephem_5m": row[1], "ephem_1h": row[2]})
+    """)
+    ]
 
     # ── Chart 7: Bash antipattern rate by project (computed at query time) ──
-    bash_antipatterns = []
-    for row in cur.execute(f"""
+    bash_antipatterns = [
+        {
+            "project": project_slug(row[0]),
+            "antipatterns": row[1],
+            "total_bash": row[2],
+        }
+        for row in cur.execute(f"""
         SELECT sm.project_path,
                SUM(CASE WHEN {_BASH_ANTIPATTERN_PREDICATE} THEN 1 ELSE 0 END) as antipatterns,
                SUM(CASE WHEN tc.tool_name = 'Bash' THEN 1 ELSE 0 END) as total_bash
@@ -344,14 +350,8 @@ def build_output(conn: sqlite3.Connection) -> dict:
         GROUP BY sm.project_path
         HAVING antipatterns > 0
         ORDER BY antipatterns DESC LIMIT 10
-    """):
-        bash_antipatterns.append(
-            {
-                "project": project_slug(row[0]),
-                "antipatterns": row[1],
-                "total_bash": row[2],
-            }
-        )
+    """)
+    ]
     total_bash_antipatterns = (
         cur.execute(f"""
         SELECT SUM(CASE WHEN {_BASH_ANTIPATTERN_PREDICATE} THEN 1 ELSE 0 END)
@@ -362,27 +362,31 @@ def build_output(conn: sqlite3.Connection) -> dict:
     )
 
     # ── Chart 8: Tool error rate by tool ──
-    tool_errors_by_tool = []
-    for row in cur.execute("""
+    tool_errors_by_tool = [
+        {
+            "tool": row[0],
+            "errors": row[1],
+            "total": row[2],
+            "rate": round(row[1] / row[2], 4) if row[2] else 0,
+        }
+        for row in cur.execute("""
         SELECT tool_name, SUM(is_error) as errors, COUNT(*) as total
         FROM turn_tool_calls tc
         JOIN session_metrics sm ON tc.session_id = sm.session_id AND sm.is_sidechain = 0
         GROUP BY tool_name
         HAVING errors > 0
         ORDER BY errors DESC LIMIT 10
-    """):
-        tool_errors_by_tool.append(
-            {
-                "tool": row[0],
-                "errors": row[1],
-                "total": row[2],
-                "rate": round(row[1] / row[2], 4) if row[2] else 0,
-            }
-        )
+    """)
+    ]
 
     # ── Chart 9: Redundant read hotspots (computed at query time) ──
-    redundant_reads = []
-    for row in cur.execute("""
+    redundant_reads = [
+        {
+            "session_id": row[0][:8],
+            "file": row[1].rsplit("/", 1)[-1] if row[1] else "?",
+            "count": row[2],
+        }
+        for row in cur.execute("""
         SELECT tc.session_id, tc.file_path, COUNT(*) as cnt
         FROM turn_tool_calls tc
         JOIN session_metrics sm ON tc.session_id = sm.session_id AND sm.is_sidechain = 0
@@ -390,14 +394,8 @@ def build_output(conn: sqlite3.Connection) -> dict:
         GROUP BY tc.session_id, tc.file_path
         HAVING cnt > 2
         ORDER BY cnt DESC LIMIT 20
-    """):
-        redundant_reads.append(
-            {
-                "session_id": row[0][:8],
-                "file": row[1].rsplit("/", 1)[-1] if row[1] else "?",
-                "count": row[2],
-            }
-        )
+    """)
+    ]
     total_redundant_reads = (
         cur.execute("""
         SELECT SUM(cnt - 1) FROM (
@@ -413,8 +411,9 @@ def build_output(conn: sqlite3.Connection) -> dict:
     )
 
     # ── Chart 10: Edit retry chains by project ──
-    edit_retries = []
-    for row in cur.execute("""
+    edit_retries = [
+        {"project": project_slug(row[0]), "retries": row[1]}
+        for row in cur.execute("""
         SELECT sm.project_path, COUNT(*) as retries
         FROM turn_tool_calls tc1
         JOIN turns t1 ON tc1.turn_id = t1.id
@@ -428,8 +427,8 @@ def build_output(conn: sqlite3.Connection) -> dict:
         GROUP BY sm.project_path
         HAVING retries > 0
         ORDER BY retries DESC LIMIT 10
-    """):
-        edit_retries.append({"project": project_slug(row[0]), "retries": row[1]})
+    """)
+    ]
     total_edit_retries = (
         cur.execute("""
         SELECT COUNT(*)
@@ -447,24 +446,26 @@ def build_output(conn: sqlite3.Connection) -> dict:
     )
 
     # ── Chart 11: Agent cost attribution ──
-    agent_cost = []
-    for row in cur.execute("""
+    agent_cost = [
+        {
+            "project": project_slug(row[0]),
+            "parent_cost": row[1],
+            "agent_cost": row[2],
+        }
+        for row in cur.execute("""
         SELECT parent.project_path,
-               SUM(CASE WHEN child.is_sidechain = 0 THEN child.total_input_tokens + child.total_cache_creation ELSE 0 END) as parent_cost,
-               SUM(CASE WHEN child.is_sidechain = 1 THEN child.total_input_tokens + child.total_cache_creation ELSE 0 END) as agent_cost
+               SUM(CASE WHEN child.is_sidechain = 0
+                        THEN child.total_input_tokens + child.total_cache_creation ELSE 0 END) as parent_cost,
+               SUM(CASE WHEN child.is_sidechain = 1
+                        THEN child.total_input_tokens + child.total_cache_creation ELSE 0 END) as agent_cost
         FROM session_metrics parent
-        JOIN session_metrics child ON child.parent_session_id = parent.session_id OR child.session_id = parent.session_id
+        JOIN session_metrics child
+          ON child.parent_session_id = parent.session_id OR child.session_id = parent.session_id
         WHERE parent.is_sidechain = 0 AND parent.uses_agent = 1
         GROUP BY parent.project_path
         ORDER BY agent_cost DESC LIMIT 10
-    """):
-        agent_cost.append(
-            {
-                "project": project_slug(row[0]),
-                "parent_cost": row[1],
-                "agent_cost": row[2],
-            }
-        )
+    """)
+    ]
 
     # ── Chart 12: Turn complexity distribution ──
     turn_complexity = {"minimal": 0, "light": 0, "medium": 0, "heavy": 0, "runaway": 0}
@@ -527,25 +528,32 @@ def build_output(conn: sqlite3.Connection) -> dict:
             response_time_dist["over_1h"] += 1
 
     # ── Chart 14: Hook overhead top 10 ──
-    hook_overhead = []
-    for row in cur.execute("""
+    hook_overhead = [
+        {
+            "project": project_slug(row[0]),
+            "hook_ms": row[1],
+            "sessions": row[2],
+            "avg_hook_ms": round(row[1] / row[2]) if row[2] else 0,
+        }
+        for row in cur.execute("""
         SELECT project_path, SUM(total_hook_ms) as hook_ms, COUNT(*) as sessions
         FROM session_metrics WHERE is_sidechain = 0 AND total_hook_ms > 0
         GROUP BY project_path
         ORDER BY hook_ms DESC LIMIT 10
-    """):
-        hook_overhead.append(
-            {
-                "project": project_slug(row[0]),
-                "hook_ms": row[1],
-                "sessions": row[2],
-                "avg_hook_ms": round(row[1] / row[2]) if row[2] else 0,
-            }
-        )
+    """)
+    ]
 
     # ── Chart 15: Per-project token spend ──
-    project_spend = []
-    for row in cur.execute("""
+    project_spend = [
+        {
+            "project": project_slug(row[0]),
+            "input_tokens": row[1],
+            "output_tokens": row[2],
+            "cache_creation": row[3],
+            "cache_read": row[4],
+            "sessions": row[5],
+        }
+        for row in cur.execute("""
         SELECT project_path,
                SUM(total_input_tokens) as inp,
                SUM(total_output_tokens) as out,
@@ -555,17 +563,8 @@ def build_output(conn: sqlite3.Connection) -> dict:
         FROM session_metrics WHERE is_sidechain = 0
         GROUP BY project_path
         ORDER BY inp + cc DESC LIMIT 10
-    """):
-        project_spend.append(
-            {
-                "project": project_slug(row[0]),
-                "input_tokens": row[1],
-                "output_tokens": row[2],
-                "cache_creation": row[3],
-                "cache_read": row[4],
-                "sessions": row[5],
-            }
-        )
+    """)
+    ]
 
     # ── Chart 16: Per-project tool profile ──
     project_tool_profile = []
@@ -596,49 +595,60 @@ def build_output(conn: sqlite3.Connection) -> dict:
             project_tool_profile.append({"project": proj_slug, "tools": tools})
 
     # ── Chart 17: Skill usage ──
-    skill_usage = []
-    for row in cur.execute("""
+    skill_usage = [
+        {"skill": row[0], "count": row[1], "errors": row[2]}
+        for row in cur.execute("""
         SELECT skill_name, COUNT(*) as cnt, SUM(is_error) as errs
         FROM turn_tool_calls
         WHERE skill_name IS NOT NULL
         GROUP BY skill_name ORDER BY cnt DESC
-    """):
-        skill_usage.append({"skill": row[0], "count": row[1], "errors": row[2]})
+    """)
+    ]
 
-    skill_usage_by_day = []
-    for row in cur.execute("""
+    skill_usage_by_day = [
+        {"date": row[0], "skill": row[1], "count": row[2]}
+        for row in cur.execute("""
         SELECT DATE(t.timestamp) as day, tc.skill_name, COUNT(*) as cnt
         FROM turn_tool_calls tc
         JOIN turns t ON tc.turn_id = t.id
         WHERE tc.skill_name IS NOT NULL
         GROUP BY day, tc.skill_name ORDER BY day
-    """):
-        skill_usage_by_day.append({"date": row[0], "skill": row[1], "count": row[2]})
+    """)
+    ]
 
     # ── Chart 18: Agent delegation ──
-    agent_delegation = []
-    for row in cur.execute("""
+    agent_delegation = [
+        {"subagent_type": row[0], "count": row[1], "errors": row[2]}
+        for row in cur.execute("""
         SELECT tc.subagent_type, COUNT(*) as cnt, SUM(tc.is_error) as errs
         FROM turn_tool_calls tc
         JOIN session_metrics sm ON tc.session_id = sm.session_id AND sm.is_sidechain = 0
         WHERE tc.subagent_type IS NOT NULL
         GROUP BY tc.subagent_type ORDER BY cnt DESC
-    """):
-        agent_delegation.append({"subagent_type": row[0], "count": row[1], "errors": row[2]})
+    """)
+    ]
 
-    agent_model_dist = []
-    for row in cur.execute("""
+    agent_model_dist = [
+        {"model": row[0], "count": row[1]}
+        for row in cur.execute("""
         SELECT tc.agent_model, COUNT(*) as cnt
         FROM turn_tool_calls tc
         JOIN session_metrics sm ON tc.session_id = sm.session_id AND sm.is_sidechain = 0
         WHERE tc.agent_model IS NOT NULL
         GROUP BY tc.agent_model ORDER BY cnt DESC
-    """):
-        agent_model_dist.append({"model": row[0], "count": row[1]})
+    """)
+    ]
 
     # ── Chart 19: Hook performance ──
-    hook_performance = []
-    for row in cur.execute("""
+    hook_performance = [
+        {
+            "hook_command": row[0],
+            "runs": row[1],
+            "total_ms": row[2],
+            "avg_ms": row[3],
+            "errors": row[4],
+        }
+        for row in cur.execute("""
         SELECT he.hook_command, COUNT(*) as runs,
                SUM(he.duration_ms) as total_ms,
                ROUND(AVG(he.duration_ms)) as avg_ms,
@@ -646,16 +656,8 @@ def build_output(conn: sqlite3.Connection) -> dict:
         FROM hook_executions he
         JOIN session_metrics sm ON he.session_id = sm.session_id AND sm.is_sidechain = 0
         GROUP BY he.hook_command ORDER BY total_ms DESC
-    """):
-        hook_performance.append(
-            {
-                "hook_command": row[0],
-                "runs": row[1],
-                "total_ms": row[2],
-                "avg_ms": row[3],
-                "errors": row[4],
-            }
-        )
+    """)
+    ]
 
     # ── Insights, findings, recommendations, trends ──
     insight_data = build_insights_and_trends(

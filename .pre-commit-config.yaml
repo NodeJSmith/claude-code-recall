@@ -6,11 +6,9 @@
 # Staging: fast, always-green hooks run at pre-commit; heavier checks run at
 # pre-push. `default_install_hook_types` below wires both stages automatically.
 #
-# Phased rollout: one guard (ruff lint) is committed but COMMENTED OUT at the
-# bottom of this file. The current tree has
-# pre-existing violations of each; every one gets fixed and flipped on in its own
-# follow-up cleanup PR. Until then, only the green hooks below are active so the
-# hook run and the lint CI stay green.
+# Phased rollout: every guard ported from hassette has been brought to green and
+# flipped on in its own cleanup PR. ruff lint was the last — the tree is now clean
+# under the full guard set, so there are no deferred hooks remaining.
 default_install_hook_types: [pre-commit, pre-push]
 
 repos:
@@ -35,7 +33,9 @@ repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: "v0.15.17"
     hooks:
-      # Formatter is green today; the linter is staged off below until cleanup.
+      # Linter runs before the formatter so autofixes are reformatted in the same pass.
+      - id: ruff-check
+        args: [--fix]
       - id: ruff-format
 
   - repo: local
@@ -103,16 +103,3 @@ repos:
       - id: pyright
         pass_filenames: false
         stages: [pre-push]
-
-  # ----------------------------------------------------------------------------
-  # DEFERRED — committed but staged off until each guard's cleanup PR brings the
-  # tree to green. Uncomment a block in the PR that fixes its violations.
-  #
-  #   ruff lint            213 violations  (ruff check)
-  # ----------------------------------------------------------------------------
-  #
-  # - repo: https://github.com/astral-sh/ruff-pre-commit
-  #   rev: "v0.15.17"
-  #   hooks:
-  #     - id: ruff-check
-  #       args: [--fix]

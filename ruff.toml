@@ -66,6 +66,11 @@ ignore = [
     "N801",   # invalid-class-name
     "SIM103", # needless-bool
     "N812",   # lowercase-imported-as-non-lowercase
+    # S608: every dynamic SQL fragment here interpolates an identifier, a
+    # placeholder count (",".join("?" * n)), or a module-level constant
+    # predicate — never user data, which always flows through ? params. The
+    # check is pure false-positive noise for this parameterized-SQLite codebase.
+    "S608",   # hardcoded-sql-expression
 ]
 
 # Allow fix for all enabled rules (when `--fix`) is provided.
@@ -77,6 +82,8 @@ dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
 
 [lint.per-file-ignores]
 "tests/**/*.py" = [
+    "ARG",    # unused-argument — test doubles/fixtures carry signature-matching params they don't use
+    "E501",   # line-too-long — inline SQL/data fixtures are legitimately long
     "S101",   # assert usage
     "S104",   # binding to all interfaces (test fixtures)
     "S105",   # hardcoded passwords (test tokens)
@@ -85,10 +92,9 @@ dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
     "S110",   # try-except-pass
     "S603",   # subprocess calls
     "S607",   # partial executable paths
-    "S608",   # SQL string construction (test queries)
 ]
 "tools/*.py" = ["S603", "S607"]
-"scripts/**/*.py" = ["S101", "S105", "S310", "S603", "S607", "S608"]
+"scripts/**/*.py" = ["S101", "S105", "S310", "S603", "S607"]
 
 [format]
 quote-style = "double"

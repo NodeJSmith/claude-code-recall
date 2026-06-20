@@ -16,8 +16,8 @@ from ccrecall.token_parser import (
     ParsedSession,
     Turn,
     _normalize_worktree_path,
-    project_slug,
     parse_session,
+    project_slug,
     record_import,
     should_skip_file,
 )

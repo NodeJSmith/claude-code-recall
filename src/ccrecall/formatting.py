@@ -101,16 +101,14 @@ def format_markdown_session(session: dict, verbose: bool = False) -> str:
         files = session.get("files_modified", [])
         if files:
             lines.append("\n### Files Modified")
-            for f in files[-10:]:
-                lines.append(f"- `{f}`")
+            lines.extend(f"- `{f}`" for f in files[-10:])
             if len(files) > 10:
                 lines.append(f"- ...and {len(files) - 10} more")
 
         commits = session.get("commits", [])
         if commits:
             lines.append("\n### Commits")
-            for c in commits:
-                lines.append(f"- {c}")
+            lines.extend(f"- {c}" for c in commits)
 
         tool_counts = session.get("tool_counts", {})
         if tool_counts:
@@ -122,7 +120,7 @@ def format_markdown_session(session: dict, verbose: bool = False) -> str:
     lines.append("\n### Conversation\n")
 
     for msg in session.get("messages", []):
-        if msg.get("is_notification"):
+        if msg.get("is_notification"):  # noqa: SIM108 — nested ternary hurts readability
             role = "Subagent Result"
         else:
             role = "User" if msg["role"] == "user" else "Assistant"

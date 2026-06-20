@@ -43,24 +43,26 @@ def build_insights_and_trends(
     cur = conn.cursor()
 
     # Root-cause detail: cache cliffs by project
-    cache_cliff_projects = []
-    for row in cur.execute("""
+    cache_cliff_projects = [
+        {"project": project_slug(row[0]), "cliffs": row[1], "sessions": row[2]}
+        for row in cur.execute("""
         SELECT project_path, SUM(cache_cliff_count) as cliffs, COUNT(*) as sessions
         FROM session_metrics WHERE is_sidechain = 0 AND cache_cliff_count > 0
         GROUP BY project_path ORDER BY cliffs DESC LIMIT 5
-    """):
-        cache_cliff_projects.append({"project": project_slug(row[0]), "cliffs": row[1], "sessions": row[2]})
+    """)
+    ]
 
     # Root-cause detail: top antipattern commands
-    top_bash_cmds = []
-    for row in cur.execute(f"""
+    top_bash_cmds = [
+        {"command": row[0], "count": row[1]}
+        for row in cur.execute(f"""
         SELECT SUBSTR(tc.command, 1, 60) as cmd, COUNT(*) as cnt
         FROM turn_tool_calls tc
         JOIN session_metrics sm ON tc.session_id = sm.session_id AND sm.is_sidechain = 0
         WHERE {_BASH_ANTIPATTERN_PREDICATE}
         GROUP BY cmd ORDER BY cnt DESC LIMIT 5
-    """):
-        top_bash_cmds.append({"command": row[0], "count": row[1]})
+    """)
+    ]
 
     # Weighted average cost rates for waste-to-dollar conversion
     avg_input_cpm = 5.0
@@ -201,7 +203,8 @@ def build_trends(conn: sqlite3.Connection) -> dict:
 
     current = _window_kpis("datetime(sm.first_turn_ts) >= datetime('now', '-7 days')")
     prior = _window_kpis(
-        "datetime(sm.first_turn_ts) >= datetime('now', '-14 days') AND datetime(sm.first_turn_ts) < datetime('now', '-7 days')"
+        "datetime(sm.first_turn_ts) >= datetime('now', '-14 days') "
+        "AND datetime(sm.first_turn_ts) < datetime('now', '-7 days')"
     )
 
     if not current:
@@ -479,7 +482,8 @@ def _build_insights(**kw) -> list[dict]:
                     "CLAUDE.md guidance is sufficient for standalone cases.",
                     "claudemd_rule": "\n".join(suggested_rules)
                     if suggested_rules
-                    else "Use Read instead of standalone cat/head/tail. Use Grep instead of standalone grep. Use Glob instead of standalone find/ls.",
+                    else "Use Read instead of standalone cat/head/tail. Use Grep instead of standalone grep. "
+                    "Use Glob instead of standalone find/ls.",
                     "estimated_savings_usd": round(waste_dollars * 0.7, 2),
                 },
             }
@@ -507,10 +511,13 @@ def _build_insights(**kw) -> list[dict]:
                 "waste_tokens": waste_tok,
                 "waste_usd": waste_dollars,
                 "solution": {
-                    "action": "Add a CLAUDE.md rule: 'After reading a file, reference it from context — do not re-read unless the file was modified since last read'",
+                    "action": "Add a CLAUDE.md rule: 'After reading a file, reference it from context — "
+                    "do not re-read unless the file was modified since last read'",
                     "detail": "Each redundant read re-ingests the file as input tokens. For large files (1K+ lines) "
-                    "this adds significant cost. The Read tool output note already says 'content unchanged since last read' but Claude sometimes ignores it.",
-                    "claudemd_rule": "After reading a file, reference it from context. Only re-read if the file was modified since last read.",
+                    "this adds significant cost. The Read tool output note already says 'content unchanged "
+                    "since last read' but Claude sometimes ignores it.",
+                    "claudemd_rule": "After reading a file, reference it from context. "
+                    "Only re-read if the file was modified since last read.",
                     "estimated_savings_usd": round(waste_dollars * 0.5, 2),
                 },
             }
@@ -538,11 +545,13 @@ def _build_insights(**kw) -> list[dict]:
                 "waste_tokens": waste_tok,
                 "waste_usd": waste_dollars,
                 "solution": {
-                    "action": "Add a CLAUDE.md rule: 'Always read a file before editing if more than 2 turns have passed since last read'",
+                    "action": "Add a CLAUDE.md rule: 'Always read a file before editing "
+                    "if more than 2 turns have passed since last read'",
                     "detail": "The root cause is stale context. Claude edits based on what it remembers, not "
                     "the current file state. A fresh read before each edit is cheap (~500 input tokens) "
                     "compared to the cost of a failed edit + retry (~300 output tokens wasted).",
-                    "claudemd_rule": "Read file before editing if >2 turns since last read, to avoid stale-context edit failures.",
+                    "claudemd_rule": "Read file before editing if >2 turns since last read, "
+                    "to avoid stale-context edit failures.",
                     "estimated_savings_usd": round(waste_dollars * 0.7, 2),
                 },
             }
@@ -556,15 +565,16 @@ def _build_insights(**kw) -> list[dict]:
             {
                 "title": "Thinking Token Overhead",
                 "severity": "INFO",
-                "finding": f"~{pct}% of output tokens went to extended thinking ({kw['total_thinking'] // 1000}K tokens, "
-                f"~${thinking_dollars}).",
+                "finding": f"~{pct}% of output tokens went to extended thinking "
+                f"({kw['total_thinking'] // 1000}K tokens, ~${thinking_dollars}).",
                 "root_cause": "Extended thinking is Opus's reasoning mode — it produces internal chain-of-thought "
                 "tokens that are billed as output but not visible to you. This is expected for complex "
                 "tasks but can be excessive for simple ones.",
                 "waste_tokens": 0,
                 "waste_usd": 0,
                 "solution": {
-                    "action": "Use Sonnet for routine tasks (file reads, simple edits, git operations) and reserve Opus for complex reasoning",
+                    "action": "Use Sonnet for routine tasks (file reads, simple edits, git operations) "
+                    "and reserve Opus for complex reasoning",
                     "detail": f"Thinking tokens cost ${thinking_dollars} at output rates. If you're using Opus for "
                     f"everything, switching routine tasks to Sonnet (which doesn't use extended thinking) "
                     f"could save 50-70% of this cost.",
@@ -619,7 +629,8 @@ def _build_insights(**kw) -> list[dict]:
                 {
                     "title": "Cost Concentration",
                     "severity": "INFO",
-                    "finding": f"{top['project']} accounts for {top_pct}% of total spend (${top['cost_usd']:.2f} of ${total_cost:.2f}).",
+                    "finding": f"{top['project']} accounts for {top_pct}% of total spend "
+                    f"(${top['cost_usd']:.2f} of ${total_cost:.2f}).",
                     "root_cause": "This project dominates your usage. Either it has the most sessions, uses "
                     "the most expensive model, or both. Review whether all work in this project "
                     "requires the current model tier.",
@@ -656,8 +667,10 @@ def _build_insights(**kw) -> list[dict]:
                 "waste_tokens": waste_tok,
                 "waste_usd": waste_dollars,
                 "solution": {
-                    "action": "Enable ENABLE_TOOL_SEARCH to defer tool schemas, trim CLAUDE.md, and disable unused skills",
-                    "detail": f"Your avg base is {avg_base:,} tokens. Tool schemas typically account for 14-20K of that. "
+                    "action": "Enable ENABLE_TOOL_SEARCH to defer tool schemas, trim CLAUDE.md, "
+                    "and disable unused skills",
+                    "detail": f"Your avg base is {avg_base:,} tokens. "
+                    "Tool schemas typically account for 14-20K of that. "
                     f"With deferred loading + pruning unused skills, base can drop to ~20K. "
                     f"Every 1K tokens trimmed from base saves that amount on every turn of every session.",
                     "claudemd_rule": None,

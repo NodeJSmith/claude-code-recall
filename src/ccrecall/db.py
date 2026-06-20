@@ -397,13 +397,13 @@ CURRENT_ONBOARDING_VERSION = 1
 
 def load_config() -> dict:
     """Read ~/.claude-memory/config.json. Returns empty dict on missing/error."""
+    if not CONFIG_PATH.exists():
+        return {}
     try:
-        if CONFIG_PATH.exists():
-            result = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-            return result if isinstance(result, dict) else {}
+        result = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
     except Exception:
-        pass
-    return {}
+        return {}
+    return result if isinstance(result, dict) else {}
 
 
 def load_settings() -> dict:
@@ -831,7 +831,9 @@ def _migrate_v5(conn: sqlite3.Connection, cursor: sqlite3.Cursor) -> None:
 
             # Rename INTERRUPTED → ABANDONED in context_summary (markdown)
             cursor.execute(
-                "UPDATE branches SET context_summary = REPLACE(context_summary, '**Status:** INTERRUPTED', '**Status:** ABANDONED') WHERE id = ? AND context_summary LIKE '%**Status:** INTERRUPTED%'",
+                "UPDATE branches SET context_summary = "
+                "REPLACE(context_summary, '**Status:** INTERRUPTED', '**Status:** ABANDONED') "
+                "WHERE id = ? AND context_summary LIKE '%**Status:** INTERRUPTED%'",
                 (branch_id,),
             )
 
@@ -850,12 +852,11 @@ def _migrate_v5(conn: sqlite3.Connection, cursor: sqlite3.Cursor) -> None:
 
         conn.commit()
 
-    # Single FTS rebuild after all batches — faster than per-row trigger-driven ops
-    try:
+    # Single FTS rebuild after all batches — faster than per-row trigger-driven ops.
+    # FTS table may not exist (e.g., FTS disabled SQLite build), so this is best-effort.
+    with contextlib.suppress(Exception):
         conn.execute("INSERT INTO branches_fts(branches_fts) VALUES('rebuild')")
         conn.commit()
-    except Exception:
-        pass  # FTS table may not exist (e.g., FTS disabled SQLite build)
 
     conn.execute("PRAGMA user_version = 5")
     conn.commit()

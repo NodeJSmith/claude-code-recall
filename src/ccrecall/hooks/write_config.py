@@ -5,6 +5,7 @@ Atomic write via tmp+replace to prevent partial writes.
 """
 
 import argparse
+import contextlib
 import json
 import os
 import tempfile
@@ -36,12 +37,10 @@ def main():
     }
     config = _write_config_defaults.copy()
     if CONFIG_PATH.exists() and not args.defaults:
-        try:
+        with contextlib.suppress(Exception):
             existing = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
             if isinstance(existing, dict):
                 config.update(existing)
-        except Exception:
-            pass
 
     # Apply CLI arguments (only reached when --defaults is not set)
     if not args.defaults:

@@ -178,8 +178,7 @@ def discover_jsonl_files() -> list[JnlFile]:
             continue
         project_cwd = _decode_project_cwd(proj_dir.name)
         # Top-level session files
-        for jf in proj_dir.glob("*.jsonl"):
-            results.append(JnlFile(jf, project_cwd, False, None))
+        results.extend(JnlFile(jf, project_cwd, False, None) for jf in proj_dir.glob("*.jsonl"))
         # Subagent files
         for jf in proj_dir.glob("*/subagents/*.jsonl"):
             parent_id = jf.parent.parent.name  # the session UUID directory
@@ -612,7 +611,7 @@ def project_slug(path: str | None) -> str:
                 continue
         meaningful.append(p)
     # Take last 2-3 segments depending on length
-    if len(meaningful) <= 2:
+    if len(meaningful) <= 2:  # noqa: SIM108 — nested ternary hurts readability
         slug = "-".join(meaningful) if meaningful else "unknown"
     else:
         slug = "-".join(meaningful[-3:])

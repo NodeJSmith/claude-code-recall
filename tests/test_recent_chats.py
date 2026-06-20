@@ -108,7 +108,7 @@ class TestRecentChatsInvariant:
         assert len(plain_results) == len(vec_results)
 
         # Same ordered list — compare element by element
-        for plain, vec in zip(plain_results, vec_results):
+        for plain, vec in zip(plain_results, vec_results, strict=False):
             assert plain["uuid"] == vec["uuid"], f"UUID mismatch at same position: {plain['uuid']!r} vs {vec['uuid']!r}"
             assert plain["project"] == vec["project"]
             assert plain.get("started_at") == vec.get("started_at")
