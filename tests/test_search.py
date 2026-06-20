@@ -23,7 +23,7 @@ from ccrecall.db import (
     upsert_branch_vec,
     vec_available,
 )
-from ccrecall.embeddings import EMBEDDING_MODEL, EMBEDDING_VERSION
+from ccrecall.embeddings import EMBEDDING_DIM, EMBEDDING_MODEL, EMBEDDING_VERSION
 from conftest import make_vec_conn
 
 
@@ -580,7 +580,7 @@ class TestDegradation:
         assert isinstance(results, list)
 
     def test_missing_model_path_does_not_raise(self, search_db):
-        """resolve_snapshot returns None (truncated model) → keyword path (FR#3)."""
+        """model_available() is False (model unavailable) → keyword path (FR#3)."""
         fts_level = detect_fts_support(search_db)
 
         with patch(
@@ -600,7 +600,7 @@ class TestDegradation:
 
         def _should_not_be_called(text):
             called.append(text)
-            return [0.0] * 1024
+            return [0.0] * EMBEDDING_DIM
 
         with patch(
             "ccrecall.search_conversations.embed_text",
@@ -692,7 +692,7 @@ class TestStaleVersionExclusion:
         vec_conn.commit()
 
         # Seed both branches into branch_vec with the same vector
-        fake_vec = [0.1] * 1024
+        fake_vec = [0.1] * EMBEDDING_DIM
         upsert_branch_vec(cursor, current_branch_id, fake_vec)
         upsert_branch_vec(cursor, stale_branch_id, fake_vec)
         vec_conn.commit()
@@ -707,7 +707,7 @@ class TestStaleVersionExclusion:
         """_get_vec_branch_ids must not return the stale-version branch (FR#11 / AC#9)."""
         conn, current_id, stale_id = stale_db
         cursor = conn.cursor()
-        fake_vec = [0.1] * 1024
+        fake_vec = [0.1] * EMBEDDING_DIM
         result_ids = _get_vec_branch_ids(cursor, fake_vec, top_k=10)
         assert stale_id not in result_ids, (
             "Stale-version branch must not appear in vector candidates"
@@ -732,7 +732,7 @@ class TestStaleVersionExclusion:
 
         # Confirm vec path excludes stale branch
         cursor = conn.cursor()
-        fake_vec = [0.1] * 1024
+        fake_vec = [0.1] * EMBEDDING_DIM
         vec_ids = _get_vec_branch_ids(cursor, fake_vec, top_k=10)
         assert stale_id not in vec_ids, (
             "Stale-version branch must not appear in vector candidates"
@@ -886,7 +886,7 @@ class TestSessionDedup:
             mid = cursor.lastrowid
             cursor.execute("INSERT INTO branch_messages VALUES (?, ?)", (bid, mid))
             # Seed branch_vec for both
-            upsert_branch_vec(cursor, bid, [0.5] * 1024)
+            upsert_branch_vec(cursor, bid, [0.5] * EMBEDDING_DIM)
 
         conn.commit()
 
@@ -895,7 +895,7 @@ class TestSessionDedup:
         ):
             with patch(
                 "ccrecall.search_conversations.embed_text",
-                return_value=[0.5] * 1024,
+                return_value=[0.5] * EMBEDDING_DIM,
             ):
                 results = search_sessions(
                     conn, "async coroutine", fts_level, max_results=10
@@ -937,7 +937,7 @@ class TestStatusFlag:
         assert exc.value.code == 0
         captured = capsys.readouterr()
         assert "vec extension:" in captured.out
-        assert "model path:" in captured.out
+        assert "model:" in captured.out
         assert "embedded branches:" in captured.out
 
     def test_status_does_not_require_query(self, tmp_path, monkeypatch):

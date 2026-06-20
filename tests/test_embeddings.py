@@ -1,7 +1,6 @@
 """Tests for the shared embedding module."""
 
 import math
-from pathlib import Path
 import pytest
 
 from ccrecall.embeddings import (
@@ -31,70 +30,45 @@ class TestResolveThreadCount:
 
 
 class TestModelAvailable:
-    def test_missing_cache(self, tmp_path, monkeypatch):
-        """model_available returns False (no raise) when cache dir is missing."""
-        missing = tmp_path / "nonexistent_snapshots"
-        monkeypatch.setattr("ccrecall.embeddings._SNAPSHOTS_DIR", missing)
-        # Reset module-level cache so the monkeypatched path is used
-        monkeypatch.setattr("ccrecall.embeddings._session", None)
-        monkeypatch.setattr("ccrecall.embeddings._tokenizer", None)
+    def test_deps_unavailable(self, monkeypatch):
+        """model_available returns False when fastembed isn't importable."""
+        monkeypatch.setattr("ccrecall.embeddings.DEPS_AVAILABLE", False)
+        monkeypatch.setattr("ccrecall.embeddings._model", None)
         assert model_available() is False
 
-    def test_empty_snapshot_dir(self, tmp_path, monkeypatch):
-        """model_available returns False when snapshots dir exists but is empty."""
-        snapshots = tmp_path / "snapshots"
-        snapshots.mkdir()
-        monkeypatch.setattr("ccrecall.embeddings._SNAPSHOTS_DIR", snapshots)
-        monkeypatch.setattr("ccrecall.embeddings._session", None)
-        monkeypatch.setattr("ccrecall.embeddings._tokenizer", None)
+    def test_construction_failure_returns_false(self, monkeypatch):
+        """model_available returns False (no raise) when the model can't construct."""
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("download failed")
+
+        monkeypatch.setattr("ccrecall.embeddings.DEPS_AVAILABLE", True)
+        monkeypatch.setattr("ccrecall.embeddings.TextEmbedding", boom)
+        monkeypatch.setattr("ccrecall.embeddings._model", None)
         assert model_available() is False
 
-    def test_partial_snapshot(self, tmp_path, monkeypatch):
-        """model_available returns False when snapshot has only tokenizer.json (no onnx)."""
-        snapshots = tmp_path / "snapshots"
-        snapshots.mkdir()
-        snap = snapshots / "abc123"
-        snap.mkdir()
-        # Only tokenizer.json, no model_quantized.onnx
-        (snap / "tokenizer.json").write_bytes(b'{"version":"1"}')
-        monkeypatch.setattr("ccrecall.embeddings._SNAPSHOTS_DIR", snapshots)
-        monkeypatch.setattr("ccrecall.embeddings._session", None)
-        monkeypatch.setattr("ccrecall.embeddings._tokenizer", None)
-        assert model_available() is False
+    def test_no_raise_on_error(self, monkeypatch):
+        """model_available never propagates; any failure becomes False."""
 
-    def test_zero_size_files(self, tmp_path, monkeypatch):
-        """model_available returns False when required files are zero-size."""
-        snapshots = tmp_path / "snapshots"
-        snapshots.mkdir()
-        snap = snapshots / "abc123"
-        snap.mkdir()
-        (snap / "tokenizer.json").write_bytes(b"")
-        (snap / "model_quantized.onnx").write_bytes(b"")
-        monkeypatch.setattr("ccrecall.embeddings._SNAPSHOTS_DIR", snapshots)
-        monkeypatch.setattr("ccrecall.embeddings._session", None)
-        monkeypatch.setattr("ccrecall.embeddings._tokenizer", None)
-        assert model_available() is False
+        def boom(*args, **kwargs):
+            raise OSError("native lib missing")
 
-    def test_no_raise_on_bad_path(self, tmp_path, monkeypatch):
-        """model_available never raises; returns False on any error."""
-        monkeypatch.setattr(
-            "ccrecall.embeddings._SNAPSHOTS_DIR", Path("/this/does/not/exist/ever")
-        )
-        monkeypatch.setattr("ccrecall.embeddings._session", None)
-        monkeypatch.setattr("ccrecall.embeddings._tokenizer", None)
+        monkeypatch.setattr("ccrecall.embeddings.DEPS_AVAILABLE", True)
+        monkeypatch.setattr("ccrecall.embeddings.TextEmbedding", boom)
+        monkeypatch.setattr("ccrecall.embeddings._model", None)
         # Must not raise
         assert model_available() is False
 
 
 class TestConstants:
     def test_embedding_constants(self):
-        """Version starts at 1, dim is 1024, model name is set."""
-        assert EMBEDDING_VERSION == 1
-        assert EMBEDDING_DIM == 1024
-        assert EMBEDDING_MODEL == "gpahal/bge-m3-onnx-int8"
+        """Version is 2 (post bge-m3 swap), dim is 512, model name is jina."""
+        assert EMBEDDING_VERSION == 2
+        assert EMBEDDING_DIM == 512
+        assert EMBEDDING_MODEL == "jinaai/jina-embeddings-v2-small-en"
 
 
-@pytest.mark.skipif(not model_available(), reason="ONNX model not available")
+@pytest.mark.skipif(not model_available(), reason="fastembed model unavailable (jina-v2-small-en)")
 class TestEmbedRealModel:
     """Real-model tests — skipped when the model is unavailable."""
 
@@ -104,7 +78,7 @@ class TestEmbedRealModel:
         assert embed_text(text) == embed_text(text)
 
     def test_dim(self):
-        """embed_text returns a list of 1024 floats."""
+        """embed_text returns a list of EMBEDDING_DIM floats."""
         v = embed_text("testing embedding dimension")
         assert len(v) == EMBEDDING_DIM
         assert all(isinstance(x, float) for x in v)
@@ -116,7 +90,7 @@ class TestEmbedRealModel:
         assert abs(magnitude - 1.0) < 1e-4
 
     def test_batch(self):
-        """embed_texts returns one vector per input, each 1024-dim and normalized."""
+        """embed_texts returns one vector per input, each EMBEDDING_DIM and normalized."""
         texts = ["first text", "second text", "third text"]
         results = embed_texts(texts)
         assert len(results) == len(texts)

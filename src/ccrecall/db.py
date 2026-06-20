@@ -305,7 +305,25 @@ def _ensure_vec_schema(conn: sqlite3.Connection) -> None:
     Caller is responsible for loading the sqlite-vec extension before calling
     this function (via vec_available or equivalent). Does not load the
     extension itself and does not commit — the caller manages the transaction.
+
+    Self-heals a stale embedding dimension: if branch_vec already exists at a
+    different float[N] than the current EMBEDDING_DIM (e.g. after an embedding
+    model swap), it is dropped and recreated. branch_vec holds only derived
+    vectors, so dropping is lossless — the backfill heal clause and embed-on-
+    write repopulate it at the new dimension.
     """
+    # sqlite_master stores the vec0 CREATE statement verbatim, so a substring
+    # check for the current float[N] reliably detects a stale dimension. Lowercase
+    # both sides so a hand-created FLOAT[...] table still compares correctly.
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='branch_vec'"
+    ).fetchone()
+    if row and f"float[{EMBEDDING_DIM}]" not in row[0].lower():
+        # Drop the trigger first: SQLite does not cascade-drop a trigger when its
+        # target table is dropped, so a surviving branches_vec_ad would fire
+        # against a missing branch_vec. (DROP TABLE works on virtual tables.)
+        conn.execute("DROP TRIGGER IF EXISTS branches_vec_ad")
+        conn.execute("DROP TABLE branch_vec")
     conn.execute(
         "CREATE VIRTUAL TABLE IF NOT EXISTS branch_vec"
         f" USING vec0(branch_id INTEGER PRIMARY KEY, embedding float[{EMBEDDING_DIM}])"

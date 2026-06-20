@@ -13,6 +13,7 @@ import ccrecall.db as db_module
 import sqlite_vec
 
 from conftest import make_vec_conn
+from ccrecall.embeddings import EMBEDDING_DIM
 from ccrecall.db import (
     CURRENT_ONBOARDING_VERSION,
     DEFAULT_SETTINGS,
@@ -1628,7 +1629,7 @@ class TestVecSchema:
         conn.commit()
 
         # Insert a branch_vec row
-        vec = sqlite_vec.serialize_float32([0.1] * 1024)
+        vec = sqlite_vec.serialize_float32([0.1] * EMBEDDING_DIM)
         conn.execute(
             "INSERT INTO branch_vec(branch_id, embedding) VALUES (?, ?)",
             (branch_id, vec),
@@ -1676,8 +1677,8 @@ class TestVecSchema:
         branch_id = cursor.lastrowid
         conn.commit()
 
-        vec1 = sqlite_vec.serialize_float32([0.1] * 1024)
-        vec2 = sqlite_vec.serialize_float32([0.9] * 1024)
+        vec1 = sqlite_vec.serialize_float32([0.1] * EMBEDDING_DIM)
+        vec2 = sqlite_vec.serialize_float32([0.9] * EMBEDDING_DIM)
 
         # First insert
         conn.execute(
@@ -1696,6 +1697,79 @@ class TestVecSchema:
 
         count = conn.execute("SELECT COUNT(*) FROM branch_vec").fetchone()[0]
         assert count == 1, "DELETE+INSERT upsert must produce exactly one row"
+        conn.close()
+
+    @pytest.mark.skipif(
+        not _VEC_AVAILABLE, reason="sqlite-vec not available in this environment"
+    )
+    def test_ensure_vec_schema_rebuilds_on_dim_change(self):
+        """A stale branch_vec at a different dim is dropped and recreated at EMBEDDING_DIM.
+
+        Simulates an embedding-model swap: the prior table was float[STALE_DIM] with
+        rows; _ensure_vec_schema must rebuild it at the current EMBEDDING_DIM (derived
+        data, so the drop is lossless) so vectors of the right width can insert.
+        """
+        conn = make_vec_conn()
+        stale_dim = EMBEDDING_DIM * 2
+
+        # Replace the freshly-created (correct-dim) table with a stale-dim one + a row.
+        conn.execute("DROP TABLE branch_vec")
+        conn.execute(
+            "CREATE VIRTUAL TABLE branch_vec"
+            f" USING vec0(branch_id INTEGER PRIMARY KEY, embedding float[{stale_dim}])"
+        )
+        conn.execute(
+            "INSERT INTO branch_vec(branch_id, embedding) VALUES (?, ?)",
+            (1, sqlite_vec.serialize_float32([0.1] * stale_dim)),
+        )
+        conn.commit()
+
+        # Self-heal: detect the dim mismatch and rebuild.
+        db_module._ensure_vec_schema(conn)
+        conn.commit()
+
+        sql = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='branch_vec'"
+        ).fetchone()[0]
+        assert f"float[{EMBEDDING_DIM}]" in sql
+        assert f"float[{stale_dim}]" not in sql
+
+        # The orphan-cleanup trigger is recreated alongside the table — it is
+        # dropped first so it can't fire against the missing table mid-rebuild.
+        assert (
+            conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='trigger' AND name='branches_vec_ad'"
+            ).fetchone()
+            is not None
+        )
+
+        # Stale row is gone (table was dropped) and a correct-width vector inserts.
+        assert conn.execute("SELECT COUNT(*) FROM branch_vec").fetchone()[0] == 0
+        conn.execute(
+            "INSERT INTO branch_vec(branch_id, embedding) VALUES (?, ?)",
+            (2, sqlite_vec.serialize_float32([0.2] * EMBEDDING_DIM)),
+        )
+        conn.commit()
+        assert conn.execute("SELECT COUNT(*) FROM branch_vec").fetchone()[0] == 1
+        conn.close()
+
+    @pytest.mark.skipif(
+        not _VEC_AVAILABLE, reason="sqlite-vec not available in this environment"
+    )
+    def test_ensure_vec_schema_preserves_matching_dim(self):
+        """branch_vec already at the current dim keeps its rows — no needless rebuild."""
+        conn = make_vec_conn()
+        conn.execute(
+            "INSERT INTO branch_vec(branch_id, embedding) VALUES (?, ?)",
+            (1, sqlite_vec.serialize_float32([0.3] * EMBEDDING_DIM)),
+        )
+        conn.commit()
+
+        db_module._ensure_vec_schema(conn)
+        conn.commit()
+
+        # Row survives — a matching-dim table is not dropped.
+        assert conn.execute("SELECT COUNT(*) FROM branch_vec").fetchone()[0] == 1
         conn.close()
 
 

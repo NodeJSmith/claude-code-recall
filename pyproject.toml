@@ -10,13 +10,14 @@ requires-python = ">=3.10"
 # Pinned to the versions in uv.lock: `uv tool install -e` (how install.py
 # installs this package) ignores uv.lock and resolves fresh, so an unbounded
 # range would pull newer ABI/runtime-breaking releases of these native wheels.
-# onnxruntime/numpy use Python-version markers to match the per-version pins.
-# To re-sync after a bump: `uv lock` then mirror the resolved versions here.
+# fastembed is the embedding engine — it owns the ONNX runtime + tokenizers and
+# the model download, so onnxruntime is left to fastembed's own constraint (an
+# explicit pin here fights its resolver) and reproducibility comes from uv.lock.
+# numpy is a direct dependency and uses Python-version markers. To re-sync after
+# a bump: `uv lock` then mirror the resolved versions here.
 dependencies = [
     "sqlite-vec==0.1.9",
-    "tokenizers==0.23.1",
-    "onnxruntime==1.24.3; python_version < '3.11'",
-    "onnxruntime==1.26.0; python_version >= '3.11'",
+    "fastembed==0.8.0",
     "numpy==2.2.6; python_version < '3.11'",
     "numpy==2.4.6; python_version >= '3.11'",
 ]
