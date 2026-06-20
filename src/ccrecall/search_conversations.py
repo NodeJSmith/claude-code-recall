@@ -25,11 +25,11 @@ from ccrecall.db import (
 from ccrecall.content import sanitize_fts_term
 from ccrecall.formatting import format_markdown_session, format_json_sessions
 from ccrecall.embeddings import (
+    DEPS_AVAILABLE,
     EMBEDDING_MODEL,
     EMBEDDING_VERSION,
     embed_text,
     model_available,
-    resolve_snapshot,
 )
 from ccrecall.fusion import rrf
 
@@ -417,9 +417,10 @@ def print_status(args: argparse.Namespace, settings: dict | None) -> None:
         is_vec = False
     print(f"vec extension: {'yes' if is_vec else 'no'}")
 
-    # Model path
-    snapshot = resolve_snapshot()
-    print(f"model path: {snapshot if snapshot is not None else 'none'}")
+    # Model: name + whether the embedding stack imports. Deliberately does not
+    # call model_available() — that constructs the fastembed model and would
+    # download it (~120 MB) on a cold cache, which a read-only status must not do.
+    print(f"model: {EMBEDDING_MODEL} (deps {'available' if DEPS_AVAILABLE else 'missing'})")
 
     # Embedded vs total branch counts — reuse the same connection
     if conn is not None:
@@ -504,11 +505,10 @@ def main():
     if not args.db.exists():
         if args.status:
             # For --status, report missing DB gracefully rather than hard-exiting.
-            # The model snapshot lives in the HF cache, independent of the DB, so
-            # resolve and report it even when the DB is absent.
-            snapshot = resolve_snapshot()
+            # Model identity is independent of the DB, so report it even when the
+            # DB is absent (deps check only — no download in a read-only path).
             print("vec extension: no")
-            print(f"model path: {snapshot if snapshot is not None else 'none'}")
+            print(f"model: {EMBEDDING_MODEL} (deps {'available' if DEPS_AVAILABLE else 'missing'})")
             print("embedded branches: error (database not found)")
             sys.exit(0)
         if args.format == "json":

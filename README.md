@@ -32,7 +32,7 @@ cm-write-config --defaults
 
 Search results are fused from two signals: keyword full-text search (FTS5 → FTS4 → LIKE fallback) and vector similarity from a locally-running embedding model. The two ranked lists are merged with Reciprocal Rank Fusion (RRF), so results that rank well in both signals appear first.
 
-The embedding model is [bge-m3 (int8-quantized ONNX)](https://huggingface.co/gpahal/bge-m3-onnx-int8), running entirely on your machine via onnxruntime. No data leaves your machine.
+The embedding model is [jina-embeddings-v2-small-en](https://huggingface.co/jinaai/jina-embeddings-v2-small-en) (512-dim), running entirely on your machine via [fastembed](https://github.com/qdrant/fastembed). No data leaves your machine.
 
 ### Coverage
 
@@ -40,7 +40,7 @@ New sessions are embedded automatically as they sync (embed-on-write), so covera
 
 ### Optional: seed historical conversations
 
-Embedding is bge-m3 inference on CPU (~4–5s per summary), so seeding a large history is genuinely CPU-heavy (~2.4 CPU-hours for ~2k active leaves at one thread). It is therefore **opt-in** — it is *not* auto-spawned on SessionStart — so it never fires unbidden. Run it yourself when you want to seed:
+Embedding runs on CPU via fastembed. jina-v2-small-en is light — a few milliseconds for a short summary, up to ~400ms for a long one — but seeding a large history (~2k active leaves) is still a bounded chunk of work, and a parallel run can thrash a small or shared box. It is therefore **opt-in** — it is *not* auto-spawned on SessionStart — so it never fires unbidden. Run it yourself when you want to seed:
 
 ```bash
 cm-backfill-embeddings              # all active leaves, all history
@@ -56,24 +56,23 @@ It runs at low scheduling priority (`nice`) and a single inference thread by def
 | Flag | Effect |
 |------|--------|
 | `--keyword-only` | Skip the embedding step entirely, use keyword search only |
-| `--status` | Print diagnostic info (vec extension loaded, model path, embedded vs. total summarized (embeddable) branch count) and exit 0 |
+| `--status` | Print diagnostic info (vec extension loaded, model name, embedded vs. total summarized (embeddable) branch count) and exit 0 |
 
 ### Runtime deps
 
-The semantic search path requires four extra packages beyond the base install:
+The semantic search path requires three extra packages beyond the base install:
 
 - `sqlite-vec` — SQLite extension for vector KNN queries
-- `onnxruntime` — runs the ONNX embedding model
-- `tokenizers` — tokenizes text before embedding
+- `fastembed` — downloads and runs the embedding model (manages onnxruntime + tokenization)
 - `numpy` — vector math (normalization)
 
-These are included in the package dependencies. If onnxruntime or tokenizers fail to import (e.g. ABI mismatch on an unusual platform), search falls back silently to keyword-only mode.
+These are included in the package dependencies. If fastembed fails to import (e.g. ABI mismatch on an unusual platform), search falls back silently to keyword-only mode.
 
 ### Degradation
 
 Semantic fusion is automatically disabled when:
-- No valid model snapshot is found under `~/.cache/huggingface/hub/models--gpahal--bge-m3-onnx-int8/snapshots/`
-- `onnxruntime` or `tokenizers` cannot be imported
+- The embedding model can't be loaded (e.g. a first-run download failed and no cached copy exists)
+- `fastembed` cannot be imported
 - `sqlite-vec` cannot be loaded on the connection (e.g. Python built without loadable extensions)
 
 In all cases, search falls back to keyword-only and returns results normally. Use `cm-search-conversations --status` to check which path is active.
@@ -108,8 +107,8 @@ These are the entry points that the `cm-*` skills invoke. You can run them from 
 | Entry point | What it does |
 |---|---|
 | `cm-recent-chats` | Prints recent sessions from the DB in markdown (default) or JSON. Used by `/cm-recall-conversations` |
-| `cm-search-conversations` | Searches sessions by keyword fused with vector similarity (FTS5 → FTS4 → LIKE fallback, RRF-fused with bge-m3 embeddings when available). Used by `/cm-recall-conversations` |
-| `cm-backfill-embeddings` | Opt-in seeding of embeddings for historical active-leaf branches (bge-m3 int8 ONNX). Not auto-spawned. Supports `--days N` / `--limit N` / `--threads N`; throttled via `nice` + a single inference thread by default. Resumable |
+| `cm-search-conversations` | Searches sessions by keyword fused with vector similarity (FTS5 → FTS4 → LIKE fallback, RRF-fused with jina embeddings when available). Used by `/cm-recall-conversations` |
+| `cm-backfill-embeddings` | Opt-in seeding of embeddings for historical active-leaf branches (jina-v2-small-en via fastembed). Not auto-spawned. Supports `--days N` / `--limit N` / `--threads N`; throttled via `nice` + a single inference thread by default. Resumable |
 | `cm-ingest-token-data` | Parses JSONL files for token usage analytics — cost, cache hits, model mix, skill/agent/hook patterns. Populates analytics tables and builds `~/.claude-memory/dashboard.html`. Used by `/cm-get-token-insights` |
 
 ## Skills
@@ -126,12 +125,12 @@ Session ends
   └─ cm-memory-sync (Stop hook)
        └─ cm-sync-current (background)
             └─ writes to ~/.claude-memory/conversations.db
-            └─ embeds the active leaf via bge-m3 if model available (drops silently on failure)
+            └─ embeds the active leaf via jina if model available (drops silently on failure)
 
 Session starts
   └─ cm-memory-setup (SessionStart)
   │    └─ cm-import-conversations (background, first run / new files)
-  │         └─ embeds each new active leaf via bge-m3 if model available
+  │         └─ embeds each new active leaf via jina if model available
   │    └─ cm-backfill-summaries (background, if summaries missing)
   │    └─ (embedding backfill is NOT auto-spawned — opt-in via cm-backfill-embeddings)
   ├─ cm-onboarding (SessionStart, startup only — one-time)
@@ -160,7 +159,7 @@ Session starts
 - `messages` — all messages, stored once per session regardless of branch
 - `branch_messages` — join table linking messages to branches
 - `import_log` — tracks which JSONL files have been imported and their hashes
-- `branch_vec` — vec0 virtual table (sqlite-vec) storing 1024-dim bge-m3 embeddings for each branch, used for KNN search
+- `branch_vec` — vec0 virtual table (sqlite-vec) storing 512-dim jina embeddings for each branch, used for KNN search
 - `token_snapshots`, `turns`, `turn_tool_calls`, `session_metrics` — analytics tables populated by `cm-ingest-token-data`
 
 ## Running tests

@@ -148,8 +148,8 @@ def main():
 
         # Note: embedding backfill is NOT auto-spawned. Embeddings are filled
         # forward by embed-on-write (active leaves only); historical seeding is
-        # opt-in via `cm-backfill-embeddings [--days N] [--limit N]` so the
-        # ~CPU-hours of bge-m3 inference never fire unbidden (machines.md).
+        # opt-in via `cm-backfill-embeddings [--days N] [--limit N]` so embedding
+        # the full history never fires unbidden (machines.md thrash risk).
     except Exception:
         pass
 

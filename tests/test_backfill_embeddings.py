@@ -17,13 +17,13 @@ from unittest.mock import patch
 import pytest
 import sqlite_vec
 
-from ccrecall.embeddings import EMBEDDING_MODEL, EMBEDDING_VERSION
+from ccrecall.embeddings import EMBEDDING_DIM, EMBEDDING_MODEL, EMBEDDING_VERSION
 from ccrecall.hooks.backfill_embeddings import BATCH_SIZE, _main
 from ccrecall.summarizer import SUMMARY_VERSION
 from conftest import make_vec_conn
 
-# A fixed 1024-dim float vector for stubbing embed_text.
-_FIXED_VEC = [0.001] * 1024
+# A fixed EMBEDDING_DIM-dim float vector for stubbing embed_text.
+_FIXED_VEC = [0.001] * EMBEDDING_DIM
 
 pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
 
@@ -346,7 +346,7 @@ class TestBackfillVersionBump:
         # Also insert a branch_vec row so the heal clause doesn't add noise
         conn.execute(
             "INSERT OR REPLACE INTO branch_vec(branch_id, embedding) VALUES (?, ?)",
-            (bid, bytes(4 * 1024)),
+            (bid, bytes(4 * EMBEDDING_DIM)),
         )
         conn.commit()
 
@@ -377,7 +377,7 @@ class TestBackfillVersionBump:
         )
         conn.execute(
             "INSERT OR REPLACE INTO branch_vec(branch_id, embedding) VALUES (?, ?)",
-            (bid, bytes(4 * 1024)),
+            (bid, bytes(4 * EMBEDDING_DIM)),
         )
         conn.commit()
 
@@ -410,7 +410,7 @@ class TestBackfillVersionBump:
         )
         conn.execute(
             "INSERT OR REPLACE INTO branch_vec(branch_id, embedding) VALUES (?, ?)",
-            (bid, bytes(4 * 1024)),
+            (bid, bytes(4 * EMBEDDING_DIM)),
         )
         conn.commit()
 

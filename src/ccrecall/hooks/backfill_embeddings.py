@@ -3,7 +3,7 @@
 Backfill embeddings for existing active-leaf branches.
 
 Opt-in: invoke manually via `cm-backfill-embeddings` to seed historical
-embeddings. NOT auto-spawned on SessionStart (bge-m3 inference is CPU-heavy);
+embeddings. NOT auto-spawned on SessionStart (embedding inference is CPU-bound);
 forward coverage comes from embed-on-write instead.
 Processes branches in batches, commits between batches, and marks per-row
 content errors with embedding_version = -1 to avoid infinite retry.
@@ -241,7 +241,7 @@ def _main(argv: list[str] | None = None) -> int:
         "--threads",
         type=int,
         default=DEFAULT_EMBED_THREADS,
-        help="onnxruntime inference threads (default: %(default)s). Raise it on "
+        help="inference threads (default: %(default)s). Raise it on "
         "an idle machine to finish faster; 1 keeps the box responsive.",
     )
     args = parser.parse_args(argv)

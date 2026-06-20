@@ -10,7 +10,7 @@ from unittest.mock import patch
 import pytest
 
 from ccrecall.db import SCHEMA, _ensure_vec_schema, _migrate_columns, vec_available
-from ccrecall.embeddings import EMBEDDING_MODEL, EMBEDDING_VERSION
+from ccrecall.embeddings import EMBEDDING_DIM, EMBEDDING_MODEL, EMBEDDING_VERSION
 from ccrecall.session_ops import sync_session
 from ccrecall.summarizer import SUMMARY_VERSION
 
@@ -490,7 +490,7 @@ class TestEmbedOnWriteOrderingInvariant:
             is None
         )
 
-        fake_vec = [0.1] * 1024
+        fake_vec = [0.1] * EMBEDDING_DIM
 
         with patch("ccrecall.session_ops.embed_text", return_value=fake_vec):
             with tempfile.TemporaryDirectory() as tmpdir:
@@ -532,7 +532,7 @@ class TestEmbedOnWriteSuccess:
         conn = _make_vec_conn(tmp_path)
         assert conn is not None  # guarded by skipif
 
-        fake_vec = [0.1] * 1024
+        fake_vec = [0.1] * EMBEDDING_DIM
 
         with patch("ccrecall.session_ops.embed_text", return_value=fake_vec):
             with tempfile.TemporaryDirectory() as tmpdir:
