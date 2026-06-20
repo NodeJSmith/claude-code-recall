@@ -4,9 +4,9 @@
 
 ### Fixed
 
-- Session-start context no longer injects untruncated exchange text on the uncached fallback path. The fallback now builds its summary through the same canonical builder as the cached path, so long exchanges are mid-truncated identically.
-- Summary backfill no longer permanently marks a branch failed on a transient DB error (only genuine content errors get the sentinel), and a sentinel-marked branch is no longer re-selected forever — the error sentinel is excluded from the eligible set, so the documented "avoid infinite retry" guarantee now actually holds.
-- `token_snapshots`/`turn_tool_calls` column migrations use explicit existence checks instead of swallowing `OperationalError`, so a real schema error surfaces instead of being silently ignored.
+- Session-start context no longer injects untruncated exchange text on the uncached fallback path. The fallback now builds its summary through the same canonical builder as the cached path, so long exchanges are mid-truncated identically. (#2)
+- Summary backfill no longer permanently marks a branch failed on a transient DB error (only genuine content errors get the sentinel), and a sentinel-marked branch is no longer re-selected forever — the error sentinel is excluded from the eligible set, so the documented "avoid infinite retry" guarantee now actually holds. (#2)
+- `token_snapshots`/`turn_tool_calls` column migrations use explicit existence checks instead of swallowing `OperationalError`, so a real schema error surfaces instead of being silently ignored. (#2)
 - Importing a session whose content all filters out (tool results, notifications, empty text) no longer crashes with `sqlite3.IntegrityError: FOREIGN KEY constraint failed`. `find_all_branches` inserts branch rows before content filtering, so a zero-message session still has children; the `total_messages == 0` cleanup now tears down `branch_messages → branches → sessions` in FK order instead of a bare session delete. Surfaced importing a large transcript set onto a fresh machine. The test fixtures now enable `PRAGMA foreign_keys = ON` to match production, so the existing FK-safe guard tests actually enforce the constraint.
 
 ### Added
