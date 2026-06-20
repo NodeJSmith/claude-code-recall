@@ -6,8 +6,8 @@
 # Staging: fast, always-green hooks run at pre-commit; heavier checks run at
 # pre-push. `default_install_hook_types` below wires both stages automatically.
 #
-# Phased rollout: two guards (ruff lint, pyright) are committed but COMMENTED
-# OUT at the bottom of this file. The current tree has
+# Phased rollout: one guard (ruff lint) is committed but COMMENTED OUT at the
+# bottom of this file. The current tree has
 # pre-existing violations of each; every one gets fixed and flipped on in its own
 # follow-up cleanup PR. Until then, only the green hooks below are active so the
 # hook run and the lint CI stay green.
@@ -92,12 +92,23 @@ repos:
         files: ^(src|tests|scripts|tools)/.*\.py$
         stages: [pre-push]
 
+  - repo: https://github.com/RobertCraigie/pyright-python
+    rev: v1.1.408
+    hooks:
+      # pass_filenames: false so pyright runs over its configured include (src/)
+      # via pyrightconfig.json rather than per-file — explicit file args would
+      # override `include` and pull in tests/, which are intentionally unchecked.
+      # Whole-project is also correct for a type-checker: one file's change can
+      # break types in another.
+      - id: pyright
+        pass_filenames: false
+        stages: [pre-push]
+
   # ----------------------------------------------------------------------------
   # DEFERRED — committed but staged off until each guard's cleanup PR brings the
   # tree to green. Uncomment a block in the PR that fixes its violations.
   #
   #   ruff lint            213 violations  (ruff check)
-  #   pyright               30 errors
   # ----------------------------------------------------------------------------
   #
   # - repo: https://github.com/astral-sh/ruff-pre-commit
@@ -105,9 +116,3 @@ repos:
   #   hooks:
   #     - id: ruff-check
   #       args: [--fix]
-  #
-  # - repo: https://github.com/RobertCraigie/pyright-python
-  #   rev: v1.1.408
-  #   hooks:
-  #     - id: pyright
-  #       stages: [pre-push]

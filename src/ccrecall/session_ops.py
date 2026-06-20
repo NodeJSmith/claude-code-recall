@@ -287,6 +287,9 @@ def sync_session(
                 ),
             )
             branch_db_id = cursor.lastrowid
+        # branch_db_id is set on both paths above: existing_branches[leaf_uuid] (UPDATE) or
+        # lastrowid (INSERT, non-None after a successful insert). Narrow for the type checker.
+        assert branch_db_id is not None
 
         # Ensure only one active branch per session
         if is_active:

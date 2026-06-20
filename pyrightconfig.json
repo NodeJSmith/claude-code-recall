@@ -5,7 +5,9 @@
     "ignore": [
         "**/node_modules",
         "**/__pycache__",
-        "**/.venv"
+        "**/.venv",
+        "**/tests",
+        "**/tools"
     ],
     "venvPath": ".",
     "venv": ".venv",

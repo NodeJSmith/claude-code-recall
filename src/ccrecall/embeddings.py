@@ -11,14 +11,13 @@ import numpy as np
 # instead of raising at import time.
 try:
     from fastembed import TextEmbedding
-
-    DEPS_AVAILABLE = True
 except (ImportError, OSError):
     # OSError too: a native wheel that imports but can't load its shared library
     # (ABI mismatch, missing system lib) raises OSError, not ImportError — catch
     # both so import-time degrades instead of crashing.
     TextEmbedding = None
-    DEPS_AVAILABLE = False
+
+DEPS_AVAILABLE = TextEmbedding is not None
 
 EMBEDDING_MODEL = "jinaai/jina-embeddings-v2-small-en"
 EMBEDDING_VERSION = 2  # Bumped from 1 (bge-m3): different model and vector space.
@@ -61,6 +60,9 @@ def get_model(threads: int | None = None):
     if not DEPS_AVAILABLE:
         raise RuntimeError("fastembed not importable")
 
+    # DEPS_AVAILABLE is True only when the fastembed import bound TextEmbedding; the
+    # assert restates that invariant so the type checker sees a non-None constructor.
+    assert TextEmbedding is not None
     _model = TextEmbedding(model_name=EMBEDDING_MODEL, threads=resolve_thread_count(threads))
     return _model
 

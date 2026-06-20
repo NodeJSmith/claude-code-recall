@@ -12,9 +12,9 @@ from whenever import Instant
 from ccrecall.token_insights import build_insights_and_trends
 from ccrecall.token_parser import (
     _BASH_ANTIPATTERN_PREDICATE,
-    _get_pricing,
-    _project_slug,
-    _turn_cost,
+    get_pricing,
+    project_slug,
+    turn_cost,
 )
 
 # ── Build Output ──────────────────────────────────────────────────────
@@ -110,8 +110,8 @@ def build_output(conn: sqlite3.Connection) -> dict:
         WHERE model IS NOT NULL
         GROUP BY model ORDER BY inp + out DESC
     """):
-        pricing = _get_pricing(row[0])
-        cost = _turn_cost(row[1], row[2], row[4], row[5], row[6], row[7], pricing)
+        pricing = get_pricing(row[0])
+        cost = turn_cost(row[1], row[2], row[4], row[5], row[6], row[7], pricing)
         model_split.append(
             {
                 "model": row[0],
@@ -137,8 +137,8 @@ def build_output(conn: sqlite3.Connection) -> dict:
         GROUP BY day, t.model
     """):
         day = row[0]
-        pricing = _get_pricing(row[1])
-        day_cost = _turn_cost(row[2], row[3], row[4], row[5], row[6], row[7], pricing)
+        pricing = get_pricing(row[1])
+        day_cost = turn_cost(row[2], row[3], row[4], row[5], row[6], row[7], pricing)
         cost_by_day[day] = cost_by_day.get(day, 0.0) + day_cost
 
     cost_by_day_list = [{"date": d, "cost_usd": round(c, 4)} for d, c in sorted(cost_by_day.items())]
@@ -153,9 +153,9 @@ def build_output(conn: sqlite3.Connection) -> dict:
         JOIN session_metrics sm ON t.session_id = sm.session_id AND sm.is_sidechain = 0
         GROUP BY sm.project_path, t.model
     """):
-        slug = _project_slug(row[0])
-        pricing = _get_pricing(row[1])
-        proj_cost = _turn_cost(row[2], row[3], row[4], row[5], row[6], row[7], pricing)
+        slug = project_slug(row[0])
+        pricing = get_pricing(row[1])
+        proj_cost = turn_cost(row[2], row[3], row[4], row[5], row[6], row[7], pricing)
         cost_by_project[slug] = cost_by_project.get(slug, 0.0) + proj_cost
 
     cost_by_project_list = sorted(
@@ -193,7 +193,7 @@ def build_output(conn: sqlite3.Connection) -> dict:
         cache_trajectory.append(
             {
                 "session_id": tsid[:8],
-                "project": _project_slug(proj[0] if proj else None),
+                "project": project_slug(proj[0] if proj else None),
                 "turns": turns_data,
             }
         )
@@ -216,7 +216,7 @@ def build_output(conn: sqlite3.Connection) -> dict:
         ).fetchall()
 
         buckets: dict[int, dict[str, list[float]]] = {}
-        for sid, session_turns in groupby(all_turns, key=lambda r: r[0]):
+        for _sid, session_turns in groupby(all_turns, key=lambda r: r[0]):
             rows = list(session_turns)
             if not rows or rows[0][2] <= 0:
                 continue
@@ -331,7 +331,7 @@ def build_output(conn: sqlite3.Connection) -> dict:
         HAVING e5 + e1 > 0
         ORDER BY e5 + e1 DESC LIMIT 8
     """):
-        ephem_split.append({"project": _project_slug(row[0]), "ephem_5m": row[1], "ephem_1h": row[2]})
+        ephem_split.append({"project": project_slug(row[0]), "ephem_5m": row[1], "ephem_1h": row[2]})
 
     # ── Chart 7: Bash antipattern rate by project (computed at query time) ──
     bash_antipatterns = []
@@ -347,7 +347,7 @@ def build_output(conn: sqlite3.Connection) -> dict:
     """):
         bash_antipatterns.append(
             {
-                "project": _project_slug(row[0]),
+                "project": project_slug(row[0]),
                 "antipatterns": row[1],
                 "total_bash": row[2],
             }
@@ -429,7 +429,7 @@ def build_output(conn: sqlite3.Connection) -> dict:
         HAVING retries > 0
         ORDER BY retries DESC LIMIT 10
     """):
-        edit_retries.append({"project": _project_slug(row[0]), "retries": row[1]})
+        edit_retries.append({"project": project_slug(row[0]), "retries": row[1]})
     total_edit_retries = (
         cur.execute("""
         SELECT COUNT(*)
@@ -460,7 +460,7 @@ def build_output(conn: sqlite3.Connection) -> dict:
     """):
         agent_cost.append(
             {
-                "project": _project_slug(row[0]),
+                "project": project_slug(row[0]),
                 "parent_cost": row[1],
                 "agent_cost": row[2],
             }
@@ -536,7 +536,7 @@ def build_output(conn: sqlite3.Connection) -> dict:
     """):
         hook_overhead.append(
             {
-                "project": _project_slug(row[0]),
+                "project": project_slug(row[0]),
                 "hook_ms": row[1],
                 "sessions": row[2],
                 "avg_hook_ms": round(row[1] / row[2]) if row[2] else 0,
@@ -558,7 +558,7 @@ def build_output(conn: sqlite3.Connection) -> dict:
     """):
         project_spend.append(
             {
-                "project": _project_slug(row[0]),
+                "project": project_slug(row[0]),
                 "input_tokens": row[1],
                 "output_tokens": row[2],
                 "cache_creation": row[3],
@@ -577,7 +577,7 @@ def build_output(conn: sqlite3.Connection) -> dict:
             FROM session_metrics WHERE is_sidechain = 0
             GROUP BY project_path ORDER BY cost DESC LIMIT 5
         """):
-            project_paths[_project_slug(row[0])] = row[0]
+            project_paths[project_slug(row[0])] = row[0]
 
         for proj_slug, proj_path in project_paths.items():
             tools = {}

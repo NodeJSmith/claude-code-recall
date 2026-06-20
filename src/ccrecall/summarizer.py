@@ -91,7 +91,7 @@ def build_exchange_pairs(messages: list[dict]) -> list[dict]:
     exchanges = []
     current_user = None
     current_user_ts = None
-    current_asst_parts = []  # type: list[str]
+    current_asst_parts: list[str] = []
 
     for m in messages:
         if m["role"] == "user":

@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 import tempfile
+from typing import Any
 
 
 def main():
@@ -27,7 +28,9 @@ def main():
             raise
 
         # Background the sync
-        kwargs = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+        # Heterogeneous values (DEVNULL ints here, bool/int platform flags added below);
+        # dict[str, Any] lets **kwargs satisfy Popen's individually-typed keyword params.
+        kwargs: dict[str, Any] = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
         if sys.platform == "win32":
             kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
         else:

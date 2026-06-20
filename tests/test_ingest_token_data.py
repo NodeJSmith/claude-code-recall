@@ -16,7 +16,7 @@ from ccrecall.token_parser import (
     ParsedSession,
     Turn,
     _normalize_worktree_path,
-    _project_slug,
+    project_slug,
     parse_session,
     record_import,
     should_skip_file,
@@ -478,21 +478,21 @@ class TestWorktreeConsolidation:
     """Worktree sessions must be grouped under their parent repo, not as separate projects."""
 
     def test_project_slug_normalizes_worktree_path(self):
-        """_project_slug must produce the same slug for worktree and parent repo paths."""
+        """project_slug must produce the same slug for worktree and parent repo paths."""
         parent = "/home/jessica/source/hassette"
         worktree = "/home/jessica/source/hassette/.claude/worktrees/65-66"
-        assert _project_slug(worktree) == _project_slug(parent)
+        assert project_slug(worktree) == project_slug(parent)
 
     def test_project_slug_preserves_non_worktree_paths(self):
-        """_project_slug must not alter paths that don't contain worktree segments."""
+        """project_slug must not alter paths that don't contain worktree segments."""
         path = "/home/jessica/source/hassette"
-        assert _project_slug(path) == "source-hassette"
+        assert project_slug(path) == "source-hassette"
 
     def test_project_slug_handles_deep_worktree_branch_names(self):
         """Worktree branch names with slashes (e.g. feature/foo) must still normalize."""
         parent = "/home/jessica/source/myapp"
         worktree = "/home/jessica/source/myapp/.claude/worktrees/feature/fix-bug"
-        assert _project_slug(worktree) == _project_slug(parent)
+        assert project_slug(worktree) == project_slug(parent)
 
     def test_normalize_worktree_path_strips_suffix(self):
         """_normalize_worktree_path must strip /.claude/worktrees/<branch>."""

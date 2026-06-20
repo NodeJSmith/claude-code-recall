@@ -7,9 +7,9 @@ import sqlite3
 
 from ccrecall.token_parser import (
     _BASH_ANTIPATTERN_PREDICATE,
-    _get_pricing,
-    _project_slug,
-    _turn_cost,
+    get_pricing,
+    project_slug,
+    turn_cost,
 )
 
 # ── Public API ─────────────────────────────────────────────────────────
@@ -49,7 +49,7 @@ def build_insights_and_trends(
         FROM session_metrics WHERE is_sidechain = 0 AND cache_cliff_count > 0
         GROUP BY project_path ORDER BY cliffs DESC LIMIT 5
     """):
-        cache_cliff_projects.append({"project": _project_slug(row[0]), "cliffs": row[1], "sessions": row[2]})
+        cache_cliff_projects.append({"project": project_slug(row[0]), "cliffs": row[1], "sessions": row[2]})
 
     # Root-cause detail: top antipattern commands
     top_bash_cmds = []
@@ -66,8 +66,8 @@ def build_insights_and_trends(
     avg_input_cpm = 5.0
     avg_output_cpm = 25.0
     if model_split:
-        weighted_in = sum(m["input_tokens"] * _get_pricing(m["model"])["input"] for m in model_split)
-        weighted_out = sum(m["output_tokens"] * _get_pricing(m["model"])["output"] for m in model_split)
+        weighted_in = sum(m["input_tokens"] * get_pricing(m["model"])["input"] for m in model_split)
+        weighted_out = sum(m["output_tokens"] * get_pricing(m["model"])["output"] for m in model_split)
         total_in = sum(m["input_tokens"] for m in model_split) or 1
         total_out = sum(m["output_tokens"] for m in model_split) or 1
         avg_input_cpm = weighted_in / total_in
@@ -176,8 +176,8 @@ def build_trends(conn: sqlite3.Connection) -> dict:
             WHERE sm.is_sidechain = 0 AND {where_clause}
             GROUP BY t.model
         """):
-            pricing = _get_pricing(crow[0])
-            window_cost += _turn_cost(
+            pricing = get_pricing(crow[0])
+            window_cost += turn_cost(
                 crow[1] or 0,
                 crow[2] or 0,
                 crow[3] or 0,
