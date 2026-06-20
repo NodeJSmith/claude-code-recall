@@ -4,20 +4,26 @@ Session formatting, time utilities, and project path helpers.
 """
 
 import json
-from datetime import datetime
 from pathlib import Path
+
+from whenever import Instant
 
 
 def format_time(ts_str: str | None, fmt: str = "%H:%M") -> str:
     """
-    Format ISO timestamp to specified format.
-    Default: HH:MM
+    Format an offset-aware ISO timestamp (Z or +HH:MM) to the given strftime
+    format in the local timezone. Default: HH:MM.
+
+    Expects the timezone-aware ISO strings the session journal emits; a naive
+    string (no offset) is rejected by the parser and returns the raw prefix.
     """
     if not ts_str:
         return "??:??"
     try:
-        dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
-        return dt.astimezone().strftime(fmt)
+        # whenever owns the parse/tz-convert; strftime needs a stdlib datetime,
+        # so cross back at the boundary for the caller's custom format string.
+        local = Instant.parse_iso(ts_str).to_system_tz()
+        return local.to_stdlib().strftime(fmt)
     except Exception:
         return ts_str[:16] if ts_str else "??:??"
 

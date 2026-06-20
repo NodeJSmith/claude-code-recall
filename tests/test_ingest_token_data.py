@@ -5,6 +5,7 @@ Gap 4: turns must be skip-if-exists on reimport, and session_metrics totals
 must not double when the same session is ingested twice.
 """
 
+import json
 import sqlite3
 from pathlib import Path
 
@@ -16,6 +17,7 @@ from ccrecall.token_parser import (
     Turn,
     _normalize_worktree_path,
     _project_slug,
+    parse_session,
     record_import,
     should_skip_file,
 )
@@ -645,3 +647,54 @@ class TestWorktreeConsolidation:
         assert snap_path == "/home/jessica/source/hassette", (
             f"Migration must normalize token_snapshots paths, got: {snap_path}"
         )
+
+
+# ---------------------------------------------------------------------------
+# user_gap_ms — gap between a turn_duration finish and the next assistant turn
+# ---------------------------------------------------------------------------
+
+
+class TestUserGapComputation:
+    """Pins the assistant-finish → next-turn gap (ISO-timestamp delta in ms)."""
+
+    def test_user_gap_ms_between_turns(self, tmp_path):
+        # Turn 1 finishes (turn_duration) at 10:00:05.000; turn 2 starts at
+        # 10:00:12.500 → gap is exactly 7.5s = 7500ms. Fractional seconds catch
+        # any millisecond-precision regression in the timestamp math.
+        lines = [
+            {
+                "type": "assistant",
+                "sessionId": "sid-gap",
+                "timestamp": "2026-03-01T10:00:00.000Z",
+                "message": {"id": "msg-1", "usage": {"output_tokens": 10}},
+            },
+            {
+                # turn_duration sets last_assistant_ts — the gap anchor.
+                "type": "system",
+                "subtype": "turn_duration",
+                "timestamp": "2026-03-01T10:00:05.000Z",
+                "durationMs": 5000,
+            },
+            {
+                "type": "assistant",
+                "sessionId": "sid-gap",
+                "timestamp": "2026-03-01T10:00:12.500Z",
+                "message": {"id": "msg-2", "usage": {"output_tokens": 10}},
+            },
+        ]
+        jnl_path = tmp_path / "sid-gap.jsonl"
+        jnl_path.write_text("\n".join(json.dumps(line) for line in lines))
+        jnl = JnlFile(
+            path=jnl_path,
+            project_cwd="/test/project",
+            is_sidechain=False,
+            parent_session_id=None,
+        )
+
+        session = parse_session(jnl_path, jnl)
+
+        assert session is not None
+        assert len(session.turns) == 2
+        # Turn 1: no prior turn_duration, so the gap is undefined.
+        assert session.turns[0].user_gap_ms is None
+        assert session.turns[1].user_gap_ms == 7500

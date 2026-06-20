@@ -18,8 +18,9 @@ Output: JSON with hookSpecificOutput for context injection
 import json
 import sqlite3
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
+
+from whenever import Instant
 
 # Add path to shared utils
 
@@ -202,8 +203,9 @@ def _find_cleared_from_session_uuid(db_path: Path, cwd: str) -> str | None:
     # Stale guard: reject handoffs older than 30 seconds
     if timestamp_str:
         try:
-            written = datetime.fromisoformat(timestamp_str)
-            age = (datetime.now(timezone.utc) - written).total_seconds()
+            written = Instant.parse_iso(timestamp_str)
+            # TimeDelta.total() takes a unit string; this is age in seconds.
+            age = (Instant.now() - written).total("seconds")
             if age > 30:
                 try:
                     handoff_path.unlink()

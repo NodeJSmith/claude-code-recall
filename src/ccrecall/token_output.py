@@ -6,8 +6,9 @@ consumed by the HTML dashboard and the slim JSON printed to stdout.
 """
 
 import sqlite3
-from datetime import datetime, timezone
 from itertools import groupby
+
+from whenever import Instant
 
 from ccrecall.token_insights import build_insights_and_trends
 from ccrecall.token_parser import (
@@ -702,7 +703,7 @@ def build_output(conn: sqlite3.Connection) -> dict:
     )
 
     return {
-        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "generated_at": Instant.now().format_iso(),
         "total_sessions": total_sessions,
         "date_range": {
             "earliest": dr[0][:10] if dr and dr[0] else None,

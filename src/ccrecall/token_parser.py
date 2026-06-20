@@ -7,8 +7,9 @@ for the token ingest pipeline.
 import json
 import sqlite3
 from dataclasses import dataclass, field
-from datetime import datetime
 from pathlib import Path
+
+from whenever import Instant
 
 PROJECTS_DIR = Path.home() / ".claude" / "projects"
 
@@ -355,12 +356,11 @@ def parse_session(filepath: Path, jnl: JnlFile) -> ParsedSession | None:
                 # Compute user gap from last assistant finish
                 if last_assistant_ts and ts:
                     try:
-                        prev = datetime.fromisoformat(
-                            last_assistant_ts.replace("Z", "+00:00")
-                        )
-                        curr = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                        prev = Instant.parse_iso(last_assistant_ts)
+                        curr = Instant.parse_iso(ts)
+                        # TimeDelta.total() takes a unit string; gap in ms.
                         current_turn.user_gap_ms = int(
-                            (curr - prev).total_seconds() * 1000
+                            (curr - prev).total("milliseconds")
                         )
                     except (ValueError, TypeError):
                         pass
