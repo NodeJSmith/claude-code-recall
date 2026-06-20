@@ -6,8 +6,8 @@
 # Staging: fast, always-green hooks run at pre-commit; heavier checks run at
 # pre-push. `default_install_hook_types` below wires both stages automatically.
 #
-# Phased rollout: a few guards (ruff lint, pyright, check-lazy-imports) are
-# committed but COMMENTED OUT at the bottom of this file. The current tree has
+# Phased rollout: two guards (ruff lint, pyright) are committed but COMMENTED
+# OUT at the bottom of this file. The current tree has
 # pre-existing violations of each; every one gets fixed and flipped on in its own
 # follow-up cleanup PR. Until then, only the green hooks below are active so the
 # hook run and the lint CI stay green.
@@ -84,13 +84,20 @@ repos:
         files: ^(src|tests|scripts|tools)/.*\.py$
         stages: [pre-push]
 
+      - id: check-lazy-imports
+        name: Ban lazy imports (use '# lazy-import:' to defend circular-import cases)
+        language: system
+        entry: ./tools/check_lazy_imports.py
+        pass_filenames: false
+        files: ^(src|tests|scripts|tools)/.*\.py$
+        stages: [pre-push]
+
   # ----------------------------------------------------------------------------
   # DEFERRED — committed but staged off until each guard's cleanup PR brings the
   # tree to green. Uncomment a block in the PR that fixes its violations.
   #
   #   ruff lint            213 violations  (ruff check)
   #   pyright               30 errors
-  #   check-lazy-imports     8 lazy imports
   # ----------------------------------------------------------------------------
   #
   # - repo: https://github.com/astral-sh/ruff-pre-commit
@@ -103,14 +110,4 @@ repos:
   #   rev: v1.1.408
   #   hooks:
   #     - id: pyright
-  #       stages: [pre-push]
-  #
-  # - repo: local
-  #   hooks:
-  #     - id: check-lazy-imports
-  #       name: Ban lazy imports (use '# lazy-import:' to defend circular-import cases)
-  #       language: system
-  #       entry: ./tools/check_lazy_imports.py
-  #       pass_filenames: false
-  #       files: ^(src|tests|scripts|tools)/.*\.py$
   #       stages: [pre-push]
