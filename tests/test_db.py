@@ -1,5 +1,6 @@
 """Tests for ccrecall.db — schema creation, migration, settings."""
 
+import contextlib
 import inspect
 import json
 import sqlite3
@@ -959,8 +960,8 @@ def _v4_db_for_v5_tests():
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     """)
-    # FTS5 branches table (for FTS rebuild test)
-    try:
+    # FTS5 branches table (for FTS rebuild test). FTS5 may not be available in all test environments.
+    with contextlib.suppress(Exception):
         conn.execute("""
             CREATE VIRTUAL TABLE IF NOT EXISTS branches_fts USING fts5(
               aggregated_content,
@@ -969,8 +970,6 @@ def _v4_db_for_v5_tests():
               tokenize='porter unicode61'
             )
         """)
-    except Exception:
-        pass  # FTS5 may not be available in all test environments
     conn.execute("PRAGMA user_version = 4")
     conn.commit()
     return conn

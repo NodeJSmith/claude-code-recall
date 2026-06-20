@@ -1,6 +1,6 @@
 """SessionStart hook - setup memory directory and trigger initial import."""
 
-import glob
+import contextlib
 import json
 import os
 import subprocess
@@ -39,7 +39,7 @@ def _spawn_background(cmd: str) -> None:
         try:
             # Atomic create — fails with FileExistsError if file already exists
             fd = os.open(str(pid_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        except FileExistsError:
+        except FileExistsError:  # noqa: PERF203 — the try/except IS the retry mechanism for atomic PID-file creation
             # File exists — check if the owning process is alive
             try:
                 existing_pid = int(pid_path.read_text().strip())
@@ -48,10 +48,8 @@ def _spawn_background(cmd: str) -> None:
                 return
             except (ValueError, OSError):
                 # Dead process (OSError ESRCH) or unreadable PID — reap and retry
-                try:
+                with contextlib.suppress(OSError):
                     pid_path.unlink()
-                except OSError:
-                    pass
                 continue
         else:
             break
@@ -63,7 +61,7 @@ def _spawn_background(cmd: str) -> None:
     else:
         kwargs["start_new_session"] = True
     try:
-        proc = subprocess.Popen([cmd], **kwargs)
+        proc = subprocess.Popen([cmd], **kwargs)  # noqa: S603 — spawns a trusted internal command, not untrusted input
         # Write child PID so the child process can clean up the file on exit
         os.write(fd, str(proc.pid).encode())
     finally:
@@ -72,11 +70,9 @@ def _spawn_background(cmd: str) -> None:
 
 def _ensure_schema(settings: dict | None = None) -> None:
     """Open DB connection to trigger _migrate_columns (creates token_snapshots if missing)."""
-    try:
+    with contextlib.suppress(Exception):
         conn = get_db_connection(settings)
         conn.close()
-    except Exception:
-        pass
 
 
 def _needs_reimport(settings: dict | None = None) -> bool:
@@ -120,14 +116,12 @@ def _reap_stale_temp_files() -> None:
     These are left behind when cm-sync-current crashes or is killed before it
     can clean up its own input file.
     """
-    pattern = os.path.join(tempfile.gettempdir(), "claude-memory-sync-*.json")
+    tmp_dir = Path(tempfile.gettempdir())
     one_hour_ago = time.time() - 3600
-    for path in glob.glob(pattern):
-        try:
-            if os.path.getmtime(path) < one_hour_ago:
-                os.unlink(path)
-        except OSError:
-            pass
+    for path in tmp_dir.glob("claude-memory-sync-*.json"):
+        with contextlib.suppress(OSError):
+            if path.stat().st_mtime < one_hour_ago:
+                path.unlink()
 
 
 def main():
@@ -155,7 +149,7 @@ def main():
         # forward by embed-on-write (active leaves only); historical seeding is
         # opt-in via `cm-backfill-embeddings [--days N] [--limit N]` so embedding
         # the full history never fires unbidden (machines.md thrash risk).
-    except Exception:
+    except Exception:  # noqa: S110 — top-level hook guard: must never crash the session start
         pass
 
     print(json.dumps({"continue": True}))

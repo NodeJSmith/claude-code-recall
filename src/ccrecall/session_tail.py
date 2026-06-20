@@ -20,7 +20,6 @@ for locating files. So we encode the raw cwd here.
 """
 
 import argparse
-import os
 import sys
 from collections import deque
 from pathlib import Path
@@ -216,9 +215,11 @@ def build_tail(entries: list[dict], k: int) -> list[tuple[str, str]]:
             if text:
                 events.append(("assistant", clip(text)))
             if isinstance(content, list):
-                for block in content:
-                    if isinstance(block, dict) and block.get("type") == "tool_use":
-                        events.append(("tool", block.get("name", "?")))
+                events.extend(
+                    ("tool", block.get("name", "?"))
+                    for block in content
+                    if isinstance(block, dict) and block.get("type") == "tool_use"
+                )
     return events[-k:]
 
 
@@ -234,8 +235,9 @@ def format_pending_block(payload: dict, *, for_injection: bool = False) -> str:
         )
         for q in payload.get("questions", []):
             lines.append(f"- **Q:** {q.get('question', '')}")
-            for opt in q.get("options", []):
-                lines.append(f"  - {opt.get('label', '')}: {clip(opt.get('description', ''), 160)}")
+            lines.extend(
+                f"  - {opt.get('label', '')}: {clip(opt.get('description', ''), 160)}" for opt in q.get("options", [])
+            )
     else:
         lines.append("⚠ PENDING QUESTION — prior session stopped at an UNANSWERED AskUserQuestion.")
         lines.append("  Surface this to the user. Do NOT answer it or act on it yourself.")
@@ -331,7 +333,7 @@ def main() -> int:
     )
     ap.add_argument("selector", nargs="?", help="session id or substring to target")
     ap.add_argument("--list", action="store_true", help="list sessions and exit")
-    ap.add_argument("--cwd", default=os.getcwd(), help="derive project dir from this path")
+    ap.add_argument("--cwd", default=str(Path.cwd()), help="derive project dir from this path")
     ap.add_argument(
         "-n",
         type=int,

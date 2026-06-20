@@ -8,7 +8,7 @@ a silent no-op.
 
 import json
 
-from ccrecall.db import CONFIG_PATH as CONFIG_PATH  # noqa: F401 — re-exported for test monkeypatching
+from ccrecall.db import CONFIG_PATH as CONFIG_PATH
 from ccrecall.db import CURRENT_ONBOARDING_VERSION, load_config
 
 

@@ -1,5 +1,6 @@
 """SessionEnd hook (matcher: clear) — writes handoff file for SessionStart to link sessions."""
 
+import contextlib
 import json
 import sys
 
@@ -23,7 +24,8 @@ def main():
     if not session_id or not cwd:
         return
 
-    try:
+    # Best-effort: a failed handoff write must not surface an error on session clear.
+    with contextlib.suppress(Exception):
         settings = load_settings()
         db_path = get_db_path(settings)
         handoff_path = db_path.parent / "clear-handoff.json"
@@ -37,8 +39,6 @@ def main():
             ),
             encoding="utf-8",
         )
-    except Exception:
-        pass
 
 
 if __name__ == "__main__":

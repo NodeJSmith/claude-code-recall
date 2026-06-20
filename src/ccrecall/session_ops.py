@@ -16,6 +16,7 @@ A ``NULL``-hash import_log entry is treated as stale: when the import path sees
 the file and updates the row.
 """
 
+import contextlib
 import json
 import sqlite3
 from pathlib import Path
@@ -289,7 +290,7 @@ def sync_session(
             branch_db_id = cursor.lastrowid
         # branch_db_id is set on both paths above: existing_branches[leaf_uuid] (UPDATE) or
         # lastrowid (INSERT, non-None after a successful insert). Narrow for the type checker.
-        assert branch_db_id is not None
+        assert branch_db_id is not None  # noqa: S101 — type-checker narrowing; set on both branches above
 
         # Ensure only one active branch per session
         if is_active:
@@ -358,11 +359,10 @@ def sync_session(
         # If the upsert raises and is swallowed, version columns stay at 0
         # so the branch remains eligible for backfill (no "version done, no vector").
         if summary_md and is_active and vec_writable:
-            try:
+            # Don't fail sync/import on embedding errors — the branch stays eligible for backfill.
+            with contextlib.suppress(Exception):
                 vec = embed_text(summary_md)
                 write_branch_embedding(cursor, branch_db_id, vec, SUMMARY_VERSION)
-            except Exception:
-                pass  # Don't fail sync/import on embedding errors
 
     # Update import_log
     if write_import_log:

@@ -15,6 +15,7 @@ Selection Algorithm (clear):
 Output: JSON with hookSpecificOutput for context injection
 """
 
+import contextlib
 import json
 import sqlite3
 import sys
@@ -182,10 +183,8 @@ def _find_cleared_from_session_uuid(db_path: Path, cwd: str) -> str | None:
     try:
         data = json.loads(handoff_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        try:
+        with contextlib.suppress(OSError):
             handoff_path.unlink()
-        except OSError:
-            pass
         return None
 
     session_id = data.get("session_id")
@@ -204,24 +203,18 @@ def _find_cleared_from_session_uuid(db_path: Path, cwd: str) -> str | None:
             # TimeDelta.total() takes a unit string; this is age in seconds.
             age = (Instant.now() - written).total("seconds")
             if age > 30:
-                try:
+                with contextlib.suppress(OSError):
                     handoff_path.unlink()
-                except OSError:
-                    pass
                 return None
         except Exception:
             # Unparseable timestamp — treat as invalid; delete and reject
-            try:
+            with contextlib.suppress(OSError):
                 handoff_path.unlink()
-            except OSError:
-                pass
             return None
 
     # Consume the file only after validation passes
-    try:
+    with contextlib.suppress(OSError):
         handoff_path.unlink()
-    except OSError:
-        pass
 
     return session_id
 
@@ -303,7 +296,7 @@ def select_sessions(
     # remaining slots go to short sessions that are more recent
     if substantive:
         recent_shorts = short_sessions[: max_sessions - 1]
-        filtered = recent_shorts + [substantive]
+        filtered = [*recent_shorts, substantive]
     else:
         filtered = short_sessions[:max_sessions]
 
@@ -367,10 +360,7 @@ def build_origin_block(source: str, sessions: list[dict]) -> str:
     branch = primary.get("git_branch", "unknown")
     exchanges = primary.get("exchange_count", 0)
 
-    if source == "clear":
-        source_label = "clear (continuing same session)"
-    else:
-        source_label = "startup (new session)"
+    source_label = "clear (continuing same session)" if source == "clear" else "startup (new session)"
 
     uuid = primary.get("uuid", "")
     lines = [
@@ -480,7 +470,7 @@ def main():
             print(json.dumps({}))
             return
 
-        logger.info(f"Injecting context from {len(sessions)} session(s) for project {project_key}")
+        logger.info("Injecting context from %s session(s) for project %s", len(sessions), project_key)
 
         # Top-of-context directive: placed first because the hook's inline
         # preview may be truncated by the harness, and because earlier tokens
@@ -514,7 +504,7 @@ def main():
         print(json.dumps(output))
 
     except Exception as e:
-        logger.error(f"Context injection error: {e}")
+        logger.error("Context injection error: %s", e)
         # Don't block session start on errors
         print(json.dumps({}))
         sys.exit(0)

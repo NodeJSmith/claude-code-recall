@@ -10,8 +10,8 @@ v3 schema: messages stored once per session, branches as a separate index.
 """
 
 import argparse
+import contextlib
 import json
-import os
 import re
 import sys
 from pathlib import Path
@@ -94,10 +94,8 @@ def main():
             hook_input = {}
         finally:
             # Clean up temp file
-            try:
-                os.unlink(args.input_file)
-            except OSError:
-                pass
+            with contextlib.suppress(OSError):
+                args.input_file.unlink()
     else:
         try:
             hook_input = json.load(sys.stdin)
@@ -139,7 +137,7 @@ def main():
         conn.close()
 
         if new_messages > 0:
-            logger.info(f"Synced {new_messages} new message(s) from session {session_id[:8]}")
+            logger.info("Synced %s new message(s) from session %s", new_messages, session_id[:8])
 
         # Output for hook (continue = True means don't block)
         output = {"continue": True}
@@ -149,7 +147,7 @@ def main():
         print(json.dumps(output))
 
     except Exception as e:
-        logger.error(f"Sync error: {e}")
+        logger.error("Sync error: %s", e)
         # Don't block Claude on sync errors
         print(json.dumps({"continue": True}))
         sys.exit(0)

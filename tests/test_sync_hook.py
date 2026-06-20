@@ -1,8 +1,11 @@
 """Integration tests for sync_current.py hook."""
 
+import contextlib
 import io
 import os
 import sqlite3
+import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -46,7 +49,7 @@ class TestSyncSessionCreatesBranches:
 
     def test_sync_session_creates_branches(self, memory_db_with_project):
         """sync_session should create branches from a fixture with rewinding."""
-        conn, project_id = memory_db_with_project
+        conn, _project_id = memory_db_with_project
         fixture_path = FIXTURE_DIR / "single_rewind.jsonl"
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -79,7 +82,7 @@ class TestSyncSessionCreatesBranches:
 
     def test_sync_session_populates_branch_content(self, memory_db_with_project):
         """Aggregated content should be populated after sync."""
-        conn, project_id = memory_db_with_project
+        conn, _project_id = memory_db_with_project
         fixture_path = FIXTURE_DIR / "single_rewind.jsonl"
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -95,7 +98,7 @@ class TestSyncSessionCreatesBranches:
 
     def test_sync_session_populates_context_summary(self, memory_db_with_project):
         """Context summary and summary_version should be populated after sync."""
-        conn, project_id = memory_db_with_project
+        conn, _project_id = memory_db_with_project
         fixture_path = FIXTURE_DIR / "single_rewind.jsonl"
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -123,7 +126,7 @@ class TestSyncSessionUpdatesExisting:
         Verifies both the Python-level dedup (existing_uuids set check)
         and the overall idempotency of sync_session.
         """
-        conn, project_id = memory_db_with_project
+        conn, _project_id = memory_db_with_project
         fixture_path = FIXTURE_DIR / "single_rewind.jsonl"
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -369,17 +372,17 @@ class TestPidGuard:
         pid_path = tmp_path / ".pid-cm-test-cmd"
         monkeypatch.setattr(memory_setup, "_PID_DIR", tmp_path)
 
-        # Use PID 1 for kernel (always alive) — we need a truly dead PID.
-        # os.fork() gives us a real dead PID safely.
-        child_pid = os.fork()
-        if child_pid == 0:
-            # Child exits immediately
-            os._exit(0)
-        # Wait for child to die
-        os.waitpid(child_pid, 0)
+        # We need a real PID that is guaranteed dead. Spawn a trivial subprocess
+        # and reap it. Deliberately NOT os.fork(): by the time this test runs the
+        # process has usually started threads (the embedding model's onnxruntime
+        # pool), and forking a multi-threaded process can deadlock the child — an
+        # intermittent CI hang. Popen+wait gives the same dead PID with no fork.
+        proc = subprocess.Popen([sys.executable, "-c", ""])
+        proc.wait()
+        dead_pid = proc.pid
 
-        # Write the dead child's PID to the file
-        pid_path.write_text(str(child_pid))
+        # Write the dead PID to the file
+        pid_path.write_text(str(dead_pid))
 
         mock_proc = MagicMock()
         mock_proc.pid = 99999
@@ -409,10 +412,13 @@ class TestPidGuard:
         mock_proc = MagicMock()
         mock_proc.pid = 12345
 
-        with patch("os.open", side_effect=capturing_open), patch("subprocess.Popen", return_value=mock_proc):
-            with patch("os.write"):
-                with patch("os.close"):
-                    memory_setup._spawn_background("cm-test-cmd")
+        with (
+            patch("os.open", side_effect=capturing_open),
+            patch("subprocess.Popen", return_value=mock_proc),
+            patch("os.write"),
+            patch("os.close"),
+        ):
+            memory_setup._spawn_background("cm-test-cmd")
 
         assert created_flags, "os.open must have been called for the PID file"
         flags = created_flags[0]
@@ -436,17 +442,17 @@ class TestMemorySyncTempCleanup:
             mock_file = MagicMock()
             mock_fdopen.return_value.__enter__ = MagicMock(return_value=mock_file)
             mock_fdopen.return_value.__exit__ = MagicMock(return_value=False)
-            with patch("subprocess.Popen", side_effect=OSError("no such file")):
-                with patch("os.unlink") as mock_unlink:
-                    # Run with a stdin that returns empty content
-                    with patch("sys.stdin") as mock_stdin:
-                        mock_stdin.read.return_value = '{"session": "test"}'
-                        try:
-                            memory_sync.main()
-                        except Exception:
-                            pass
-                    # Verify unlink was called with our tmp path
-                    mock_unlink.assert_any_call(tmp_path_str)
+            with (
+                patch("subprocess.Popen", side_effect=OSError("no such file")),
+                patch("sys.stdin") as mock_stdin,
+            ):
+                # Run with a stdin that returns empty content
+                mock_stdin.read.return_value = '{"session": "test"}'
+                with contextlib.suppress(Exception):
+                    memory_sync.main()
+
+        # Popen failed, so the cleanup path must have deleted the real temp file
+        assert not tmp_file.exists(), "temp file should be unlinked when Popen fails"
 
 
 class TestReapStaleTempFiles:

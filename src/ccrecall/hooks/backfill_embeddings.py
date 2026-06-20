@@ -18,6 +18,7 @@ non-zero so the scheduler sees the failure.
 """
 
 import argparse
+import contextlib
 import json
 import os
 import sys
@@ -148,7 +149,7 @@ def run_status(args, settings, logger) -> int:
     try:
         conn = get_db_connection(settings, load_vec=True)
     except Exception as e:
-        logger.error(f"Backfill status: failed to connect to DB: {e}")
+        logger.error("Backfill status: failed to connect to DB: %s", e)
         print(f"cm-backfill-embeddings: failed to connect to DB: {e}", file=sys.stderr)
         return EXIT_ABORT
 
@@ -191,10 +192,8 @@ def main():
         code = _main()
     finally:
         if not is_status:
-            try:
+            with contextlib.suppress(OSError):
                 _PID_FILE.unlink(missing_ok=True)
-            except OSError:
-                pass
     sys.exit(code)
 
 
@@ -252,10 +251,8 @@ def _main(argv: list[str] | None = None) -> int:
     # Background CPU job: lower scheduling priority so the bounded inference
     # threads yield to interactive work (machines.md thrash risk). Best-effort —
     # os.nice is POSIX-only and may be denied; either way the run proceeds.
-    try:
+    with contextlib.suppress(AttributeError, OSError):
         os.nice(10)
-    except (AttributeError, OSError):
-        pass
 
     # ABORT level: check model availability before touching any rows.
     # model_available() warms the singleton session on success — no extra cost.
@@ -271,7 +268,7 @@ def _main(argv: list[str] | None = None) -> int:
     try:
         conn = get_db_connection(settings, load_vec=True)
     except Exception as e:
-        logger.error(f"Backfill embeddings: failed to connect to DB: {e}")
+        logger.error("Backfill embeddings: failed to connect to DB: %s", e)
         print(
             f"cm-backfill-embeddings: failed to connect to DB: {e}",
             file=sys.stderr,
@@ -306,7 +303,7 @@ def _main(argv: list[str] | None = None) -> int:
     if args.limit is not None:
         total_eligible = min(total_eligible, args.limit)
 
-    logger.info(f"Backfill embeddings: starting, {total_eligible} branches to embed")
+    logger.info("Backfill embeddings: starting, %s branches to embed", total_eligible)
     print(
         f"cm-backfill-embeddings: starting, {total_eligible} to embed",
         file=sys.stderr,
@@ -361,11 +358,11 @@ def _main(argv: list[str] | None = None) -> int:
                         "UPDATE branches SET embedding_version = ? WHERE id = ?",
                         (CONTENT_ERROR_VERSION, branch_id),
                     )
-                    logger.error(f"Backfill embeddings: branch {branch_id} failed: {e}")
+                    logger.error("Backfill embeddings: branch %s failed: %s", branch_id, e)
         except Exception as e:
             # Infra/session failure (e.g. ONNX session crash, OOM): abort without
             # marking any further rows — they stay eligible for the next run.
-            logger.error(f"Backfill embeddings: session failure, aborting: {e}")
+            logger.error("Backfill embeddings: session failure, aborting: %s", e)
             conn.commit()
             conn.close()
             return EXIT_ABORT
@@ -383,7 +380,7 @@ def _main(argv: list[str] | None = None) -> int:
                 f"{total_updated}/{total_eligible} embedded, {remaining} left, "
                 f"{format_duration(elapsed)} elapsed, ETA {eta}"
             )
-            logger.info(f"Backfill embeddings: {msg}")
+            logger.info("Backfill embeddings: %s", msg)
             print(f"cm-backfill-embeddings: {msg}", file=sys.stderr)
             last_progress = total_updated
 
@@ -392,7 +389,7 @@ def _main(argv: list[str] | None = None) -> int:
     conn.close()
     elapsed = time.monotonic() - started
     remaining = max(0, total_eligible - total_updated)
-    logger.info(f"Backfill embeddings complete: {total_updated} branches embedded in {format_duration(elapsed)}")
+    logger.info("Backfill embeddings complete: %s branches embedded in %s", total_updated, format_duration(elapsed))
     if args.json:
         print(
             json.dumps(

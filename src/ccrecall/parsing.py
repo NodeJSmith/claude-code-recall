@@ -141,10 +141,7 @@ def find_all_branches(all_entries: list[dict]) -> list[dict]:
         entry = uuid_to_entry.get(uuid)
         if entry and entry.get("type") == "user":
             return True
-        for kid in children.get(uuid, []):
-            if has_user_descendant(kid, depth + 1):
-                return True
-        return False
+        return any(has_user_descendant(kid, depth + 1) for kid in children.get(uuid, []))
 
     def collect_subtree(uuid: str) -> set[str]:
         result: set[str] = set()

@@ -150,7 +150,7 @@ class TestImportSessionWritesRealHashImportLog:
         """When write_import_log=True with a real hash, import_log stores that hash."""
 
         fixture_path = FIXTURE_DIR / "linear_3_exchange.jsonl"
-        h = hashlib.md5()
+        h = hashlib.md5(usedforsecurity=False)
         with open(fixture_path, "rb") as fh:
             for chunk in iter(lambda: fh.read(8192), b""):
                 h.update(chunk)
@@ -210,7 +210,7 @@ class TestImportSkipsNullHashEntry:
         assert cursor.fetchone()[0] is None, "Setup: hash should be NULL"
 
         # Now simulate import path: compute real hash and call sync_session again
-        h = hashlib.md5()
+        h = hashlib.md5(usedforsecurity=False)
         with open(fixture_path, "rb") as fh:
             for chunk in iter(lambda: fh.read(8192), b""):
                 h.update(chunk)
@@ -273,7 +273,7 @@ class TestSyncThenImportDedupIntegration:
         assert messages_after_sync > 0
 
         # Step 2: import path computes hash and re-syncs
-        h = hashlib.md5()
+        h = hashlib.md5(usedforsecurity=False)
         with open(fixture_path, "rb") as fh:
             for chunk in iter(lambda: fh.read(8192), b""):
                 h.update(chunk)
@@ -417,10 +417,12 @@ class TestEmbedOnWriteModelUnavailable:
         conn.commit()
         _migrate_columns(conn)
 
-        with patch("ccrecall.session_ops.embed_text", side_effect=RuntimeError("no model")):
-            with tempfile.TemporaryDirectory() as tmpdir:
-                result = sync_session(conn, fixture_path, Path(tmpdir))
-                conn.commit()
+        with (
+            patch("ccrecall.session_ops.embed_text", side_effect=RuntimeError("no model")),
+            tempfile.TemporaryDirectory() as tmpdir,
+        ):
+            result = sync_session(conn, fixture_path, Path(tmpdir))
+            conn.commit()
 
         # sync must succeed
         assert result >= 0
@@ -459,10 +461,12 @@ class TestEmbedOnWriteOrderingInvariant:
 
         fake_vec = [0.1] * EMBEDDING_DIM
 
-        with patch("ccrecall.session_ops.embed_text", return_value=fake_vec):
-            with tempfile.TemporaryDirectory() as tmpdir:
-                result = sync_session(conn, fixture_path, Path(tmpdir))
-                conn.commit()
+        with (
+            patch("ccrecall.session_ops.embed_text", return_value=fake_vec),
+            tempfile.TemporaryDirectory() as tmpdir,
+        ):
+            result = sync_session(conn, fixture_path, Path(tmpdir))
+            conn.commit()
 
         # sync must succeed
         assert result >= 0
@@ -499,10 +503,12 @@ class TestEmbedOnWriteSuccess:
 
         fake_vec = [0.1] * EMBEDDING_DIM
 
-        with patch("ccrecall.session_ops.embed_text", return_value=fake_vec):
-            with tempfile.TemporaryDirectory() as tmpdir:
-                result = sync_session(conn, fixture_path, Path(tmpdir))
-                conn.commit()
+        with (
+            patch("ccrecall.session_ops.embed_text", return_value=fake_vec),
+            tempfile.TemporaryDirectory() as tmpdir,
+        ):
+            result = sync_session(conn, fixture_path, Path(tmpdir))
+            conn.commit()
 
         assert result >= 0
 

@@ -133,7 +133,7 @@ class TestWriteConfigAtomicWrite:
 
         monkeypatch.setattr(os, "fdopen", exploding_fdopen)
 
-        with pytest.raises(OSError):
+        with pytest.raises(OSError, match="simulated write failure"):
             _run_main(["--defaults"])
 
         tmp_files = list(tmp_path.glob("*.tmp"))
@@ -152,7 +152,7 @@ class TestWriteConfigAtomicWrite:
 
         monkeypatch.setattr(os, "fdopen", exploding_fdopen)
 
-        with pytest.raises(OSError):
+        with pytest.raises(OSError, match="simulated write failure"):
             _run_main(["--defaults"])
 
         surviving = json.loads(cfg.read_text())

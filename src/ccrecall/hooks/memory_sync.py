@@ -1,10 +1,12 @@
 """Stop hook - background sync for current session."""
 
+import contextlib
 import json
 import os
 import subprocess
 import sys
 import tempfile
+from pathlib import Path
 from typing import Any
 
 
@@ -21,10 +23,8 @@ def main():
                 f.write(hook_input)
         except Exception:
             # fd is closed by os.fdopen even on error; clean up the file
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
+            with contextlib.suppress(OSError):
+                Path(tmp_path).unlink()
             raise
 
         # Background the sync
@@ -36,18 +36,16 @@ def main():
         else:
             kwargs["start_new_session"] = True
         try:
-            subprocess.Popen(
-                ["cm-sync-current", "--input-file", tmp_path],
+            subprocess.Popen(  # noqa: S603 — spawns the project's own installed CLI, not untrusted input
+                ["cm-sync-current", "--input-file", tmp_path],  # noqa: S607 — entrypoint resolved via PATH by design
                 **kwargs,
             )
         except Exception:
             # Popen failed — clean up the temp file (cm-sync-current won't run to do it)
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
+            with contextlib.suppress(OSError):
+                Path(tmp_path).unlink()
             raise
-    except Exception:
+    except Exception:  # noqa: S110 — top-level hook guard: must never crash the session stop
         pass
 
     print(json.dumps({"continue": True}))

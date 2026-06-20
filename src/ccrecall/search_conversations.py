@@ -170,7 +170,7 @@ def _get_vec_branch_ids(
           AND b.embedding_version = ?
           AND b.embedding_model = ?
     """
-    filter_params: list = list(candidate_ids) + [EMBEDDING_VERSION, EMBEDDING_MODEL]
+    filter_params: list = [*list(candidate_ids), EMBEDDING_VERSION, EMBEDDING_MODEL]
 
     if projects:
         ph2 = ",".join("?" * len(projects))
@@ -376,13 +376,12 @@ def format_markdown(sessions: list[dict], query: str, verbose: bool = False) -> 
         return f"No sessions found for query: {query}"
 
     lines = [f'# Search Results: "{query}" ({len(sessions)} sessions)\n']
-    for session in sessions:
-        lines.append(format_markdown_session(session, verbose=verbose))
+    lines.extend(format_markdown_session(session, verbose=verbose) for session in sessions)
 
     return "\n".join(lines)
 
 
-def print_status(args: argparse.Namespace, settings: dict | None) -> None:
+def print_status(settings: dict | None) -> None:
     """Print diagnostic status and exit 0."""
     # Open one connection with vec loaded; branch_vec_queryable probes whether
     # the vec table is usable — get_db_connection already loaded the extension
@@ -484,7 +483,7 @@ def main():
     settings = {"db_path": str(args.db)} if args.db != DEFAULT_DB_PATH else None
 
     if args.status:
-        print_status(args, settings)
+        print_status(settings)
         return  # print_status calls sys.exit(0), but be explicit
 
     try:

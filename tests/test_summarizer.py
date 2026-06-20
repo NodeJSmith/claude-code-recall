@@ -423,9 +423,7 @@ class TestDetectDispositionWithCommits:
     """Tests for the improved detect_disposition() with commits parameter."""
 
     def _make_exchanges(self, count: int, last_user: str = "ok") -> list[dict]:
-        exchanges = []
-        for i in range(count - 1):
-            exchanges.append({"user": f"Q{i}", "assistant": f"A{i}", "timestamp": f"t{i}"})
+        exchanges = [{"user": f"Q{i}", "assistant": f"A{i}", "timestamp": f"t{i}"} for i in range(count - 1)]
         exchanges.append({"user": last_user, "assistant": "Done.", "timestamp": "t_last"})
         return exchanges
 
@@ -483,7 +481,7 @@ class TestDetectDispositionWithCommits:
         ]
         # Simulate: last exchange has assistant content but no user reply after
         # We can test this by checking disposition of a last exchange where user="" and assistant is non-empty
-        exchanges_with_no_reply = exchanges[:2] + [{"user": "", "assistant": "No followup.", "timestamp": "t3"}]
+        exchanges_with_no_reply = [*exchanges[:2], {"user": "", "assistant": "No followup.", "timestamp": "t3"}]
         result = detect_disposition(exchanges_with_no_reply)
         assert result == "ABANDONED"
 

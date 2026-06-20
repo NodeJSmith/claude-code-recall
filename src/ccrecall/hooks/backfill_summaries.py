@@ -6,6 +6,8 @@ Processes branches in batches, commits between batches, and marks errors
 with summary_version = -1 to avoid infinite retry.
 """
 
+import contextlib
+
 from ccrecall.db import (
     CONTENT_ERROR_VERSION,
     DEFAULT_DB_PATH,
@@ -25,10 +27,8 @@ def main():
         _main()
     finally:
         # Delete PID file so _spawn_background can spawn again next session
-        try:
+        with contextlib.suppress(OSError):
             _PID_FILE.unlink(missing_ok=True)
-        except OSError:
-            pass
 
 
 def _main():
@@ -38,7 +38,7 @@ def _main():
     try:
         conn = get_db_connection(settings)
     except Exception as e:
-        logger.error(f"Backfill: failed to connect to DB: {e}")
+        logger.error("Backfill: failed to connect to DB: %s", e)
         return
 
     cursor = conn.cursor()
@@ -71,7 +71,7 @@ def _main():
                         (summary_md, summary_json, SUMMARY_VERSION, branch_id),
                     )
                     total_updated += 1
-                except (ValueError, TypeError, KeyError) as e:
+                except (ValueError, TypeError, KeyError) as e:  # noqa: PERF203 — per-row error isolation
                     # Per-row content error (malformed summary data): mark the
                     # sentinel so it isn't retried forever. Infra errors fall
                     # through to the outer handler instead of poisoning the row.
@@ -79,11 +79,11 @@ def _main():
                         "UPDATE branches SET summary_version = ? WHERE id = ?",
                         (CONTENT_ERROR_VERSION, branch_id),
                     )
-                    logger.error(f"Backfill: branch {branch_id} content error: {e}")
+                    logger.error("Backfill: branch %s content error: %s", branch_id, e)
         except Exception as e:
             # Infra/session failure (locked DB, I/O): abort without marking
             # further rows — they stay eligible next run. Commit prior batches.
-            logger.error(f"Backfill: session failure, aborting: {e}")
+            logger.error("Backfill: session failure, aborting: %s", e)
             conn.commit()
             conn.close()
             return
@@ -91,7 +91,7 @@ def _main():
         conn.commit()
 
     conn.close()
-    logger.info(f"Backfill complete: {total_updated} branches summarized")
+    logger.info("Backfill complete: %s branches summarized", total_updated)
 
 
 if __name__ == "__main__":

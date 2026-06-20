@@ -9,6 +9,7 @@ into the projects table. Two path strategies are supported:
     extract cwd metadata when no direct cwd is available
 """
 
+import contextlib
 import sqlite3
 from pathlib import Path
 
@@ -98,11 +99,9 @@ def _probe_project_dir(project_dir: Path) -> str | None:
     Returns the cwd string if found, or None if no JSONL exists or has no cwd.
     """
     for jsonl_file in sorted(project_dir.glob("*.jsonl"))[:1]:
-        try:
+        with contextlib.suppress(Exception):
             entries = list(parse_all_with_uuids(jsonl_file))
             meta = extract_session_metadata(entries)
             if meta.get("cwd"):
                 return meta["cwd"]
-        except Exception:
-            pass
     return None
