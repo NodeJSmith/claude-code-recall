@@ -8,12 +8,13 @@ with summary_version = -1 to avoid infinite retry.
 """
 
 from ccrecall.db import (
+    CONTENT_ERROR_VERSION,
     DEFAULT_DB_PATH,
     get_db_connection,
     load_settings,
     setup_logging,
 )
-from ccrecall.summarizer import compute_context_summary
+from ccrecall.summarizer import SUMMARY_VERSION, compute_context_summary
 
 BATCH_SIZE = 50
 
@@ -48,34 +49,45 @@ def _main():
         cursor.execute(
             """
             SELECT id FROM branches
-            WHERE summary_version IS NULL OR summary_version < 3
+            WHERE summary_version IS NULL
+               OR (summary_version < ? AND summary_version != ?)
             LIMIT ?
         """,
-            (BATCH_SIZE,),
+            (SUMMARY_VERSION, CONTENT_ERROR_VERSION, BATCH_SIZE),
         )
         rows = cursor.fetchall()
 
         if not rows:
             break
 
-        for (branch_id,) in rows:
-            try:
-                summary_md, summary_json = compute_context_summary(cursor, branch_id)
-                cursor.execute(
-                    """
-                    UPDATE branches SET context_summary = ?, context_summary_json = ?, summary_version = 3
-                    WHERE id = ?
-                """,
-                    (summary_md, summary_json, branch_id),
-                )
-                total_updated += 1
-            except Exception as e:
-                # Mark as errored to avoid infinite retry
-                cursor.execute(
-                    "UPDATE branches SET summary_version = -1 WHERE id = ?",
-                    (branch_id,),
-                )
-                logger.error(f"Backfill: branch {branch_id} failed: {e}")
+        try:
+            for (branch_id,) in rows:
+                try:
+                    summary_md, summary_json = compute_context_summary(cursor, branch_id)
+                    cursor.execute(
+                        """
+                        UPDATE branches SET context_summary = ?, context_summary_json = ?, summary_version = ?
+                        WHERE id = ?
+                    """,
+                        (summary_md, summary_json, SUMMARY_VERSION, branch_id),
+                    )
+                    total_updated += 1
+                except (ValueError, TypeError, KeyError) as e:
+                    # Per-row content error (malformed summary data): mark the
+                    # sentinel so it isn't retried forever. Infra errors fall
+                    # through to the outer handler instead of poisoning the row.
+                    cursor.execute(
+                        "UPDATE branches SET summary_version = ? WHERE id = ?",
+                        (CONTENT_ERROR_VERSION, branch_id),
+                    )
+                    logger.error(f"Backfill: branch {branch_id} content error: {e}")
+        except Exception as e:
+            # Infra/session failure (locked DB, I/O): abort without marking
+            # further rows — they stay eligible next run. Commit prior batches.
+            logger.error(f"Backfill: session failure, aborting: {e}")
+            conn.commit()
+            conn.close()
+            return
 
         conn.commit()
 

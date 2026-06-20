@@ -42,8 +42,7 @@ from ccrecall.session_tail import (
     transcript_for_uuid,
 )
 from ccrecall.summarizer import (
-    build_exchange_pairs,
-    detect_disposition,
+    build_context_summary_json,
     render_context_summary,
 )
 
@@ -319,67 +318,25 @@ def select_sessions(
 
 
 def _build_fallback_context(session: dict) -> str:
+    """Fallback for sessions without a cached context_summary.
+
+    Builds the structured summary through the canonical
+    build_context_summary_json so exchange text is truncated identically to the
+    cached path, then renders it. One builder means the two paths can't drift —
+    a hand-rolled copy here previously emitted untruncated exchange text.
     """
-    Fallback for sessions without cached context_summary.
-    Constructs a summary_json dict from raw session data and delegates
-    to render_context_summary() — no duplicated rendering logic here.
-    """
-    messages = session.get("messages", [])
-    exchanges = build_exchange_pairs(messages) if messages else []
-    files = session.get("files_modified", [])
-    commits = session.get("commits", [])
-
-    # Build topic from first exchange
-    topic = exchanges[0]["user"][:120] if exchanges else ""
-
-    # Derive disposition, passing commits for metadata-based detection
-    disposition = detect_disposition(exchanges, commits=commits) if exchanges else ""
-
-    exchange_count = session.get("exchange_count", len(exchanges))
-
-    # Build first_exchanges (up to 2)
-    first_exchanges = [
-        {"user": ex["user"], "assistant": ex["assistant"], "timestamp": ex["timestamp"]}
-        for ex in exchanges[:2]
-    ]
-
-    # Build last_exchanges (up to 6 for long sessions, all for short)
-    if len(exchanges) <= 8:
-        last_exchanges = [
-            {
-                "user": ex["user"],
-                "assistant": ex["assistant"],
-                "timestamp": ex["timestamp"],
-            }
-            for ex in exchanges
-        ]
-    else:
-        last_exchanges = [
-            {
-                "user": ex["user"],
-                "assistant": ex["assistant"],
-                "timestamp": ex["timestamp"],
-            }
-            for ex in exchanges[-6:]
-        ]
-
-    summary_json = {
-        "version": 3,
-        "topic": topic,
-        "disposition": disposition,
-        "first_exchanges": first_exchanges,
-        "last_exchanges": last_exchanges,
-        "metadata": {
-            "exchange_count": exchange_count,
-            "files_modified": files,
-            "commits": commits,
-            "tool_counts": {},
-            "started_at": session.get("started_at"),
-            "ended_at": session.get("ended_at"),
-            "git_branch": session.get("git_branch"),
-        },
+    # tool_counts isn't carried on the session dict that reaches this fallback
+    # path; build_context_summary_json defaults a missing key to {}.
+    branch_row = {
+        "files_modified": session.get("files_modified", []),
+        "commits": session.get("commits", []),
+        "git_branch": session.get("git_branch"),
+        "started_at": session.get("started_at"),
+        "ended_at": session.get("ended_at"),
     }
-
+    if "exchange_count" in session:
+        branch_row["exchange_count"] = session["exchange_count"]
+    summary_json = build_context_summary_json(branch_row, session.get("messages", []))
     return render_context_summary(summary_json)
 
 

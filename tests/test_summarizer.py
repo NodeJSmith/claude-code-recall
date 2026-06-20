@@ -2,6 +2,7 @@
 
 import inspect
 import json
+import logging
 import sqlite3
 
 import pytest
@@ -15,7 +16,7 @@ from ccrecall.summarizer import (
     compute_context_summary,
     render_context_summary,
 )
-from ccrecall.db import SCHEMA, _migrate_columns
+from ccrecall.db import CONTENT_ERROR_VERSION, SCHEMA, _migrate_columns
 
 
 class TestTruncateMid:
@@ -618,19 +619,87 @@ class TestNeedsBackfillVersionBump:
         )
         conn.close()
 
-    def test_backfill_summaries_uses_version_3_threshold(self):
-        """Verify backfill_summaries.py source contains 'summary_version < 3' (not 2)."""
+    def test_backfill_summaries_uses_version_constants(self):
+        """backfill_summaries ties its threshold/sentinel to the shared constants.
+
+        SUMMARY_VERSION is the canonical 3 and CONTENT_ERROR_VERSION the -1
+        sentinel — using the constants (not stale literals) keeps a future
+        version bump from silently desyncing this hook.
+        """
         source = inspect.getsource(backfill_summaries)
-        assert "summary_version < 3" in source, (
-            "backfill_summaries.py must query for summary_version < 3"
+        assert "SUMMARY_VERSION" in source, (
+            "backfill_summaries.py must gate on the SUMMARY_VERSION constant"
         )
-        assert "summary_version = 3" in source, (
-            "backfill_summaries.py must write summary_version = 3"
+        assert "CONTENT_ERROR_VERSION" in source, (
+            "backfill_summaries.py must use the CONTENT_ERROR_VERSION sentinel"
         )
 
-    def test_memory_setup_uses_version_3_threshold(self):
-        """Verify memory_setup.py _needs_backfill uses 'summary_version < 3' (not 2)."""
+    def test_memory_setup_uses_version_constant(self):
+        """_needs_backfill ties its threshold to SUMMARY_VERSION, not a literal."""
         source = inspect.getsource(memory_setup._needs_backfill)
-        assert "summary_version < 3" in source, (
-            "_needs_backfill() must check for summary_version < 3"
+        assert "SUMMARY_VERSION" in source, (
+            "_needs_backfill() must check against the SUMMARY_VERSION constant"
         )
+
+
+class TestBackfillErrorHandling:
+    """backfill_summaries separates per-row content errors from infra failures."""
+
+    STARTING_VERSION = 2  # eligible (< SUMMARY_VERSION), not the error sentinel
+
+    def _seed(self, path):
+        conn = sqlite3.connect(str(path))
+        conn.executescript(SCHEMA)
+        conn.commit()
+        _migrate_columns(conn)
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO projects (path, key, name) VALUES (?, ?, ?)",
+            ("/test/proj", "-test-proj", "proj"),
+        )
+        cur.execute("INSERT INTO sessions (uuid, project_id) VALUES (?, ?)", ("sess-1", 1))
+        cur.execute(
+            "INSERT INTO branches (session_id, leaf_uuid, is_active, summary_version)"
+            " VALUES (1, 'leaf-1', 1, ?)",
+            (self.STARTING_VERSION,),
+        )
+        conn.commit()
+        conn.close()
+
+    def _run_with_raise(self, path, monkeypatch, exc):
+        monkeypatch.setattr(
+            backfill_summaries, "load_settings", lambda: {"db_path": str(path)}
+        )
+        monkeypatch.setattr(
+            backfill_summaries, "setup_logging", lambda s: logging.getLogger("test-backfill")
+        )
+
+        def boom(cursor, branch_id):
+            raise exc
+
+        monkeypatch.setattr(backfill_summaries, "compute_context_summary", boom)
+        backfill_summaries._main()
+
+    def _version(self, path):
+        conn = sqlite3.connect(str(path))
+        v = conn.execute("SELECT summary_version FROM branches WHERE id = 1").fetchone()[0]
+        conn.close()
+        return v
+
+    def test_content_error_marks_sentinel(self, tmp_path, monkeypatch):
+        """A content error (ValueError) marks the row with the error sentinel and stops retrying."""
+        db = tmp_path / "c.db"
+        self._seed(db)
+        self._run_with_raise(db, monkeypatch, ValueError("malformed summary"))
+        assert self._version(db) == CONTENT_ERROR_VERSION
+
+    def test_infra_error_does_not_poison_row(self, tmp_path, monkeypatch):
+        """A transient infra error leaves the row eligible (not marked errored).
+
+        Regression: a bare ``except Exception`` used to mark the row -1 on any
+        failure, permanently poisoning it after a transient DB error.
+        """
+        db = tmp_path / "c.db"
+        self._seed(db)
+        self._run_with_raise(db, monkeypatch, sqlite3.OperationalError("database is locked"))
+        assert self._version(db) == self.STARTING_VERSION  # unchanged — still eligible
