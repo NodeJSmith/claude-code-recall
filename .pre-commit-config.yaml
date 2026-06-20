@@ -1,0 +1,119 @@
+# prek / pre-commit configuration.
+#
+# prek is a faster drop-in for pre-commit that reads this same file. Install the
+# hooks locally with `prek install`.
+#
+# Staging: fast, always-green hooks run at pre-commit; heavier checks run at
+# pre-push. `default_install_hook_types` below wires both stages automatically.
+#
+# Phased rollout: several guards (ruff lint, pyright, and the custom AST checks)
+# are committed but COMMENTED OUT at the bottom of this file. The current tree has
+# pre-existing violations of each; every one gets fixed and flipped on in its own
+# follow-up cleanup PR. Until then, only the green hooks below are active so the
+# hook run and the lint CI stay green.
+default_install_hook_types: [pre-commit, pre-push]
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: "v6.0.0"
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: mixed-line-ending
+      - id: check-builtin-literals
+      - id: check-case-conflict
+      - id: debug-statements
+
+  - repo: https://github.com/crate-ci/typos
+    rev: v1.46.3
+    hooks:
+      - id: typos
+        args: [--force-exclude]
+        stages: [pre-commit, pre-push]
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: "v0.15.17"
+    hooks:
+      # Formatter is green today; the linter is staged off below until cleanup.
+      - id: ruff-format
+
+  - repo: local
+    hooks:
+      - id: zizmor
+        name: zizmor (GitHub Actions security)
+        language: system
+        # --offline keeps zizmor from calling the GitHub API (audits the static
+        # workflow files only); unsetting the tokens guarantees offline mode even
+        # when a token is present in the environment.
+        entry: env -u GH_TOKEN -u GITHUB_TOKEN uvx zizmor@1.25.2 --offline
+        files: ^\.github/workflows/
+        stages: [pre-commit, pre-push]
+
+      # Ban mypy-style `# type: ignore` comments — use `# pyright: ignore[reportXxx]`.
+      - id: no-mypy-ignore
+        name: 'Ban "type: ignore" comments (use pyright)'
+        language: pygrep
+        types: [python]
+        entry: '# type: ignore'
+
+      # Ban `from __future__ import annotations` — it stringizes annotations at
+      # runtime, breaking Pydantic models, FastAPI deps, and get_type_hints().
+      # Anchored to line start so prose merely mentioning it is not flagged.
+      - id: no-future-annotations
+        name: "Ban from __future__ import annotations (breaks runtime annotations)"
+        language: pygrep
+        types: [python]
+        entry: '^from __future__ import annotations'
+
+  # ----------------------------------------------------------------------------
+  # DEFERRED — committed but staged off until each guard's cleanup PR brings the
+  # tree to green. Uncomment a block in the PR that fixes its violations.
+  #
+  #   ruff lint            213 violations  (ruff check)
+  #   pyright               30 errors
+  #   check-spec-tokens     66 leaked AC#/FR#/T0x tokens
+  #   check-llm-cruft       87 section-divider comments
+  #   check-lazy-imports     8 lazy imports
+  #   shebang executability 23 modules carry a vestigial #! shebang (run via
+  #                         console-scripts, not directly) — strip them, then add
+  #                         check-shebang-scripts-are-executable to the
+  #                         pre-commit-hooks block above
+  # ----------------------------------------------------------------------------
+  #
+  # - repo: https://github.com/astral-sh/ruff-pre-commit
+  #   rev: "v0.15.17"
+  #   hooks:
+  #     - id: ruff-check
+  #       args: [--fix]
+  #
+  # - repo: https://github.com/RobertCraigie/pyright-python
+  #   rev: v1.1.408
+  #   hooks:
+  #     - id: pyright
+  #       stages: [pre-push]
+  #
+  # - repo: local
+  #   hooks:
+  #     - id: check-spec-tokens
+  #       name: Ban leaked spec-artifact tokens (AC#/FR#/T##/WP#)
+  #       language: system
+  #       entry: ./tools/check_spec_tokens.py
+  #       pass_filenames: false
+  #       files: ^(src|tests|scripts|tools)/.*\.py$
+  #       stages: [pre-push]
+  #
+  #     - id: check-llm-cruft
+  #       name: Ban AI-writing tells (section dividers, filler phrases)
+  #       language: system
+  #       entry: ./tools/check_llm_cruft.py
+  #       pass_filenames: false
+  #       files: ^(src|tests|scripts|tools)/.*\.py$
+  #       stages: [pre-push]
+  #
+  #     - id: check-lazy-imports
+  #       name: Ban lazy imports (use '# lazy-import:' to defend circular-import cases)
+  #       language: system
+  #       entry: ./tools/check_lazy_imports.py
+  #       pass_filenames: false
+  #       files: ^(src|tests|scripts|tools)/.*\.py$
+  #       stages: [pre-push]

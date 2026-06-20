@@ -68,9 +68,7 @@ def transcript_dir(cwd: str, projects_dir: Path = DEFAULT_PROJECTS_DIR) -> Path:
     return projects_dir / slug
 
 
-def transcript_for_uuid(
-    uuid: str, cwd: str | None = None, projects_dir: Path = DEFAULT_PROJECTS_DIR
-) -> Path | None:
+def transcript_for_uuid(uuid: str, cwd: str | None = None, projects_dir: Path = DEFAULT_PROJECTS_DIR) -> Path | None:
     """Locate a session's transcript file by its session id (filename stem).
 
     Tries the cwd's project dir first (the common case), then falls back to a
@@ -96,7 +94,7 @@ def load_tail_entries(path: Path, tail_lines: int = _HOOK_TAIL_LINES) -> list[di
     parse multi-MB transcripts in full on every startup. Not for the CLI tail
     view, which needs a possibly-early last instruction — use load_entries there.
     """
-    with open(path, "r", encoding="utf-8", errors="replace") as fh:
+    with open(path, encoding="utf-8", errors="replace") as fh:
         lines = deque(fh, maxlen=tail_lines)
     return list(parse_lines_with_uuids(lines))
 
@@ -122,11 +120,7 @@ def typed_instruction(entry: dict) -> str | None:
     if entry.get("type") != "user":
         return None
     content = entry.get("message", {}).get("content")
-    if (
-        is_tool_result(content)
-        or is_task_notification(content)
-        or is_teammate_message(content)
-    ):
+    if is_tool_result(content) or is_task_notification(content) or is_teammate_message(content):
         return None
     text, _, _, _ = extract_text_content(content)
     if not text:
@@ -169,11 +163,7 @@ def find_pending_question(entries: list[dict]) -> dict | None:
         if not isinstance(content, list):
             continue
         for block in content:
-            if (
-                isinstance(block, dict)
-                and block.get("type") == "tool_use"
-                and block.get("name") == "AskUserQuestion"
-            ):
+            if isinstance(block, dict) and block.get("type") == "tool_use" and block.get("name") == "AskUserQuestion":
                 last = (block.get("id"), block.get("input", {}))
 
     if not last:
@@ -195,9 +185,7 @@ def last_typed_instruction(entries: list[dict]) -> str | None:
 def last_assistant_text(entries: list[dict]) -> str | None:
     for entry in reversed(entries):
         if entry.get("type") == "assistant":
-            text, _, _, _ = extract_text_content(
-                entry.get("message", {}).get("content")
-            )
+            text, _, _, _ = extract_text_content(entry.get("message", {}).get("content"))
             if text:
                 return text
     return None
@@ -242,16 +230,10 @@ def format_pending_block(payload: dict, *, for_injection: bool = False) -> str:
         for q in payload.get("questions", []):
             lines.append(f"- **Q:** {q.get('question', '')}")
             for opt in q.get("options", []):
-                lines.append(
-                    f"  - {opt.get('label', '')}: {clip(opt.get('description', ''), 160)}"
-                )
+                lines.append(f"  - {opt.get('label', '')}: {clip(opt.get('description', ''), 160)}")
     else:
-        lines.append(
-            "⚠ PENDING QUESTION — prior session stopped at an UNANSWERED AskUserQuestion."
-        )
-        lines.append(
-            "  Surface this to the user. Do NOT answer it or act on it yourself."
-        )
+        lines.append("⚠ PENDING QUESTION — prior session stopped at an UNANSWERED AskUserQuestion.")
+        lines.append("  Surface this to the user. Do NOT answer it or act on it yourself.")
         for q in payload.get("questions", []):
             lines.append(f"  Q: {q.get('question', '')}")
             for i, opt in enumerate(q.get("options", []), 1):
@@ -343,9 +325,7 @@ def main() -> int:
     )
     ap.add_argument("selector", nargs="?", help="session id or substring to target")
     ap.add_argument("--list", action="store_true", help="list sessions and exit")
-    ap.add_argument(
-        "--cwd", default=os.getcwd(), help="derive project dir from this path"
-    )
+    ap.add_argument("--cwd", default=os.getcwd(), help="derive project dir from this path")
     ap.add_argument(
         "-n",
         type=int,

@@ -16,9 +16,7 @@ class TestUpsertProjectWithCwd:
         """upsert_project should create a project using the provided cwd path."""
 
         cursor = memory_db.cursor()
-        project_id = upsert_project(
-            cursor, "-home-user-myrepo", cwd="/home/user/myrepo"
-        )
+        project_id = upsert_project(cursor, "-home-user-myrepo", cwd="/home/user/myrepo")
         memory_db.commit()
 
         assert project_id is not None
@@ -41,9 +39,7 @@ class TestUpsertProjectWithCwd:
 
         assert id1 == id2, "Idempotent call should return same project_id"
 
-        cursor.execute(
-            "SELECT COUNT(*) FROM projects WHERE key = ?", ("-home-user-myrepo",)
-        )
+        cursor.execute("SELECT COUNT(*) FROM projects WHERE key = ?", ("-home-user-myrepo",))
         assert cursor.fetchone()[0] == 1, "Should have exactly one project row"
 
     def test_upsert_project_updates_path_when_better_data(self, memory_db):
@@ -58,9 +54,7 @@ class TestUpsertProjectWithCwd:
         memory_db.commit()
 
         # Upsert with real cwd (same key but different path from cwd metadata)
-        project_id = upsert_project(
-            cursor, "-home-user-my-repo", cwd="/home/user/my-repo"
-        )
+        project_id = upsert_project(cursor, "-home-user-my-repo", cwd="/home/user/my-repo")
         memory_db.commit()
 
         assert project_id is not None
@@ -83,9 +77,7 @@ class TestUpsertProjectWithCwd:
         cursor.execute("SELECT path FROM projects WHERE id = ?", (project_id,))
         row = cursor.fetchone()
         # normalize_cwd strips the worktree suffix
-        assert row[0] == "/home/user/myrepo", (
-            "Worktree suffix should be stripped from cwd"
-        )
+        assert row[0] == "/home/user/myrepo", "Worktree suffix should be stripped from cwd"
 
 
 class TestUpsertProjectProbesJsonl:
@@ -100,9 +92,7 @@ class TestUpsertProjectProbesJsonl:
             project_dir.mkdir()
 
             # linear_3_exchange.jsonl has cwd="/Users/samarthgupta/repos/forks/node-banana"
-            shutil.copy(
-                FIXTURE_DIR / "linear_3_exchange.jsonl", project_dir / "sess.jsonl"
-            )
+            shutil.copy(FIXTURE_DIR / "linear_3_exchange.jsonl", project_dir / "sess.jsonl")
 
             cursor = memory_db.cursor()
             # Use the encoded directory name as project_key, no cwd
@@ -130,9 +120,7 @@ class TestUpsertProjectProbesJsonl:
             project_dir.mkdir()
 
             cursor = memory_db.cursor()
-            project_id = upsert_project(
-                cursor, "-home-user-myproject", project_dir=project_dir
-            )
+            project_id = upsert_project(cursor, "-home-user-myproject", project_dir=project_dir)
             memory_db.commit()
 
         assert project_id is not None
@@ -141,6 +129,4 @@ class TestUpsertProjectProbesJsonl:
         row = cursor.fetchone()
         assert row is not None
         # Falls back to parse_project_key (lossy) when no JSONL available
-        assert "myproject" in row[0], (
-            "Fallback path should contain project name from key reconstruction"
-        )
+        assert "myproject" in row[0], "Fallback path should contain project name from key reconstruction"

@@ -18,7 +18,6 @@ from ccrecall.token_parser import (
     _turn_cost,
 )
 
-
 # ── Build Output ──────────────────────────────────────────────────────
 
 
@@ -54,9 +53,7 @@ def build_output(conn: sqlite3.Connection) -> dict:
         dominant_cache_tier = "5m"
 
     cache_denom = total_cache_read + total_cache_creation
-    global_cache_ratio = (
-        round(total_cache_read / cache_denom, 4) if cache_denom > 0 else 0.0
-    )
+    global_cache_ratio = round(total_cache_read / cache_denom, 4) if cache_denom > 0 else 0.0
 
     total_tool_calls = (
         cur.execute("""
@@ -145,9 +142,7 @@ def build_output(conn: sqlite3.Connection) -> dict:
         day_cost = _turn_cost(row[2], row[3], row[4], row[5], row[6], row[7], pricing)
         cost_by_day[day] = cost_by_day.get(day, 0.0) + day_cost
 
-    cost_by_day_list = [
-        {"date": d, "cost_usd": round(c, 4)} for d, c in sorted(cost_by_day.items())
-    ]
+    cost_by_day_list = [{"date": d, "cost_usd": round(c, 4)} for d, c in sorted(cost_by_day.items())]
 
     cost_by_project: dict[str, float] = {}
     for row in cur.execute("""
@@ -195,9 +190,7 @@ def build_output(conn: sqlite3.Connection) -> dict:
                     "gap_ms": row[4],
                 }
             )
-        proj = cur.execute(
-            "SELECT project_path FROM session_metrics WHERE session_id = ?", (tsid,)
-        ).fetchone()
+        proj = cur.execute("SELECT project_path FROM session_metrics WHERE session_id = ?", (tsid,)).fetchone()
         cache_trajectory.append(
             {
                 "session_id": tsid[:8],
@@ -207,9 +200,7 @@ def build_output(conn: sqlite3.Connection) -> dict:
         )
 
     # ── Chart 5b: Context Segmentation (aggregate across all sessions) ──
-    def _compute_seg_curve(
-        session_ids: list[str], max_turns: int = 60, min_sessions: int = 3
-    ) -> list[dict]:
+    def _compute_seg_curve(session_ids: list[str], max_turns: int = 60, min_sessions: int = 3) -> list[dict]:
         if not session_ids:
             return []
         placeholders = ",".join("?" * len(session_ids))
@@ -239,9 +230,7 @@ def build_output(conn: sqlite3.Connection) -> dict:
                 base = min(base_ctx, total_ctx)
                 history = min(cumul_output, total_ctx - base)
                 tool_user = max(0, total_ctx - base - history)
-                bucket = buckets.setdefault(
-                    turn_idx, {"base": [], "hist": [], "tool": []}
-                )
+                bucket = buckets.setdefault(turn_idx, {"base": [], "hist": [], "tool": []})
                 bucket["base"].append(base / total_ctx * 100)
                 bucket["hist"].append(history / total_ctx * 100)
                 bucket["tool"].append(tool_user / total_ctx * 100)
@@ -305,9 +294,7 @@ def build_output(conn: sqlite3.Connection) -> dict:
         HAVING cnt >= 10 AND avg_footprint > 0
         ORDER BY avg_footprint DESC LIMIT 12
     """):
-        tool_footprint.append(
-            {"tool": row[0], "calls": row[1], "avg_tokens": int(row[2])}
-        )
+        tool_footprint.append({"tool": row[0], "calls": row[1], "avg_tokens": int(row[2])})
 
     seg_agg = cur.execute("""
         SELECT
@@ -345,9 +332,7 @@ def build_output(conn: sqlite3.Connection) -> dict:
         HAVING e5 + e1 > 0
         ORDER BY e5 + e1 DESC LIMIT 8
     """):
-        ephem_split.append(
-            {"project": _project_slug(row[0]), "ephem_5m": row[1], "ephem_1h": row[2]}
-        )
+        ephem_split.append({"project": _project_slug(row[0]), "ephem_5m": row[1], "ephem_1h": row[2]})
 
     # ── Chart 7: Bash antipattern rate by project (computed at query time) ──
     bash_antipatterns = []
@@ -510,9 +495,7 @@ def build_output(conn: sqlite3.Connection) -> dict:
         turn_complexity[bucket] += 1
         thinking_sum_complexity[bucket] += think
     thinking_in_complexity = {
-        k: round(thinking_sum_complexity[k] / turn_complexity[k])
-        if turn_complexity[k] > 0
-        else 0
+        k: round(thinking_sum_complexity[k] / turn_complexity[k]) if turn_complexity[k] > 0 else 0
         for k in turn_complexity
     }
 
@@ -642,9 +625,7 @@ def build_output(conn: sqlite3.Connection) -> dict:
         WHERE tc.subagent_type IS NOT NULL
         GROUP BY tc.subagent_type ORDER BY cnt DESC
     """):
-        agent_delegation.append(
-            {"subagent_type": row[0], "count": row[1], "errors": row[2]}
-        )
+        agent_delegation.append({"subagent_type": row[0], "count": row[1], "errors": row[2]})
 
     agent_model_dist = []
     for row in cur.execute("""
@@ -717,9 +698,7 @@ def build_output(conn: sqlite3.Connection) -> dict:
             "cache_cliffs": total_cache_cliffs,
             "max_token_stops": total_max_token_stops,
             "bash_antipatterns": total_bash_antipatterns,
-            "tool_error_rate": round(total_tool_errors / total_tool_calls, 4)
-            if total_tool_calls
-            else 0,
+            "tool_error_rate": round(total_tool_errors / total_tool_calls, 4) if total_tool_calls else 0,
             "total_cost_usd": round(total_cost_usd, 2),
         },
         "sessions_by_day": sessions_by_day,

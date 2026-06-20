@@ -27,9 +27,7 @@ _SHORT_CONFIRM_RE = re.compile(
     r"^(?:y(?:a|ep|es)?|thanks?|(?:looks? )?good|nice|perfect|great|ok|lgtm|k)\s*[.!]?$",
     re.IGNORECASE,
 )
-_NEW_INSTRUCTION_RE = re.compile(
-    r"^(?:now |next |also |can you |let\'?s |please |I (?:want|need) )", re.IGNORECASE
-)
+_NEW_INSTRUCTION_RE = re.compile(r"^(?:now |next |also |can you |let\'?s |please |I (?:want|need) )", re.IGNORECASE)
 
 
 def truncate_mid(text: str, front: int = _FRONT_CHARS, back: int = _BACK_CHARS) -> str:
@@ -329,9 +327,7 @@ def render_context_summary(summary_json: dict) -> str:
         if gap > 0:
             gap_detail = _build_gap_summary(summary_json)
             if gap_detail:
-                lines.append(
-                    f"[... {gap} earlier exchanges covering: {gap_detail} ...]\n"
-                )
+                lines.append(f"[... {gap} earlier exchanges covering: {gap_detail} ...]\n")
             else:
                 lines.append(f"[... {gap} earlier exchanges ...]\n")
 
@@ -369,9 +365,7 @@ def render_context_summary(summary_json: dict) -> str:
     return "\n".join(lines)
 
 
-def compute_context_summary(
-    cursor: sqlite3.Cursor, branch_db_id: int
-) -> tuple[str, str]:
+def compute_context_summary(cursor: sqlite3.Cursor, branch_db_id: int) -> tuple[str, str]:
     """
     Orchestrator: fetch branch + messages from DB, return (markdown, json_string).
 
@@ -415,9 +409,7 @@ def compute_context_summary(
         (branch_db_id,),
     )
 
-    messages = [
-        {"role": r, "content": c, "timestamp": t} for r, c, t in cursor.fetchall()
-    ]
+    messages = [{"role": r, "content": c, "timestamp": t} for r, c, t in cursor.fetchall()]
 
     if not messages:
         return "", ""

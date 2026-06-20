@@ -14,6 +14,8 @@ from pathlib import Path
 
 import sqlite_vec
 
+from ccrecall.content import sanitize_fts_term
+
 # Local imports
 from ccrecall.db import (
     DEFAULT_DB_PATH,
@@ -22,8 +24,6 @@ from ccrecall.db import (
     detect_fts_support,
     get_db_connection,
 )
-from ccrecall.content import sanitize_fts_term
-from ccrecall.formatting import format_markdown_session, format_json_sessions
 from ccrecall.embeddings import (
     DEPS_AVAILABLE,
     EMBEDDING_MODEL,
@@ -31,6 +31,7 @@ from ccrecall.embeddings import (
     embed_text,
     model_available,
 )
+from ccrecall.formatting import format_json_sessions, format_markdown_session
 from ccrecall.fusion import rrf
 
 
@@ -79,9 +80,7 @@ def _get_fts_branch_ids(
 
         if session_id:
             sql += " AND s.uuid LIKE ? ESCAPE '\\'"
-            escaped = (
-                session_id.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-            )
+            escaped = session_id.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
             params.append(f"{escaped}%")
 
         if path:
@@ -115,9 +114,7 @@ def _get_fts_branch_ids(
 
         if session_id:
             sql += " AND s.uuid LIKE ? ESCAPE '\\'"
-            escaped = (
-                session_id.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-            )
+            escaped = session_id.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
             params.append(f"{escaped}%")
 
         if path:
@@ -150,9 +147,7 @@ def _get_vec_branch_ids(
         serialized = sqlite_vec.serialize_float32(query_vec)
         knn_k = top_k
         rows = cursor.execute(
-            "SELECT branch_id, distance FROM branch_vec"
-            " WHERE embedding MATCH ? AND k = ?"
-            " ORDER BY distance",
+            "SELECT branch_id, distance FROM branch_vec WHERE embedding MATCH ? AND k = ? ORDER BY distance",
             (serialized, knn_k),
         ).fetchall()
     except Exception:
@@ -184,9 +179,7 @@ def _get_vec_branch_ids(
 
     if session_id:
         filter_sql += " AND s.uuid LIKE ? ESCAPE '\\'"
-        escaped = (
-            session_id.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-        )
+        escaped = session_id.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         filter_params.append(f"{escaped}%")
 
     if path:
@@ -195,9 +188,7 @@ def _get_vec_branch_ids(
         filter_params.append(f"%{escaped}%")
 
     try:
-        valid_ids = {
-            row[0] for row in cursor.execute(filter_sql, filter_params).fetchall()
-        }
+        valid_ids = {row[0] for row in cursor.execute(filter_sql, filter_params).fetchall()}
     except Exception:
         return []
 
@@ -205,9 +196,7 @@ def _get_vec_branch_ids(
     return [bid for bid in candidate_ids if bid in valid_ids]
 
 
-def _dedup_by_session(
-    cursor: sqlite3.Cursor, ordered_branch_ids: list[int]
-) -> list[int]:
+def _dedup_by_session(cursor: sqlite3.Cursor, ordered_branch_ids: list[int]) -> list[int]:
     """Keep the highest-ranked branch per session_id (FR#12).
 
     Returns a new list with one branch per session, preserving relative order.
@@ -292,8 +281,7 @@ def _hydrate_branches(
         )
 
         messages = [
-            {"role": r, "content": c, "timestamp": t, "is_notification": notif}
-            for r, c, t, notif in cursor.fetchall()
+            {"role": r, "content": c, "timestamp": t, "is_notification": notif} for r, c, t, notif in cursor.fetchall()
         ]
 
         session_data = {
@@ -306,9 +294,7 @@ def _hydrate_branches(
         }
 
         if verbose:
-            session_data["files_modified"] = (
-                json.loads(files_json) if files_json else []
-            )
+            session_data["files_modified"] = json.loads(files_json) if files_json else []
             session_data["commits"] = json.loads(commits_json) if commits_json else []
 
         results.append(session_data)
@@ -362,18 +348,12 @@ def search_sessions(
 
     if use_fusion and query_vec is not None:
         try:
-            fts_ids = _get_fts_branch_ids(
-                cursor, query, fts_level, top_k, projects, session_id, path
-            )
-            vec_ids = _get_vec_branch_ids(
-                cursor, query_vec, top_k, projects, session_id, path
-            )
+            fts_ids = _get_fts_branch_ids(cursor, query, fts_level, top_k, projects, session_id, path)
+            vec_ids = _get_vec_branch_ids(cursor, query_vec, top_k, projects, session_id, path)
             fused_ids = rrf([fts_ids, vec_ids])
             deduped_ids = _dedup_by_session(cursor, fused_ids)
             ordered_ids = deduped_ids[:max_results]
-            return _hydrate_branches(
-                cursor, ordered_ids, verbose, include_notifications
-            )
+            return _hydrate_branches(cursor, ordered_ids, verbose, include_notifications)
         except Exception:
             _emit_degrade = True
 
@@ -384,9 +364,7 @@ def search_sessions(
         )
 
     # Keyword-only path (FTS or LIKE)
-    branch_ids = _get_fts_branch_ids(
-        cursor, query, fts_level, top_k, projects, session_id, path
-    )
+    branch_ids = _get_fts_branch_ids(cursor, query, fts_level, top_k, projects, session_id, path)
     deduped_ids = _dedup_by_session(cursor, branch_ids)
     ordered_ids = deduped_ids[:max_results]
     return _hydrate_branches(cursor, ordered_ids, verbose, include_notifications)
@@ -428,9 +406,7 @@ def print_status(args: argparse.Namespace, settings: dict | None) -> None:
             # Denominator is the shared embeddable universe (db.EMBEDDABLE_BRANCH_FILTER),
             # the same predicate the backfill's build_selection()/count_status() use,
             # so this diagnostic can't drift from `cm-backfill-embeddings --status`.
-            total = conn.execute(
-                f"SELECT count(*) FROM branches WHERE {EMBEDDABLE_BRANCH_FILTER}"
-            ).fetchone()[0]
+            total = conn.execute(f"SELECT count(*) FROM branches WHERE {EMBEDDABLE_BRANCH_FILTER}").fetchone()[0]
             embedded = conn.execute(
                 f"SELECT count(*) FROM branches WHERE {EMBEDDABLE_BRANCH_FILTER}"
                 " AND embedding_version = ? AND embedding_model = ?",
@@ -450,26 +426,16 @@ def print_status(args: argparse.Namespace, settings: dict | None) -> None:
 def main():
     parser = argparse.ArgumentParser(description="Search conversation sessions")
     parser.add_argument("--query", "-q", type=str, help="Search keywords")
-    parser.add_argument(
-        "--status", action="store_true", help="Print diagnostic status and exit"
-    )
+    parser.add_argument("--status", action="store_true", help="Print diagnostic status and exit")
     parser.add_argument(
         "--keyword-only",
         action="store_true",
         help="Skip embedding, use keyword search only",
     )
-    parser.add_argument(
-        "--max-results", type=int, default=5, help="Max sessions (1-10, default: 5)"
-    )
-    parser.add_argument(
-        "--session", type=str, help="Filter by session UUID (prefix match)"
-    )
-    parser.add_argument(
-        "--project", type=str, help="Filter by project name(s), comma-separated"
-    )
-    parser.add_argument(
-        "--path", type=str, help="Filter by cwd substring (e.g. worktree name)"
-    )
+    parser.add_argument("--max-results", type=int, default=5, help="Max sessions (1-10, default: 5)")
+    parser.add_argument("--session", type=str, help="Filter by session UUID (prefix match)")
+    parser.add_argument("--project", type=str, help="Filter by project name(s), comma-separated")
+    parser.add_argument("--path", type=str, help="Filter by cwd substring (e.g. worktree name)")
     parser.add_argument(
         "--format",
         choices=["markdown", "json"],
@@ -487,9 +453,7 @@ def main():
         action="store_true",
         help="Include task notification messages (hidden by default)",
     )
-    parser.add_argument(
-        "--db", type=Path, default=DEFAULT_DB_PATH, help="Database path"
-    )
+    parser.add_argument("--db", type=Path, default=DEFAULT_DB_PATH, help="Database path")
 
     args = parser.parse_args()
 
@@ -512,11 +476,7 @@ def main():
             print("embedded branches: error (database not found)")
             sys.exit(0)
         if args.format == "json":
-            print(
-                json.dumps(
-                    {"error": "Database not found", "sessions": [], "query": args.query}
-                )
-            )
+            print(json.dumps({"error": "Database not found", "sessions": [], "query": args.query}))
         else:
             print("Error: Database not found. Run memory setup first.")
         sys.exit(1)

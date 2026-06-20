@@ -68,9 +68,7 @@ class TestSyncSessionCreatesBranches:
             memory_db.commit()
 
         cursor = memory_db.cursor()
-        cursor.execute(
-            "SELECT context_summary, summary_version FROM branches WHERE is_active = 1"
-        )
+        cursor.execute("SELECT context_summary, summary_version FROM branches WHERE is_active = 1")
         row = cursor.fetchone()
         assert row is not None
         assert row[0], "Context summary should be populated"
@@ -95,19 +93,13 @@ class TestSyncSessionCreatesBranches:
         # tool_heavy.jsonl has tool_use content — if we WERE writing has_tool_use,
         # some rows would be non-NULL/non-zero.  Since we don't write it, all rows
         # should have NULL or the schema default (0 for has_tool_use).
-        cursor.execute(
-            "SELECT COUNT(*) FROM messages WHERE has_tool_use IS NOT NULL AND has_tool_use != 0"
-        )
+        cursor.execute("SELECT COUNT(*) FROM messages WHERE has_tool_use IS NOT NULL AND has_tool_use != 0")
         rows_with_tool_use = cursor.fetchone()[0]
-        assert rows_with_tool_use == 0, (
-            "session_ops INSERT must not populate has_tool_use column"
-        )
+        assert rows_with_tool_use == 0, "session_ops INSERT must not populate has_tool_use column"
 
         cursor.execute("SELECT COUNT(*) FROM messages WHERE tool_summary IS NOT NULL")
         rows_with_tool_summary = cursor.fetchone()[0]
-        assert rows_with_tool_summary == 0, (
-            "session_ops INSERT must not populate tool_summary column"
-        )
+        assert rows_with_tool_summary == 0, "session_ops INSERT must not populate tool_summary column"
 
 
 class TestSyncSessionWritesNullHashImportLog:
@@ -148,9 +140,7 @@ class TestSyncSessionWritesNullHashImportLog:
 
         cursor = memory_db.cursor()
         cursor.execute("SELECT COUNT(*) FROM import_log")
-        assert cursor.fetchone()[0] == 0, (
-            "import_log must not be written when write_import_log=False"
-        )
+        assert cursor.fetchone()[0] == 0, "import_log must not be written when write_import_log=False"
 
 
 class TestImportSessionWritesRealHashImportLog:
@@ -239,9 +229,7 @@ class TestImportSkipsNullHashEntry:
 
         # Should have processed (not skipped due to hash=NULL != real_hash)
         # The return value >= 0 (0 is acceptable if no NEW messages inserted)
-        assert result >= 0, (
-            "Should not return -1 (skipped); NULL hash must trigger reimport"
-        )
+        assert result >= 0, "Should not return -1 (skipped); NULL hash must trigger reimport"
 
         # Hash should now be updated to the real value
         cursor.execute(
@@ -305,9 +293,7 @@ class TestSyncThenImportDedupIntegration:
         # No duplicate messages
         cursor.execute("SELECT COUNT(*) FROM messages")
         messages_after_import = cursor.fetchone()[0]
-        assert messages_after_import == messages_after_sync, (
-            "Import after sync must not create duplicate messages"
-        )
+        assert messages_after_import == messages_after_sync, "Import after sync must not create duplicate messages"
 
         # import_log row updated with real hash
         cursor.execute(
@@ -343,9 +329,7 @@ class TestAggregatedContentEnrichment:
             memory_db.commit()
 
         cursor = memory_db.cursor()
-        cursor.execute(
-            "SELECT aggregated_content, files_modified FROM branches WHERE is_active = 1"
-        )
+        cursor.execute("SELECT aggregated_content, files_modified FROM branches WHERE is_active = 1")
         row = cursor.fetchone()
         assert row is not None
         agg_content, files_json = row
@@ -355,12 +339,8 @@ class TestAggregatedContentEnrichment:
             if files:
                 # Full paths should appear in aggregated_content
                 for path in files[:3]:
-                    assert path in agg_content, (
-                        f"Full file path '{path}' should be in aggregated_content"
-                    )
-                assert "__files__" in agg_content, (
-                    "__files__ marker should separate message text from file paths"
-                )
+                    assert path in agg_content, f"Full file path '{path}' should be in aggregated_content"
+                assert "__files__" in agg_content, "__files__ marker should separate message text from file paths"
 
     def test_aggregated_content_includes_commits(self, memory_db):
         """Commit text from commits should appear in aggregated_content."""
@@ -372,9 +352,7 @@ class TestAggregatedContentEnrichment:
             memory_db.commit()
 
         cursor = memory_db.cursor()
-        cursor.execute(
-            "SELECT aggregated_content, commits FROM branches WHERE is_active = 1"
-        )
+        cursor.execute("SELECT aggregated_content, commits FROM branches WHERE is_active = 1")
         row = cursor.fetchone()
         assert row is not None
         agg_content, commits_json = row
@@ -383,12 +361,8 @@ class TestAggregatedContentEnrichment:
             commits = json.loads(commits_json)
             if commits:
                 for commit in commits[:3]:
-                    assert commit in agg_content, (
-                        f"Commit '{commit}' should be in aggregated_content"
-                    )
-                assert "__commits__" in agg_content, (
-                    "__commits__ marker should separate file paths from commit text"
-                )
+                    assert commit in agg_content, f"Commit '{commit}' should be in aggregated_content"
+                assert "__commits__" in agg_content, "__commits__ marker should separate file paths from commit text"
 
     def test_aggregated_content_set_semantics_on_resync(self, memory_db):
         """On resync, aggregated_content is recomputed (SET), not doubled (APPEND)."""
@@ -443,9 +417,7 @@ class TestEmbedOnWriteModelUnavailable:
         conn.commit()
         _migrate_columns(conn)
 
-        with patch(
-            "ccrecall.session_ops.embed_text", side_effect=RuntimeError("no model")
-        ):
+        with patch("ccrecall.session_ops.embed_text", side_effect=RuntimeError("no model")):
             with tempfile.TemporaryDirectory() as tmpdir:
                 result = sync_session(conn, fixture_path, Path(tmpdir))
                 conn.commit()
@@ -458,9 +430,7 @@ class TestEmbedOnWriteModelUnavailable:
         rows = cursor.fetchall()
         assert rows, "branches should exist"
         for (ev,) in rows:
-            assert ev == 0 or ev is None, (
-                f"embedding_version should stay 0 when embed fails, got {ev}"
-            )
+            assert ev == 0 or ev is None, f"embedding_version should stay 0 when embed fails, got {ev}"
         conn.close()
 
 
@@ -484,10 +454,7 @@ class TestEmbedOnWriteOrderingInvariant:
 
         # Precondition: branch_vec must not exist before sync so the upsert raises
         assert (
-            conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name='branch_vec'"
-            ).fetchone()
-            is None
+            conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='branch_vec'").fetchone() is None
         )
 
         fake_vec = [0.1] * EMBEDDING_DIM
@@ -505,9 +472,7 @@ class TestEmbedOnWriteOrderingInvariant:
         rows = cursor.fetchall()
         assert rows
         for (ev,) in rows:
-            assert ev == 0 or ev is None, (
-                f"embedding_version must stay 0 when vec upsert fails, got {ev}"
-            )
+            assert ev == 0 or ev is None, f"embedding_version must stay 0 when vec upsert fails, got {ev}"
         conn.close()
 
 
@@ -555,28 +520,18 @@ class TestEmbedOnWriteSuccess:
 
         active_embedded = False
         for branch_id, ev, em, svae, is_active in rows:
-            cursor.execute(
-                "SELECT COUNT(*) FROM branch_vec WHERE branch_id = ?", (branch_id,)
-            )
+            cursor.execute("SELECT COUNT(*) FROM branch_vec WHERE branch_id = ?", (branch_id,))
             vec_count = cursor.fetchone()[0]
             if is_active:
                 active_embedded = True
-                assert ev == EMBEDDING_VERSION, (
-                    f"branch {branch_id}: embedding_version={ev}, want {EMBEDDING_VERSION}"
-                )
-                assert em == EMBEDDING_MODEL, (
-                    f"branch {branch_id}: embedding_model={em!r}, want {EMBEDDING_MODEL!r}"
-                )
+                assert ev == EMBEDDING_VERSION, f"branch {branch_id}: embedding_version={ev}, want {EMBEDDING_VERSION}"
+                assert em == EMBEDDING_MODEL, f"branch {branch_id}: embedding_model={em!r}, want {EMBEDDING_MODEL!r}"
                 assert svae == SUMMARY_VERSION, (
                     f"branch {branch_id}: summary_version_at_embed={svae}, want {SUMMARY_VERSION}"
                 )
-                assert vec_count == 1, (
-                    f"active branch {branch_id}: expected 1 branch_vec row, got {vec_count}"
-                )
+                assert vec_count == 1, f"active branch {branch_id}: expected 1 branch_vec row, got {vec_count}"
             else:
-                assert vec_count == 0, (
-                    f"inactive branch {branch_id}: should have no vector, got {vec_count}"
-                )
+                assert vec_count == 0, f"inactive branch {branch_id}: should have no vector, got {vec_count}"
 
         assert active_embedded, "expected at least one embedded active leaf"
         conn.close()

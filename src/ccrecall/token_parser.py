@@ -193,18 +193,14 @@ def should_skip_file(conn: sqlite3.Connection, filepath: Path) -> bool:
         mtime_ns = filepath.stat().st_mtime_ns
     except OSError:
         return True
-    cur = conn.execute(
-        "SELECT mtime_ns FROM token_import_log WHERE file_path = ?", (str(filepath),)
-    )
+    cur = conn.execute("SELECT mtime_ns FROM token_import_log WHERE file_path = ?", (str(filepath),))
     row = cur.fetchone()
     if row and row[0] == mtime_ns:
         return True
     return False
 
 
-def record_import(
-    conn: sqlite3.Connection, filepath: Path, session_id: str, turn_count: int
-) -> None:
+def record_import(conn: sqlite3.Connection, filepath: Path, session_id: str, turn_count: int) -> None:
     mtime_ns = filepath.stat().st_mtime_ns
     conn.execute(
         """INSERT OR REPLACE INTO token_import_log (file_path, session_id, imported_at, turn_count, mtime_ns)
@@ -286,9 +282,7 @@ def _extract_usage(msg: dict) -> dict:
 
 
 def parse_session(filepath: Path, jnl: JnlFile) -> ParsedSession | None:
-    session = ParsedSession(
-        session_id="", project_path=_normalize_worktree_path(jnl.project_cwd)
-    )
+    session = ParsedSession(session_id="", project_path=_normalize_worktree_path(jnl.project_cwd))
 
     current_turn: Turn | None = None
     turn_index = 0
@@ -359,9 +353,7 @@ def parse_session(filepath: Path, jnl: JnlFile) -> ParsedSession | None:
                         prev = Instant.parse_iso(last_assistant_ts)
                         curr = Instant.parse_iso(ts)
                         # TimeDelta.total() takes a unit string; gap in ms.
-                        current_turn.user_gap_ms = int(
-                            (curr - prev).total("milliseconds")
-                        )
+                        current_turn.user_gap_ms = int((curr - prev).total("milliseconds"))
                     except (ValueError, TypeError):
                         pass
 
@@ -401,12 +393,7 @@ def parse_session(filepath: Path, jnl: JnlFile) -> ParsedSession | None:
                     )
                     inp = block.get("input", {}) or {}
                     # Extract file_path from various tool input formats
-                    tc.file_path = (
-                        inp.get("file_path")
-                        or inp.get("path")
-                        or inp.get("file")
-                        or None
-                    )
+                    tc.file_path = inp.get("file_path") or inp.get("path") or inp.get("file") or None
                     if "command" in inp:
                         tc.command = str(inp["command"])[:COMMAND_TRUNCATE]
 
@@ -457,17 +444,9 @@ def parse_session(filepath: Path, jnl: JnlFile) -> ParsedSession | None:
                                 # Extract error text
                                 result_content = block.get("content", "")
                                 if isinstance(result_content, list):
-                                    texts = [
-                                        c.get("text", "")
-                                        for c in result_content
-                                        if isinstance(c, dict)
-                                    ]
+                                    texts = [c.get("text", "") for c in result_content if isinstance(c, dict)]
                                     result_content = " ".join(texts)
-                                tc.error_text = (
-                                    str(result_content)[:200]
-                                    if result_content
-                                    else None
-                                )
+                                tc.error_text = str(result_content)[:200] if result_content else None
 
         # ── System events ──
         elif line_type == "system":
@@ -480,9 +459,7 @@ def parse_session(filepath: Path, jnl: JnlFile) -> ParsedSession | None:
             elif subtype in ("stop_hook_summary", "hook_summary"):
                 hook_infos = line.get("hookInfos", []) or []
                 hook_errors = line.get("hookErrors", []) or []
-                error_commands = {
-                    e.get("command") for e in hook_errors if isinstance(e, dict)
-                }
+                error_commands = {e.get("command") for e in hook_errors if isinstance(e, dict)}
                 for h in hook_infos:
                     dur = h.get("durationMs", 0) or 0
                     session.total_hook_ms += dur

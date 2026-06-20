@@ -8,12 +8,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+import sqlite_vec
+from conftest import make_vec_conn
 
 import ccrecall.db as db_module
-import sqlite_vec
-
-from conftest import make_vec_conn
-from ccrecall.embeddings import EMBEDDING_DIM
 from ccrecall.db import (
     CURRENT_ONBOARDING_VERSION,
     DEFAULT_SETTINGS,
@@ -26,14 +24,13 @@ from ccrecall.db import (
     migrate_db,
     vec_available,
 )
+from ccrecall.embeddings import EMBEDDING_DIM
 
 
 class TestSchemaCreation:
     def test_all_tables_exist(self, memory_db):
         cursor = memory_db.cursor()
-        cursor.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
-        )
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
         tables = {row[0] for row in cursor.fetchall()}
         expected = {
             "projects",
@@ -47,9 +44,7 @@ class TestSchemaCreation:
 
     def test_fts_tables_exist(self, memory_db):
         cursor = memory_db.cursor()
-        cursor.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE '%_fts%'"
-        )
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE '%_fts%'")
         fts_tables = {row[0] for row in cursor.fetchall()}
         assert "messages_fts" in fts_tables
         assert "branches_fts" in fts_tables
@@ -147,18 +142,12 @@ class TestMigrateColumns:
     def test_migrate_backfills_notifications(self):
         """Migration should flag existing task-notification messages."""
         conn = _pre_migration_db(include_tool_summary=True)
-        conn.execute(
-            "INSERT INTO messages (id, session_id, role, content) VALUES (1, 1, 'user', 'Hello world')"
-        )
-        conn.execute(
-            "INSERT INTO messages (id, session_id, role, content) VALUES (2, 1, 'assistant', 'Hi there')"
-        )
+        conn.execute("INSERT INTO messages (id, session_id, role, content) VALUES (1, 1, 'user', 'Hello world')")
+        conn.execute("INSERT INTO messages (id, session_id, role, content) VALUES (2, 1, 'assistant', 'Hi there')")
         conn.execute(
             "INSERT INTO messages (id, session_id, role, content) VALUES (3, 1, 'user', '<task-notification><task-id>abc</task-id></task-notification>')"
         )
-        conn.execute(
-            "INSERT INTO messages (id, session_id, role, content) VALUES (4, 1, 'user', 'Normal follow-up')"
-        )
+        conn.execute("INSERT INTO messages (id, session_id, role, content) VALUES (4, 1, 'user', 'Normal follow-up')")
         conn.commit()
 
         _migrate_columns(conn)
@@ -195,9 +184,7 @@ class TestMigrateColumns:
         _migrate_columns(conn)
 
         cursor = conn.cursor()
-        cursor.execute(
-            "SELECT aggregated_content, exchange_count FROM branches WHERE id = 1"
-        )
+        cursor.execute("SELECT aggregated_content, exchange_count FROM branches WHERE id = 1")
         agg, exc = cursor.fetchone()
         assert "<task-notification>" not in agg
         assert "Hello" in agg
@@ -257,9 +244,7 @@ class TestVersionedMigration:
     def test_v0_to_v2_backfills_both(self):
         """From version 0, both task-notification and teammate messages get backfilled."""
         conn = _versioned_db(user_version=0)
-        conn.execute(
-            "INSERT INTO messages (id, session_id, role, content) VALUES (1, 1, 'user', 'Hello')"
-        )
+        conn.execute("INSERT INTO messages (id, session_id, role, content) VALUES (1, 1, 'user', 'Hello')")
         conn.execute(
             "INSERT INTO messages (id, session_id, role, content) VALUES (2, 1, 'user', '<task-notification>task</task-notification>')"
         )
@@ -326,9 +311,7 @@ class TestVersionedMigration:
     def test_v2_to_v3_preserves_import_log(self):
         """v3 migration does selective backfill, not wholesale import_log clear."""
         conn = _versioned_db(user_version=2)
-        conn.execute(
-            "INSERT INTO import_log (file_path, file_hash) VALUES ('/nonexistent/session.jsonl', 'abc123')"
-        )
+        conn.execute("INSERT INTO import_log (file_path, file_hash) VALUES ('/nonexistent/session.jsonl', 'abc123')")
         conn.commit()
 
         _migrate_columns(conn)
@@ -413,9 +396,7 @@ class TestVersionedMigration:
         _migrate_columns(conn)
 
         hash_val = conn.execute("SELECT file_hash FROM import_log").fetchone()[0]
-        assert (
-            hash_val == "original"
-        )  # Hash preserved — no destructive reimport triggered
+        assert hash_val == "original"  # Hash preserved — no destructive reimport triggered
         conn.close()
 
 
@@ -483,12 +464,8 @@ class TestMigrateDb:
             # Verify new schema has branches table
             new_conn = sqlite3.connect(str(db_path))
             cursor = new_conn.cursor()
-            cursor.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name='branches'"
-            )
-            assert cursor.fetchone() is not None, (
-                "Recreated DB should have branches table"
-            )
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='branches'")
+            assert cursor.fetchone() is not None, "Recreated DB should have branches table"
 
             # Old session should be gone (DB was nuked)
             cursor.execute("SELECT COUNT(*) FROM sessions")
@@ -783,9 +760,7 @@ class TestV4Migration:
 
         assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
         origin = conn.execute("SELECT origin FROM messages WHERE id = 1").fetchone()[0]
-        assert origin == "telegram", (
-            "idempotent re-run must not corrupt already-correct data"
-        )
+        assert origin == "telegram", "idempotent re-run must not corrupt already-correct data"
         conn.close()
 
     def test_v4_skips_when_already_v4(self):
@@ -812,9 +787,7 @@ class TestLoadConfig:
     def test_returns_dict_for_valid_config(self, tmp_path, monkeypatch):
         """A well-formed JSON object is returned as-is."""
         cfg = tmp_path / "config.json"
-        cfg.write_text(
-            json.dumps({"auto_inject_context": False, "onboarding_completed": True})
-        )
+        cfg.write_text(json.dumps({"auto_inject_context": False, "onboarding_completed": True}))
         monkeypatch.setattr("ccrecall.db.CONFIG_PATH", cfg)
 
         result = load_config()
@@ -846,9 +819,7 @@ class TestLoadConfig:
 
     def test_returns_empty_dict_for_missing_file(self, tmp_path, monkeypatch):
         """Missing config file returns {} without raising."""
-        monkeypatch.setattr(
-            "ccrecall.db.CONFIG_PATH", tmp_path / "nonexistent.json"
-        )
+        monkeypatch.setattr("ccrecall.db.CONFIG_PATH", tmp_path / "nonexistent.json")
 
         assert load_config() == {}
 
@@ -876,9 +847,7 @@ class TestLoadSettingsWithConfig:
     def test_config_overrides_applied(self, tmp_path, monkeypatch):
         """Valid config keys are merged into defaults."""
         cfg = tmp_path / "config.json"
-        cfg.write_text(
-            json.dumps({"auto_inject_context": False, "max_context_sessions": 5})
-        )
+        cfg.write_text(json.dumps({"auto_inject_context": False, "max_context_sessions": 5}))
         monkeypatch.setattr("ccrecall.db.CONFIG_PATH", cfg)
 
         result = load_settings()
@@ -888,9 +857,7 @@ class TestLoadSettingsWithConfig:
 
     def test_missing_config_returns_defaults(self, tmp_path, monkeypatch):
         """load_settings() returns DEFAULT_SETTINGS when config.json does not exist."""
-        monkeypatch.setattr(
-            "ccrecall.db.CONFIG_PATH", tmp_path / "nonexistent.json"
-        )
+        monkeypatch.setattr("ccrecall.db.CONFIG_PATH", tmp_path / "nonexistent.json")
 
         result = load_settings()
         assert result == DEFAULT_SETTINGS
@@ -926,29 +893,21 @@ class TestMigrateDbBackupGuard:
         conn.execute("INSERT INTO sessions (uuid) VALUES ('keep-me')")
         conn.commit()
 
-        monkeypatch.setattr(
-            db_module, "_backup_db_before_migration", lambda *_a, **_kw: False
-        )
+        monkeypatch.setattr(db_module, "_backup_db_before_migration", lambda *_a, **_kw: False)
 
         result = migrate_db(conn)
 
         # Must refuse to migrate when backup fails
-        assert result is False, (
-            "migrate_db must return False when _backup_db_before_migration returns False"
-        )
+        assert result is False, "migrate_db must return False when _backup_db_before_migration returns False"
 
         # Original DB file must still exist
         assert db_file.exists(), "DB file must not be deleted when backup failed"
 
         # File must still be readable and contain original data
         verify = sqlite3.connect(str(db_file))
-        count = verify.execute(
-            "SELECT COUNT(*) FROM sessions WHERE uuid = 'keep-me'"
-        ).fetchone()[0]
+        count = verify.execute("SELECT COUNT(*) FROM sessions WHERE uuid = 'keep-me'").fetchone()[0]
         verify.close()
-        assert count == 1, (
-            "Original session data must be intact after aborted migration"
-        )
+        assert count == 1, "Original session data must be intact after aborted migration"
 
 
 def _v4_db_for_v5_tests():
@@ -1046,15 +1005,9 @@ class TestV5Migration:
 
         _migrate_columns(conn)
 
-        agg = cursor.execute(
-            "SELECT aggregated_content FROM branches WHERE id = 1"
-        ).fetchone()[0]
-        assert "/src/main.py" in agg, (
-            "File paths must be included in aggregated_content after v5"
-        )
-        assert "/src/utils.py" in agg, (
-            "File paths must be included in aggregated_content after v5"
-        )
+        agg = cursor.execute("SELECT aggregated_content FROM branches WHERE id = 1").fetchone()[0]
+        assert "/src/main.py" in agg, "File paths must be included in aggregated_content after v5"
+        assert "/src/utils.py" in agg, "File paths must be included in aggregated_content after v5"
         conn.close()
 
     def test_v5_migration_renames_interrupted_to_abandoned(self):
@@ -1078,18 +1031,12 @@ class TestV5Migration:
 
         _migrate_columns(conn)
 
-        row = cursor.execute(
-            "SELECT context_summary, context_summary_json FROM branches WHERE id = 1"
-        ).fetchone()
+        row = cursor.execute("SELECT context_summary, context_summary_json FROM branches WHERE id = 1").fetchone()
         cs, csj = row
-        assert "INTERRUPTED" not in cs, (
-            "context_summary must not contain INTERRUPTED after v5"
-        )
+        assert "INTERRUPTED" not in cs, "context_summary must not contain INTERRUPTED after v5"
         assert "ABANDONED" in cs, "context_summary must contain ABANDONED after v5"
         parsed = json.loads(csj)
-        assert parsed["disposition"] == "ABANDONED", (
-            "context_summary_json disposition must be ABANDONED"
-        )
+        assert parsed["disposition"] == "ABANDONED", "context_summary_json disposition must be ABANDONED"
         conn.close()
 
     def test_v5_migration_idempotent(self):
@@ -1109,21 +1056,15 @@ class TestV5Migration:
         conn.commit()
 
         _migrate_columns(conn)
-        agg_first = cursor.execute(
-            "SELECT aggregated_content FROM branches WHERE id = 1"
-        ).fetchone()[0]
+        agg_first = cursor.execute("SELECT aggregated_content FROM branches WHERE id = 1").fetchone()[0]
 
         # Reset version to 4 to simulate running v5 again
         conn.execute("PRAGMA user_version = 4")
         conn.commit()
         _migrate_columns(conn)
-        agg_second = cursor.execute(
-            "SELECT aggregated_content FROM branches WHERE id = 1"
-        ).fetchone()[0]
+        agg_second = cursor.execute("SELECT aggregated_content FROM branches WHERE id = 1").fetchone()[0]
 
-        assert agg_first == agg_second, (
-            "v5 is SET semantics — running twice must produce the same result"
-        )
+        assert agg_first == agg_second, "v5 is SET semantics — running twice must produce the same result"
         conn.close()
 
     def test_v5_migration_gates_project_paths(self):
@@ -1161,9 +1102,7 @@ class TestV5Migration:
         # Should not raise even with NULL files/commits
         _migrate_columns(conn)
 
-        agg = cursor.execute(
-            "SELECT aggregated_content FROM branches WHERE id = 1"
-        ).fetchone()[0]
+        agg = cursor.execute("SELECT aggregated_content FROM branches WHERE id = 1").fetchone()[0]
         assert agg is not None
         conn.close()
 
@@ -1191,9 +1130,7 @@ class TestV5Migration:
                 "SELECT rowid FROM branches_fts WHERE branches_fts MATCH 'uniquefile_xyzzy'"
             ).fetchall()
             # If FTS5 is available, the file path should be findable
-            assert len(rows) >= 1, (
-                "branches_fts must contain the updated aggregated_content"
-            )
+            assert len(rows) >= 1, "branches_fts must contain the updated aggregated_content"
         except sqlite3.OperationalError:
             # FTS may not be available in this SQLite build — skip FTS assertion
             pass
@@ -1252,9 +1189,7 @@ class TestV5Migration:
         version = conn.execute("PRAGMA user_version").fetchone()[0]
         conn.close()
 
-        assert version == 6, (
-            f"get_db_connection on a v4 DB must run v5+v6, got version={version}"
-        )
+        assert version == 6, f"get_db_connection on a v4 DB must run v5+v6, got version={version}"
 
 
 class TestV6Migration:
@@ -1305,12 +1240,8 @@ class TestV6Migration:
         data = {
             "version": 3,
             "disposition": "IN_PROGRESS",
-            "first_exchanges": [
-                {"user": padding, "assistant": "short", "timestamp": "2025-01-01"}
-            ],
-            "last_exchanges": [
-                {"user": "short", "assistant": "short", "timestamp": "2025-01-01"}
-            ],
+            "first_exchanges": [{"user": padding, "assistant": "short", "timestamp": "2025-01-01"}],
+            "last_exchanges": [{"user": "short", "assistant": "short", "timestamp": "2025-01-01"}],
         }
         return json.dumps(data)
 
@@ -1330,13 +1261,9 @@ class TestV6Migration:
 
         _migrate_columns(conn)
 
-        result = cursor.execute(
-            "SELECT context_summary_json FROM branches WHERE id = 1"
-        ).fetchone()[0]
+        result = cursor.execute("SELECT context_summary_json FROM branches WHERE id = 1").fetchone()[0]
         assert result is not None
-        assert len(result) < 51200, (
-            f"context_summary_json must be < 50KB after v6, got {len(result)}"
-        )
+        assert len(result) < 51200, f"context_summary_json must be < 50KB after v6, got {len(result)}"
         conn.close()
 
     def test_v6_leaves_small_json_unchanged(self):
@@ -1348,9 +1275,7 @@ class TestV6Migration:
             {
                 "version": 3,
                 "disposition": "COMPLETED",
-                "first_exchanges": [
-                    {"user": "hello", "assistant": "world", "timestamp": "2025-01-01"}
-                ],
+                "first_exchanges": [{"user": "hello", "assistant": "world", "timestamp": "2025-01-01"}],
                 "last_exchanges": [],
             }
         )
@@ -1364,9 +1289,7 @@ class TestV6Migration:
 
         _migrate_columns(conn)
 
-        result = cursor.execute(
-            "SELECT context_summary_json FROM branches WHERE id = 1"
-        ).fetchone()[0]
+        result = cursor.execute("SELECT context_summary_json FROM branches WHERE id = 1").fetchone()[0]
         assert result == small_json, "Small JSON must be unchanged after v6 migration"
         conn.close()
 
@@ -1383,21 +1306,15 @@ class TestV6Migration:
         conn.commit()
 
         _migrate_columns(conn)
-        result_first = cursor.execute(
-            "SELECT context_summary_json FROM branches WHERE id = 1"
-        ).fetchone()[0]
+        result_first = cursor.execute("SELECT context_summary_json FROM branches WHERE id = 1").fetchone()[0]
 
         # Reset to v5 to simulate re-run
         conn.execute("PRAGMA user_version = 5")
         conn.commit()
         _migrate_columns(conn)
-        result_second = cursor.execute(
-            "SELECT context_summary_json FROM branches WHERE id = 1"
-        ).fetchone()[0]
+        result_second = cursor.execute("SELECT context_summary_json FROM branches WHERE id = 1").fetchone()[0]
 
-        assert result_first == result_second, (
-            "v6 is idempotent — running twice must produce the same result"
-        )
+        assert result_first == result_second, "v6 is idempotent — running twice must produce the same result"
         conn.close()
 
     def test_v6_bumps_user_version(self):
@@ -1484,9 +1401,7 @@ class TestNewBranchColumns:
     def test_embedding_version_index_exists(self, memory_db):
         """idx_branches_embedding_version index is created by _migrate_columns."""
         cursor = memory_db.cursor()
-        cursor.execute(
-            "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_branches_embedding_version'"
-        )
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_branches_embedding_version'")
         assert cursor.fetchone() is not None
 
     def test_new_columns_idempotent(self, memory_db):
@@ -1521,9 +1436,7 @@ class TestVecAvailable:
     def test_never_raises_on_operational_error(self):
         """When sqlite_vec.load raises OperationalError, vec_available returns False."""
         with patch("ccrecall.db.sqlite_vec") as mock_vec:
-            mock_vec.load.side_effect = sqlite3.OperationalError(
-                "cannot load extension"
-            )
+            mock_vec.load.side_effect = sqlite3.OperationalError("cannot load extension")
 
             class _FakeConn:
                 def enable_load_extension(self, _flag):
@@ -1532,9 +1445,7 @@ class TestVecAvailable:
             result = vec_available(_FakeConn())
             assert result is False
 
-    @pytest.mark.skipif(
-        not _VEC_AVAILABLE, reason="sqlite-vec not available in this environment"
-    )
+    @pytest.mark.skipif(not _VEC_AVAILABLE, reason="sqlite-vec not available in this environment")
     def test_returns_true_when_available(self):
         """Returns True when the extension loads successfully."""
         conn = sqlite3.connect(":memory:")
@@ -1552,12 +1463,7 @@ class TestVecSchema:
         conn.executescript(SCHEMA)
         conn.commit()
         _migrate_columns(conn)
-        tables = {
-            row[0]
-            for row in conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            ).fetchall()
-        }
+        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
         # Core tables must always be there
         assert "branches" in tables
         # branch_vec must NEVER appear via the plain migration path — regardless
@@ -1568,43 +1474,28 @@ class TestVecSchema:
     def test_conftest_memory_db_fixture_works(self, memory_db):
         """The memory_db fixture (conftest) initializes cleanly — no 'no such module: vec0'."""
         cursor = memory_db.cursor()
-        cursor.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='branches'"
-        )
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='branches'")
         assert cursor.fetchone() is not None
 
-    @pytest.mark.skipif(
-        not _VEC_AVAILABLE, reason="sqlite-vec not available in this environment"
-    )
+    @pytest.mark.skipif(not _VEC_AVAILABLE, reason="sqlite-vec not available in this environment")
     def test_branch_vec_exists_when_extension_available(self):
         """branch_vec virtual table is created by _ensure_vec_schema after loading the extension."""
         conn = make_vec_conn()
 
-        tables = {
-            row[0]
-            for row in conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            ).fetchall()
-        }
+        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
         assert "branch_vec" in tables
         conn.close()
 
-    @pytest.mark.skipif(
-        not _VEC_AVAILABLE, reason="sqlite-vec not available in this environment"
-    )
+    @pytest.mark.skipif(not _VEC_AVAILABLE, reason="sqlite-vec not available in this environment")
     def test_trigger_exists_when_extension_available(self):
         """branches_vec_ad trigger is created by _ensure_vec_schema after loading the extension."""
         conn = make_vec_conn()
 
-        row = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='trigger' AND name='branches_vec_ad'"
-        ).fetchone()
+        row = conn.execute("SELECT name FROM sqlite_master WHERE type='trigger' AND name='branches_vec_ad'").fetchone()
         assert row is not None
         conn.close()
 
-    @pytest.mark.skipif(
-        not _VEC_AVAILABLE, reason="sqlite-vec not available in this environment"
-    )
+    @pytest.mark.skipif(not _VEC_AVAILABLE, reason="sqlite-vec not available in this environment")
     def test_trigger_removes_branch_vec_row_on_branch_delete(self):
         """AC#11: deleting a branch row removes its branch_vec row (trigger fires)."""
         conn = make_vec_conn()
@@ -1644,14 +1535,10 @@ class TestVecSchema:
         conn.commit()
 
         count_after = conn.execute("SELECT COUNT(*) FROM branch_vec").fetchone()[0]
-        assert count_after == 0, (
-            "AFTER DELETE ON branches trigger must remove the matching branch_vec row"
-        )
+        assert count_after == 0, "AFTER DELETE ON branches trigger must remove the matching branch_vec row"
         conn.close()
 
-    @pytest.mark.skipif(
-        not _VEC_AVAILABLE, reason="sqlite-vec not available in this environment"
-    )
+    @pytest.mark.skipif(not _VEC_AVAILABLE, reason="sqlite-vec not available in this environment")
     def test_upsert_via_delete_insert(self):
         """vec0 upsert pattern is DELETE + INSERT (INSERT OR REPLACE is not supported by vec0).
 
@@ -1699,9 +1586,7 @@ class TestVecSchema:
         assert count == 1, "DELETE+INSERT upsert must produce exactly one row"
         conn.close()
 
-    @pytest.mark.skipif(
-        not _VEC_AVAILABLE, reason="sqlite-vec not available in this environment"
-    )
+    @pytest.mark.skipif(not _VEC_AVAILABLE, reason="sqlite-vec not available in this environment")
     def test_ensure_vec_schema_rebuilds_on_dim_change(self):
         """A stale branch_vec at a different dim is dropped and recreated at EMBEDDING_DIM.
 
@@ -1715,8 +1600,7 @@ class TestVecSchema:
         # Replace the freshly-created (correct-dim) table with a stale-dim one + a row.
         conn.execute("DROP TABLE branch_vec")
         conn.execute(
-            "CREATE VIRTUAL TABLE branch_vec"
-            f" USING vec0(branch_id INTEGER PRIMARY KEY, embedding float[{stale_dim}])"
+            f"CREATE VIRTUAL TABLE branch_vec USING vec0(branch_id INTEGER PRIMARY KEY, embedding float[{stale_dim}])"
         )
         conn.execute(
             "INSERT INTO branch_vec(branch_id, embedding) VALUES (?, ?)",
@@ -1728,18 +1612,14 @@ class TestVecSchema:
         db_module._ensure_vec_schema(conn)
         conn.commit()
 
-        sql = conn.execute(
-            "SELECT sql FROM sqlite_master WHERE type='table' AND name='branch_vec'"
-        ).fetchone()[0]
+        sql = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='branch_vec'").fetchone()[0]
         assert f"float[{EMBEDDING_DIM}]" in sql
         assert f"float[{stale_dim}]" not in sql
 
         # The orphan-cleanup trigger is recreated alongside the table — it is
         # dropped first so it can't fire against the missing table mid-rebuild.
         assert (
-            conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='trigger' AND name='branches_vec_ad'"
-            ).fetchone()
+            conn.execute("SELECT 1 FROM sqlite_master WHERE type='trigger' AND name='branches_vec_ad'").fetchone()
             is not None
         )
 
@@ -1753,9 +1633,7 @@ class TestVecSchema:
         assert conn.execute("SELECT COUNT(*) FROM branch_vec").fetchone()[0] == 1
         conn.close()
 
-    @pytest.mark.skipif(
-        not _VEC_AVAILABLE, reason="sqlite-vec not available in this environment"
-    )
+    @pytest.mark.skipif(not _VEC_AVAILABLE, reason="sqlite-vec not available in this environment")
     def test_ensure_vec_schema_preserves_matching_dim(self):
         """branch_vec already at the current dim keeps its rows — no needless rebuild."""
         conn = make_vec_conn()
@@ -1783,27 +1661,18 @@ class TestLoadVecParameter:
 
         conn = get_db_connection()
         # Core tables must exist
-        tables = {
-            row[0]
-            for row in conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            ).fetchall()
-        }
+        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
         assert "branches" in tables
         assert "sessions" in tables
 
         # Three new columns must exist
-        cols = {
-            row[1] for row in conn.execute("PRAGMA table_info(branches)").fetchall()
-        }
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(branches)").fetchall()}
         assert "embedding_version" in cols
         assert "embedding_model" in cols
         assert "summary_version_at_embed" in cols
         conn.close()
 
-    @pytest.mark.skipif(
-        not _VEC_AVAILABLE, reason="sqlite-vec not available in this environment"
-    )
+    @pytest.mark.skipif(not _VEC_AVAILABLE, reason="sqlite-vec not available in this environment")
     def test_load_vec_true_allows_branch_vec_query(self, tmp_path, monkeypatch):
         """get_db_connection(load_vec=True) returns a connection that can query branch_vec."""
         db_file = tmp_path / "conversations.db"
@@ -1815,9 +1684,7 @@ class TestLoadVecParameter:
         assert count == 0
         conn.close()
 
-    def test_load_vec_false_default_does_not_require_extension(
-        self, tmp_path, monkeypatch
-    ):
+    def test_load_vec_false_default_does_not_require_extension(self, tmp_path, monkeypatch):
         """get_db_connection() default path works even on machines where vec is unavailable.
 
         This test always passes — it verifies the non-load_vec path does not

@@ -61,9 +61,7 @@ def get_model(threads: int | None = None):
     if not DEPS_AVAILABLE:
         raise RuntimeError("fastembed not importable")
 
-    _model = TextEmbedding(
-        model_name=EMBEDDING_MODEL, threads=resolve_thread_count(threads)
-    )
+    _model = TextEmbedding(model_name=EMBEDDING_MODEL, threads=resolve_thread_count(threads))
     return _model
 
 

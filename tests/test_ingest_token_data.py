@@ -10,6 +10,7 @@ import sqlite3
 from pathlib import Path
 
 import pytest
+
 from ccrecall.token_analytics import import_session
 from ccrecall.token_parser import (
     JnlFile,
@@ -87,9 +88,7 @@ class TestTurnsAppendOnly:
         import_session(token_db, session, jnl)
         token_db.commit()
 
-        count = token_db.execute(
-            "SELECT COUNT(*) FROM turns WHERE session_id = 'sess-abc'"
-        ).fetchone()[0]
+        count = token_db.execute("SELECT COUNT(*) FROM turns WHERE session_id = 'sess-abc'").fetchone()[0]
         assert count == 2, f"Expected 2 turn rows after first import, got {count}"
 
     def test_second_import_skips_existing_turns(self, token_db, tmp_path):
@@ -104,12 +103,8 @@ class TestTurnsAppendOnly:
         import_session(token_db, session, jnl)
         token_db.commit()
 
-        count = token_db.execute(
-            "SELECT COUNT(*) FROM turns WHERE session_id = 'sess-dedup'"
-        ).fetchone()[0]
-        assert count == 2, (
-            f"Duplicate import must not create extra turn rows — got {count}"
-        )
+        count = token_db.execute("SELECT COUNT(*) FROM turns WHERE session_id = 'sess-dedup'").fetchone()[0]
+        assert count == 2, f"Duplicate import must not create extra turn rows — got {count}"
 
     def test_repeated_imports_no_duplicate_turn_index(self, token_db, tmp_path):
         """(session_id, turn_index) uniqueness must hold after multiple imports."""
@@ -127,9 +122,7 @@ class TestTurnsAppendOnly:
             GROUP BY session_id, turn_index
             HAVING cnt > 1
         """).fetchall()
-        assert rows == [], (
-            f"(session_id, turn_index) must be unique — duplicates found: {rows}"
-        )
+        assert rows == [], f"(session_id, turn_index) must be unique — duplicates found: {rows}"
 
 
 # ---------------------------------------------------------------------------
@@ -155,9 +148,7 @@ class TestSessionMetricsStableOnReimport:
         first_total = token_db.execute(
             "SELECT total_input_tokens FROM session_metrics WHERE session_id = 'sess-tokens'"
         ).fetchone()[0]
-        assert first_total == 500, (
-            f"Expected 500 input tokens after first import, got {first_total}"
-        )
+        assert first_total == 500, f"Expected 500 input tokens after first import, got {first_total}"
 
         # Reimport same session
         import_session(token_db, session, jnl)
@@ -200,9 +191,7 @@ class TestSessionMetricsStableOnReimport:
         import_session(token_db, session, jnl)
         token_db.commit()
 
-        count = token_db.execute(
-            "SELECT COUNT(*) FROM session_metrics WHERE session_id = 'sess-single'"
-        ).fetchone()[0]
+        count = token_db.execute("SELECT COUNT(*) FROM session_metrics WHERE session_id = 'sess-single'").fetchone()[0]
         assert count == 1, (
             f"Expected exactly 1 session_metrics row, got {count} — "
             "INSERT OR REPLACE must upsert, not insert a second row"
@@ -250,12 +239,9 @@ class TestTokenImportLogSchema:
 
     def test_import_log_not_created_by_token_schema(self, token_db):
         """A fresh v4 schema must not contain import_log — that table belongs to the conversation subsystem (db.py)."""
-        row = token_db.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='import_log'"
-        ).fetchone()
+        row = token_db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='import_log'").fetchone()
         assert row is None, (
-            "import_log must not be created by token schema init — "
-            "it belongs to the conversation subsystem (db.py)"
+            "import_log must not be created by token schema init — it belongs to the conversation subsystem (db.py)"
         )
 
 
@@ -348,9 +334,7 @@ class TestRecordImport:
         ).fetchall()
         assert len(rows) == 1, f"Expected 1 row after upsert, got {len(rows)}"
         assert rows[0][0] == 7, "turn_count must be updated to latest value"
-        assert rows[0][1] == f.stat().st_mtime_ns, (
-            "mtime_ns must reflect current file state"
-        )
+        assert rows[0][1] == f.stat().st_mtime_ns, "mtime_ns must reflect current file state"
 
     def test_imported_at_is_set(self, token_db, tmp_path):
         """imported_at must be a non-null datetime string after record_import."""
@@ -381,26 +365,18 @@ class TestTableIsolation:
         record_import(token_db, f, "sess-iso", turn_count=1)
         token_db.commit()
 
-        row = token_db.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='import_log'"
-        ).fetchone()
-        assert row is None, (
-            "import_log must not be created as a side-effect of token_import_log writes"
-        )
+        row = token_db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='import_log'").fetchone()
+        assert row is None, "import_log must not be created as a side-effect of token_import_log writes"
 
     def test_schema_version_table_present(self, token_db):
         """schema_version table must exist — used to gate v4 migration logic."""
-        row = token_db.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='schema_version'"
-        ).fetchone()
+        row = token_db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='schema_version'").fetchone()
         assert row is not None, "schema_version table must exist after ensure_schema"
 
     def test_schema_version_matches_constant(self, token_db):
         """schema_version must be SCHEMA_VERSION after a fresh ensure_schema."""
         version = token_db.execute("SELECT version FROM schema_version").fetchone()[0]
-        assert version == SCHEMA_VERSION, (
-            f"Expected schema version {SCHEMA_VERSION}, got {version}"
-        )
+        assert version == SCHEMA_VERSION, f"Expected schema version {SCHEMA_VERSION}, got {version}"
 
 
 # ---------------------------------------------------------------------------
@@ -458,20 +434,15 @@ class TestV3ToV4Migration:
         """ensure_schema must NOT drop import_log — it belongs to the conversation subsystem."""
         conn = _v3_token_db()
         assert (
-            conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name='import_log'"
-            ).fetchone()
+            conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='import_log'").fetchone()
             is not None
         )
 
         ensure_schema(conn)
 
-        row = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='import_log'"
-        ).fetchone()
+        row = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='import_log'").fetchone()
         assert row is not None, (
-            "import_log must survive token schema migration — "
-            "it is used by conversation import tracking (db.py)"
+            "import_log must survive token schema migration — it is used by conversation import tracking (db.py)"
         )
         conn.close()
 
@@ -480,17 +451,13 @@ class TestV3ToV4Migration:
         # Prevents: old mtime fingerprints from a different schema causing files
         # to be permanently skipped after a schema upgrade forces full re-import.
         conn = _v3_token_db()
-        conn.execute(
-            "INSERT INTO token_import_log (file_path, mtime_ns) VALUES ('/old/file.jsonl', 999)"
-        )
+        conn.execute("INSERT INTO token_import_log (file_path, mtime_ns) VALUES ('/old/file.jsonl', 999)")
         conn.commit()
 
         ensure_schema(conn)
 
         count = conn.execute("SELECT COUNT(*) FROM token_import_log").fetchone()[0]
-        assert count == 0, (
-            f"token_import_log must be cleared on schema upgrade, found {count} rows"
-        )
+        assert count == 0, f"token_import_log must be cleared on schema upgrade, found {count} rows"
         conn.close()
 
     def test_migration_token_import_log_functional_after_upgrade(self, tmp_path):
@@ -549,18 +516,14 @@ class TestWorktreeConsolidation:
     def test_normalize_worktree_path_strips_suffix(self):
         """_normalize_worktree_path must strip /.claude/worktrees/<branch>."""
         assert (
-            _normalize_worktree_path(
-                "/home/jessica/source/hassette/.claude/worktrees/65-66"
-            )
+            _normalize_worktree_path("/home/jessica/source/hassette/.claude/worktrees/65-66")
             == "/home/jessica/source/hassette"
         )
 
     def test_normalize_worktree_path_strips_decoded_form(self):
         """_normalize_worktree_path must handle decoded paths where dot is lost (//claude/worktrees/)."""
         assert (
-            _normalize_worktree_path(
-                "/home/jessica/source/hassette//claude/worktrees/new/ui"
-            )
+            _normalize_worktree_path("/home/jessica/source/hassette//claude/worktrees/new/ui")
             == "/home/jessica/source/hassette"
         )
 
@@ -623,18 +586,14 @@ class TestWorktreeConsolidation:
         # Second call runs the migration on existing data
         ensure_schema(conn)
 
-        wt1_path = conn.execute(
-            "SELECT project_path FROM session_metrics WHERE session_id = 'sess-wt1'"
-        ).fetchone()[0]
-        wt2_path = conn.execute(
-            "SELECT project_path FROM session_metrics WHERE session_id = 'sess-wt2'"
-        ).fetchone()[0]
+        wt1_path = conn.execute("SELECT project_path FROM session_metrics WHERE session_id = 'sess-wt1'").fetchone()[0]
+        wt2_path = conn.execute("SELECT project_path FROM session_metrics WHERE session_id = 'sess-wt2'").fetchone()[0]
         parent_path = conn.execute(
             "SELECT project_path FROM session_metrics WHERE session_id = 'sess-parent'"
         ).fetchone()[0]
-        snap_path = conn.execute(
-            "SELECT project_path FROM token_snapshots WHERE session_uuid = 'snap-wt1'"
-        ).fetchone()[0]
+        snap_path = conn.execute("SELECT project_path FROM token_snapshots WHERE session_uuid = 'snap-wt1'").fetchone()[
+            0
+        ]
         assert wt1_path == "/home/jessica/source/hassette", (
             f"Migration must normalize .claude/worktrees path, got: {wt1_path}"
         )

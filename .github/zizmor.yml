@@ -1,0 +1,8 @@
+# release-please legitimately needs workflow-level write permissions to open
+# release PRs and create GitHub releases. It uses the default GITHUB_TOKEN; when
+# this repo starts publishing to PyPI, swap in a GitHub App token so the release
+# PR also triggers CI (and add a `github-app` ignore here for that file).
+rules:
+  excessive-permissions:
+    ignore:
+      - release-please.yml

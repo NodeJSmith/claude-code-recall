@@ -56,9 +56,7 @@ def import_session(
 
     # Check if already imported with same (non-NULL) hash
     file_hash = get_file_hash(filepath)
-    cursor.execute(
-        "SELECT id, file_hash FROM import_log WHERE file_path = ?", (str(filepath),)
-    )
+    cursor.execute("SELECT id, file_hash FROM import_log WHERE file_path = ?", (str(filepath),))
     log_row = cursor.fetchone()
     if log_row and log_row[1] is not None and log_row[1] == file_hash:
         return -1, 0
@@ -100,8 +98,7 @@ def import_session(
         # grandchild->child->parent (branch_messages -> branches -> sessions) so
         # the session delete doesn't trip the branches.session_id constraint.
         cursor.execute(
-            "DELETE FROM branch_messages WHERE branch_id IN "
-            "(SELECT id FROM branches WHERE session_id = ?)",
+            "DELETE FROM branch_messages WHERE branch_id IN (SELECT id FROM branches WHERE session_id = ?)",
             (session_id,),
         )
         cursor.execute("DELETE FROM branches WHERE session_id = ?", (session_id,))
@@ -178,9 +175,7 @@ def main():
 
 
 def _main():
-    parser = argparse.ArgumentParser(
-        description="Import Claude Code conversations into SQLite"
-    )
+    parser = argparse.ArgumentParser(description="Import Claude Code conversations into SQLite")
     parser.add_argument(
         "--db",
         type=Path,
@@ -193,12 +188,8 @@ def _main():
         default=DEFAULT_PROJECTS_DIR,
         help=f"Projects directory (default: {DEFAULT_PROJECTS_DIR})",
     )
-    parser.add_argument(
-        "--project", type=str, help="Import only specific project (by directory name)"
-    )
-    parser.add_argument(
-        "--search", type=str, help="Search conversations instead of importing"
-    )
+    parser.add_argument("--project", type=str, help="Import only specific project (by directory name)")
+    parser.add_argument("--search", type=str, help="Search conversations instead of importing")
     parser.add_argument("--limit", type=int, default=20, help="Search result limit")
     parser.add_argument("--stats", action="store_true", help="Show database statistics")
 
@@ -343,9 +334,7 @@ def _main():
             print(f"Project not found: {project_dir}")
             return
 
-        sessions, messages, skipped = import_project(
-            conn, project_dir, exclude_projects
-        )
+        sessions, messages, skipped = import_project(conn, project_dir, exclude_projects)
         conn.commit()
         total_sessions += sessions
         total_messages += messages
@@ -356,27 +345,19 @@ def _main():
             if not project_dir.is_dir() or project_dir.name.startswith("."):
                 continue
 
-            sessions, messages, skipped = import_project(
-                conn, project_dir, exclude_projects
-            )
+            sessions, messages, skipped = import_project(conn, project_dir, exclude_projects)
             conn.commit()  # Per-project commit to minimize write-lock window
             total_sessions += sessions
             total_messages += messages
             total_skipped += skipped
 
             if sessions > 0 or messages > 0:
-                print(
-                    f"Imported {project_dir.name}: {sessions} branches, {messages} messages"
-                )
+                print(f"Imported {project_dir.name}: {sessions} branches, {messages} messages")
 
     conn.close()
 
-    logger.info(
-        f"Import complete: {total_sessions} branches, {total_messages} messages"
-    )
-    print(
-        f"\nTotal: {total_sessions} branches, {total_messages} messages imported ({total_skipped} unchanged)"
-    )
+    logger.info(f"Import complete: {total_sessions} branches, {total_messages} messages")
+    print(f"\nTotal: {total_sessions} branches, {total_messages} messages imported ({total_skipped} unchanged)")
 
     if db_path.exists():
         db_size = db_path.stat().st_size

@@ -9,7 +9,11 @@ a silent no-op.
 
 import json
 
-from ccrecall.db import CONFIG_PATH, CURRENT_ONBOARDING_VERSION, load_config  # noqa: F401 — CONFIG_PATH re-exported for test monkeypatching
+from ccrecall.db import (  # noqa: F401 — CONFIG_PATH re-exported for test monkeypatching
+    CONFIG_PATH,
+    CURRENT_ONBOARDING_VERSION,
+    load_config,
+)
 
 
 def _build_onboarding_context() -> str:
@@ -59,10 +63,7 @@ def main():
     config = load_config()
 
     # Already onboarded — exit silently
-    if (
-        config.get("onboarding_completed") is True
-        and config.get("onboarding_version", 0) >= CURRENT_ONBOARDING_VERSION
-    ):
+    if config.get("onboarding_completed") is True and config.get("onboarding_version", 0) >= CURRENT_ONBOARDING_VERSION:
         print(json.dumps({}))
         return
 

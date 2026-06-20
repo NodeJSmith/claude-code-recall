@@ -1,0 +1,17 @@
+[files]
+extend-exclude = [
+    "CHANGELOG.md",
+    "*.lock",
+    "uv.lock",
+    # Transcript fixtures are opaque captured data — message IDs, base64 blobs, and
+    # tool-use tokens that trip the spell-checker. They are data, not prose.
+    "tests/fixtures/",
+    "*.jsonl",
+]
+
+[default.extend-words]
+# Abbreviation of summary_version_at_embed in tests/test_session_ops.py assertions.
+svae = "svae"
+# Accepted spelling variant.
+Unparseable = "Unparseable"
+unparseable = "unparseable"

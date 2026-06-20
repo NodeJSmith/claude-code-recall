@@ -4,9 +4,9 @@ import sqlite3
 from uuid import uuid4
 
 from ccrecall.hooks.memory_context import (
-    select_sessions,
-    build_context,
     _build_fallback_context,
+    build_context,
+    select_sessions,
 )
 from ccrecall.summarizer import (
     build_exchange_pairs,
@@ -81,9 +81,7 @@ class TestSessionSelection:
         memory_db.commit()
         return cursor.lastrowid
 
-    def _link_message_to_branch(
-        self, memory_db: sqlite3.Connection, branch_id: int, message_id: int
-    ):
+    def _link_message_to_branch(self, memory_db: sqlite3.Connection, branch_id: int, message_id: int):
         """Helper to link a message to a branch."""
         cursor = memory_db.cursor()
         cursor.execute(
@@ -103,15 +101,11 @@ class TestSessionSelection:
         self._link_message_to_branch(memory_db, branch_id, msg_id)
 
         current_session = str(uuid4())
-        selected = select_sessions(
-            memory_db, "test-proj", current_session, max_sessions=5
-        )
+        selected = select_sessions(memory_db, "test-proj", current_session, max_sessions=5)
 
         assert selected == []
 
-    def test_select_sessions_collects_short_sessions(
-        self, memory_db: sqlite3.Connection
-    ):
+    def test_select_sessions_collects_short_sessions(self, memory_db: sqlite3.Connection):
         """Multiple 2-exchange sessions should all be collected up to max."""
         project_id = self._insert_project(memory_db, "test-proj")
         current_session = str(uuid4())
@@ -130,9 +124,7 @@ class TestSessionSelection:
                 )
                 self._link_message_to_branch(memory_db, branch_id, msg_id)
 
-        selected = select_sessions(
-            memory_db, "test-proj", current_session, max_sessions=5
-        )
+        selected = select_sessions(memory_db, "test-proj", current_session, max_sessions=5)
 
         # All 3 short sessions should be selected (oldest first by branch.ended_at DESC)
         assert len(selected) == 3
@@ -145,18 +137,14 @@ class TestSessionSelection:
 
         # Create: 2 short sessions + 1 long session + 1 more short session (after long)
         for i in range(2):
-            session_id = self._insert_session(
-                memory_db, project_id, uuid=f"sess-short-{i}"
-            )
+            session_id = self._insert_session(memory_db, project_id, uuid=f"sess-short-{i}")
             branch_id = self._insert_branch(memory_db, session_id, exchange_count=2)
             msg_id = self._insert_message(memory_db, session_id, "user", f"msg-{i}")
             self._link_message_to_branch(memory_db, branch_id, msg_id)
 
         # Long session (3 exchanges) - should stop here
         long_session_id = self._insert_session(memory_db, project_id, uuid="sess-long")
-        long_branch_id = self._insert_branch(
-            memory_db, long_session_id, exchange_count=3
-        )
+        long_branch_id = self._insert_branch(memory_db, long_session_id, exchange_count=3)
         for j in range(2):
             msg_id = self._insert_message(
                 memory_db,
@@ -167,18 +155,12 @@ class TestSessionSelection:
             self._link_message_to_branch(memory_db, long_branch_id, msg_id)
 
         # Another short session after the long one (should be skipped)
-        after_session_id = self._insert_session(
-            memory_db, project_id, uuid="sess-after"
-        )
-        after_branch_id = self._insert_branch(
-            memory_db, after_session_id, exchange_count=2
-        )
+        after_session_id = self._insert_session(memory_db, project_id, uuid="sess-after")
+        after_branch_id = self._insert_branch(memory_db, after_session_id, exchange_count=2)
         msg_id = self._insert_message(memory_db, after_session_id, "user", "after")
         self._link_message_to_branch(memory_db, after_branch_id, msg_id)
 
-        selected = select_sessions(
-            memory_db, "test-proj", current_session, max_sessions=5
-        )
+        selected = select_sessions(memory_db, "test-proj", current_session, max_sessions=5)
 
         # Should get 2 short + 1 long, then stop (the "after" session is skipped)
         assert len(selected) == 3
@@ -192,12 +174,8 @@ class TestSessionSelection:
         current_session = str(uuid4())
 
         # Create a parent session
-        parent_session_id = self._insert_session(
-            memory_db, project_id, uuid="parent-sess"
-        )
-        parent_branch_id = self._insert_branch(
-            memory_db, parent_session_id, exchange_count=3
-        )
+        parent_session_id = self._insert_session(memory_db, project_id, uuid="parent-sess")
+        parent_branch_id = self._insert_branch(memory_db, parent_session_id, exchange_count=3)
         msg_id = self._insert_message(memory_db, parent_session_id, "user", "parent")
         self._link_message_to_branch(memory_db, parent_branch_id, msg_id)
 
@@ -208,17 +186,11 @@ class TestSessionSelection:
             uuid="subagent-sess",
             parent_session_id=parent_session_id,
         )
-        subagent_branch_id = self._insert_branch(
-            memory_db, subagent_session_id, exchange_count=3
-        )
-        msg_id = self._insert_message(
-            memory_db, subagent_session_id, "user", "subagent"
-        )
+        subagent_branch_id = self._insert_branch(memory_db, subagent_session_id, exchange_count=3)
+        msg_id = self._insert_message(memory_db, subagent_session_id, "user", "subagent")
         self._link_message_to_branch(memory_db, subagent_branch_id, msg_id)
 
-        selected = select_sessions(
-            memory_db, "test-proj", current_session, max_sessions=5
-        )
+        selected = select_sessions(memory_db, "test-proj", current_session, max_sessions=5)
 
         # Only parent should be selected, subagent excluded
         assert len(selected) == 1
@@ -231,28 +203,18 @@ class TestSessionSelection:
         current_session = str(uuid4())
 
         # Create current session
-        current_session_id = self._insert_session(
-            memory_db, project_id, uuid=current_session
-        )
-        current_branch_id = self._insert_branch(
-            memory_db, current_session_id, exchange_count=3
-        )
+        current_session_id = self._insert_session(memory_db, project_id, uuid=current_session)
+        current_branch_id = self._insert_branch(memory_db, current_session_id, exchange_count=3)
         msg_id = self._insert_message(memory_db, current_session_id, "user", "current")
         self._link_message_to_branch(memory_db, current_branch_id, msg_id)
 
         # Create another session (should be selected)
-        other_session_id = self._insert_session(
-            memory_db, project_id, uuid="other-sess"
-        )
-        other_branch_id = self._insert_branch(
-            memory_db, other_session_id, exchange_count=3
-        )
+        other_session_id = self._insert_session(memory_db, project_id, uuid="other-sess")
+        other_branch_id = self._insert_branch(memory_db, other_session_id, exchange_count=3)
         msg_id = self._insert_message(memory_db, other_session_id, "user", "other")
         self._link_message_to_branch(memory_db, other_branch_id, msg_id)
 
-        selected = select_sessions(
-            memory_db, "test-proj", current_session, max_sessions=5
-        )
+        selected = select_sessions(memory_db, "test-proj", current_session, max_sessions=5)
 
         # Only "other" should be selected
         assert len(selected) == 1
@@ -266,9 +228,7 @@ class TestSessionSelection:
 
         # Create 2 sessions with different messages
         for sess_idx in range(2):
-            session_id = self._insert_session(
-                memory_db, project_id, uuid=f"sess-{sess_idx}"
-            )
+            session_id = self._insert_session(memory_db, project_id, uuid=f"sess-{sess_idx}")
             branch_id = self._insert_branch(memory_db, session_id, exchange_count=2)
 
             # Add 2 messages per branch
@@ -278,9 +238,7 @@ class TestSessionSelection:
                 msg_id = self._insert_message(memory_db, session_id, role, content)
                 self._link_message_to_branch(memory_db, branch_id, msg_id)
 
-        selected = select_sessions(
-            memory_db, "test-proj", current_session, max_sessions=5
-        )
+        selected = select_sessions(memory_db, "test-proj", current_session, max_sessions=5)
 
         # Both sessions should be selected
         assert len(selected) == 2
@@ -297,9 +255,7 @@ class TestSessionSelection:
                 assert "timestamp" in msg
                 assert msg["role"] in ("user", "assistant")
 
-    def test_batch_message_loading_excludes_notifications(
-        self, memory_db: sqlite3.Connection
-    ):
+    def test_batch_message_loading_excludes_notifications(self, memory_db: sqlite3.Connection):
         """Batch query should exclude notification messages (is_notification=1)."""
         project_id = self._insert_project(memory_db, "test-proj")
         current_session = str(uuid4())
@@ -308,9 +264,7 @@ class TestSessionSelection:
         branch_id = self._insert_branch(memory_db, session_id, exchange_count=2)
 
         # Add 1 regular message and 1 notification message
-        msg1_id = self._insert_message(
-            memory_db, session_id, "user", "regular message", is_notification=0
-        )
+        msg1_id = self._insert_message(memory_db, session_id, "user", "regular message", is_notification=0)
         msg2_id = self._insert_message(
             memory_db,
             session_id,
@@ -322,9 +276,7 @@ class TestSessionSelection:
         self._link_message_to_branch(memory_db, branch_id, msg1_id)
         self._link_message_to_branch(memory_db, branch_id, msg2_id)
 
-        selected = select_sessions(
-            memory_db, "test-proj", current_session, max_sessions=5
-        )
+        selected = select_sessions(memory_db, "test-proj", current_session, max_sessions=5)
 
         # Should have 1 session
         assert len(selected) == 1
@@ -345,9 +297,7 @@ class TestSessionSelection:
             self._link_message_to_branch(memory_db, branch_id, msg_id)
 
         # Request only 3 sessions max
-        selected = select_sessions(
-            memory_db, "test-proj", current_session, max_sessions=3
-        )
+        selected = select_sessions(memory_db, "test-proj", current_session, max_sessions=3)
 
         # Should get exactly 3 (respects the limit for 2-exchange sessions)
         assert len(selected) == 3
@@ -357,9 +307,7 @@ class TestSessionSelection:
         current_session = str(uuid4())
 
         # Query non-existent project
-        selected = select_sessions(
-            memory_db, "nonexistent-proj", current_session, max_sessions=5
-        )
+        selected = select_sessions(memory_db, "nonexistent-proj", current_session, max_sessions=5)
 
         assert selected == []
 
@@ -371,23 +319,17 @@ class TestSessionSelection:
 
         # Session 1: only has an inactive branch (should be skipped)
         sess1_id = self._insert_session(memory_db, project_id, uuid="sess-inactive")
-        branch1_id = self._insert_branch(
-            memory_db, sess1_id, exchange_count=3, is_active=0
-        )
+        branch1_id = self._insert_branch(memory_db, sess1_id, exchange_count=3, is_active=0)
         msg1_id = self._insert_message(memory_db, sess1_id, "user", "inactive msg")
         self._link_message_to_branch(memory_db, branch1_id, msg1_id)
 
         # Session 2: has an active branch (should be selected)
         sess2_id = self._insert_session(memory_db, project_id, uuid="sess-active")
-        branch2_id = self._insert_branch(
-            memory_db, sess2_id, exchange_count=3, is_active=1
-        )
+        branch2_id = self._insert_branch(memory_db, sess2_id, exchange_count=3, is_active=1)
         msg2_id = self._insert_message(memory_db, sess2_id, "user", "active msg")
         self._link_message_to_branch(memory_db, branch2_id, msg2_id)
 
-        selected = select_sessions(
-            memory_db, "test-proj", current_session, max_sessions=5
-        )
+        selected = select_sessions(memory_db, "test-proj", current_session, max_sessions=5)
 
         # Only sess-active should be selected; sess-inactive is excluded by is_active filter
         assert len(selected) == 1

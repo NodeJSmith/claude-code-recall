@@ -18,9 +18,7 @@ class TestFormatTime:
     def test_valid_iso_timestamp(self):
         result = format_time("2025-01-15T14:30:00Z")
         # Should produce HH:MM in local timezone
-        assert re.match(r"\d{2}:\d{2}$", result), (
-            f"Expected HH:MM format, got {result!r}"
-        )
+        assert re.match(r"\d{2}:\d{2}$", result), f"Expected HH:MM format, got {result!r}"
 
     def test_none_returns_placeholder(self):
         assert format_time(None) == "??:??"
@@ -60,9 +58,7 @@ class TestProjectKey:
         original = "/Users/sam/project"
         key = get_project_key(original)
         reconstructed = parse_project_key(key)
-        assert reconstructed == original, (
-            f"Expected exact roundtrip, got {reconstructed!r}"
-        )
+        assert reconstructed == original, f"Expected exact roundtrip, got {reconstructed!r}"
 
     def test_parse_project_key_lossy_with_dashes(self):
         """parse_project_key is lossy for paths containing dashes (dashes become /)."""
@@ -153,9 +149,7 @@ class TestProjectKey:
 
     def test_get_project_key_windows_matches_posix_equivalent(self):
         """Windows forward-slash and backslash paths should produce identical keys."""
-        assert get_project_key("C:/Users/sam/project") == get_project_key(
-            "C:\\Users\\sam\\project"
-        )
+        assert get_project_key("C:/Users/sam/project") == get_project_key("C:\\Users\\sam\\project")
 
     def test_normalize_cwd_windows_worktree(self):
         """Windows worktree paths should resolve to base repo path."""

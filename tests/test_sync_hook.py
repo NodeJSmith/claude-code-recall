@@ -87,9 +87,7 @@ class TestSyncSessionCreatesBranches:
             sync_session(conn, fixture_path, project_dir)
 
             cursor = conn.cursor()
-            cursor.execute(
-                "SELECT aggregated_content FROM branches WHERE is_active = 1"
-            )
+            cursor.execute("SELECT aggregated_content FROM branches WHERE is_active = 1")
             row = cursor.fetchone()
             assert row is not None
             content = row[0]
@@ -106,9 +104,7 @@ class TestSyncSessionCreatesBranches:
             conn.commit()
 
             cursor = conn.cursor()
-            cursor.execute(
-                "SELECT context_summary, summary_version FROM branches WHERE is_active = 1"
-            )
+            cursor.execute("SELECT context_summary, summary_version FROM branches WHERE is_active = 1")
             row = cursor.fetchone()
             assert row is not None
             summary, version = row
@@ -150,9 +146,7 @@ class TestSyncSessionUpdatesExisting:
             branches_1 = cursor.fetchall()
 
             # Record message UUIDs (these are what the Python-level dedup tracks)
-            cursor.execute(
-                "SELECT uuid FROM messages WHERE uuid IS NOT NULL ORDER BY uuid"
-            )
+            cursor.execute("SELECT uuid FROM messages WHERE uuid IS NOT NULL ORDER BY uuid")
             uuids_1 = [row[0] for row in cursor.fetchall()]
             assert len(uuids_1) > 0, "Messages should have UUIDs for dedup tracking"
 
@@ -167,15 +161,11 @@ class TestSyncSessionUpdatesExisting:
             session_count_2 = cursor.fetchone()[0]
 
             # Record UUIDs after second sync
-            cursor.execute(
-                "SELECT uuid FROM messages WHERE uuid IS NOT NULL ORDER BY uuid"
-            )
+            cursor.execute("SELECT uuid FROM messages WHERE uuid IS NOT NULL ORDER BY uuid")
             uuids_2 = [row[0] for row in cursor.fetchall()]
 
             # Session count should not increase
-            assert session_count_2 == session_count_1, (
-                "Session count should not increase"
-            )
+            assert session_count_2 == session_count_1, "Session count should not increase"
 
             # Message count should be the same (no duplicates)
             assert msg_count_2 == msg_count_1, "Messages should not be duplicated"
@@ -191,12 +181,8 @@ class TestSyncSessionUpdatesExisting:
             # Branch structure should be preserved (updated, not recreated)
             cursor.execute("SELECT id, leaf_uuid, is_active FROM branches ORDER BY id")
             branches_2 = cursor.fetchall()
-            assert len(branches_2) == len(branches_1), (
-                "Branch count should be unchanged"
-            )
-            assert [b[1] for b in branches_2] == [b[1] for b in branches_1], (
-                "Branch leaf_uuids should be unchanged"
-            )
+            assert len(branches_2) == len(branches_1), "Branch count should be unchanged"
+            assert [b[1] for b in branches_2] == [b[1] for b in branches_1], "Branch leaf_uuids should be unchanged"
 
 
 class TestValidateSessionIdValid:
@@ -247,9 +233,7 @@ class TestValidateSessionIdRejectsTraversal:
 
     def test_validate_session_id_rejects_uuid_with_extra(self):
         """Should reject UUID with extra characters."""
-        assert (
-            validate_session_id("016e1f0d-cff2-4552-9e21-43833c9a468e-extra") is False
-        )
+        assert validate_session_id("016e1f0d-cff2-4552-9e21-43833c9a468e-extra") is False
 
 
 class TestSyncBranchMessagesDiff:
@@ -273,21 +257,15 @@ class TestSyncBranchMessagesDiff:
             conn.commit()
 
             cursor = conn.cursor()
-            cursor.execute(
-                "SELECT branch_id, message_id FROM branch_messages ORDER BY branch_id, message_id"
-            )
+            cursor.execute("SELECT branch_id, message_id FROM branch_messages ORDER BY branch_id, message_id")
             links_after_first = cursor.fetchall()
-            assert links_after_first, (
-                "branch_messages must be populated after first sync"
-            )
+            assert links_after_first, "branch_messages must be populated after first sync"
 
             # Second sync — same file, same session; the diff should be a no-op
             sync_session(conn, fixture_path, project_dir)
             conn.commit()
 
-            cursor.execute(
-                "SELECT branch_id, message_id FROM branch_messages ORDER BY branch_id, message_id"
-            )
+            cursor.execute("SELECT branch_id, message_id FROM branch_messages ORDER BY branch_id, message_id")
             links_after_second = cursor.fetchall()
 
             assert links_after_second == links_after_first, (
@@ -295,9 +273,7 @@ class TestSyncBranchMessagesDiff:
                 f"before={len(links_after_first)}, after={len(links_after_second)}"
             )
 
-    def test_no_duplicate_branch_messages_on_repeated_sync(
-        self, memory_db_with_project
-    ):
+    def test_no_duplicate_branch_messages_on_repeated_sync(self, memory_db_with_project):
         """Repeated syncs must never produce duplicate (branch_id, message_id) pairs."""
         conn, _ = memory_db_with_project
         fixture_path = FIXTURE_DIR / "single_rewind.jsonl"
@@ -317,13 +293,9 @@ class TestSyncBranchMessagesDiff:
                 HAVING cnt > 1
             """)
             duplicates = cursor.fetchall()
-            assert not duplicates, (
-                f"Duplicate (branch_id, message_id) pairs found after 3 syncs: {duplicates}"
-            )
+            assert not duplicates, f"Duplicate (branch_id, message_id) pairs found after 3 syncs: {duplicates}"
 
-    def test_new_messages_add_branch_links_without_removing_old(
-        self, memory_db_with_project
-    ):
+    def test_new_messages_add_branch_links_without_removing_old(self, memory_db_with_project):
         """Growing a session mid-sync must add new branch_messages and keep existing ones.
 
         Prevents: the diff logic silently dropping links when new messages arrive
@@ -350,22 +322,16 @@ class TestSyncBranchMessagesDiff:
             conn.commit()
 
             cursor = conn.cursor()
-            cursor.execute(
-                "SELECT branch_id, message_id FROM branch_messages ORDER BY branch_id, message_id"
-            )
+            cursor.execute("SELECT branch_id, message_id FROM branch_messages ORDER BY branch_id, message_id")
             links_after_partial = set(cursor.fetchall())
-            assert links_after_partial, (
-                "branch_messages must be populated after partial sync"
-            )
+            assert links_after_partial, "branch_messages must be populated after partial sync"
 
             # Second sync: the full session (all fixture lines — many more exchanges).
             full_path.write_text("\n".join(fixture_lines))
             sync_session(conn, full_path, project_dir)
             conn.commit()
 
-            cursor.execute(
-                "SELECT branch_id, message_id FROM branch_messages ORDER BY branch_id, message_id"
-            )
+            cursor.execute("SELECT branch_id, message_id FROM branch_messages ORDER BY branch_id, message_id")
             links_after_full = set(cursor.fetchall())
 
             # All links from the partial sync must still exist (append-only for existing links)
@@ -418,10 +384,9 @@ class TestPidGuard:
         mock_proc = MagicMock()
         mock_proc.pid = 99999
 
-        with patch("subprocess.Popen", return_value=mock_proc) as mock_popen:
-            with patch("os.write"):
-                memory_setup._spawn_background("cm-test-cmd")
-                mock_popen.assert_called_once()
+        with patch("subprocess.Popen", return_value=mock_proc) as mock_popen, patch("os.write"):
+            memory_setup._spawn_background("cm-test-cmd")
+            mock_popen.assert_called_once()
 
         # PID file should have been reaped (it no longer exists or has been rewritten)
         # Since we patched os.write, the file won't be written with the new PID
@@ -444,11 +409,10 @@ class TestPidGuard:
         mock_proc = MagicMock()
         mock_proc.pid = 12345
 
-        with patch("os.open", side_effect=capturing_open):
-            with patch("subprocess.Popen", return_value=mock_proc):
-                with patch("os.write"):
-                    with patch("os.close"):
-                        memory_setup._spawn_background("cm-test-cmd")
+        with patch("os.open", side_effect=capturing_open), patch("subprocess.Popen", return_value=mock_proc):
+            with patch("os.write"):
+                with patch("os.close"):
+                    memory_setup._spawn_background("cm-test-cmd")
 
         assert created_flags, "os.open must have been called for the PID file"
         flags = created_flags[0]
@@ -467,23 +431,22 @@ class TestMemorySyncTempCleanup:
         tmp_file.write_text('{"test": true}')
         tmp_path_str = str(tmp_file)
 
-        with patch("tempfile.mkstemp", return_value=(0, tmp_path_str)):
-            with patch("os.fdopen") as mock_fdopen:
-                # Make fdopen return a context manager that writes successfully
-                mock_file = MagicMock()
-                mock_fdopen.return_value.__enter__ = MagicMock(return_value=mock_file)
-                mock_fdopen.return_value.__exit__ = MagicMock(return_value=False)
-                with patch("subprocess.Popen", side_effect=OSError("no such file")):
-                    with patch("os.unlink") as mock_unlink:
-                        # Run with a stdin that returns empty content
-                        with patch("sys.stdin") as mock_stdin:
-                            mock_stdin.read.return_value = '{"session": "test"}'
-                            try:
-                                memory_sync.main()
-                            except Exception:
-                                pass
-                        # Verify unlink was called with our tmp path
-                        mock_unlink.assert_any_call(tmp_path_str)
+        with patch("tempfile.mkstemp", return_value=(0, tmp_path_str)), patch("os.fdopen") as mock_fdopen:
+            # Make fdopen return a context manager that writes successfully
+            mock_file = MagicMock()
+            mock_fdopen.return_value.__enter__ = MagicMock(return_value=mock_file)
+            mock_fdopen.return_value.__exit__ = MagicMock(return_value=False)
+            with patch("subprocess.Popen", side_effect=OSError("no such file")):
+                with patch("os.unlink") as mock_unlink:
+                    # Run with a stdin that returns empty content
+                    with patch("sys.stdin") as mock_stdin:
+                        mock_stdin.read.return_value = '{"session": "test"}'
+                        try:
+                            memory_sync.main()
+                        except Exception:
+                            pass
+                    # Verify unlink was called with our tmp path
+                    mock_unlink.assert_any_call(tmp_path_str)
 
 
 class TestReapStaleTempFiles:
@@ -577,11 +540,7 @@ class TestRecentChatsDbFlag:
                 recent_chats_main()
 
         output = captured.getvalue()
-        assert (
-            "test-project" in output
-            or "hello from custom db" in output
-            or "Recent Conversations" in output
-        )
+        assert "test-project" in output or "hello from custom db" in output or "Recent Conversations" in output
 
 
 class TestSearchConversationsDbFlag:

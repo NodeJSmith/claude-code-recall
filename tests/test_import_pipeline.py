@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from ccrecall.hooks.import_conversations import import_session, import_project
+from ccrecall.hooks.import_conversations import import_project, import_session
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures"
 
@@ -31,9 +31,7 @@ class TestImportSessionBasic:
         fixture_file = FIXTURE_DIR / "linear_3_exchange.jsonl"
         assert fixture_file.exists(), f"Fixture {fixture_file} not found"
 
-        branches_imported, total_messages = import_session(
-            memory_db, fixture_file, project_id
-        )
+        branches_imported, total_messages = import_session(memory_db, fixture_file, project_id)
 
         # Should import successfully
         assert branches_imported > 0, "At least one branch should be imported"
@@ -41,9 +39,7 @@ class TestImportSessionBasic:
 
         # Verify session was created
         cursor = memory_db.cursor()
-        cursor.execute(
-            "SELECT COUNT(*) FROM sessions WHERE project_id = ?", (project_id,)
-        )
+        cursor.execute("SELECT COUNT(*) FROM sessions WHERE project_id = ?", (project_id,))
         session_count = cursor.fetchone()[0]
         assert session_count == 1, "Exactly one session should exist"
 
@@ -53,9 +49,7 @@ class TestImportSessionBasic:
             (project_id,),
         )
         branch_count = cursor.fetchone()[0]
-        assert branch_count == branches_imported, (
-            "Branch count should match returned value"
-        )
+        assert branch_count == branches_imported, "Branch count should match returned value"
 
         # Verify messages exist
         cursor.execute(
@@ -63,9 +57,7 @@ class TestImportSessionBasic:
             (project_id,),
         )
         message_count = cursor.fetchone()[0]
-        assert message_count == total_messages, (
-            "Message count should match returned value"
-        )
+        assert message_count == total_messages, "Message count should match returned value"
 
 
 class TestImportSessionWithBranches:
@@ -76,9 +68,7 @@ class TestImportSessionWithBranches:
         fixture_file = FIXTURE_DIR / "single_rewind.jsonl"
         assert fixture_file.exists(), f"Fixture {fixture_file} not found"
 
-        branches_imported, total_messages = import_session(
-            memory_db, fixture_file, project_id
-        )
+        branches_imported, total_messages = import_session(memory_db, fixture_file, project_id)
 
         # single_rewind has 3 branches
         assert branches_imported == 3, f"Expected 3 branches, got {branches_imported}"
@@ -124,21 +114,15 @@ class TestEmptySessionGuard:
             )
 
         try:
-            branches_imported, total_messages = import_session(
-                memory_db, temp_path, project_id
-            )
+            branches_imported, total_messages = import_session(memory_db, temp_path, project_id)
 
             # Guard 1: no extractable content means session deleted and returns -1
-            assert branches_imported == -1, (
-                "Session should be deleted (guard 1 triggered)"
-            )
+            assert branches_imported == -1, "Session should be deleted (guard 1 triggered)"
             assert total_messages == 0, "No messages should be imported"
 
             # Verify session was NOT created or was cleaned up
             cursor = memory_db.cursor()
-            cursor.execute(
-                "SELECT COUNT(*) FROM sessions WHERE project_id = ?", (project_id,)
-            )
+            cursor.execute("SELECT COUNT(*) FROM sessions WHERE project_id = ?", (project_id,))
             session_count = cursor.fetchone()[0]
             assert session_count == 0, "Empty session should be deleted"
 
@@ -174,9 +158,7 @@ class TestEmptyBranchGuard:
             )
 
         try:
-            branches_imported, total_messages = import_session(
-                memory_db, temp_path, project_id
-            )
+            branches_imported, total_messages = import_session(memory_db, temp_path, project_id)
 
             # Guard 2 fires because after excluding notifications, the branch
             # has only assistant text — but the notification user message IS
@@ -199,9 +181,7 @@ class TestEmptyBranchGuard:
                 assert notif_count > 0, "Notification messages should be flagged"
             else:
                 # Branch was deleted by guard 2 or guard 3 — session should not exist
-                cursor.execute(
-                    "SELECT COUNT(*) FROM sessions WHERE project_id = ?", (project_id,)
-                )
+                cursor.execute("SELECT COUNT(*) FROM sessions WHERE project_id = ?", (project_id,))
                 assert cursor.fetchone()[0] == 0, "Empty session should be cleaned up"
         finally:
             temp_path.unlink()
@@ -220,9 +200,7 @@ class TestReimportIdempotent:
 
         # Count sessions after first import
         cursor = memory_db.cursor()
-        cursor.execute(
-            "SELECT COUNT(*) FROM sessions WHERE project_id = ?", (project_id,)
-        )
+        cursor.execute("SELECT COUNT(*) FROM sessions WHERE project_id = ?", (project_id,))
         sessions_after_first = cursor.fetchone()[0]
 
         # Second import (same file)
@@ -231,13 +209,9 @@ class TestReimportIdempotent:
         assert messages2 == 0, "No new messages on second import"
 
         # Verify no new session created
-        cursor.execute(
-            "SELECT COUNT(*) FROM sessions WHERE project_id = ?", (project_id,)
-        )
+        cursor.execute("SELECT COUNT(*) FROM sessions WHERE project_id = ?", (project_id,))
         sessions_after_second = cursor.fetchone()[0]
-        assert sessions_after_second == sessions_after_first, (
-            "No new session should be created"
-        )
+        assert sessions_after_second == sessions_after_first, "No new session should be created"
 
 
 class TestImportLogTracking:
@@ -247,9 +221,7 @@ class TestImportLogTracking:
         """Verify import_log entry is created with file hash and message count."""
         fixture_file = FIXTURE_DIR / "linear_3_exchange.jsonl"
 
-        branches_imported, total_messages = import_session(
-            memory_db, fixture_file, project_id
-        )
+        branches_imported, total_messages = import_session(memory_db, fixture_file, project_id)
         assert branches_imported > 0, "Import should succeed"
 
         # Check import_log
@@ -392,13 +364,9 @@ class TestImportProject:
             # so project_name will be "node-banana" (derived from real cwd, not directory key)
             import shutil
 
-            shutil.copy(
-                FIXTURE_DIR / "linear_3_exchange.jsonl", project_dir / "session1.jsonl"
-            )
+            shutil.copy(FIXTURE_DIR / "linear_3_exchange.jsonl", project_dir / "session1.jsonl")
 
-            sessions, messages, skipped = import_project(
-                memory_db, project_dir, exclude_projects=["node-banana"]
-            )
+            sessions, messages, skipped = import_project(memory_db, project_dir, exclude_projects=["node-banana"])
             # Should return (0, 0, 0) because the project name matches exclusion
             assert sessions == 0
             assert messages == 0
@@ -412,9 +380,7 @@ class TestImportProject:
 
             import shutil
 
-            shutil.copy(
-                FIXTURE_DIR / "linear_3_exchange.jsonl", project_dir / "session1.jsonl"
-            )
+            shutil.copy(FIXTURE_DIR / "linear_3_exchange.jsonl", project_dir / "session1.jsonl")
 
             sessions, messages, skipped = import_project(memory_db, project_dir)
             assert sessions > 0 or skipped > 0, "Should process the JSONL file"
@@ -450,8 +416,7 @@ class TestAppendOnlyReimport:
 
         cursor = memory_db.cursor()
         cursor.execute(
-            "SELECT id, uuid FROM messages WHERE session_id = "
-            "(SELECT id FROM sessions WHERE project_id = ?)",
+            "SELECT id, uuid FROM messages WHERE session_id = (SELECT id FROM sessions WHERE project_id = ?)",
             (project_id,),
         )
         rows_before = cursor.fetchall()
@@ -470,14 +435,11 @@ class TestAppendOnlyReimport:
 
         # Same number of message rows — append-only, no duplicates
         cursor.execute(
-            "SELECT id, uuid FROM messages WHERE session_id = "
-            "(SELECT id FROM sessions WHERE project_id = ?)",
+            "SELECT id, uuid FROM messages WHERE session_id = (SELECT id FROM sessions WHERE project_id = ?)",
             (project_id,),
         )
         rows_after = cursor.fetchall()
-        assert len(rows_after) == len(rows_before), (
-            "Reimport must not create duplicate message rows"
-        )
+        assert len(rows_after) == len(rows_before), "Reimport must not create duplicate message rows"
 
         # Same DB row IDs — ON CONFLICT DO NOTHING preserved originals
         ids_after = {row[0] for row in rows_after}
@@ -510,9 +472,7 @@ class TestAppendOnlyReimport:
             HAVING cnt > 1
         """)
         duplicates = cursor.fetchall()
-        assert duplicates == [], (
-            f"Duplicate (session_id, uuid) pairs found after repeated reimport: {duplicates}"
-        )
+        assert duplicates == [], f"Duplicate (session_id, uuid) pairs found after repeated reimport: {duplicates}"
 
 
 class TestBranchMessagesDiffOnReimport:
@@ -527,9 +487,7 @@ class TestBranchMessagesDiffOnReimport:
         fixture_file = FIXTURE_DIR / "single_rewind.jsonl"
 
         branches1, _ = import_session(memory_db, fixture_file, project_id)
-        assert branches1 == 3, (
-            "Fixture must produce 3 branches for this test to be meaningful"
-        )
+        assert branches1 == 3, "Fixture must produce 3 branches for this test to be meaningful"
 
         cursor = memory_db.cursor()
         cursor.execute(
@@ -606,23 +564,18 @@ class TestSessionWithMessagesButNoBranches:
             )
 
         try:
-            branches_imported, total_messages = import_session(
-                memory_db, temp_path, project_id
-            )
+            branches_imported, total_messages = import_session(memory_db, temp_path, project_id)
 
             cursor = memory_db.cursor()
             # Session must still exist (messages present — conservative cleanup)
-            cursor.execute(
-                "SELECT COUNT(*) FROM sessions WHERE project_id = ?", (project_id,)
-            )
+            cursor.execute("SELECT COUNT(*) FROM sessions WHERE project_id = ?", (project_id,))
             session_count = cursor.fetchone()[0]
 
             if branches_imported > 0:
                 # Branch survived (assistant text kept it non-empty) — session must exist
                 assert session_count == 1, "Session must exist when branch has content"
                 cursor.execute(
-                    "SELECT COUNT(*) FROM messages WHERE session_id = "
-                    "(SELECT id FROM sessions WHERE project_id = ?)",
+                    "SELECT COUNT(*) FROM messages WHERE session_id = (SELECT id FROM sessions WHERE project_id = ?)",
                     (project_id,),
                 )
                 msg_count = cursor.fetchone()[0]
@@ -638,15 +591,12 @@ class TestSessionWithMessagesButNoBranches:
                     )
                     msg_count = cursor.fetchone()[0]
                     assert msg_count > 0, (
-                        "Session row must not survive with zero message rows — "
-                        "that would be an orphaned session"
+                        "Session row must not survive with zero message rows — that would be an orphaned session"
                     )
         finally:
             temp_path.unlink()
 
-    def test_session_deleted_only_when_both_messages_and_branches_are_zero(
-        self, memory_db, project_id
-    ):
+    def test_session_deleted_only_when_both_messages_and_branches_are_zero(self, memory_db, project_id):
         """Session cleanup fires only when message count AND branch count are both zero.
 
         A session with messages but no branches (all branches empty) should not be deleted
@@ -663,22 +613,14 @@ class TestSessionWithMessagesButNoBranches:
             )
 
         try:
-            branches_imported, total_messages = import_session(
-                memory_db, temp_path, project_id
-            )
+            branches_imported, total_messages = import_session(memory_db, temp_path, project_id)
 
             # Guard 1 fires: no extractable text, session must be cleaned up
-            assert branches_imported == -1, (
-                "Should trigger guard 1 (no extractable content)"
-            )
+            assert branches_imported == -1, "Should trigger guard 1 (no extractable content)"
 
             cursor = memory_db.cursor()
-            cursor.execute(
-                "SELECT COUNT(*) FROM sessions WHERE project_id = ?", (project_id,)
-            )
-            assert cursor.fetchone()[0] == 0, (
-                "Session with zero messages and zero branches must be cleaned up"
-            )
+            cursor.execute("SELECT COUNT(*) FROM sessions WHERE project_id = ?", (project_id,))
+            assert cursor.fetchone()[0] == 0, "Session with zero messages and zero branches must be cleaned up"
         finally:
             temp_path.unlink()
 
@@ -728,9 +670,7 @@ class TestEmptyBranchGuardTightened:
 
             if not branch_rows_after_first:
                 # Guard 1 fired (no messages at all) — nothing to test for branch preservation
-                cursor.execute(
-                    "SELECT COUNT(*) FROM sessions WHERE project_id = ?", (project_id,)
-                )
+                cursor.execute("SELECT COUNT(*) FROM sessions WHERE project_id = ?", (project_id,))
                 assert cursor.fetchone()[0] == 0, "Guard 1 must clean up empty session"
                 return
 

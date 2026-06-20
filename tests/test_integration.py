@@ -55,12 +55,7 @@ def _setup_db_and_import(filepath: Path) -> sqlite3.Connection:
         if entry_type == "user" and is_tool_result(content):
             continue
         notification = (
-            1
-            if (
-                entry_type == "user"
-                and (is_task_notification(content) or is_teammate_message(content))
-            )
-            else 0
+            1 if (entry_type == "user" and (is_task_notification(content) or is_teammate_message(content))) else 0
         )
         text, has_tool_use, has_thinking, tool_summary = extract_text_content(content)
         if not text:
@@ -97,9 +92,7 @@ def _setup_db_and_import(filepath: Path) -> sqlite3.Connection:
     for branch in branches:
         branch_msgs = [m for m in messages if m.get("uuid") in branch["uuids"]]
         branch_msgs.sort(key=lambda e: e.get("timestamp") or "")
-        exchange_count, files, commits, _tool_counts = compute_branch_metadata(
-            branch_msgs
-        )
+        exchange_count, files, commits, _tool_counts = compute_branch_metadata(branch_msgs)
 
         cursor.execute(
             """
@@ -136,9 +129,7 @@ class TestNotificationEndToEnd:
         cursor.execute("SELECT COUNT(*) FROM messages WHERE is_notification = 1")
         assert cursor.fetchone()[0] == 2  # Two task-notification messages
 
-        cursor.execute(
-            "SELECT COUNT(*) FROM messages WHERE is_notification = 0 AND role = 'user'"
-        )
+        cursor.execute("SELECT COUNT(*) FROM messages WHERE is_notification = 0 AND role = 'user'")
         assert cursor.fetchone()[0] == 2  # Two real user messages
         conn.close()
 
@@ -158,9 +149,7 @@ class TestNotificationEndToEnd:
         cursor = conn.cursor()
         cursor.execute("SELECT exchange_count FROM branches WHERE is_active = 1")
         count = cursor.fetchone()[0]
-        assert (
-            count == 2
-        )  # "Research AI agent memory" and "summarize the key takeaways"
+        assert count == 2  # "Research AI agent memory" and "summarize the key takeaways"
         conn.close()
 
     def test_context_injection_query_excludes_notifications(self):
@@ -229,9 +218,7 @@ class TestTeammateMessageEndToEnd:
         cursor.execute("SELECT COUNT(*) FROM messages WHERE is_notification = 1")
         assert cursor.fetchone()[0] == 2  # Two teammate messages (report + idle)
 
-        cursor.execute(
-            "SELECT COUNT(*) FROM messages WHERE is_notification = 0 AND role = 'user'"
-        )
+        cursor.execute("SELECT COUNT(*) FROM messages WHERE is_notification = 0 AND role = 'user'")
         assert cursor.fetchone()[0] == 2  # Two real user messages
         conn.close()
 
@@ -252,9 +239,7 @@ class TestTeammateMessageEndToEnd:
         cursor = conn.cursor()
         cursor.execute("SELECT exchange_count FROM branches WHERE is_active = 1")
         count = cursor.fetchone()[0]
-        assert (
-            count == 2
-        )  # "Implement the security fixes" and "awesome, looks great. now commit"
+        assert count == 2  # "Implement the security fixes" and "awesome, looks great. now commit"
         conn.close()
 
     def test_context_injection_query_excludes_teammate_messages(self):

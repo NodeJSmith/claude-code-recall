@@ -16,11 +16,11 @@ from unittest.mock import patch
 
 import pytest
 import sqlite_vec
+from conftest import make_vec_conn
 
 from ccrecall.embeddings import EMBEDDING_DIM, EMBEDDING_MODEL, EMBEDDING_VERSION
 from ccrecall.hooks.backfill_embeddings import BATCH_SIZE, _main
 from ccrecall.summarizer import SUMMARY_VERSION
-from conftest import make_vec_conn
 
 # A fixed EMBEDDING_DIM-dim float vector for stubbing embed_text.
 _FIXED_VEC = [0.001] * EMBEDDING_DIM
@@ -40,9 +40,7 @@ def _vec_available() -> bool:
         return False
 
 
-_VEC_SKIP = pytest.mark.skipif(
-    not _vec_available(), reason="sqlite-vec not available in this environment"
-)
+_VEC_SKIP = pytest.mark.skipif(not _vec_available(), reason="sqlite-vec not available in this environment")
 
 
 # ---------------------------------------------------------------------------
@@ -63,9 +61,7 @@ def _insert_branch(
     """
     conn.execute(
         "INSERT INTO sessions(uuid, project_id) VALUES (?, NULL)",
-        (
-            f"sess-{id(summary)}-{conn.execute('SELECT COUNT(*) FROM sessions').fetchone()[0]}",
-        ),
+        (f"sess-{id(summary)}-{conn.execute('SELECT COUNT(*) FROM sessions').fetchone()[0]}",),
     )
     session_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
     conn.execute(
@@ -89,9 +85,7 @@ def _insert_branch(
 
 
 def _branch_embedding_version(conn: sqlite3.Connection, branch_id: int) -> int | None:
-    row = conn.execute(
-        "SELECT embedding_version FROM branches WHERE id = ?", (branch_id,)
-    ).fetchone()
+    row = conn.execute("SELECT embedding_version FROM branches WHERE id = ?", (branch_id,)).fetchone()
     return row[0] if row else None
 
 
@@ -100,12 +94,7 @@ def _vec_count(conn: sqlite3.Connection) -> int:
 
 
 def _has_vec(conn: sqlite3.Connection, branch_id: int) -> bool:
-    return (
-        conn.execute(
-            "SELECT COUNT(*) FROM branch_vec WHERE branch_id = ?", (branch_id,)
-        ).fetchone()[0]
-        == 1
-    )
+    return conn.execute("SELECT COUNT(*) FROM branch_vec WHERE branch_id = ?", (branch_id,)).fetchone()[0] == 1
 
 
 class _NoCloseConn:
@@ -131,9 +120,7 @@ def _run_backfill_with_stub(conn: sqlite3.Connection, argv: list[str] | None = N
     argv defaults to [] so the run never reads pytest's own sys.argv.
     """
     with (
-        patch(
-            "ccrecall.hooks.backfill_embeddings.model_available", return_value=True
-        ),
+        patch("ccrecall.hooks.backfill_embeddings.model_available", return_value=True),
         patch(
             "ccrecall.hooks.backfill_embeddings.embed_text",
             return_value=_FIXED_VEC,
@@ -247,9 +234,7 @@ class TestBackfillResume:
                 "ccrecall.hooks.backfill_embeddings.get_db_connection",
                 return_value=_NoCloseConn(conn),
             ),
-            patch(
-                "ccrecall.hooks.backfill_embeddings.load_settings", return_value={}
-            ),
+            patch("ccrecall.hooks.backfill_embeddings.load_settings", return_value={}),
             patch("ccrecall.hooks.backfill_embeddings.time.sleep"),
         ):
             _main([])
@@ -272,9 +257,7 @@ class TestBackfillResume:
                 "ccrecall.hooks.backfill_embeddings.get_db_connection",
                 return_value=_NoCloseConn(conn),
             ),
-            patch(
-                "ccrecall.hooks.backfill_embeddings.load_settings", return_value={}
-            ),
+            patch("ccrecall.hooks.backfill_embeddings.load_settings", return_value={}),
             patch("ccrecall.hooks.backfill_embeddings.time.sleep"),
         ):
             _main([])
@@ -352,9 +335,7 @@ class TestBackfillVersionBump:
 
         _run_backfill_with_stub(conn)
 
-        row = conn.execute(
-            "SELECT embedding_version FROM branches WHERE id = ?", (bid,)
-        ).fetchone()
+        row = conn.execute("SELECT embedding_version FROM branches WHERE id = ?", (bid,)).fetchone()
         assert row[0] == EMBEDDING_VERSION
 
     def test_model_change_reselects(self):
@@ -383,9 +364,7 @@ class TestBackfillVersionBump:
 
         _run_backfill_with_stub(conn)
 
-        row = conn.execute(
-            "SELECT embedding_model FROM branches WHERE id = ?", (bid,)
-        ).fetchone()
+        row = conn.execute("SELECT embedding_model FROM branches WHERE id = ?", (bid,)).fetchone()
         assert row[0] == EMBEDDING_MODEL
 
     def test_summary_version_mismatch_reselects(self):
@@ -416,9 +395,7 @@ class TestBackfillVersionBump:
 
         _run_backfill_with_stub(conn)
 
-        row = conn.execute(
-            "SELECT summary_version_at_embed FROM branches WHERE id = ?", (bid,)
-        ).fetchone()
+        row = conn.execute("SELECT summary_version_at_embed FROM branches WHERE id = ?", (bid,)).fetchone()
         assert row[0] == SUMMARY_VERSION
 
 
@@ -449,16 +426,12 @@ class TestBackfillNoProgressGuard:
                 "ccrecall.hooks.backfill_embeddings.embed_text",
                 return_value=_FIXED_VEC,
             ),
-            patch(
-                "ccrecall.hooks.backfill_embeddings.write_branch_embedding"
-            ),  # no-op: row never stamped done
+            patch("ccrecall.hooks.backfill_embeddings.write_branch_embedding"),  # no-op: row never stamped done
             patch(
                 "ccrecall.hooks.backfill_embeddings.get_db_connection",
                 return_value=_NoCloseConn(conn),
             ),
-            patch(
-                "ccrecall.hooks.backfill_embeddings.load_settings", return_value={}
-            ),
+            patch("ccrecall.hooks.backfill_embeddings.load_settings", return_value={}),
             patch("ccrecall.hooks.backfill_embeddings.time.sleep"),
         ):
             _main([])  # must return, not hang
@@ -466,9 +439,7 @@ class TestBackfillNoProgressGuard:
         # Row was never actually stamped (write was a no-op), confirming
         # _main() exited via the guard, not via the row becoming done.
         ev = _branch_embedding_version(conn, bid)
-        assert ev != EMBEDDING_VERSION, (
-            "Row should not be at EMBEDDING_VERSION — write was patched to no-op"
-        )
+        assert ev != EMBEDDING_VERSION, "Row should not be at EMBEDDING_VERSION — write was patched to no-op"
 
 
 # ---------------------------------------------------------------------------
@@ -492,9 +463,7 @@ class TestBackfillFailureModes:
                 "ccrecall.hooks.backfill_embeddings.get_db_connection",
                 return_value=_NoCloseConn(conn),
             ),
-            patch(
-                "ccrecall.hooks.backfill_embeddings.load_settings", return_value={}
-            ),
+            patch("ccrecall.hooks.backfill_embeddings.load_settings", return_value={}),
         ):
             _main([])
 
@@ -529,9 +498,7 @@ class TestBackfillFailureModes:
                 "ccrecall.hooks.backfill_embeddings.get_db_connection",
                 return_value=_NoCloseConn(conn),
             ),
-            patch(
-                "ccrecall.hooks.backfill_embeddings.load_settings", return_value={}
-            ),
+            patch("ccrecall.hooks.backfill_embeddings.load_settings", return_value={}),
             patch("ccrecall.hooks.backfill_embeddings.time.sleep"),
         ):
             _main([])
@@ -567,9 +534,7 @@ class TestBackfillFailureModes:
                 "ccrecall.hooks.backfill_embeddings.get_db_connection",
                 return_value=_NoCloseConn(conn),
             ),
-            patch(
-                "ccrecall.hooks.backfill_embeddings.load_settings", return_value={}
-            ),
+            patch("ccrecall.hooks.backfill_embeddings.load_settings", return_value={}),
             patch("ccrecall.hooks.backfill_embeddings.time.sleep"),
         ):
             _main([])
@@ -606,9 +571,7 @@ class TestBackfillFailureModes:
                 "ccrecall.hooks.backfill_embeddings.get_db_connection",
                 return_value=_NoCloseConn(conn),
             ),
-            patch(
-                "ccrecall.hooks.backfill_embeddings.load_settings", return_value={}
-            ),
+            patch("ccrecall.hooks.backfill_embeddings.load_settings", return_value={}),
             patch("ccrecall.hooks.backfill_embeddings.time.sleep"),
         ):
             _main([])
@@ -651,9 +614,7 @@ class TestBackfillFlags:
         recent = _insert_branch(conn, "recent")
         old = _insert_branch(conn, "old")
         # Set ended_at relative to 'now' so the test is wall-clock independent.
-        conn.execute(
-            "UPDATE branches SET ended_at = datetime('now') WHERE id = ?", (recent,)
-        )
+        conn.execute("UPDATE branches SET ended_at = datetime('now') WHERE id = ?", (recent,))
         conn.execute(
             "UPDATE branches SET ended_at = datetime('now', '-60 days') WHERE id = ?",
             (old,),
@@ -706,9 +667,7 @@ class TestBackfillStatus:
         for i in range(2):
             _insert_branch(conn, f"eligible {i}")
         errored = _insert_branch(conn, "errored")
-        conn.execute(
-            "UPDATE branches SET embedding_version = -1 WHERE id = ?", (errored,)
-        )
+        conn.execute("UPDATE branches SET embedding_version = -1 WHERE id = ?", (errored,))
         conn.commit()
 
     def test_json_counts(self, capsys):
@@ -756,9 +715,7 @@ class TestBackfillStatus:
             "UPDATE branches SET ended_at = datetime('now', '-60 days') WHERE id = ?",
             (old,),
         )
-        conn.execute(
-            "UPDATE branches SET embedding_version = -1 WHERE id = ?", (recent_err,)
-        )
+        conn.execute("UPDATE branches SET embedding_version = -1 WHERE id = ?", (recent_err,))
         conn.commit()
 
         out = _run_status(conn, ["--json", "--days", "30"], capsys)

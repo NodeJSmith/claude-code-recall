@@ -10,9 +10,9 @@ are present.
 import sqlite3
 
 import pytest
+from conftest import make_vec_conn
 
 from ccrecall.recent_chats import get_recent_sessions
-from conftest import make_vec_conn
 
 
 def _seed_sessions(conn: sqlite3.Connection) -> list[str]:
@@ -109,18 +109,14 @@ class TestRecentChatsInvariant:
 
         # Same ordered list — compare element by element
         for plain, vec in zip(plain_results, vec_results):
-            assert plain["uuid"] == vec["uuid"], (
-                f"UUID mismatch at same position: {plain['uuid']!r} vs {vec['uuid']!r}"
-            )
+            assert plain["uuid"] == vec["uuid"], f"UUID mismatch at same position: {plain['uuid']!r} vs {vec['uuid']!r}"
             assert plain["project"] == vec["project"]
             assert plain.get("started_at") == vec.get("started_at")
             assert plain.get("ended_at") == vec.get("ended_at")
             # Same messages in same order (role + content)
             plain_msgs = [(m["role"], m["content"]) for m in plain["messages"]]
             vec_msgs = [(m["role"], m["content"]) for m in vec["messages"]]
-            assert plain_msgs == vec_msgs, (
-                f"Message list mismatch for session {plain['uuid']!r}"
-            )
+            assert plain_msgs == vec_msgs, f"Message list mismatch for session {plain['uuid']!r}"
 
     def test_recent_chats_order_unaffected_by_embedding_columns(self, memory_db):
         """DESC ordering by ended_at is unaffected by presence of embedding columns."""
@@ -158,7 +154,5 @@ class TestRecentChatsInvariant:
         assert len(results) == 3
         assert all(r["project"] == "proj" for r in results)
 
-        results_no_match = get_recent_sessions(
-            memory_db, n=10, projects=["nonexistent"]
-        )
+        results_no_match = get_recent_sessions(memory_db, n=10, projects=["nonexistent"])
         assert len(results_no_match) == 0

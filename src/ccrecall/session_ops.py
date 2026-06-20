@@ -170,12 +170,7 @@ def sync_session(
             continue
 
         notification = (
-            1
-            if (
-                entry_type == "user"
-                and (is_task_notification(content) or is_teammate_message(content))
-            )
-            else 0
+            1 if (entry_type == "user" and (is_task_notification(content) or is_teammate_message(content))) else 0
         )
 
         text, _has_tool_use, has_thinking, _tool_summary = extract_text_content(content)
@@ -217,9 +212,7 @@ def sync_session(
     uuid_to_msg_id = {row[1]: row[0] for row in cursor.fetchall()}
 
     # --- Get existing branch leaf_uuids for this session ---
-    cursor.execute(
-        "SELECT id, leaf_uuid FROM branches WHERE session_id = ?", (session_id,)
-    )
+    cursor.execute("SELECT id, leaf_uuid FROM branches WHERE session_id = ?", (session_id,))
     existing_branches = {row[1]: row[0] for row in cursor.fetchall()}
 
     # Probe vec persistence once: if sqlite-vec didn't load, branch_vec doesn't
@@ -240,9 +233,7 @@ def sync_session(
 
         # Compute branch metadata
         branch_meta = extract_session_metadata(branch_msgs)
-        exchange_count, files, commits, tool_counts = compute_branch_metadata(
-            branch_msgs
-        )
+        exchange_count, files, commits, tool_counts = compute_branch_metadata(branch_msgs)
 
         files_json = json.dumps(files) if files else None
         commits_json = json.dumps(commits) if commits else None
@@ -373,9 +364,7 @@ def sync_session(
 
     # --- Update import_log ---
     if write_import_log:
-        cursor.execute(
-            "SELECT COUNT(*) FROM messages WHERE session_id = ?", (session_id,)
-        )
+        cursor.execute("SELECT COUNT(*) FROM messages WHERE session_id = ?", (session_id,))
         total_messages = cursor.fetchone()[0]
 
         if log_row:

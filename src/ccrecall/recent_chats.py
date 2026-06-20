@@ -13,7 +13,7 @@ from pathlib import Path
 
 # Local imports
 from ccrecall.db import DEFAULT_DB_PATH, get_db_connection
-from ccrecall.formatting import format_markdown_session, format_json_sessions
+from ccrecall.formatting import format_json_sessions, format_markdown_session
 
 
 def get_recent_sessions(
@@ -51,9 +51,7 @@ def get_recent_sessions(
 
     if session_id:
         sql += " AND s.uuid LIKE ? ESCAPE '\\'"
-        escaped = (
-            session_id.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-        )
+        escaped = session_id.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         params.append(f"{escaped}%")
 
     if before:
@@ -128,8 +126,7 @@ def get_recent_sessions(
         )
 
         messages = [
-            {"role": r, "content": c, "timestamp": t, "is_notification": notif}
-            for r, c, t, notif in cursor.fetchall()
+            {"role": r, "content": c, "timestamp": t, "is_notification": notif} for r, c, t, notif in cursor.fetchall()
         ]
 
         session_data = {
@@ -142,13 +139,9 @@ def get_recent_sessions(
         }
 
         if verbose:
-            session_data["files_modified"] = (
-                json.loads(files_json) if files_json else []
-            )
+            session_data["files_modified"] = json.loads(files_json) if files_json else []
             session_data["commits"] = json.loads(commits_json) if commits_json else []
-            session_data["tool_counts"] = (
-                json.loads(tool_counts_json) if tool_counts_json else {}
-            )
+            session_data["tool_counts"] = json.loads(tool_counts_json) if tool_counts_json else {}
 
         results.append(session_data)
 
@@ -169,28 +162,18 @@ def format_markdown(sessions: list[dict], verbose: bool = False) -> str:
 
 def main():
     parser = argparse.ArgumentParser(description="Get recent conversation sessions")
-    parser.add_argument(
-        "--n", "-n", type=int, default=3, help="Number of sessions (1-20, default: 3)"
-    )
+    parser.add_argument("--n", "-n", type=int, default=3, help="Number of sessions (1-20, default: 3)")
     parser.add_argument(
         "--sort-order",
         choices=["desc", "asc"],
         default="desc",
         help="Sort order (default: desc)",
     )
-    parser.add_argument(
-        "--before", type=str, help="Sessions before this datetime (ISO)"
-    )
+    parser.add_argument("--before", type=str, help="Sessions before this datetime (ISO)")
     parser.add_argument("--after", type=str, help="Sessions after this datetime (ISO)")
-    parser.add_argument(
-        "--session", type=str, help="Filter by session UUID (prefix match)"
-    )
-    parser.add_argument(
-        "--project", type=str, help="Filter by project name(s), comma-separated"
-    )
-    parser.add_argument(
-        "--path", type=str, help="Filter by cwd substring (e.g. worktree name)"
-    )
+    parser.add_argument("--session", type=str, help="Filter by session UUID (prefix match)")
+    parser.add_argument("--project", type=str, help="Filter by project name(s), comma-separated")
+    parser.add_argument("--path", type=str, help="Filter by cwd substring (e.g. worktree name)")
     parser.add_argument(
         "--format",
         choices=["markdown", "json"],
@@ -208,9 +191,7 @@ def main():
         action="store_true",
         help="Include task notification messages (hidden by default)",
     )
-    parser.add_argument(
-        "--db", type=Path, default=DEFAULT_DB_PATH, help="Database path"
-    )
+    parser.add_argument("--db", type=Path, default=DEFAULT_DB_PATH, help="Database path")
 
     args = parser.parse_args()
     n = max(1, min(20, args.n))
@@ -218,11 +199,7 @@ def main():
 
     if not args.db.exists():
         if args.format == "json":
-            print(
-                json.dumps(
-                    {"error": "Database not found", "sessions": [], "total_sessions": 0}
-                )
-            )
+            print(json.dumps({"error": "Database not found", "sessions": [], "total_sessions": 0}))
         else:
             print("Error: Database not found. Run memory setup first.")
         sys.exit(1)
