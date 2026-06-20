@@ -1,0 +1,97 @@
+# Exclude a variety of commonly ignored directories.
+exclude = [
+    ".bzr",
+    ".direnv",
+    ".eggs",
+    ".git",
+    ".git-rewrite",
+    ".hg",
+    ".ipynb_checkpoints",
+    ".mypy_cache",
+    ".pants.d",
+    ".pyenv",
+    ".pytest_cache",
+    ".pytype",
+    ".ruff_cache",
+    ".svn",
+    ".tox",
+    ".venv",
+    ".vscode",
+    "__pypackages__",
+    "_build",
+    "buck-out",
+    "build",
+    "dist",
+    "node_modules",
+    "site-packages",
+    "venv",
+]
+
+line-length = 120
+indent-width = 4
+
+target-version = "py310"
+
+[lint]
+select = [
+    "E",      # pycodestyle (error)
+    "W",      # pycodestyle (warning)
+    "F",      # pyflakes
+    "UP",     # pyupgrade
+    "C419",   # pylint - unnecessary-comprehension-in-call
+    "RET",    # flake8-return
+    "SIM",    # flake8-simplify
+    "ARG",    # flake8-unused-arguments
+    "PTH",    # flake8-use-pathlib
+    "RUF",    # ruff
+    "TCH",    # flake8-type-checking
+    "S",      # flake8-bandit (security)
+    "I",      # isort
+    "DTZ",    # flake8-datetimez (complements the whenever house rule)
+    "PT",     # flake8-pytest-style
+    "B",      # bugbear
+    "LOG",    # flake8-logging
+    "G",      # flake8-logging-format
+    "N",      # pep8-naming
+    "PERF",   # Perflint
+    "TID252", # relative imports
+]
+
+ignore = [
+    "RET504", # unnecessary-assign
+    "SIM102", # collapsible-if
+    "PTH123", # builtin-open
+    "RUF015", # unnecessary-iterable-allocation-for-first-element
+    "PTH118", # os-path-join
+    "N801",   # invalid-class-name
+    "SIM103", # needless-bool
+    "N812",   # lowercase-imported-as-non-lowercase
+]
+
+# Allow fix for all enabled rules (when `--fix`) is provided.
+fixable = ["ALL"]
+unfixable = []
+
+# Allow unused variables when underscore-prefixed.
+dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
+
+[lint.per-file-ignores]
+"tests/**/*.py" = [
+    "S101",   # assert usage
+    "S104",   # binding to all interfaces (test fixtures)
+    "S105",   # hardcoded passwords (test tokens)
+    "S106",   # hardcoded password arguments
+    "S108",   # insecure temp file paths
+    "S110",   # try-except-pass
+    "S603",   # subprocess calls
+    "S607",   # partial executable paths
+    "S608",   # SQL string construction (test queries)
+]
+"tools/*.py" = ["S603", "S607"]
+"scripts/**/*.py" = ["S101", "S105", "S310", "S603", "S607", "S608"]
+
+[format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
