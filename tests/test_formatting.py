@@ -1,6 +1,7 @@
 """Tests for ccrecall.formatting — time formatting, project paths, session rendering."""
 
 import re
+from pathlib import Path
 
 from ccrecall.formatting import (
     extract_project_name,
@@ -132,8 +133,6 @@ class TestProjectKey:
 
     def test_normalize_cwd_project_name_is_base(self):
         """After normalize_cwd, Path().name should be the base repo name, not the worktree name."""
-        from pathlib import Path
-
         wt = "/Users/sam/repos/myproject/.claude/worktrees/feat"
         assert Path(normalize_cwd(wt)).name == "myproject"
 

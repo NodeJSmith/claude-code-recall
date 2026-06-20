@@ -1,5 +1,6 @@
 """Integration tests for the import pipeline with v3 schema guards."""
 
+import shutil
 import tempfile
 from pathlib import Path
 
@@ -361,8 +362,6 @@ class TestImportProject:
 
             # Copy a fixture into it; the fixture has cwd="/Users/samarthgupta/repos/forks/node-banana"
             # so project_name will be "node-banana" (derived from real cwd, not directory key)
-            import shutil
-
             shutil.copy(FIXTURE_DIR / "linear_3_exchange.jsonl", project_dir / "session1.jsonl")
 
             sessions, messages, skipped = import_project(memory_db, project_dir, exclude_projects=["node-banana"])
@@ -376,8 +375,6 @@ class TestImportProject:
         with tempfile.TemporaryDirectory() as tmpdir:
             project_dir = Path(tmpdir) / "-Users-sam-project"
             project_dir.mkdir()
-
-            import shutil
 
             shutil.copy(FIXTURE_DIR / "linear_3_exchange.jsonl", project_dir / "session1.jsonl")
 

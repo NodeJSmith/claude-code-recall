@@ -26,6 +26,10 @@ import time
 from pathlib import Path
 
 import numpy as np
+import sqlite_vec
+from fastembed import TextEmbedding
+
+from ccrecall import embeddings
 
 DB_PATH = Path.home() / ".claude-memory" / "conversations.db"
 OUT_DIR = Path(__file__).resolve().parent
@@ -181,8 +185,6 @@ def embed_with_progress(model, texts: list[str], batch_size: int, label: str) ->
 def embed_fastembed(
     model_cfg: dict, docs: list[str], queries: list[str], batch_size: int, threads: int | None, cuda: bool
 ) -> tuple[np.ndarray, np.ndarray]:
-    from fastembed import TextEmbedding
-
     # batch_size must stay small: attention memory scales as batch * heads * seq^2,
     # and these summaries reach ~3000 tokens, so fastembed's default batch of 256
     # tries to allocate ~73 GB and OOMs. CPU-safe batch is 2; an 8 GB GPU fits ~4.
@@ -208,8 +210,6 @@ def load_stored_bge_vectors(conn: sqlite3.Connection, corpus_ids: list[int]) -> 
     single-threaded pass that thrashed the VPS overnight). Only queries are
     embedded live.
     """
-    import sqlite_vec
-
     conn.enable_load_extension(True)
     sqlite_vec.load(conn)
     rows = conn.execute("SELECT branch_id, embedding FROM branch_vec").fetchall()
@@ -221,8 +221,6 @@ def load_stored_bge_vectors(conn: sqlite3.Connection, corpus_ids: list[int]) -> 
 
 
 def embed_bge_m3(conn: sqlite3.Connection, corpus_ids: list[int], queries: list[str]) -> tuple[np.ndarray, np.ndarray]:
-    from ccrecall import embeddings
-
     if not embeddings.model_available():
         raise RuntimeError("bge-m3 weights not in HF cache; baseline unavailable")
     doc_emb = load_stored_bge_vectors(conn, corpus_ids)

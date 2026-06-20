@@ -1,5 +1,7 @@
 """Tests for ccrecall.content — message content extraction and tool detection."""
 
+import json
+
 from ccrecall.content import (
     extract_commits,
     extract_files_modified,
@@ -64,8 +66,6 @@ class TestExtractTextContent:
         assert text == "Let me check."
         assert has_tool is True
         assert summary is not None
-        import json
-
         counts = json.loads(summary)
         assert counts == {"Read": 2, "Bash": 1}
 
@@ -90,8 +90,6 @@ class TestExtractTextContent:
         assert text == "Here's what I found."
         assert has_tool is True
         assert has_think is True
-        import json
-
         assert json.loads(summary) == {"Grep": 1}
 
     def test_list_with_tool_use_no_name(self):
