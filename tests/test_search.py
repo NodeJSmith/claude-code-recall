@@ -458,9 +458,7 @@ class TestPathFilter:
         assert all(r["uuid"] == "sess-beta-1" for r in with_path)
 
 
-# ---------------------------------------------------------------------------
 # Helpers shared by new vec/fusion tests
-# ---------------------------------------------------------------------------
 
 
 def _seed_branch(conn: sqlite3.Connection, uuid: str, content: str, summary: str) -> tuple[int, int]:
@@ -497,16 +495,14 @@ def _seed_branch(conn: sqlite3.Connection, uuid: str, content: str, summary: str
     return sess_id, branch_id
 
 
-# ---------------------------------------------------------------------------
-# FR#3 / AC#2 — degrade to keyword when model/extension unavailable
-# ---------------------------------------------------------------------------
+# degrade to keyword when model/extension unavailable
 
 
 class TestDegradation:
     """search_sessions must not raise and must return FTS results when vec/model unavailable."""
 
     def test_no_model_returns_fts_results(self, search_db):
-        """model_available() == False → keyword path, no raise (FR#3)."""
+        """model_available() == False → keyword path, no raise."""
         fts_level = detect_fts_support(search_db)
         if fts_level not in ("fts5", "fts4"):
             pytest.skip("FTS not available")
@@ -519,7 +515,7 @@ class TestDegradation:
         assert "sess-beta-1" in uuids
 
     def test_attribute_error_on_extension_does_not_raise(self, search_db):
-        """AttributeError from extension load → keyword path, no raise (AC#2)."""
+        """AttributeError from extension load → keyword path, no raise."""
         fts_level = detect_fts_support(search_db)
 
         def _raise(*_a, **_kw):
@@ -533,7 +529,7 @@ class TestDegradation:
         assert isinstance(results, list)
 
     def test_missing_model_path_does_not_raise(self, search_db):
-        """model_available() is False (model unavailable) → keyword path (FR#3)."""
+        """model_available() is False (model unavailable) → keyword path."""
         fts_level = detect_fts_support(search_db)
 
         with patch("ccrecall.search_conversations.model_available", return_value=False):
@@ -545,7 +541,7 @@ class TestDegradation:
         assert "sess-alpha-2" in uuids
 
     def test_keyword_only_flag_skips_embed(self, search_db):
-        """--keyword-only skips embed_text entirely (FR#2)."""
+        """--keyword-only skips embed_text entirely."""
         fts_level = detect_fts_support(search_db)
         called = []
 
@@ -563,7 +559,7 @@ class TestDegradation:
         assert len(results) >= 2
 
     def test_vec_table_missing_falls_back(self, search_db):
-        """FR#3: model_available=True but branch_vec absent → OperationalError → keyword results."""
+        """model_available=True but branch_vec absent → OperationalError → keyword results."""
         fts_level = detect_fts_support(search_db)
         if fts_level not in ("fts5", "fts4"):
             pytest.skip("FTS not available")
@@ -580,9 +576,7 @@ class TestDegradation:
         assert "sess-alpha-2" in uuids
 
 
-# ---------------------------------------------------------------------------
-# FR#11 / AC#9 — stale-version branch_vec rows excluded from vector candidates
-# ---------------------------------------------------------------------------
+# stale-version branch_vec rows excluded from vector candidates
 
 
 class TestStaleVersionExclusion:
@@ -647,7 +641,7 @@ class TestStaleVersionExclusion:
         reason="sqlite-vec not available",
     )
     def test_stale_branch_excluded_from_vec_candidates(self, stale_db):
-        """_get_vec_branch_ids must not return the stale-version branch (FR#11 / AC#9)."""
+        """_get_vec_branch_ids must not return the stale-version branch."""
         conn, current_id, stale_id = stale_db
         cursor = conn.cursor()
         fake_vec = [0.1] * EMBEDDING_DIM
@@ -660,7 +654,7 @@ class TestStaleVersionExclusion:
         reason="sqlite-vec not available",
     )
     def test_stale_branch_reachable_via_fts_not_vec(self, stale_db):
-        """Integration: stale branch appears in FTS results but NOT in vec candidates (FR#11).
+        """Integration: stale branch appears in FTS results but NOT in vec candidates.
 
         The stale branch's aggregated_content contains "stale text", so a keyword
         search for "stale" must surface it via FTS. However, _get_vec_branch_ids
@@ -682,9 +676,7 @@ class TestStaleVersionExclusion:
         assert "sess-stale" in uuids, "Stale session must still be reachable via keyword/FTS search"
 
 
-# ---------------------------------------------------------------------------
-# FR#12 / AC#10 — session dedup: two branches of one session → one result
-# ---------------------------------------------------------------------------
+# session dedup: two branches of one session → one result
 
 
 class TestSessionDedup:
@@ -771,7 +763,7 @@ class TestSessionDedup:
         reason="sqlite-vec not available",
     )
     def test_duplicate_session_via_search(self):
-        """Two branches of one session ranked by fusion → exactly one result returned (AC#10)."""
+        """Two branches of one session ranked by fusion → exactly one result returned."""
         conn = make_vec_conn()
         fts_level = detect_fts_support(conn)
 
@@ -832,21 +824,19 @@ class TestSessionDedup:
 
         session_uuids = [r["uuid"] for r in results]
         assert session_uuids.count("sess-multi-branch") == 1, (
-            "Two branches of the same session must yield exactly one result (FR#12 / AC#10)"
+            "Two branches of the same session must yield exactly one result"
         )
         conn.close()
 
 
-# ---------------------------------------------------------------------------
-# FR#15 / AC#13 — --status flag
-# ---------------------------------------------------------------------------
+# --status flag
 
 
 class TestStatusFlag:
     """--status prints diagnostic info and exits 0 without requiring --query."""
 
     def test_status_exits_zero(self, tmp_path, capsys):
-        """--status exits 0 and outputs the three diagnostic fields (AC#13)."""
+        """--status exits 0 and outputs the three diagnostic fields."""
         db_path = tmp_path / "test.db"
         # Create a minimal DB so status can read branch counts
         c = sqlite3.connect(str(db_path))
@@ -868,7 +858,7 @@ class TestStatusFlag:
         assert "embedded branches:" in captured.out
 
     def test_status_does_not_require_query(self, tmp_path, monkeypatch):
-        """--status works without --query (AC#13 — query must not be required)."""
+        """--status works without --query."""
         db_path = tmp_path / "conv.db"
         c = sqlite3.connect(str(db_path))
         c.executescript(SCHEMA_CORE)
@@ -887,7 +877,7 @@ class TestStatusFlag:
         assert exc.value.code == 0
 
     def test_status_ignores_keyword_only(self, tmp_path, monkeypatch, capsys):
-        """--status combined with --keyword-only still exits 0 (AC#13)."""
+        """--status combined with --keyword-only still exits 0."""
         db_path = tmp_path / "conv2.db"
         c = sqlite3.connect(str(db_path))
         c.executescript(SCHEMA_CORE)

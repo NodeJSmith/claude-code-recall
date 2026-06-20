@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Tests for ingest_token_data — token ingest append-only behaviour.
 
 Gap 4: turns must be skip-if-exists on reimport, and session_metrics totals
@@ -28,9 +27,7 @@ from ccrecall.token_schema import (
     ensure_schema,
 )
 
-# ---------------------------------------------------------------------------
 # Helpers
-# ---------------------------------------------------------------------------
 
 
 def _minimal_jnl(tmp_path: Path) -> JnlFile:
@@ -72,9 +69,7 @@ def token_db():
     conn.close()
 
 
-# ---------------------------------------------------------------------------
 # Gap 4a — turns are append-only (skip-if-exists)
-# ---------------------------------------------------------------------------
 
 
 class TestTurnsAppendOnly:
@@ -125,9 +120,7 @@ class TestTurnsAppendOnly:
         assert rows == [], f"(session_id, turn_index) must be unique — duplicates found: {rows}"
 
 
-# ---------------------------------------------------------------------------
 # Gap 4b — session_metrics totals do not double on reimport
-# ---------------------------------------------------------------------------
 
 
 class TestSessionMetricsStableOnReimport:
@@ -198,9 +191,7 @@ class TestSessionMetricsStableOnReimport:
         )
 
 
-# ---------------------------------------------------------------------------
 # token_import_log schema
-# ---------------------------------------------------------------------------
 
 
 class TestTokenImportLogSchema:
@@ -245,9 +236,7 @@ class TestTokenImportLogSchema:
         )
 
 
-# ---------------------------------------------------------------------------
 # should_skip_file
-# ---------------------------------------------------------------------------
 
 
 class TestShouldSkipFile:
@@ -289,9 +278,7 @@ class TestShouldSkipFile:
         assert should_skip_file(token_db, ghost) is True
 
 
-# ---------------------------------------------------------------------------
 # record_import
-# ---------------------------------------------------------------------------
 
 
 class TestRecordImport:
@@ -350,9 +337,7 @@ class TestRecordImport:
         assert imported_at is not None, "imported_at must be set by record_import"
 
 
-# ---------------------------------------------------------------------------
 # Table isolation — token_import_log vs import_log
-# ---------------------------------------------------------------------------
 
 
 class TestTableIsolation:
@@ -379,9 +364,7 @@ class TestTableIsolation:
         assert version == SCHEMA_VERSION, f"Expected schema version {SCHEMA_VERSION}, got {version}"
 
 
-# ---------------------------------------------------------------------------
 # v3 → v4 migration
-# ---------------------------------------------------------------------------
 
 
 def _v3_token_db() -> sqlite3.Connection:
@@ -488,9 +471,7 @@ class TestV3ToV4Migration:
         conn.close()
 
 
-# ---------------------------------------------------------------------------
 # Worktree path consolidation (issue #239)
-# ---------------------------------------------------------------------------
 
 
 class TestWorktreeConsolidation:
@@ -608,9 +589,7 @@ class TestWorktreeConsolidation:
         )
 
 
-# ---------------------------------------------------------------------------
 # user_gap_ms — gap between a turn_duration finish and the next assistant turn
-# ---------------------------------------------------------------------------
 
 
 class TestUserGapComputation:

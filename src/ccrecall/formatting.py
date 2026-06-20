@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Session formatting, time utilities, and project path helpers.
 """

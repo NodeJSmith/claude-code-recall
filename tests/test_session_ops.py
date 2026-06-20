@@ -241,7 +241,7 @@ class TestImportSkipsNullHashEntry:
 
 
 class TestSyncThenImportDedupIntegration:
-    """FR#8 integration test: sync then import does not duplicate messages."""
+    """Integration test: sync then import does not duplicate messages."""
 
     def test_sync_then_import_dedup_integration(self, memory_db):
         """End-to-end: sync a session file, then run import on the same file.
@@ -406,7 +406,7 @@ def _make_vec_conn(tmp_path: Path) -> sqlite3.Connection | None:
 
 
 class TestEmbedOnWriteModelUnavailable:
-    """FR#5: embedding failure must not fail sync; embedding_version stays 0."""
+    """Embedding failure must not fail sync; embedding_version stays 0."""
 
     def test_embed_text_raises_leaves_embedding_version_zero(self, tmp_path):
         """When embed_text raises, sync completes and embedding_version stays 0."""
@@ -486,7 +486,7 @@ except Exception:
 
 
 class TestEmbedOnWriteSuccess:
-    """FR#4/AC#5: a sync on a vec-enabled connection produces a branch_vec row."""
+    """A sync on a vec-enabled connection produces a branch_vec row."""
 
     @pytest.mark.skipif(not _VEC_OK, reason="sqlite-vec not available")
     def test_sync_writes_branch_vec_row(self, tmp_path):

@@ -1072,9 +1072,9 @@ class TestV5Migration:
         # Verify that _migrate_project_paths is NOT called by examining the call path:
         # get_db_connection should not call _migrate_project_paths unconditionally.
         source = inspect.getsource(db_module.get_db_connection)
-        # The unconditional call pattern was: _migrate_project_paths(conn) at the end
-        # After WP03 it should be inside the v5 migration block, not at the top level.
-        # We verify this structurally by checking _migrate_columns source for _migrate_project_paths.
+        # An unconditional _migrate_project_paths(conn) at the end would be a bug — it
+        # must live inside the v5 migration block, not at the top level. Verify this
+        # structurally by checking _migrate_columns source for _migrate_project_paths.
         mc_source = inspect.getsource(db_module._migrate_columns)
         assert "_migrate_project_paths" in mc_source, (
             "_migrate_project_paths must be called inside _migrate_columns (v5 block)"
@@ -1325,9 +1325,7 @@ class TestV6Migration:
         conn.close()
 
 
-# ---------------------------------------------------------------------------
-# T02: vec schema, columns, trigger, vec_available, load_vec
-# ---------------------------------------------------------------------------
+# vec schema, columns, trigger, vec_available, load_vec
 
 
 def _vec_available_in_env() -> bool:
@@ -1497,7 +1495,7 @@ class TestVecSchema:
 
     @pytest.mark.skipif(not _VEC_AVAILABLE, reason="sqlite-vec not available in this environment")
     def test_trigger_removes_branch_vec_row_on_branch_delete(self):
-        """AC#11: deleting a branch row removes its branch_vec row (trigger fires)."""
+        """Deleting a branch row removes its branch_vec row (trigger fires)."""
         conn = make_vec_conn()
 
         # Populate branches with a row so we can insert a vector

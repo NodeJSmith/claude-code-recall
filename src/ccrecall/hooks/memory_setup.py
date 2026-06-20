@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """SessionStart hook - setup memory directory and trigger initial import."""
 
 import glob

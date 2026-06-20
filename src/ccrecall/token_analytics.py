@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 token_analytics — Session import and token_snapshots backfill
 for the token ingest pipeline.

@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Precompute structured context summaries for session injection.
 

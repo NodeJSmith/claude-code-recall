@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """SessionEnd hook (matcher: clear) — writes handoff file for SessionStart to link sessions."""
 
 import json

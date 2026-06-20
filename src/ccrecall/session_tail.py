@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Recover a prior session's tail for fast resume.
 
 Powers two things:

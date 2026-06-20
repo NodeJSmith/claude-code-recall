@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 token_insights — Trend analysis, insight generation, and findings/recommendations
 for the token ingest pipeline.

@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 token_schema — Schema definitions, ensure_schema(), and version management
 for the token ingest pipeline.

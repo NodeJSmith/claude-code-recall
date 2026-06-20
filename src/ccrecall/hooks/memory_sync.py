@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Stop hook - background sync for current session."""
 
 import json

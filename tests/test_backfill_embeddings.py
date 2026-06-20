@@ -1,11 +1,11 @@
-"""Tests for the embedding backfill hook (T05).
+"""Tests for the embedding backfill hook.
 
-FR#6/AC#3: backfill embeds all eligible branches in a vec-enabled DB.
-FR#7/AC#4: resume processes only remaining branches; heal clause re-embeds
-           "version-done but no vector" rows.
-FR#8:      per-batch progress logged.
-FR#9:      bumping EMBEDDING_VERSION / model / summary_version makes rows re-appear.
-FR#14/AC#12: model-load failure marks nothing; one bad summary marks exactly that row.
+Backfill embeds all eligible branches in a vec-enabled DB. Resume processes only
+remaining branches; the heal clause re-embeds "version-done but no vector" rows.
+Per-batch progress is logged. Bumping EMBEDDING_VERSION / model / summary_version
+makes rows re-appear. A model-load failure marks nothing; one bad summary marks
+exactly that row.
+
 Scope: only active leaves (is_active=1) are embedded — inactive forks are skipped.
 Opt-in: --days bounds by recency, --limit caps the run.
 """
@@ -43,9 +43,7 @@ def _vec_available() -> bool:
 _VEC_SKIP = pytest.mark.skipif(not _vec_available(), reason="sqlite-vec not available in this environment")
 
 
-# ---------------------------------------------------------------------------
 # Helpers
-# ---------------------------------------------------------------------------
 
 
 def _insert_branch(
@@ -135,15 +133,13 @@ def _run_backfill_with_stub(conn: sqlite3.Connection, argv: list[str] | None = N
         _main(argv if argv is not None else [])
 
 
-# ---------------------------------------------------------------------------
-# FR#6 / AC#3: backfill embeds all eligible branches
-# ---------------------------------------------------------------------------
+# backfill embeds all eligible branches
 
 
 @_VEC_SKIP
 class TestBackfillEmbedsFull:
     def test_all_eligible_branches_embedded(self):
-        """FR#6/AC#3: all branches with non-empty context_summary get embedded."""
+        """All branches with non-empty context_summary get embedded."""
         conn = make_vec_conn()
         ids = [_insert_branch(conn, f"summary {i}") for i in range(5)]
 
@@ -202,15 +198,13 @@ class TestBackfillEmbedsFull:
         assert _vec_count(conn) == count
 
 
-# ---------------------------------------------------------------------------
-# FR#7 / AC#4: resume processes only remaining; heal clause for missing vectors
-# ---------------------------------------------------------------------------
+# resume processes only remaining; heal clause for missing vectors
 
 
 @_VEC_SKIP
 class TestBackfillResume:
     def test_resume_skips_already_done(self):
-        """FR#7/AC#4: second run does not re-embed already-done branches."""
+        """Second run does not re-embed already-done branches."""
         conn = make_vec_conn()
         ids = [_insert_branch(conn, f"summary {i}") for i in range(4)]
 
@@ -265,7 +259,7 @@ class TestBackfillResume:
         assert call_count[0] == 0
 
     def test_resume_processes_new_branch(self):
-        """FR#7: after first run, a newly added branch is processed on second run."""
+        """After first run, a newly added branch is processed on second run."""
         conn = make_vec_conn()
         _insert_branch(conn, "first summary")
 
@@ -279,7 +273,7 @@ class TestBackfillResume:
         assert _has_vec(conn, new_id)
 
     def test_heal_clause_missing_vec_row(self):
-        """FR#7 heal clause: version says done but branch_vec row absent → re-selected."""
+        """Heal clause: version says done but branch_vec row absent → re-selected."""
         conn = make_vec_conn()
         bid = _insert_branch(conn, "summary that needs healing")
 
@@ -301,15 +295,13 @@ class TestBackfillResume:
         assert _has_vec(conn, bid)
 
 
-# ---------------------------------------------------------------------------
-# FR#9: version bump / model change / summary_version change re-selects rows
-# ---------------------------------------------------------------------------
+# version bump / model change / summary_version change re-selects rows
 
 
 @_VEC_SKIP
 class TestBackfillVersionBump:
     def test_embedding_version_bump_reselects(self):
-        """FR#9: a row with stale embedding_version (below current) is re-embedded.
+        """A row with stale embedding_version (below current) is re-embedded.
 
         Seeds a branch with embedding_version=0 (below real EMBEDDING_VERSION=1)
         and current model/summary.  Runs _main() with real constants — the SELECT
@@ -339,7 +331,7 @@ class TestBackfillVersionBump:
         assert row[0] == EMBEDDING_VERSION
 
     def test_model_change_reselects(self):
-        """FR#9: a row with a stale embedding_model is re-embedded to current model.
+        """A row with a stale embedding_model is re-embedded to current model.
 
         Seeds a branch at current EMBEDDING_VERSION/SUMMARY_VERSION but with a
         stale model name.  _main() re-embeds it and writes the current model.
@@ -368,7 +360,7 @@ class TestBackfillVersionBump:
         assert row[0] == EMBEDDING_MODEL
 
     def test_summary_version_mismatch_reselects(self):
-        """FR#9: a row with stale summary_version_at_embed is re-embedded.
+        """A row with stale summary_version_at_embed is re-embedded.
 
         Seeds a branch at current version/model but summary_version_at_embed=0
         (below real SUMMARY_VERSION).  _main() re-embeds and stamps current
@@ -399,9 +391,7 @@ class TestBackfillVersionBump:
         assert row[0] == SUMMARY_VERSION
 
 
-# ---------------------------------------------------------------------------
 # No-progress guard (Fix A): loop breaks when same batch re-selected
-# ---------------------------------------------------------------------------
 
 
 @_VEC_SKIP
@@ -442,15 +432,13 @@ class TestBackfillNoProgressGuard:
         assert ev != EMBEDDING_VERSION, "Row should not be at EMBEDDING_VERSION — write was patched to no-op"
 
 
-# ---------------------------------------------------------------------------
-# FR#14 / AC#12: model failure marks nothing; one bad summary marks only itself
-# ---------------------------------------------------------------------------
+# model failure marks nothing; one bad summary marks only itself
 
 
 @_VEC_SKIP
 class TestBackfillFailureModes:
     def test_model_unavailable_marks_nothing(self):
-        """FR#14/AC#12: model_available=False → zero rows marked, all stay eligible."""
+        """model_available=False → zero rows marked, all stay eligible."""
         conn = make_vec_conn()
         ids = [_insert_branch(conn, f"summary {i}") for i in range(3)]
 
@@ -474,7 +462,7 @@ class TestBackfillFailureModes:
         assert _vec_count(conn) == 0
 
     def test_single_bad_summary_marks_only_itself(self):
-        """FR#14/AC#12: one row's embed_text raising marks only that row -1; rest succeed."""
+        """One row's embed_text raising marks only that row -1; rest succeed."""
         conn = make_vec_conn()
         good_id1 = _insert_branch(conn, "good summary one")
         bad_id = _insert_branch(conn, "bad summary that will fail")
@@ -579,9 +567,7 @@ class TestBackfillFailureModes:
         assert call_count[0] == 0
 
 
-# ---------------------------------------------------------------------------
 # Scope: only active leaves are embedded (query path filters is_active=1)
-# ---------------------------------------------------------------------------
 
 
 @_VEC_SKIP
@@ -601,9 +587,7 @@ class TestBackfillScopeActive:
         assert _vec_count(conn) == 1
 
 
-# ---------------------------------------------------------------------------
 # Opt-in flags: --days bounds recency, --limit caps the run
-# ---------------------------------------------------------------------------
 
 
 @_VEC_SKIP
@@ -638,9 +622,7 @@ class TestBackfillFlags:
         assert _vec_count(conn) == 2
 
 
-# ---------------------------------------------------------------------------
 # --status: read-only progress reader (done / eligible / errored / total)
-# ---------------------------------------------------------------------------
 
 
 def _run_status(conn: sqlite3.Connection, argv: list[str], capsys):

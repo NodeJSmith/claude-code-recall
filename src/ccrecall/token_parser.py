@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 token_parser — JSONL parsing, data classes, session parsing, and file discovery
 for the token ingest pipeline.

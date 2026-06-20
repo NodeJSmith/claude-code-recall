@@ -254,7 +254,7 @@ def select_sessions(
         return []
     project_id = row[0]
 
-    # --- Clear path: hard-link via handoff file written by SessionEnd hook ---
+    # Clear path: hard-link via handoff file written by SessionEnd hook
     if source == "clear" and db_path is not None:
         prev_session_uuid = _find_cleared_from_session_uuid(db_path, cwd)
 
@@ -279,7 +279,7 @@ def select_sessions(
 
         # Session not found in DB or no recent /clear — fall through to startup logic
 
-    # --- Startup path (also fallback for clear with no handoff) ---
+    # Startup path (also fallback for clear with no handoff)
     cursor.execute(_CANDIDATE_QUERY, (project_id, current_session_id))
     candidates = cursor.fetchall()
 

@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 JSONL parsing, branch detection, and metadata extraction.
 """

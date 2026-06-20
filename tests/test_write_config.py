@@ -7,9 +7,6 @@ from pathlib import Path
 
 import pytest
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 import ccrecall.db as _db_mod
 import ccrecall.hooks.write_config as write_config
 from ccrecall.db import CURRENT_ONBOARDING_VERSION
@@ -31,9 +28,7 @@ def _run_main(args=None):
         sys.argv = original_argv
 
 
-# ---------------------------------------------------------------------------
 # Tests
-# ---------------------------------------------------------------------------
 
 
 class TestWriteConfigDefaults:

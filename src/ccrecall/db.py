@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Database connection, schema management, settings, and logging.
 """
@@ -470,7 +469,7 @@ def _migrate_columns(conn: sqlite3.Connection) -> None:
     cursor.execute("PRAGMA table_info(messages)")
     existing = {row[1] for row in cursor.fetchall()}
 
-    # --- DDL migrations (column-existence gated, idempotent) ---
+    # DDL migrations (column-existence gated, idempotent)
     if "tool_summary" not in existing:
         cursor.execute("ALTER TABLE messages ADD COLUMN tool_summary TEXT")
         conn.commit()
@@ -551,7 +550,7 @@ CREATE INDEX IF NOT EXISTS idx_token_snapshots_start ON token_snapshots(start_ti
         cursor.execute("ALTER TABLE token_snapshots ADD COLUMN data_source TEXT")
         conn.commit()
 
-    # --- DML migrations (version-gated via PRAGMA user_version, run once) ---
+    # DML migrations (version-gated via PRAGMA user_version, run once)
     version = conn.execute("PRAGMA user_version").fetchone()[0]
 
     # Resolve db_path for backup operations (PRAGMA database_list returns (seq, name, file))

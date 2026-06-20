@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 token_dashboard — Dashboard deployment and main() entry point
 for the token ingest pipeline.

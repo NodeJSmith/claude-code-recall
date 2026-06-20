@@ -10,7 +10,7 @@ from ccrecall.content import (
     parse_origin,
 )
 
-# --- extract_text_content ---
+# extract_text_content
 
 
 class TestExtractTextContent:
@@ -125,7 +125,7 @@ class TestExtractTextContent:
         assert summary is None
 
 
-# --- is_tool_result ---
+# is_tool_result
 
 
 class TestIsToolResult:
@@ -147,7 +147,7 @@ class TestIsToolResult:
         assert is_tool_result(None) is False
 
 
-# --- is_task_notification ---
+# is_task_notification
 
 
 class TestIsTaskNotification:
@@ -189,7 +189,7 @@ class TestIsTaskNotification:
         assert is_task_notification(content) is False
 
 
-# --- is_teammate_message ---
+# is_teammate_message
 
 
 class TestIsTeammateMessage:
@@ -232,7 +232,7 @@ class TestIsTeammateMessage:
         assert is_teammate_message(content) is False
 
 
-# --- extract_files_modified ---
+# extract_files_modified
 
 
 class TestExtractFilesModified:
@@ -268,7 +268,7 @@ class TestExtractFilesModified:
         assert extract_files_modified(content) == []
 
 
-# --- extract_commits ---
+# extract_commits
 
 
 class TestExtractCommits:
@@ -321,7 +321,7 @@ class TestExtractCommits:
         assert extract_commits("hello") == []
 
 
-# --- channel XML stripping ---
+# channel XML stripping
 
 
 class TestChannelStripping:
@@ -344,7 +344,7 @@ class TestChannelStripping:
         assert text == "Just a normal message"
 
 
-# --- parse_origin ---
+# parse_origin
 
 
 class TestParseOrigin:
