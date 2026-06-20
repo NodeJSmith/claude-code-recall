@@ -367,8 +367,8 @@ def _main(argv: list[str] | None = None) -> int:
                     cursor.execute("RELEASE SAVEPOINT row")
                     # Per-row content error: mark sentinel so this row is skipped next run.
                     cursor.execute(
-                        "UPDATE branches SET embedding_version = -1 WHERE id = ?",
-                        (branch_id,),
+                        "UPDATE branches SET embedding_version = ? WHERE id = ?",
+                        (CONTENT_ERROR_VERSION, branch_id),
                     )
                     logger.error(f"Backfill embeddings: branch {branch_id} failed: {e}")
         except Exception as e:

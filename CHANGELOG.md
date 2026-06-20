@@ -8,6 +8,12 @@
 - Summary backfill no longer permanently marks a branch failed on a transient DB error (only genuine content errors get the sentinel), and a sentinel-marked branch is no longer re-selected forever — the error sentinel is excluded from the eligible set, so the documented "avoid infinite retry" guarantee now actually holds. (#2)
 - `token_snapshots`/`turn_tool_calls` column migrations use explicit existence checks instead of swallowing `OperationalError`, so a real schema error surfaces instead of being silently ignored. (#2)
 - Importing a session whose content all filters out (tool results, notifications, empty text) no longer crashes with `sqlite3.IntegrityError: FOREIGN KEY constraint failed`. `find_all_branches` inserts branch rows before content filtering, so a zero-message session still has children; the `total_messages == 0` cleanup now tears down `branch_messages → branches → sessions` in FK order instead of a bare session delete. Surfaced importing a large transcript set onto a fresh machine. The test fixtures now enable `PRAGMA foreign_keys = ON` to match production, so the existing FK-safe guard tests actually enforce the constraint.
+- The `data_source` column migration on `token_snapshots` now uses an explicit existence check instead of swallowing every `OperationalError`. #2 hardened the other `token_snapshots` migrations this way but missed this lone `ALTER`, so a real schema error (locked DB, disk full) was still silently ignored there.
+- `cm-backfill-embeddings` marks per-row content errors with the shared `CONTENT_ERROR_VERSION` constant instead of a hardcoded `-1`, keeping the error sentinel single-sourced with the selection and count queries that already reference it.
+
+### Changed
+
+- Date/time handling migrated from the standard library `datetime` to [`whenever`](https://github.com/ariebovenberg/whenever) across the hook and token-parsing modules (`memory_context`, `clear_handoff`, `formatting`, `token_parser`, `token_output`) — DST-safe and typed, with no behavior change for real (timezone-aware) inputs. Handoff timestamps now serialize with a `Z` suffix instead of `+00:00`; both parse identically. New runtime dependency: `whenever==0.10.0`.
 
 ### Added
 
