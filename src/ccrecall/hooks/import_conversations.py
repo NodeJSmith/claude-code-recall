@@ -19,7 +19,6 @@ from ccrecall.content import sanitize_fts_term
 from ccrecall.db import (
     DEFAULT_DB_PATH,
     DEFAULT_PROJECTS_DIR,
-    detect_fts_support,
     get_db_connection,
     get_db_path,
     load_settings,
@@ -28,6 +27,7 @@ from ccrecall.db import (
 from ccrecall.formatting import extract_project_name, normalize_project_key
 from ccrecall.parsing import extract_session_uuid
 from ccrecall.project_ops import upsert_project
+from ccrecall.schema import detect_fts_support
 from ccrecall.session_ops import sync_session
 
 

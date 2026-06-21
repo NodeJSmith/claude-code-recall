@@ -69,7 +69,7 @@ def _spawn_background(cmd: str) -> None:
 
 
 def _ensure_schema(settings: dict | None = None) -> None:
-    """Open DB connection to trigger _migrate_columns (creates token_snapshots if missing)."""
+    """Open DB connection to trigger migrate_columns (creates token_snapshots if missing)."""
     with contextlib.suppress(Exception):
         conn = get_db_connection(settings)
         conn.close()

@@ -13,19 +13,18 @@ import sqlite_vec
 from conftest import make_vec_conn
 
 import ccrecall.db as db_module
+import ccrecall.migrations as migrations_module
 from ccrecall.db import (
     CURRENT_ONBOARDING_VERSION,
     DEFAULT_SETTINGS,
-    SCHEMA,
-    _migrate_columns,
-    _migrate_project_paths,
     get_db_connection,
     load_config,
     load_settings,
-    migrate_db,
     vec_available,
 )
 from ccrecall.embeddings import EMBEDDING_DIM
+from ccrecall.migrations import _migrate_project_paths, migrate_columns, migrate_db
+from ccrecall.schema import SCHEMA
 
 
 class TestSchemaCreation:
@@ -110,10 +109,10 @@ def _pre_migration_db(include_tool_summary=False):
 
 class TestMigrateColumns:
     def test_adds_tool_summary_column(self):
-        """_migrate_columns should add tool_summary and is_notification if missing."""
+        """migrate_columns should add tool_summary and is_notification if missing."""
         conn = _pre_migration_db()
 
-        _migrate_columns(conn)
+        migrate_columns(conn)
 
         cursor = conn.cursor()
         cursor.execute("PRAGMA table_info(messages)")
@@ -123,10 +122,10 @@ class TestMigrateColumns:
         conn.close()
 
     def test_adds_context_summary_columns(self):
-        """_migrate_columns should add context_summary, context_summary_json, summary_version to branches."""
+        """migrate_columns should add context_summary, context_summary_json, summary_version to branches."""
         conn = _pre_migration_db()
 
-        _migrate_columns(conn)
+        migrate_columns(conn)
 
         cursor = conn.cursor()
         cursor.execute("PRAGMA table_info(branches)")
@@ -137,8 +136,8 @@ class TestMigrateColumns:
         conn.close()
 
     def test_idempotent_when_column_exists(self, memory_db):
-        """_migrate_columns should not fail when column already exists."""
-        _migrate_columns(memory_db)  # Already called in fixture, call again
+        """migrate_columns should not fail when column already exists."""
+        migrate_columns(memory_db)  # Already called in fixture, call again
 
     def test_migrate_backfills_notifications(self):
         """Migration should flag existing task-notification messages."""
@@ -151,7 +150,7 @@ class TestMigrateColumns:
         conn.execute("INSERT INTO messages (id, session_id, role, content) VALUES (4, 1, 'user', 'Normal follow-up')")
         conn.commit()
 
-        _migrate_columns(conn)
+        migrate_columns(conn)
 
         cursor = conn.cursor()
         cursor.execute("SELECT id, is_notification FROM messages ORDER BY id")
@@ -182,7 +181,7 @@ class TestMigrateColumns:
         conn.execute("INSERT INTO branch_messages VALUES (1, 3)")
         conn.commit()
 
-        _migrate_columns(conn)
+        migrate_columns(conn)
 
         cursor = conn.cursor()
         cursor.execute("SELECT aggregated_content, exchange_count FROM branches WHERE id = 1")
@@ -237,7 +236,7 @@ class TestVersionedMigration:
     def test_fresh_db_gets_latest_version(self):
         """A fresh DB (no columns, version 0) should end up at the latest user_version."""
         conn = _pre_migration_db()
-        _migrate_columns(conn)
+        migrate_columns(conn)
         version = conn.execute("PRAGMA user_version").fetchone()[0]
         assert version == 6
         conn.close()
@@ -254,7 +253,7 @@ class TestVersionedMigration:
         )
         conn.commit()
 
-        _migrate_columns(conn)
+        migrate_columns(conn)
 
         cursor = conn.cursor()
         cursor.execute("SELECT id, is_notification FROM messages ORDER BY id")
@@ -280,7 +279,7 @@ class TestVersionedMigration:
         )
         conn.commit()
 
-        _migrate_columns(conn)
+        migrate_columns(conn)
 
         cursor = conn.cursor()
         cursor.execute("SELECT id, is_notification FROM messages ORDER BY id")
@@ -299,7 +298,7 @@ class TestVersionedMigration:
         )
         conn.commit()
 
-        _migrate_columns(conn)
+        migrate_columns(conn)
 
         # Teammate message should NOT have been re-flagged (v2 backfill already ran)
         cursor = conn.cursor()
@@ -315,7 +314,7 @@ class TestVersionedMigration:
         conn.execute("INSERT INTO import_log (file_path, file_hash) VALUES ('/nonexistent/session.jsonl', 'abc123')")
         conn.commit()
 
-        _migrate_columns(conn)
+        migrate_columns(conn)
 
         # import_log row preserved (file doesn't exist, so backfill skips it)
         count = conn.execute("SELECT COUNT(*) FROM import_log").fetchone()[0]
@@ -355,7 +354,7 @@ class TestVersionedMigration:
         )
         conn.commit()
 
-        _migrate_columns(conn)
+        migrate_columns(conn)
 
         origin = conn.execute("SELECT origin FROM messages WHERE id = 1").fetchone()[0]
         assert origin == "telegram"
@@ -394,7 +393,7 @@ class TestVersionedMigration:
         )
         conn.commit()
 
-        _migrate_columns(conn)
+        migrate_columns(conn)
 
         hash_val = conn.execute("SELECT file_hash FROM import_log").fetchone()[0]
         assert hash_val == "original"  # Hash preserved — no destructive reimport triggered
@@ -496,7 +495,7 @@ def _project_path_db():
     conn = sqlite3.connect(":memory:")
     conn.executescript(SCHEMA)
     conn.commit()
-    _migrate_columns(conn)
+    migrate_columns(conn)
     return conn
 
 
@@ -720,7 +719,7 @@ class TestV4Migration:
     def test_v4_bumps_user_version(self):
         """After migration from v3, user_version progresses through all versions to latest."""
         conn = _v3_db_with_messages()
-        _migrate_columns(conn)
+        migrate_columns(conn)
         assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
         conn.close()
 
@@ -738,7 +737,7 @@ class TestV4Migration:
         )
         conn.commit()
 
-        _migrate_columns(conn)
+        migrate_columns(conn)
 
         cursor = conn.cursor()
         cursor.execute("SELECT id, origin FROM messages ORDER BY id")
@@ -749,15 +748,15 @@ class TestV4Migration:
         conn.close()
 
     def test_v4_idempotent(self):
-        """Re-running _migrate_columns on a v4 DB is a safe no-op."""
+        """Re-running migrate_columns on a v4 DB is a safe no-op."""
         conn = _v3_db_with_messages()
         conn.execute(
             "INSERT INTO messages (id, session_id, role, content, origin) VALUES (1, 1, 'user', 'hello', 'telegram')"
         )
         conn.commit()
 
-        _migrate_columns(conn)  # v3->v6
-        _migrate_columns(conn)  # no-op
+        migrate_columns(conn)  # v3->v6
+        migrate_columns(conn)  # no-op
 
         assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
         origin = conn.execute("SELECT origin FROM messages WHERE id = 1").fetchone()[0]
@@ -774,7 +773,7 @@ class TestV4Migration:
         conn.execute("PRAGMA user_version = 4")
         conn.commit()
 
-        _migrate_columns(conn)
+        migrate_columns(conn)
 
         # Because we're already at v4 the DML block is skipped — the value stays
         origin = conn.execute("SELECT origin FROM messages WHERE id = 1").fetchone()[0]
@@ -894,7 +893,7 @@ class TestMigrateDbBackupGuard:
         conn.execute("INSERT INTO sessions (uuid) VALUES ('keep-me')")
         conn.commit()
 
-        monkeypatch.setattr(db_module, "_backup_db_before_migration", lambda *_a, **_kw: False)
+        monkeypatch.setattr(migrations_module, "_backup_db_before_migration", lambda *_a, **_kw: False)
 
         result = migrate_db(conn)
 
@@ -1002,7 +1001,7 @@ class TestV5Migration:
         cursor.execute("INSERT INTO branch_messages VALUES (1, 1)")
         conn.commit()
 
-        _migrate_columns(conn)
+        migrate_columns(conn)
 
         agg = cursor.execute("SELECT aggregated_content FROM branches WHERE id = 1").fetchone()[0]
         assert "/src/main.py" in agg, "File paths must be included in aggregated_content after v5"
@@ -1028,7 +1027,7 @@ class TestV5Migration:
         )
         conn.commit()
 
-        _migrate_columns(conn)
+        migrate_columns(conn)
 
         row = cursor.execute("SELECT context_summary, context_summary_json FROM branches WHERE id = 1").fetchone()
         cs, csj = row
@@ -1054,13 +1053,13 @@ class TestV5Migration:
         cursor.execute("INSERT INTO branch_messages VALUES (1, 1)")
         conn.commit()
 
-        _migrate_columns(conn)
+        migrate_columns(conn)
         agg_first = cursor.execute("SELECT aggregated_content FROM branches WHERE id = 1").fetchone()[0]
 
         # Reset version to 4 to simulate running v5 again
         conn.execute("PRAGMA user_version = 4")
         conn.commit()
-        _migrate_columns(conn)
+        migrate_columns(conn)
         agg_second = cursor.execute("SELECT aggregated_content FROM branches WHERE id = 1").fetchone()[0]
 
         assert agg_first == agg_second, "v5 is SET semantics — running twice must produce the same result"
@@ -1073,10 +1072,10 @@ class TestV5Migration:
         source = inspect.getsource(db_module.get_db_connection)
         # An unconditional _migrate_project_paths(conn) at the end would be a bug — it
         # must live inside the v5 migration block, not at the top level. Verify this
-        # structurally by checking _migrate_columns source for _migrate_project_paths.
-        mc_source = inspect.getsource(db_module._migrate_columns)
+        # structurally by checking migrate_columns source for _migrate_project_paths.
+        mc_source = inspect.getsource(migrations_module.migrate_columns)
         assert "_migrate_project_paths" in mc_source, (
-            "_migrate_project_paths must be called inside _migrate_columns (v5 block)"
+            "_migrate_project_paths must be called inside migrate_columns (v5 block)"
         )
         assert "_migrate_project_paths" not in source, (
             "_migrate_project_paths must NOT be called unconditionally in get_db_connection"
@@ -1099,7 +1098,7 @@ class TestV5Migration:
         conn.commit()
 
         # Should not raise even with NULL files/commits
-        _migrate_columns(conn)
+        migrate_columns(conn)
 
         agg = cursor.execute("SELECT aggregated_content FROM branches WHERE id = 1").fetchone()[0]
         assert agg is not None
@@ -1121,7 +1120,7 @@ class TestV5Migration:
         cursor.execute("INSERT INTO branch_messages VALUES (1, 1)")
         conn.commit()
 
-        _migrate_columns(conn)
+        migrate_columns(conn)
 
         # Check branches_fts exists and is queryable (FTS rebuild should have run)
         try:
@@ -1258,7 +1257,7 @@ class TestV6Migration:
         )
         conn.commit()
 
-        _migrate_columns(conn)
+        migrate_columns(conn)
 
         result = cursor.execute("SELECT context_summary_json FROM branches WHERE id = 1").fetchone()[0]
         assert result is not None
@@ -1286,7 +1285,7 @@ class TestV6Migration:
         )
         conn.commit()
 
-        _migrate_columns(conn)
+        migrate_columns(conn)
 
         result = cursor.execute("SELECT context_summary_json FROM branches WHERE id = 1").fetchone()[0]
         assert result == small_json, "Small JSON must be unchanged after v6 migration"
@@ -1304,13 +1303,13 @@ class TestV6Migration:
         )
         conn.commit()
 
-        _migrate_columns(conn)
+        migrate_columns(conn)
         result_first = cursor.execute("SELECT context_summary_json FROM branches WHERE id = 1").fetchone()[0]
 
         # Reset to v5 to simulate re-run
         conn.execute("PRAGMA user_version = 5")
         conn.commit()
-        _migrate_columns(conn)
+        migrate_columns(conn)
         result_second = cursor.execute("SELECT context_summary_json FROM branches WHERE id = 1").fetchone()[0]
 
         assert result_first == result_second, "v6 is idempotent — running twice must produce the same result"
@@ -1319,7 +1318,7 @@ class TestV6Migration:
     def test_v6_bumps_user_version(self):
         """After running from v5, user_version must be 6."""
         conn = self._v5_db()
-        _migrate_columns(conn)
+        migrate_columns(conn)
         assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
         conn.close()
 
@@ -1346,9 +1345,9 @@ class TestNewBranchColumns:
     """Three new columns on branches (embedding_version, embedding_model, summary_version_at_embed)."""
 
     def test_new_columns_exist_via_migrate_columns(self):
-        """_migrate_columns adds the three embedding columns to an existing branches table."""
+        """migrate_columns adds the three embedding columns to an existing branches table."""
         conn = _pre_migration_db()
-        _migrate_columns(conn)
+        migrate_columns(conn)
 
         cursor = conn.cursor()
         cursor.execute("PRAGMA table_info(branches)")
@@ -1359,7 +1358,7 @@ class TestNewBranchColumns:
         conn.close()
 
     def test_new_columns_exist_on_memory_db_fixture(self, memory_db):
-        """The memory_db fixture (SCHEMA + _migrate_columns) also has the three columns."""
+        """The memory_db fixture (SCHEMA + migrate_columns) also has the three columns."""
         cursor = memory_db.cursor()
         cursor.execute("PRAGMA table_info(branches)")
         columns = {row[1] for row in cursor.fetchall()}
@@ -1396,14 +1395,14 @@ class TestNewBranchColumns:
         assert row[2] is None
 
     def test_embedding_version_index_exists(self, memory_db):
-        """idx_branches_embedding_version index is created by _migrate_columns."""
+        """idx_branches_embedding_version index is created by migrate_columns."""
         cursor = memory_db.cursor()
         cursor.execute("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_branches_embedding_version'")
         assert cursor.fetchone() is not None
 
     def test_new_columns_idempotent(self, memory_db):
-        """Calling _migrate_columns a second time does not raise."""
-        _migrate_columns(memory_db)  # already called by fixture; call again
+        """Calling migrate_columns a second time does not raise."""
+        migrate_columns(memory_db)  # already called by fixture; call again
 
 
 class TestVecAvailable:
@@ -1455,11 +1454,11 @@ class TestVecSchema:
     """branch_vec table and branches_vec_ad trigger — guarded by vec_available."""
 
     def test_raw_no_vec_connection_unaffected(self):
-        """_migrate_columns never creates branch_vec — it belongs to load_vec=True only."""
+        """migrate_columns never creates branch_vec — it belongs to load_vec=True only."""
         conn = sqlite3.connect(":memory:")
         conn.executescript(SCHEMA)
         conn.commit()
-        _migrate_columns(conn)
+        migrate_columns(conn)
         tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
         # Core tables must always be there
         assert "branches" in tables
