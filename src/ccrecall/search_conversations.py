@@ -33,6 +33,7 @@ from ccrecall.embeddings import (
 )
 from ccrecall.formatting import format_json_sessions, format_markdown_session
 from ccrecall.fusion import rrf
+from ccrecall.serialization import decode_json_column
 
 
 def _get_fts_branch_ids(
@@ -294,8 +295,8 @@ def _hydrate_branches(
         }
 
         if verbose:
-            session_data["files_modified"] = json.loads(files_json) if files_json else []
-            session_data["commits"] = json.loads(commits_json) if commits_json else []
+            session_data["files_modified"] = decode_json_column(files_json, [])
+            session_data["commits"] = decode_json_column(commits_json, [])
 
         results.append(session_data)
 

@@ -14,6 +14,7 @@ from pathlib import Path
 # Local imports
 from ccrecall.db import DEFAULT_DB_PATH, get_db_connection
 from ccrecall.formatting import format_json_sessions, format_markdown_session
+from ccrecall.serialization import decode_json_column
 
 
 def get_recent_sessions(
@@ -139,9 +140,9 @@ def get_recent_sessions(
         }
 
         if verbose:
-            session_data["files_modified"] = json.loads(files_json) if files_json else []
-            session_data["commits"] = json.loads(commits_json) if commits_json else []
-            session_data["tool_counts"] = json.loads(tool_counts_json) if tool_counts_json else {}
+            session_data["files_modified"] = decode_json_column(files_json, [])
+            session_data["commits"] = decode_json_column(commits_json, [])
+            session_data["tool_counts"] = decode_json_column(tool_counts_json, {})
 
         results.append(session_data)
 

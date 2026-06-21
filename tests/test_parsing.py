@@ -9,10 +9,31 @@ from hypothesis import strategies as st
 from ccrecall.parsing import (
     compute_branch_metadata,
     extract_session_metadata,
+    extract_session_uuid,
     find_all_branches,
     parse_all_with_uuids,
     parse_jsonl_file,
 )
+
+
+class TestExtractSessionUuid:
+    def test_plain_session_file(self):
+        assert extract_session_uuid(Path("/x/abc-123.jsonl")) == "abc-123"
+
+    def test_agent_prefix_stripped(self):
+        assert extract_session_uuid(Path("/x/agent-abc-123.jsonl")) == "abc-123"
+
+    def test_no_double_strip(self):
+        # only the leading prefix is removed
+        assert extract_session_uuid(Path("/x/agent-agent-1.jsonl")) == "agent-1"
+
+    def test_uuid_containing_agent_substring_untouched(self):
+        assert extract_session_uuid(Path("/x/myagent-1.jsonl")) == "myagent-1"
+
+    def test_extensionless_path(self):
+        # Works regardless of extension — stem handles it.
+        assert extract_session_uuid(Path("/x/agent-abc")) == "abc"
+
 
 # Verified expected values from real fixture analysis
 EXPECTED = {

@@ -27,6 +27,16 @@ def is_valid_entry(obj: object) -> bool:
     return is_valid(TranscriptEntry, obj, "transcript entry")
 
 
+def extract_session_uuid(filepath: Path) -> str:
+    """Session UUID from a transcript filename.
+
+    The stem minus an optional ``agent-`` prefix — subagent transcripts are named
+    ``agent-<uuid>.jsonl`` and resolve to the same session UUID as the parent.
+    """
+    stem = filepath.stem
+    return stem.removeprefix("agent-")
+
+
 def parse_jsonl_file(filepath: Path) -> Generator[dict, None, None]:
     """Parse JSONL file, yielding user/assistant entries for import."""
     with open(filepath, encoding="utf-8", errors="replace") as f:
