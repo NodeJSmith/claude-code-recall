@@ -1,7 +1,7 @@
 ---
 task_id: "T05"
 title: "Decompose parse_session into line-type handlers"
-status: "planned"
+status: "done"
 depends_on: ["T02"]
 implements: ["FR#4", "FR#7", "FR#8", "AC#4", "AC#6", "AC#7", "AC#8"]
 ---

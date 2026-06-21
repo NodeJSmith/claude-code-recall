@@ -275,6 +275,15 @@ class ParsedSession:
     hook_calls: list[dict] = field(default_factory=list)
 
 
+@dataclass
+class SessionParseState:
+    session: ParsedSession
+    current_turn: Turn | None = None
+    turn_index: int = 0
+    last_assistant_ts: str | None = None
+    metadata_captured: bool = False
+
+
 def _extract_usage(msg: dict) -> dict:
     usage = msg.get("usage", {}) or {}
     cache_creation = usage.get("cache_creation", {}) or {}
@@ -288,13 +297,182 @@ def _extract_usage(msg: dict) -> dict:
     }
 
 
-def parse_session(filepath: Path, jnl: JnlFile) -> ParsedSession | None:
-    session = ParsedSession(session_id="", project_path=_normalize_worktree_path(jnl.project_cwd))
+def normalize_skill_name(raw_skill: str | None) -> str | None:
+    """Strip a "claude-<plugin>:" prefix so plugin and bare skill names unify.
 
-    current_turn: Turn | None = None
-    turn_index = 0
-    last_assistant_ts: str | None = None
-    metadata_captured = False
+    Only strips when the prefix matches "claude-*:" — preserves third-party
+    namespaces like "visual-explainer:generate-web-diagram".
+    """
+    if raw_skill and ":" in raw_skill:
+        prefix, _, bare = raw_skill.partition(":")
+        if prefix.startswith("claude-"):
+            return bare
+    return raw_skill
+
+
+def apply_content_block(state: SessionParseState, block: dict) -> None:
+    """Apply a single assistant content block to the current turn."""
+    btype = block.get("type")
+    turn = state.current_turn
+    if turn is None:
+        return
+
+    if btype == "thinking":
+        # Count thinking text length as proxy (actual token count not in JSONL)
+        thinking_text = block.get("thinking", "")
+        # Rough estimate: 1 token ≈ CHARS_PER_TOKEN chars
+        turn.thinking_tokens += len(thinking_text) // CHARS_PER_TOKEN
+
+    elif btype == "tool_use":
+        tc = ToolCall(
+            tool_name=block.get("name", "unknown"),
+            tool_use_id=block.get("id", ""),
+        )
+        block_input = block.get("input")
+        inp = block_input if isinstance(block_input, dict) else {}
+        # Extract file_path from various tool input formats
+        tc.file_path = inp.get("file_path") or inp.get("path") or inp.get("file") or None
+        if "command" in inp:
+            tc.command = str(inp["command"])[:COMMAND_TRUNCATE]
+
+        # Extract workflow-specific metadata
+        if tc.tool_name == "Skill":
+            tc.skill_name = normalize_skill_name(inp.get("skill") or None)
+        elif tc.tool_name == "Agent":
+            state.session.uses_agent = True
+            tc.subagent_type = inp.get("subagent_type") or None
+            tc.agent_model = inp.get("model") or None
+            # Store agent description as command if no command set
+            if not tc.command:
+                desc = inp.get("description") or ""
+                if desc:
+                    tc.command = str(desc)[:COMMAND_TRUNCATE]
+
+        turn.tool_calls.append(tc)
+        turn._pending_tools[tc.tool_use_id] = tc
+
+
+def finalize_and_start_turn(state: SessionParseState, mid: str, ts: str | None, model: str | None) -> None:
+    """Append the current turn (if any) and open a new one, computing the user gap."""
+    if state.current_turn:
+        state.session.turns.append(state.current_turn)
+    state.turn_index += 1
+    state.current_turn = Turn(
+        index=state.turn_index,
+        message_id=mid,
+        timestamp=ts or "",
+        model=model,
+    )
+    if state.last_assistant_ts and ts:
+        try:
+            prev = Instant.parse_iso(state.last_assistant_ts)
+            curr = Instant.parse_iso(ts)
+            # TimeDelta.total() takes a unit string; gap in ms.
+            state.current_turn.user_gap_ms = int((curr - prev).total("milliseconds"))
+        except (ValueError, TypeError):
+            pass
+
+
+def handle_assistant_line(state: SessionParseState, line: dict) -> None:
+    """Process an assistant event: finalize/start turns, update usage, extract content."""
+    msg = line.get("message", {}) or {}
+    mid = msg.get("id", "")
+    if not mid:
+        return
+
+    ts = line.get("timestamp")
+
+    # Same logical turn?
+    if state.current_turn and state.current_turn.message_id == mid:
+        # Merge: accumulate tool_use blocks, update usage to latest
+        pass
+    else:
+        finalize_and_start_turn(state, mid, ts, msg.get("model"))
+
+    # Always update usage from the latest event for this message.id
+    u = _extract_usage(msg)
+    state.current_turn.input_tokens = u["input_tokens"]
+    state.current_turn.output_tokens = u["output_tokens"]
+    state.current_turn.cache_read_tokens = u["cache_read_tokens"]
+    state.current_turn.cache_creation_tokens = u["cache_creation_tokens"]
+    state.current_turn.ephem_5m_tokens = u["ephem_5m_tokens"]
+    state.current_turn.ephem_1h_tokens = u["ephem_1h_tokens"]
+
+    stop = msg.get("stop_reason")
+    if stop:
+        state.current_turn.stop_reason = stop
+
+    if msg.get("model"):
+        state.current_turn.model = msg["model"]
+
+    # Extract content blocks
+    content = msg.get("content", []) or []
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        apply_content_block(state, block)
+
+
+def handle_user_line(state: SessionParseState, line: dict) -> None:
+    """Process a user event: count messages and match tool results to pending calls."""
+    state.session.user_msg_count += 1
+
+    msg = line.get("message", {}) or {}
+    content = msg.get("content", []) or []
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") == "tool_result":
+            tuid = block.get("tool_use_id", "")
+            is_err = block.get("is_error", False)
+            # Match to pending tool call (pop to avoid re-matching)
+            if state.current_turn:
+                tc = state.current_turn._pending_tools.pop(tuid, None)
+                if tc:
+                    tc.is_error = 1 if is_err else 0
+                    if is_err:
+                        # Extract error text
+                        result_content = block.get("content", "")
+                        if isinstance(result_content, list):
+                            texts = [c.get("text", "") for c in result_content if isinstance(c, dict)]
+                            result_content = " ".join(texts)
+                        tc.error_text = str(result_content)[:COMMAND_TRUNCATE] if result_content else None
+
+
+def handle_system_line(state: SessionParseState, line: dict) -> None:
+    """Process a system event: turn_duration, hook_summary, api_error."""
+    subtype = line.get("subtype", "")
+    ts = line.get("timestamp")
+
+    if subtype == "turn_duration":
+        duration_ms = line.get("durationMs")
+        if duration_ms is not None and state.current_turn:
+            state.current_turn.turn_duration_ms = duration_ms
+            if ts:
+                state.last_assistant_ts = ts
+    elif subtype in ("stop_hook_summary", "hook_summary"):
+        hook_infos = line.get("hookInfos", []) or []
+        hook_errors = line.get("hookErrors", []) or []
+        error_commands = {e.get("command") for e in hook_errors if isinstance(e, dict)}
+        for h in hook_infos:
+            dur = h.get("durationMs", 0) or 0
+            state.session.total_hook_ms += dur
+            cmd = h.get("command") or h.get("hook_command") or "unknown"
+            state.session.hook_calls.append(
+                {
+                    "hook_command": str(cmd)[:COMMAND_TRUNCATE],
+                    "duration_ms": dur,
+                    "is_error": 1 if cmd in error_commands else 0,
+                }
+            )
+    elif subtype == "api_error":
+        state.session.api_error_count += 1
+
+
+def parse_session(filepath: Path, jnl: JnlFile) -> ParsedSession | None:
+    state = SessionParseState(
+        session=ParsedSession(session_id="", project_path=_normalize_worktree_path(jnl.project_cwd))
+    )
 
     try:
         lines = filepath.read_text(encoding="utf-8").splitlines()
@@ -315,194 +493,47 @@ def parse_session(filepath: Path, jnl: JnlFile) -> ParsedSession | None:
             continue
 
         line_type = line.get("type")
-        subtype = line.get("subtype", "")
-        ts = line.get("timestamp")
 
         # Capture session metadata from any line that has it
-        if not metadata_captured:
+        if not state.metadata_captured:
             sid = line.get("sessionId")
             if sid:
-                session.session_id = sid
-                metadata_captured = True
-        if line.get("sessionId") and not session.session_id:
-            session.session_id = line["sessionId"]
-        if line.get("version") and not session.cc_version:
-            session.cc_version = line["version"]
-        if line.get("slug") and not session.slug:
-            session.slug = line["slug"]
-        if line.get("entrypoint") and not session.entrypoint:
-            session.entrypoint = line["entrypoint"]
+                state.session.session_id = sid
+                state.metadata_captured = True
+        if line.get("sessionId") and not state.session.session_id:
+            state.session.session_id = line["sessionId"]
+        if line.get("version") and not state.session.cc_version:
+            state.session.cc_version = line["version"]
+        if line.get("slug") and not state.session.slug:
+            state.session.slug = line["slug"]
+        if line.get("entrypoint") and not state.session.entrypoint:
+            state.session.entrypoint = line["entrypoint"]
         # Take LAST observed branch (can change mid-session)
         if line.get("gitBranch"):
-            session.git_branch = line["gitBranch"]
+            state.session.git_branch = line["gitBranch"]
 
-        # ── Assistant events (grouped by message.id) ──
         if line_type == "assistant":
-            msg = line.get("message", {}) or {}
-            mid = msg.get("id", "")
-            if not mid:
-                continue
-
-            # Same logical turn?
-            if current_turn and current_turn.message_id == mid:
-                # Merge: accumulate tool_use blocks, update usage to latest
-                pass
-            else:
-                # Finalize previous turn
-                if current_turn:
-                    session.turns.append(current_turn)
-                # Start new turn
-                turn_index += 1
-                current_turn = Turn(
-                    index=turn_index,
-                    message_id=mid,
-                    timestamp=ts or "",
-                    model=msg.get("model"),
-                )
-                # Compute user gap from last assistant finish
-                if last_assistant_ts and ts:
-                    try:
-                        prev = Instant.parse_iso(last_assistant_ts)
-                        curr = Instant.parse_iso(ts)
-                        # TimeDelta.total() takes a unit string; gap in ms.
-                        current_turn.user_gap_ms = int((curr - prev).total("milliseconds"))
-                    except (ValueError, TypeError):
-                        pass
-
-            # Always update usage from the latest event for this message.id
-            u = _extract_usage(msg)
-            current_turn.input_tokens = u["input_tokens"]
-            current_turn.output_tokens = u["output_tokens"]
-            current_turn.cache_read_tokens = u["cache_read_tokens"]
-            current_turn.cache_creation_tokens = u["cache_creation_tokens"]
-            current_turn.ephem_5m_tokens = u["ephem_5m_tokens"]
-            current_turn.ephem_1h_tokens = u["ephem_1h_tokens"]
-
-            stop = msg.get("stop_reason")
-            if stop:
-                current_turn.stop_reason = stop
-
-            if msg.get("model"):
-                current_turn.model = msg["model"]
-
-            # Extract content blocks
-            content = msg.get("content", []) or []
-            for block in content:
-                if not isinstance(block, dict):
-                    continue
-                btype = block.get("type")
-
-                if btype == "thinking":
-                    # Count thinking text length as proxy (actual token count not in JSONL)
-                    thinking_text = block.get("thinking", "")
-                    # Rough estimate: 1 token ≈ CHARS_PER_TOKEN chars
-                    current_turn.thinking_tokens += len(thinking_text) // CHARS_PER_TOKEN
-
-                elif btype == "tool_use":
-                    tc = ToolCall(
-                        tool_name=block.get("name", "unknown"),
-                        tool_use_id=block.get("id", ""),
-                    )
-                    block_input = block.get("input")
-                    inp = block_input if isinstance(block_input, dict) else {}
-                    # Extract file_path from various tool input formats
-                    tc.file_path = inp.get("file_path") or inp.get("path") or inp.get("file") or None
-                    if "command" in inp:
-                        tc.command = str(inp["command"])[:COMMAND_TRUNCATE]
-
-                    # Extract workflow-specific metadata
-                    if tc.tool_name == "Skill":
-                        raw_skill = inp.get("skill") or None
-                        # Normalize: strip "claude-<plugin>:" prefix so
-                        # "claude-memory:recall-conversations" and "recall-conversations"
-                        # count as the same skill. Guard: only strip when prefix matches
-                        # "claude-*:" to preserve third-party namespaces like
-                        # "visual-explainer:generate-web-diagram".
-                        if raw_skill and ":" in raw_skill:
-                            prefix, _, bare = raw_skill.partition(":")
-                            if prefix.startswith("claude-"):
-                                raw_skill = bare
-                        tc.skill_name = raw_skill
-                    elif tc.tool_name == "Agent":
-                        session.uses_agent = True
-                        tc.subagent_type = inp.get("subagent_type") or None
-                        tc.agent_model = inp.get("model") or None
-                        # Store agent description as command if no command set
-                        if not tc.command:
-                            desc = inp.get("description") or ""
-                            if desc:
-                                tc.command = str(desc)[:COMMAND_TRUNCATE]
-
-                    current_turn.tool_calls.append(tc)
-                    current_turn._pending_tools[tc.tool_use_id] = tc
-
-        # ── User events ──
+            handle_assistant_line(state, line)
         elif line_type == "user":
-            session.user_msg_count += 1
-
-            msg = line.get("message", {}) or {}
-            content = msg.get("content", []) or []
-            for block in content:
-                if not isinstance(block, dict):
-                    continue
-                if block.get("type") == "tool_result":
-                    tuid = block.get("tool_use_id", "")
-                    is_err = block.get("is_error", False)
-                    # Match to pending tool call (pop to avoid re-matching)
-                    if current_turn:
-                        tc = current_turn._pending_tools.pop(tuid, None)
-                        if tc:
-                            tc.is_error = 1 if is_err else 0
-                            if is_err:
-                                # Extract error text
-                                result_content = block.get("content", "")
-                                if isinstance(result_content, list):
-                                    texts = [c.get("text", "") for c in result_content if isinstance(c, dict)]
-                                    result_content = " ".join(texts)
-                                tc.error_text = str(result_content)[:COMMAND_TRUNCATE] if result_content else None
-
-        # ── System events ──
+            handle_user_line(state, line)
         elif line_type == "system":
-            if subtype == "turn_duration":
-                duration_ms = line.get("durationMs")
-                if duration_ms is not None and current_turn:
-                    current_turn.turn_duration_ms = duration_ms
-                    if ts:
-                        last_assistant_ts = ts
-            elif subtype in ("stop_hook_summary", "hook_summary"):
-                hook_infos = line.get("hookInfos", []) or []
-                hook_errors = line.get("hookErrors", []) or []
-                error_commands = {e.get("command") for e in hook_errors if isinstance(e, dict)}
-                for h in hook_infos:
-                    dur = h.get("durationMs", 0) or 0
-                    session.total_hook_ms += dur
-                    cmd = h.get("command") or h.get("hook_command") or "unknown"
-                    session.hook_calls.append(
-                        {
-                            "hook_command": str(cmd)[:COMMAND_TRUNCATE],
-                            "duration_ms": dur,
-                            "is_error": 1 if cmd in error_commands else 0,
-                        }
-                    )
-            elif subtype == "api_error":
-                session.api_error_count += 1
-
+            handle_system_line(state, line)
         # Skip: progress, file-history-snapshot, local_command, etc.
 
     # Finalize last turn
-    if current_turn:
-        session.turns.append(current_turn)
+    if state.current_turn:
+        state.session.turns.append(state.current_turn)
 
-    if not session.session_id:
+    if not state.session.session_id:
         # Derive from filename
-        session.session_id = filepath.stem
+        state.session.session_id = filepath.stem
 
     # Subagent JSONL files inherit the parent's sessionId — use the filename
     # as a unique ID to avoid overwriting the parent session's data.
     if jnl.is_sidechain:
-        session.session_id = filepath.stem
+        state.session.session_id = filepath.stem
 
-    return session if session.turns else None
+    return state.session if state.session.turns else None
 
 
 def _detect_cache_ttl_ms(session: ParsedSession) -> tuple[int, str]:
