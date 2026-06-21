@@ -1,11 +1,12 @@
-"""
-Session formatting, time utilities, and project path helpers.
-"""
+"""Session formatting, time utilities, and project path helpers."""
 
 import json
 from pathlib import Path
 
 from whenever import Instant
+
+# Verbose output lists at most this many modified files before collapsing to a count.
+MAX_FILES_DISPLAYED = 10
 
 
 def format_time(ts_str: str | None, fmt: str = "%H:%M") -> str:
@@ -101,9 +102,9 @@ def format_markdown_session(session: dict, verbose: bool = False) -> str:
         files = session.get("files_modified", [])
         if files:
             lines.append("\n### Files Modified")
-            lines.extend(f"- `{f}`" for f in files[-10:])
-            if len(files) > 10:
-                lines.append(f"- ...and {len(files) - 10} more")
+            lines.extend(f"- `{f}`" for f in files[-MAX_FILES_DISPLAYED:])
+            if len(files) > MAX_FILES_DISPLAYED:
+                lines.append(f"- ...and {len(files) - MAX_FILES_DISPLAYED} more")
 
         commits = session.get("commits", [])
         if commits:
@@ -112,7 +113,7 @@ def format_markdown_session(session: dict, verbose: bool = False) -> str:
 
         tool_counts = session.get("tool_counts", {})
         if tool_counts:
-            sorted_tools = sorted(tool_counts.items(), key=lambda x: x[1], reverse=True)
+            sorted_tools = sorted(tool_counts.items(), key=lambda kv: kv[1], reverse=True)
             tools_str = ", ".join(f"{name}: {count}" for name, count in sorted_tools)
             lines.append("\n### Tools Used")
             lines.append(tools_str)

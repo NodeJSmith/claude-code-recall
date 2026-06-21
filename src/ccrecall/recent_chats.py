@@ -9,7 +9,8 @@ import sqlite3
 import sys
 from pathlib import Path
 
-from ccrecall.db import DEFAULT_DB_PATH, get_db_connection
+from ccrecall.content import escape_like
+from ccrecall.db import DEFAULT_DB_PATH, fetch_branch_messages, get_db_connection
 from ccrecall.formatting import format_json_sessions, format_markdown_session
 from ccrecall.serialization import decode_json_column
 
@@ -53,8 +54,7 @@ def get_recent_sessions(
 
     if session_id:
         sql += " AND s.uuid LIKE ? ESCAPE '\\'"
-        escaped = session_id.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-        params.append(f"{escaped}%")
+        params.append(f"{escape_like(session_id)}%")
 
     if before:
         sql += " AND b.started_at < ?"
@@ -71,8 +71,7 @@ def get_recent_sessions(
 
     if path:
         sql += " AND s.cwd LIKE ? ESCAPE '\\'"
-        escaped = path.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-        params.append(f"%{escaped}%")
+        params.append(f"%{escape_like(path)}%")
 
     order = "DESC" if sort_order == "desc" else "ASC"
     sql += f" ORDER BY b.ended_at {order} LIMIT ?"
@@ -115,21 +114,7 @@ def get_recent_sessions(
             ) = session
             tool_counts_json = None
 
-        cursor.execute(
-            """
-            SELECT m.role, m.content, m.timestamp, COALESCE(m.is_notification, 0) as is_notification
-            FROM branch_messages bm
-            JOIN messages m ON bm.message_id = m.id
-            WHERE bm.branch_id = ?
-              AND (? OR COALESCE(m.is_notification, 0) = 0)
-            ORDER BY m.timestamp ASC
-        """,
-            (branch_db_id, include_notifications),
-        )
-
-        messages = [
-            {"role": r, "content": c, "timestamp": t, "is_notification": notif} for r, c, t, notif in cursor.fetchall()
-        ]
+        messages = fetch_branch_messages(cursor, branch_db_id, include_notifications)
 
         session_data = {
             "uuid": uuid,

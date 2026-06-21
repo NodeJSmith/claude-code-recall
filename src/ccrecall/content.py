@@ -1,9 +1,16 @@
-"""
-Message content extraction and tool detection utilities.
-"""
+"""Message content extraction and tool detection utilities."""
 
 import json
 import re
+
+# Commit messages are stored truncated — they're for at-a-glance session context,
+# not full reconstruction.
+MAX_COMMIT_MESSAGE_LEN = 100
+
+
+def escape_like(value: str) -> str:
+    """Escape SQLite LIKE wildcards so a user value matches literally (pair with ESCAPE '\\')."""
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def sanitize_fts_term(term: str) -> str:
@@ -91,28 +98,26 @@ def parse_origin(entry: dict) -> str | None:
     return None
 
 
-def is_task_notification(content) -> bool:
-    """Check if content is a task-notification message (subagent result)."""
+def extract_plain_text(content) -> str | None:
+    """Join text blocks (or a bare string) into stripped plain text; None if neither shape."""
     if isinstance(content, list):
         texts = [item.get("text", "") for item in content if isinstance(item, dict) and item.get("type") == "text"]
-        text = "\n".join(texts).strip()
-    elif isinstance(content, str):
-        text = content.strip()
-    else:
-        return False
-    return text.startswith("<task-notification>")
+        return "\n".join(texts).strip()
+    if isinstance(content, str):
+        return content.strip()
+    return None
+
+
+def is_task_notification(content) -> bool:
+    """Check if content is a task-notification message (subagent result)."""
+    text = extract_plain_text(content)
+    return text is not None and text.startswith("<task-notification>")
 
 
 def is_teammate_message(content) -> bool:
     """Detect teammate coordination messages (team reports, idle notifications, shutdown)."""
-    if isinstance(content, list):
-        texts = [item.get("text", "") for item in content if isinstance(item, dict) and item.get("type") == "text"]
-        text = "\n".join(texts).strip()
-    elif isinstance(content, str):
-        text = content.strip()
-    else:
-        return False
-    return text.startswith("<teammate-message")
+    text = extract_plain_text(content)
+    return text is not None and text.startswith("<teammate-message")
 
 
 def is_tool_result(content) -> bool:
@@ -146,7 +151,7 @@ def extract_commits(content) -> list[str]:
                 if item.get("name") == "Bash":
                     cmd = item.get("input", {}).get("command", "")
                     if "git commit" in cmd:
-                        m = re.search(r'-m\s+["\']([^"\']+)["\']', cmd)
-                        if m:
-                            commits.append(m.group(1)[:100])
+                        match = re.search(r'-m\s+["\']([^"\']+)["\']', cmd)
+                        if match:
+                            commits.append(match.group(1)[:MAX_COMMIT_MESSAGE_LEN])
     return commits

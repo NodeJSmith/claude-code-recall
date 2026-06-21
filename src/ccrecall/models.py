@@ -11,10 +11,13 @@ import logging
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-# Use the named logger setup_logging() configures so boundary skip-logs reach the
-# same rotating file as the rest of the app; a module logger would propagate to an
-# unconfigured root and silently drop them.
-_LOG = logging.getLogger("claude-memory")
+# The single logger name setup_logging() configures. Shared so boundary skip-logs
+# and hook exceptions reach the same rotating file as the rest of the app; a module
+# logger would propagate to an unconfigured root and silently drop them. Defined here
+# (the lowest-level module) so db/session_ops/hooks can import it without a cycle.
+LOGGER_NAME = "claude-memory"
+
+_LOG = logging.getLogger(LOGGER_NAME)
 
 
 def is_valid(model: type[BaseModel], data: object, label: str) -> bool:

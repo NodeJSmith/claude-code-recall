@@ -11,11 +11,12 @@ from pathlib import Path
 
 import sqlite_vec
 
-from ccrecall.content import sanitize_fts_term
+from ccrecall.content import escape_like, sanitize_fts_term
 from ccrecall.db import (
     DEFAULT_DB_PATH,
     EMBEDDABLE_BRANCH_FILTER,
     branch_vec_queryable,
+    fetch_branch_messages,
     get_db_connection,
 )
 from ccrecall.embeddings import (
@@ -85,13 +86,11 @@ def _get_fts_branch_ids(
 
         if session_id:
             sql += " AND s.uuid LIKE ? ESCAPE '\\'"
-            escaped = session_id.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-            params.append(f"{escaped}%")
+            params.append(f"{escape_like(session_id)}%")
 
         if path:
             sql += " AND s.cwd LIKE ? ESCAPE '\\'"
-            escaped = path.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-            params.append(f"%{escaped}%")
+            params.append(f"%{escape_like(path)}%")
 
         if fts_level == "fts5":
             sql += " ORDER BY bm25(branches_fts) LIMIT ?"
@@ -119,13 +118,11 @@ def _get_fts_branch_ids(
 
         if session_id:
             sql += " AND s.uuid LIKE ? ESCAPE '\\'"
-            escaped = session_id.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-            params.append(f"{escaped}%")
+            params.append(f"{escape_like(session_id)}%")
 
         if path:
             sql += " AND s.cwd LIKE ? ESCAPE '\\'"
-            escaped = path.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-            params.append(f"%{escaped}%")
+            params.append(f"%{escape_like(path)}%")
 
         sql += " ORDER BY b.ended_at DESC LIMIT ?"
         params.append(top_k)
@@ -175,7 +172,7 @@ def _get_vec_branch_ids(
           AND b.embedding_version = ?
           AND b.embedding_model = ?
     """
-    filter_params: list = [*list(candidate_ids), EMBEDDING_VERSION, EMBEDDING_MODEL]
+    filter_params: list = [*candidate_ids, EMBEDDING_VERSION, EMBEDDING_MODEL]
 
     if projects:
         proj_placeholders = ",".join("?" * len(projects))
@@ -184,13 +181,11 @@ def _get_vec_branch_ids(
 
     if session_id:
         filter_sql += " AND s.uuid LIKE ? ESCAPE '\\'"
-        escaped = session_id.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-        filter_params.append(f"{escaped}%")
+        filter_params.append(f"{escape_like(session_id)}%")
 
     if path:
         filter_sql += " AND s.cwd LIKE ? ESCAPE '\\'"
-        escaped = path.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-        filter_params.append(f"%{escaped}%")
+        filter_params.append(f"%{escape_like(path)}%")
 
     try:
         valid_ids = {row[0] for row in cursor.execute(filter_sql, filter_params).fetchall()}
@@ -273,21 +268,7 @@ def _hydrate_branches(
             branch_db_id,
         ) = row
 
-        cursor.execute(
-            """
-            SELECT m.role, m.content, m.timestamp, COALESCE(m.is_notification, 0) as is_notification
-            FROM branch_messages bm
-            JOIN messages m ON bm.message_id = m.id
-            WHERE bm.branch_id = ?
-              AND (? OR COALESCE(m.is_notification, 0) = 0)
-            ORDER BY m.timestamp ASC
-        """,
-            (branch_db_id, include_notifications),
-        )
-
-        messages = [
-            {"role": r, "content": c, "timestamp": t, "is_notification": notif} for r, c, t, notif in cursor.fetchall()
-        ]
+        messages = fetch_branch_messages(cursor, branch_db_id, include_notifications)
 
         session_data = {
             "uuid": uuid,
