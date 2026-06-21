@@ -15,7 +15,6 @@ import pytest
 
 from ccrecall.hooks import memory_setup, memory_sync
 from ccrecall.hooks.sync_current import sync_session, validate_session_id
-from ccrecall.migrations import migrate_columns
 from ccrecall.recent_chats import run as recent_chats_run
 from ccrecall.schema import SCHEMA
 from ccrecall.search_conversations import run as search_conversations_run
@@ -29,7 +28,6 @@ def memory_db_with_project():
     conn = sqlite3.connect(":memory:")
     conn.executescript(SCHEMA)
     conn.commit()
-    migrate_columns(conn)
 
     # Create a test project
     cursor = conn.cursor()
@@ -507,7 +505,6 @@ class TestRecentChatsDbFlag:
         conn = sqlite3.connect(str(custom_db))
         conn.executescript(SCHEMA)
         conn.commit()
-        migrate_columns(conn)
 
         # Insert a project and session with a branch so recent_chats can retrieve it
         cursor = conn.cursor()
@@ -560,7 +557,6 @@ class TestSearchConversationsDbFlag:
         conn = sqlite3.connect(str(custom_db))
         conn.executescript(SCHEMA)
         conn.commit()
-        migrate_columns(conn)
 
         # Insert a project, session, branch, and message with unique searchable content
         cursor = conn.cursor()

@@ -1,7 +1,7 @@
 ---
 task_id: "T03"
 title: "Migrate test consumers off migrations; remove migration-behavior tests"
-status: "planned"
+status: "done"
 depends_on: ["T02"]
 implements: ["AC#6"]
 ---

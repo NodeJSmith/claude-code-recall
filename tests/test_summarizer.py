@@ -9,7 +9,6 @@ import pytest
 
 from ccrecall.db import CONTENT_ERROR_VERSION
 from ccrecall.hooks import backfill_summaries, memory_setup
-from ccrecall.migrations import migrate_columns
 from ccrecall.schema import SCHEMA
 from ccrecall.summarizer import (
     build_context_summary_json,
@@ -313,7 +312,6 @@ class TestComputeContextSummary:
         conn = sqlite3.connect(":memory:")
         conn.executescript(SCHEMA)
         conn.commit()
-        migrate_columns(conn)
 
         cursor = conn.cursor()
         cursor.execute(
@@ -554,7 +552,6 @@ class TestNeedsBackfillVersionBump:
         conn = sqlite3.connect(":memory:")
         conn.executescript(SCHEMA)
         conn.commit()
-        migrate_columns(conn)
         cursor = conn.cursor()
         cursor.execute(
             "INSERT INTO projects (path, key, name) VALUES (?, ?, ?)",
@@ -619,7 +616,6 @@ class TestBackfillErrorHandling:
         conn = sqlite3.connect(str(path))
         conn.executescript(SCHEMA)
         conn.commit()
-        migrate_columns(conn)
         cur = conn.cursor()
         cur.execute(
             "INSERT INTO projects (path, key, name) VALUES (?, ?, ?)",

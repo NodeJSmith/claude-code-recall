@@ -11,7 +11,6 @@ from ccrecall.db import (
     vec_available,
 )
 from ccrecall.embeddings import EMBEDDING_DIM, EMBEDDING_MODEL, EMBEDDING_VERSION
-from ccrecall.migrations import migrate_columns
 from ccrecall.recent_chats import get_recent_sessions
 from ccrecall.schema import SCHEMA, SCHEMA_CORE, detect_fts_support
 from ccrecall.search_conversations import (
@@ -29,7 +28,6 @@ def search_db():
     conn = sqlite3.connect(":memory:")
     conn.executescript(SCHEMA)
     conn.commit()
-    migrate_columns(conn)
 
     cursor = conn.cursor()
 
@@ -293,7 +291,6 @@ class TestFtsSearchFindsFilePath:
         conn = sqlite3.connect(":memory:")
         conn.executescript(SCHEMA)
         conn.commit()
-        migrate_columns(conn)
 
         cursor = conn.cursor()
         cursor.execute(
@@ -685,7 +682,6 @@ class TestSessionDedup:
         conn = sqlite3.connect(":memory:")
         conn.executescript(SCHEMA)
         conn.commit()
-        migrate_columns(conn)
 
         cursor = conn.cursor()
         cursor.execute(
@@ -721,7 +717,6 @@ class TestSessionDedup:
         conn = sqlite3.connect(":memory:")
         conn.executescript(SCHEMA)
         conn.commit()
-        migrate_columns(conn)
 
         cursor = conn.cursor()
         cursor.execute(
@@ -840,7 +835,6 @@ class TestStatusFlag:
         c = sqlite3.connect(str(db_path))
         c.executescript(SCHEMA_CORE)
         c.commit()
-        migrate_columns(c)
         c.close()
 
         settings = {"db_path": str(db_path)}
@@ -860,7 +854,6 @@ class TestStatusFlag:
         c = sqlite3.connect(str(db_path))
         c.executescript(SCHEMA_CORE)
         c.commit()
-        migrate_columns(c)
         c.close()
 
         with pytest.raises(SystemExit) as exc:
@@ -873,7 +866,6 @@ class TestStatusFlag:
         c = sqlite3.connect(str(db_path))
         c.executescript(SCHEMA_CORE)
         c.commit()
-        migrate_columns(c)
         c.close()
 
         with pytest.raises(SystemExit) as exc:
