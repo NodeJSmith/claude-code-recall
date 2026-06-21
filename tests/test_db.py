@@ -20,6 +20,7 @@ from ccrecall.db import (
     get_db_connection,
     load_config,
     load_settings,
+    log_hook_exception,
     vec_available,
 )
 from ccrecall.embeddings import EMBEDDING_DIM
@@ -830,6 +831,34 @@ class TestLoadConfig:
         monkeypatch.setattr("ccrecall.db.CONFIG_PATH", cfg)
 
         assert load_config() == {}
+
+    def test_unexpected_error_propagates(self, tmp_path, monkeypatch):
+        """A non-OSError/ValueError (a real bug) must surface, not be masked as {} (issue #10)."""
+        cfg = tmp_path / "config.json"
+        cfg.write_text("{}")
+        monkeypatch.setattr("ccrecall.db.CONFIG_PATH", cfg)
+
+        with patch("ccrecall.db.json.loads", side_effect=TypeError("boom")), pytest.raises(TypeError):
+            load_config()
+
+
+class TestLogHookException:
+    """log_hook_exception is a best-effort guard helper — it must never raise (issue #10)."""
+
+    def test_does_not_raise_with_active_exception(self):
+        """Called from inside an except block, it logs without re-raising."""
+        try:
+            raise ValueError("boom")
+        except ValueError:
+            log_hook_exception("test")  # must return normally
+
+    def test_does_not_raise_when_logging_setup_fails(self):
+        """Even if logging setup itself raises, the helper suppresses it and returns."""
+        with patch("ccrecall.db.setup_logging", side_effect=RuntimeError("broke")):
+            try:
+                raise ValueError("boom")
+            except ValueError:
+                log_hook_exception("test")  # suppressed; must return normally
 
 
 class TestLoadSettingsWithConfig:

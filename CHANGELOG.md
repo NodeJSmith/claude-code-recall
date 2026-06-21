@@ -12,6 +12,7 @@
 - `cm-backfill-embeddings` marks per-row content errors with the shared `CONTENT_ERROR_VERSION` constant instead of a hardcoded `-1`, keeping the error sentinel single-sourced with the selection and count queries that already reference it. (#3)
 - `ccrecall stats` is now fully read-only — it no longer shares the import PID lifecycle, so running it can't delete a live background import's sentinel and trigger a duplicate concurrent import.
 - `ccrecall backfill embeddings` rejects `--days`/`--limit` below 1 (exit 2) instead of silently embedding nothing.
+- Broad `except Exception` handlers across the codebase are narrowed to the specific failures they actually handle (DB errors, file I/O, malformed JSON/content), so a genuine bug surfaces instead of being masked as empty results or silent degradation. Top-level hook guards stay crash-proof but now log their failures (when logging is enabled) instead of swallowing them silently. (#10)
 
 ### Changed
 

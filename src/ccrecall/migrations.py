@@ -291,7 +291,7 @@ def _backup_db_before_migration(db_path: Path, label: str) -> bool:
         if not backup_path.exists() or backup_path.stat().st_size == 0:
             return False
         return True
-    except Exception:
+    except (sqlite3.Error, OSError):
         return False
     finally:
         if dst:

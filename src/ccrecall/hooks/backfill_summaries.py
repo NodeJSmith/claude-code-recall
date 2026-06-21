@@ -7,6 +7,7 @@ with summary_version = -1 to avoid infinite retry.
 """
 
 import contextlib
+import sqlite3
 
 from ccrecall.db import (
     CONTENT_ERROR_VERSION,
@@ -45,7 +46,7 @@ def _main():
 
     try:
         conn = get_db_connection(settings)
-    except Exception as e:
+    except (sqlite3.Error, OSError) as e:
         logger.error("Backfill: failed to connect to DB: %s", e)
         return
 

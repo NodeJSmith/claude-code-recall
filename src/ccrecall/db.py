@@ -153,12 +153,14 @@ def _ensure_vec_schema(conn: sqlite3.Connection) -> None:
 
 
 def load_config() -> dict:
-    """Read ~/.claude-memory/config.json. Returns empty dict on missing/error."""
+    """Read ~/.claude-memory/config.json. Returns empty dict on missing/malformed config."""
     if not CONFIG_PATH.exists():
         return {}
     try:
         result = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-    except Exception:
+    except (OSError, ValueError):
+        # OSError = read failure; ValueError = malformed JSON (JSONDecodeError /
+        # UnicodeDecodeError). A real bug surfaces instead of masking as "no config".
         return {}
     return result if isinstance(result, dict) else {}
 
@@ -265,3 +267,15 @@ def setup_logging(settings: dict | None = None) -> logging.Logger:
     logger.setLevel(logging.INFO)
 
     return logger
+
+
+def log_hook_exception(context: str) -> None:
+    """Best-effort: route the active exception to the memory log without ever raising.
+
+    Top-level hook guards must never crash the session, but a bare ``except: pass``
+    also hides every failure. This logs the in-flight exception (a no-op unless
+    logging_enabled) while suppressing any error from logging itself, so the guard
+    stays crash-proof and failures become observable when logging is turned on.
+    """
+    with contextlib.suppress(Exception):
+        setup_logging(load_settings()).exception("%s hook failed", context)

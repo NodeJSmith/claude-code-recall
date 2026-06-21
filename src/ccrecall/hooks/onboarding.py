@@ -9,7 +9,7 @@ a silent no-op.
 import json
 
 from ccrecall.db import CONFIG_PATH as CONFIG_PATH
-from ccrecall.db import CURRENT_ONBOARDING_VERSION, load_config
+from ccrecall.db import CURRENT_ONBOARDING_VERSION, load_config, log_hook_exception
 
 
 def _build_onboarding_context() -> str:
@@ -78,5 +78,7 @@ if __name__ == "__main__":
     try:
         main()
     except Exception:
-        # Never block session start
+        # Never block session start. Log best-effort (no-op unless
+        # logging_enabled) so the failure isn't silent.
+        log_hook_exception("onboarding")
         print(json.dumps({}))

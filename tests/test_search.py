@@ -1,7 +1,7 @@
 """Tests for search_conversations.py and recent_chats.py — search and retrieval."""
 
 import sqlite3
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from conftest import make_vec_conn
@@ -888,3 +888,30 @@ class TestStatusFlag:
             run(db=db_path)
         # run() exits 2 when neither --query nor --status is given
         assert exc.value.code != 0
+
+
+class TestExceptionNarrowing:
+    """The vec/FTS degradation paths catch DB errors only (issue #10): a query
+    failure falls back gracefully, but a genuine bug propagates."""
+
+    def test_vec_branch_ids_returns_empty_on_db_error(self):
+        """A DB error (branch_vec table missing) degrades to an empty list, not a crash."""
+        conn = sqlite3.connect(":memory:")  # no branch_vec table → vec query raises sqlite3.Error
+        try:
+            result = _get_vec_branch_ids(conn.cursor(), [0.1, 0.2, 0.3, 0.4], top_k=5)
+            assert result == []
+        finally:
+            conn.close()
+
+    def test_vec_branch_ids_propagates_non_db_error(self):
+        """A non-DB error (a real bug) propagates instead of being masked as 'no results'."""
+        cursor = MagicMock()
+        cursor.execute.side_effect = AttributeError("real bug")
+        with pytest.raises(AttributeError):
+            _get_vec_branch_ids(cursor, [0.1, 0.2, 0.3, 0.4], top_k=5)
+
+    def test_detect_fts_support_returns_none_on_db_error(self):
+        """A DB error (querying a closed connection) degrades to None, not a crash."""
+        conn = sqlite3.connect(":memory:")
+        conn.close()  # subsequent execute raises sqlite3.ProgrammingError (a sqlite3.Error)
+        assert detect_fts_support(conn) is None

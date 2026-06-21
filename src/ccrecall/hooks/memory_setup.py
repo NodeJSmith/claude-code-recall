@@ -3,6 +3,7 @@
 import contextlib
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -14,6 +15,7 @@ from ccrecall.db import (
     DEFAULT_DB_PATH,
     get_db_connection,
     load_settings,
+    log_hook_exception,
 )
 from ccrecall.hooks import backfill_summaries, import_conversations
 from ccrecall.summarizer import SUMMARY_VERSION
@@ -75,7 +77,7 @@ def _spawn_background(argv: list[str], pid_key: str) -> None:
 
 def _ensure_schema(settings: dict | None = None) -> None:
     """Open DB connection to trigger migrate_columns (creates token_snapshots if missing)."""
-    with contextlib.suppress(Exception):
+    with contextlib.suppress(sqlite3.Error, OSError):
         conn = get_db_connection(settings)
         conn.close()
 
@@ -89,7 +91,7 @@ def _needs_reimport(settings: dict | None = None) -> bool:
         count = cursor.fetchone()[0]
         conn.close()
         return count > 0
-    except Exception:
+    except (sqlite3.Error, OSError):
         return False
 
 
@@ -111,7 +113,7 @@ def _needs_backfill(settings: dict | None = None) -> bool:
         count = cursor.fetchone()[0]
         conn.close()
         return count > 0
-    except Exception:
+    except (sqlite3.Error, OSError):
         return False
 
 
@@ -154,8 +156,10 @@ def main():
         # forward by embed-on-write (active leaves only); historical seeding is
         # opt-in via `ccrecall backfill embeddings [--days N] [--limit N]` so
         # embedding the full history never fires unbidden (machines.md thrash risk).
-    except Exception:  # noqa: S110 — top-level hook guard: must never crash the session start
-        pass
+    except Exception:
+        # Top-level hook guard: must never crash the session start. Log
+        # best-effort (no-op unless logging_enabled) so the failure isn't silent.
+        log_hook_exception("memory-setup")
 
     print(json.dumps({"continue": True}))
 

@@ -18,6 +18,7 @@ the file and updates the row.
 
 import contextlib
 import json
+import logging
 import sqlite3
 from pathlib import Path
 
@@ -347,8 +348,19 @@ def sync_session(
                 """,
                 (summary_md, summary_json, SUMMARY_VERSION, branch_db_id),
             )
-        except Exception:
-            summary_md = None  # Don't fail sync/import on summary errors
+        except (ValueError, TypeError, KeyError):
+            # Content error (malformed summary data) — same classification as
+            # backfill_summaries: skip this branch's summary without failing the
+            # sync/import. A real bug (e.g. AttributeError) still propagates.
+            summary_md = None
+        except sqlite3.Error:
+            # Infra error (locked/failed DB write): log and skip the summary
+            # rather than aborting the whole import (this runs per branch with no
+            # outer handler in the import loop). The branch stays eligible for
+            # backfill, and the failure is observable in the log instead of being
+            # silently swallowed.
+            logging.getLogger("claude-memory").exception("sync: summary write failed for branch %s", branch_db_id)
+            summary_md = None
 
         # Embed-on-write: compute and upsert vector after summary succeeds.
         # Only active leaves are embedded — the query path filters is_active=1,
@@ -357,7 +369,10 @@ def sync_session(
         # If the upsert raises and is swallowed, version columns stay at 0
         # so the branch remains eligible for backfill (no "version done, no vector").
         if summary_md and is_active and vec_writable:
-            # Don't fail sync/import on embedding errors — the branch stays eligible for backfill.
+            # Deliberately broad: embed_text wraps a third-party model stack
+            # (fastembed/onnxruntime) whose failure modes aren't a fixed type, and
+            # embedding is non-essential here — a failure just leaves the branch
+            # eligible for backfill rather than failing the sync/import.
             with contextlib.suppress(Exception):
                 vec = embed_text(summary_md)
                 write_branch_embedding(cursor, branch_db_id, vec, SUMMARY_VERSION)

@@ -213,6 +213,8 @@ def run(
         else:
             print(format_markdown(sessions, verbose=verbose))
 
+    # Deliberately broad: top-level CLI handler — reports any error to the user
+    # and exits non-zero rather than dumping a traceback.
     except Exception as e:
         if output_format == "json":
             print(json.dumps({"error": str(e), "sessions": [], "total_sessions": 0}))

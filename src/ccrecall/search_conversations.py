@@ -146,7 +146,8 @@ def _get_vec_branch_ids(
 
     Only returns branches whose embedding_version == EMBEDDING_VERSION and
     embedding_model == EMBEDDING_MODEL (stale-version exclusion).
-    Returns empty list on any error.
+    Returns empty list when the vec query fails (e.g. extension unavailable),
+    so the caller degrades to keyword search; non-DB bugs propagate.
     """
     try:
         serialized = sqlite_vec.serialize_float32(query_vec)
@@ -155,7 +156,7 @@ def _get_vec_branch_ids(
             "SELECT branch_id, distance FROM branch_vec WHERE embedding MATCH ? AND k = ? ORDER BY distance",
             (serialized, knn_k),
         ).fetchall()
-    except Exception:
+    except sqlite3.Error:
         return []
 
     if not rows:
@@ -194,7 +195,7 @@ def _get_vec_branch_ids(
 
     try:
         valid_ids = {row[0] for row in cursor.execute(filter_sql, filter_params).fetchall()}
-    except Exception:
+    except sqlite3.Error:
         return []
 
     # Preserve KNN distance ordering, keeping only valid (current-version) IDs
@@ -345,6 +346,9 @@ def search_sessions(
             _emit_degrade = True
 
     if use_fusion:
+        # Deliberately broad: embed_text wraps a third-party model stack
+        # (fastembed/onnxruntime) whose failure modes aren't a fixed exception
+        # type. Degrade to keyword search and announce it via _emit_degrade.
         try:
             query_vec = embed_text(query)
         except Exception:
@@ -359,7 +363,9 @@ def search_sessions(
             deduped_ids = _dedup_by_session(cursor, fused_ids)
             ordered_ids = deduped_ids[:max_results]
             return _hydrate_branches(cursor, ordered_ids, verbose, include_notifications)
-        except Exception:
+        except sqlite3.Error:
+            # DB-level failure in the fusion path: degrade to keyword search.
+            # Bugs in fusion/hydration (rrf, dedup) propagate instead of hiding.
             _emit_degrade = True
 
     if _emit_degrade and not keyword_only:
@@ -394,7 +400,7 @@ def print_status(settings: dict | None) -> None:
     try:
         conn = get_db_connection(settings, load_vec=True)
         is_vec = branch_vec_queryable(conn)
-    except Exception:
+    except (sqlite3.Error, OSError):
         conn = None
         is_vec = False
     print(f"vec extension: {'yes' if is_vec else 'no'}")
@@ -417,7 +423,7 @@ def print_status(settings: dict | None) -> None:
                 (EMBEDDING_VERSION, EMBEDDING_MODEL),
             ).fetchone()[0]
             print(f"embedded branches: {embedded}/{total}")
-        except Exception as e:
+        except sqlite3.Error as e:
             print(f"embedded branches: error ({e})")
         finally:
             conn.close()
@@ -503,6 +509,8 @@ def run(
         else:
             print(format_markdown(sessions, query, verbose=verbose))
 
+    # Deliberately broad: top-level CLI handler — reports any error to the user
+    # and exits non-zero rather than dumping a traceback.
     except Exception as e:
         if output_format == "json":
             print(json.dumps({"error": str(e), "sessions": [], "query": query}))

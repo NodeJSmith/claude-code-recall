@@ -9,6 +9,8 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from ccrecall.db import log_hook_exception
+
 
 def main():
     try:
@@ -45,8 +47,10 @@ def main():
             with contextlib.suppress(OSError):
                 Path(tmp_path).unlink()
             raise
-    except Exception:  # noqa: S110 — top-level hook guard: must never crash the session stop
-        pass
+    except Exception:
+        # Top-level hook guard: must never crash the session stop. Log
+        # best-effort (no-op unless logging_enabled) so the failure isn't silent.
+        log_hook_exception("memory-sync")
 
     print(json.dumps({"continue": True}))
 
