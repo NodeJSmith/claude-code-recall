@@ -31,7 +31,7 @@ dependencies = [
 # Unified CLI — single entry point. Subcommands replace the former skill-facing
 # and helper cm-* tools. The hook entry points below keep their cm-* names for
 # now (folded into `ccrecall hook ...` in a later phase).
-ccrecall                 = "ccrecall.cli:app"
+ccrecall                 = "ccrecall.cli:main"
 # Hook entry points (wired in settings.json)
 cm-memory-setup          = "ccrecall.hooks.memory_setup:main"
 cm-memory-sync           = "ccrecall.hooks.memory_sync:main"

@@ -9,7 +9,8 @@ argument-parsing layer changed (argparse -> cyclopts).
 from pathlib import Path
 from typing import Annotated, Literal
 
-from cyclopts import Parameter
+from cyclopts import ArgumentCollection, Group, Parameter
+from cyclopts.validators import Number
 
 from ccrecall import recent_chats as recent_chats_mod
 from ccrecall import search_conversations as search_mod
@@ -26,6 +27,26 @@ from ccrecall.hooks import write_config as write_config_mod
 
 # store_true flags carry no --no-<flag> negation, matching the former argparse.
 _FLAG = Parameter(negative=[])
+
+
+def _exactly_one_query_or_status(arguments: ArgumentCollection) -> None:
+    """Group validator: search needs exactly one of --query / --status.
+
+    Runs at parse time so the message renders in cyclopts' boxed error style
+    (and exits 2 via the entry-point wrapper), matching every other usage error.
+    search_conversations.run() keeps the same guard for direct (non-CLI) callers.
+    """
+    # arg.tokens is non-empty only when that argument was supplied on the CLI.
+    provided = [arg for arg in arguments if arg.tokens]
+    if not provided:
+        raise ValueError("one of --query/-q or --status is required")
+    if len(provided) > 1:
+        raise ValueError("--query and --status are mutually exclusive")
+
+
+# Membership in this group (query + status below) is what triggers the
+# exactly-one validator at parse time — the flags carry no logic themselves.
+_SEARCH_MODE = Group("Search mode", validator=_exactly_one_query_or_status)
 
 # A few run() parameters are renamed from their CLI flag to avoid shadowing a
 # builtin/module: json_mode -> --json (the json module), output_format ->
@@ -61,12 +82,19 @@ def cmd_import(
     db: Annotated[Path, Parameter(help="Database path.")] = DEFAULT_DB_PATH,
     projects_dir: Annotated[Path, Parameter(help="Projects directory.")] = DEFAULT_PROJECTS_DIR,
     project: Annotated[str | None, Parameter(help="Import only this project (by directory name).")] = None,
-    search: Annotated[str | None, Parameter(help="Search conversations instead of importing.")] = None,
-    limit: Annotated[int, Parameter(help="Search result limit.")] = 20,
-    stats: Annotated[bool, _FLAG, Parameter(help="Show database statistics.")] = False,
 ) -> None:
-    """Import (or search) Claude Code conversations into the memory DB."""
-    import_mod.run(db=db, projects_dir=projects_dir, project=project, search=search, limit=limit, stats=stats)
+    """Import Claude Code conversations into the memory DB."""
+    import_mod.run(db=db, projects_dir=projects_dir, project=project)
+
+
+@app.command(name="stats")
+def cmd_stats(
+    *,
+    db: Annotated[Path, Parameter(help="Database path.")] = DEFAULT_DB_PATH,
+) -> None:
+    """Show memory database statistics."""
+    # stats reports DB-global counts, so projects_dir/project don't apply.
+    import_mod.run(db=db, stats=True)
 
 
 @backfill_app.command(name="summaries")
@@ -109,7 +137,14 @@ def cmd_backfill_embeddings(
 @app.command(name="recent")
 def cmd_recent(
     *,
-    n: Annotated[int, Parameter(name=["--n", "-n"], help="Number of sessions (1-20).")] = 3,
+    n: Annotated[
+        int,
+        Parameter(
+            name=["--n", "-n"],
+            validator=Number(gte=1, lte=recent_chats_mod.MAX_RECENT_SESSIONS),
+            help=f"Number of sessions (1-{recent_chats_mod.MAX_RECENT_SESSIONS}).",
+        ),
+    ] = 3,
     sort_order: Annotated[Literal["desc", "asc"], Parameter(name=["--sort-order"], help="Sort order.")] = "desc",
     before: Annotated[str | None, Parameter(help="Sessions before this datetime (ISO).")] = None,
     after: Annotated[str | None, Parameter(help="Sessions after this datetime (ISO).")] = None,
@@ -140,10 +175,17 @@ def cmd_recent(
 @app.command(name="search")
 def cmd_search(
     *,
-    query: Annotated[str | None, Parameter(name=["--query", "-q"], help="Search keywords.")] = None,
-    status: Annotated[bool, _FLAG, Parameter(help="Print diagnostic status and exit.")] = False,
+    query: Annotated[str | None, Parameter(name=["--query", "-q"], group=_SEARCH_MODE, help="Search keywords.")] = None,
+    status: Annotated[bool, _FLAG, Parameter(group=_SEARCH_MODE, help="Print diagnostic status and exit.")] = False,
     keyword_only: Annotated[bool, _FLAG, Parameter(help="Skip embedding; keyword search only.")] = False,
-    max_results: Annotated[int, Parameter(name=["--max-results"], help="Max sessions (1-10).")] = 5,
+    max_results: Annotated[
+        int,
+        Parameter(
+            name=["--max-results"],
+            validator=Number(gte=1, lte=search_mod.MAX_SEARCH_RESULTS),
+            help=f"Max sessions (1-{search_mod.MAX_SEARCH_RESULTS}).",
+        ),
+    ] = 5,
     session: Annotated[str | None, Parameter(help="Filter by session UUID (prefix match).")] = None,
     project: Annotated[str | None, Parameter(help="Filter by project name(s), comma-separated.")] = None,
     path: Annotated[str | None, Parameter(help="Filter by cwd substring (e.g. worktree name).")] = None,

@@ -11,10 +11,8 @@ v3 schema: messages stored once per session, branches as separate index.
 import contextlib
 import hashlib
 import sqlite3
-import sys
 from pathlib import Path
 
-from ccrecall.content import sanitize_fts_term
 from ccrecall.db import (
     DEFAULT_DB_PATH,
     DEFAULT_PROJECTS_DIR,
@@ -26,7 +24,6 @@ from ccrecall.db import (
 from ccrecall.formatting import extract_project_name, normalize_project_key
 from ccrecall.parsing import extract_session_uuid
 from ccrecall.project_ops import upsert_project
-from ccrecall.schema import detect_fts_support
 from ccrecall.session_ops import sync_session
 
 
@@ -170,13 +167,11 @@ def run(
     db: Path = DEFAULT_DB_PATH,
     projects_dir: Path = DEFAULT_PROJECTS_DIR,
     project: str | None = None,
-    search: str | None = None,
-    limit: int = 20,
     stats: bool = False,
 ) -> None:
-    """Import (or search) Claude Code conversations into the memory DB."""
+    """Import Claude Code conversations into the memory DB (or print stats)."""
     try:
-        _run(db=db, projects_dir=projects_dir, project=project, search=search, limit=limit, stats=stats)
+        _run(db=db, projects_dir=projects_dir, project=project, stats=stats)
     finally:
         # Delete PID file so _spawn_background can spawn again next session
         with contextlib.suppress(OSError):
@@ -188,8 +183,6 @@ def _run(
     db: Path,
     projects_dir: Path,
     project: str | None,
-    search: str | None,
-    limit: int,
     stats: bool,
 ) -> None:
     settings = load_settings()
@@ -200,158 +193,63 @@ def _run(
     db_path = get_db_path(settings)
     exclude_projects = settings.get("exclude_projects", [])
 
-    # Use get_db_connection which handles migration
-    conn = get_db_connection(settings, load_vec=True)
-
-    if stats:
-        cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM projects")
-        projects = cursor.fetchone()[0]
-        cursor.execute("SELECT COUNT(*) FROM sessions")
-        sessions = cursor.fetchone()[0]
-        cursor.execute("SELECT COUNT(*) FROM messages")
-        messages = cursor.fetchone()[0]
-        cursor.execute("SELECT COUNT(*) FROM branches")
-        total_branches = cursor.fetchone()[0]
-        cursor.execute("SELECT COUNT(*) FROM branches WHERE is_active = 1")
-        active = cursor.fetchone()[0]
-        cursor.execute("SELECT COUNT(*) FROM branches WHERE is_active = 0")
-        abandoned = cursor.fetchone()[0]
-
-        db_size = db_path.stat().st_size if db_path.exists() else 0
-
-        print(f"Database: {db_path}")
-        print(f"Size: {db_size / 1024 / 1024:.2f} MB")
-        print(f"Projects: {projects}")
-        print(f"Sessions: {sessions}")
-        print(f"Branches: {total_branches} ({active} active, {abandoned} abandoned)")
-        print(f"Messages: {messages}")
-        return
-
-    if search:
-        cursor = conn.cursor()
-        terms = search.split()
-        fts_level = detect_fts_support(conn)
-
-        if fts_level in ("fts5", "fts4"):
-            sanitized_terms = [sanitize_fts_term(term) for term in terms]
-            sanitized_terms = [t for t in sanitized_terms if t]  # Remove empty terms
-            if not sanitized_terms:
-                print("No valid search terms after sanitization")
-                sys.exit(0)
-            fts_query = " OR ".join(f'"{term}"' for term in sanitized_terms)
-
-            if fts_level == "fts5":
-                sql = """
-                    SELECT
-                        m.id, m.timestamp, m.role,
-                        snippet(messages_fts, 0, '>>>', '<<<', '...', 32) as snippet,
-                        m.content, s.uuid as session_uuid,
-                        p.name as project_name, p.path as project_path,
-                        bm25(messages_fts) as rank
-                    FROM messages_fts
-                    JOIN messages m ON messages_fts.rowid = m.id
-                    JOIN sessions s ON m.session_id = s.id
-                    JOIN projects p ON s.project_id = p.id
-                    WHERE messages_fts MATCH ?
-                """
-            else:
-                sql = """
-                    SELECT
-                        m.id, m.timestamp, m.role,
-                        snippet(messages_fts, '>>>', '<<<', '...', -1, 32) as snippet,
-                        m.content, s.uuid as session_uuid,
-                        p.name as project_name, p.path as project_path,
-                        0 as rank
-                    FROM messages_fts
-                    JOIN messages m ON messages_fts.rowid = m.id
-                    JOIN sessions s ON m.session_id = s.id
-                    JOIN projects p ON s.project_id = p.id
-                    WHERE messages_fts MATCH ?
-                """
-            params: list = [fts_query]
-
-            if project:
-                sql += " AND p.name LIKE ?"
-                params.append(f"%{project}%")
-
-            if fts_level == "fts5":
-                sql += " ORDER BY rank LIMIT ?"
-            else:
-                sql += " ORDER BY m.timestamp DESC LIMIT ?"
-            params.append(limit)
-
-        else:
-            # LIKE fallback
-            like_clauses = " AND ".join("m.content LIKE ?" for _ in terms)
-            sql = f"""
-                SELECT
-                    m.id, m.timestamp, m.role,
-                    substr(m.content, 1, 200) as snippet,
-                    m.content, s.uuid as session_uuid,
-                    p.name as project_name, p.path as project_path,
-                    0 as rank
-                FROM messages m
-                JOIN sessions s ON m.session_id = s.id
-                JOIN projects p ON s.project_id = p.id
-                WHERE {like_clauses}
-            """
-            params = [f"%{term}%" for term in terms]
-
-            if project:
-                sql += " AND p.name LIKE ?"
-                params.append(f"%{project}%")
-
-            sql += " ORDER BY m.timestamp DESC LIMIT ?"
-            params.append(limit)
-
-        cursor.execute(sql, params)
-
-        results = cursor.fetchall()
-        if not results:
-            print("No results found.")
-            return
-
-        for row in results:
-            print(f"\n{'-' * 60}")
-            print(f"{row[6]} / {row[5][:8]} - {row[1]} - {row[2]}")
-            print(f"{row[3]}")
-        print(f"\n{'-' * 60}")
-        print(f"Found {len(results)} results")
-        return
-
-    # Import mode
     total_sessions = 0
     total_messages = 0
     total_skipped = 0
 
-    if project:
-        project_dir = projects_dir / project
-        if not project_dir.exists():
-            print(f"Project not found: {project_dir}")
+    # get_db_connection handles migration; closing() releases the connection on
+    # every exit path (stats, missing-project, normal completion).
+    with contextlib.closing(get_db_connection(settings, load_vec=True)) as conn:
+        if stats:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM projects")
+            projects = cursor.fetchone()[0]
+            cursor.execute("SELECT COUNT(*) FROM sessions")
+            sessions = cursor.fetchone()[0]
+            cursor.execute("SELECT COUNT(*) FROM messages")
+            messages = cursor.fetchone()[0]
+            cursor.execute("SELECT COUNT(*) FROM branches")
+            total_branches = cursor.fetchone()[0]
+            cursor.execute("SELECT COUNT(*) FROM branches WHERE is_active = 1")
+            active = cursor.fetchone()[0]
+            cursor.execute("SELECT COUNT(*) FROM branches WHERE is_active = 0")
+            abandoned = cursor.fetchone()[0]
+
+            db_size = db_path.stat().st_size if db_path.exists() else 0
+
+            print(f"Database: {db_path}")
+            print(f"Size: {db_size / 1024 / 1024:.2f} MB")
+            print(f"Projects: {projects}")
+            print(f"Sessions: {sessions}")
+            print(f"Branches: {total_branches} ({active} active, {abandoned} abandoned)")
+            print(f"Messages: {messages}")
             return
 
-        sessions, messages, skipped = import_project(conn, project_dir, exclude_projects)
-        conn.commit()
-        total_sessions += sessions
-        total_messages += messages
-        total_skipped += skipped
-        print(f"Imported {project}: {sessions} branches, {messages} messages")
-    else:
-        for project_dir in projects_dir.iterdir():
-            if not project_dir.is_dir() or project_dir.name.startswith("."):
-                continue
+        if project:
+            project_dir = projects_dir / project
+            if not project_dir.exists():
+                print(f"Project not found: {project_dir}")
+                return
 
             sessions, messages, skipped = import_project(conn, project_dir, exclude_projects)
-            conn.commit()  # Per-project commit to minimize write-lock window
+            conn.commit()
             total_sessions += sessions
             total_messages += messages
             total_skipped += skipped
+            print(f"Imported {project}: {sessions} branches, {messages} messages")
+        else:
+            for project_dir in projects_dir.iterdir():
+                if not project_dir.is_dir() or project_dir.name.startswith("."):
+                    continue
 
-            if sessions > 0 or messages > 0:
-                print(f"Imported {project_dir.name}: {sessions} branches, {messages} messages")
+                sessions, messages, skipped = import_project(conn, project_dir, exclude_projects)
+                conn.commit()  # Per-project commit to minimize write-lock window
+                total_sessions += sessions
+                total_messages += messages
+                total_skipped += skipped
 
-    conn.close()
+                if sessions > 0 or messages > 0:
+                    print(f"Imported {project_dir.name}: {sessions} branches, {messages} messages")
 
     logger.info("Import complete: %s branches, %s messages", total_sessions, total_messages)
     print(f"\nTotal: {total_sessions} branches, {total_messages} messages imported ({total_skipped} unchanged)")

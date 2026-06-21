@@ -15,6 +15,10 @@ from ccrecall.db import DEFAULT_DB_PATH, get_db_connection
 from ccrecall.formatting import format_json_sessions, format_markdown_session
 from ccrecall.serialization import decode_json_column
 
+# Upper bound on --n, single-sourced here and referenced by the CLI validator
+# (cli/commands.py) so the clamp and the validator can't drift apart.
+MAX_RECENT_SESSIONS = 20
+
 
 def get_recent_sessions(
     conn: sqlite3.Connection,
@@ -174,7 +178,9 @@ def run(
     db: Path = DEFAULT_DB_PATH,
 ) -> None:
     """Get recent conversation sessions."""
-    n = max(1, min(20, n))
+    # Backstop for direct callers; the CLI validator rejects out-of-range --n
+    # before reaching here. Both sides bound on MAX_RECENT_SESSIONS.
+    n = max(1, min(MAX_RECENT_SESSIONS, n))
     projects = [p.strip() for p in project.split(",")] if project else None
 
     if not db.exists():

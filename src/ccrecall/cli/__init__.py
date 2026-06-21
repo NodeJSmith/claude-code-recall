@@ -8,6 +8,7 @@ this module triggers that registration).
 from importlib.metadata import PackageNotFoundError, version
 
 from cyclopts import App
+from cyclopts.exceptions import CycloptsError
 
 try:
     _version = version("ccrecall")
@@ -19,7 +20,32 @@ app = App(
     version=_version,
     version_flags=["--version", "-V"],
     help="Conversation history and semantic search for Claude Code.",
+    # Plaintext so the examples block keeps its line breaks and literal <…>
+    # placeholders (markdown/rst reflow them and strip the angle brackets).
+    help_format="plaintext",
+    help_epilogue=(
+        "Examples:\n"
+        "  ccrecall recent --n 5\n"
+        "  ccrecall search -q 'auth bug' --format json\n"
+        "  ccrecall tail <session-id>\n"
+        "  ccrecall backfill embeddings --status"
+    ),
 )
+
+
+def main() -> None:
+    """Console-script entry point.
+
+    Wraps the cyclopts app so every argument-parsing error exits 2 — the usual
+    usage-error code — carrying cyclopts' boxed message, so parser errors agree
+    with the app-level validators. A command that raises its own SystemExit
+    bypasses this handler (SystemExit is not a CycloptsError), keeping its code.
+    """
+    try:
+        app(exit_on_error=False, print_error=True)
+    except CycloptsError as exc:
+        raise SystemExit(2) from exc
+
 
 backfill_app = App(name="backfill", help="Seed historical summaries and embeddings.")
 app.command(backfill_app)

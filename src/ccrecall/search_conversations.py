@@ -34,6 +34,10 @@ from ccrecall.fusion import rrf
 from ccrecall.schema import detect_fts_support
 from ccrecall.serialization import decode_json_column
 
+# Upper bound on --max-results, single-sourced here and referenced by the CLI
+# validator (cli/commands.py) so the clamp and the validator can't drift apart.
+MAX_SEARCH_RESULTS = 10
+
 
 def _get_fts_branch_ids(
     cursor: sqlite3.Cursor,
@@ -445,7 +449,9 @@ def run(
         print("error: --query and --status are mutually exclusive", file=sys.stderr)
         sys.exit(2)
 
-    max_results = max(1, min(10, max_results))
+    # Backstop for direct callers; the CLI validator rejects out-of-range
+    # --max-results before reaching here. Both sides bound on MAX_SEARCH_RESULTS.
+    max_results = max(1, min(MAX_SEARCH_RESULTS, max_results))
     projects = [p.strip() for p in project.split(",")] if project else None
 
     if not db.exists():
