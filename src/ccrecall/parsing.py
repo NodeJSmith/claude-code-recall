@@ -14,6 +14,17 @@ from ccrecall.content import (
     is_teammate_message,
     is_tool_result,
 )
+from ccrecall.models import TranscriptEntry, is_valid
+
+
+def is_valid_entry(obj: object) -> bool:
+    """Validate a raw transcript entry at the ingest boundary.
+
+    Rejects (and logs) lines whose ``message``/``content`` aren't the shapes the
+    import path dereferences, so a malformed entry is skipped here instead of
+    crashing compute_branch_metadata downstream.
+    """
+    return is_valid(TranscriptEntry, obj, "transcript entry")
 
 
 def parse_jsonl_file(filepath: Path) -> Generator[dict, None, None]:
@@ -25,12 +36,14 @@ def parse_jsonl_file(filepath: Path) -> Generator[dict, None, None]:
                 continue
             try:
                 obj = json.loads(line)
-                if obj.get("isMeta") and not obj.get("origin"):
-                    continue
-                if obj.get("type") in ("user", "assistant"):
-                    yield obj
             except json.JSONDecodeError:
-                pass
+                continue
+            if not is_valid_entry(obj):
+                continue
+            if obj.get("isMeta") and not obj.get("origin"):
+                continue
+            if obj.get("type") in ("user", "assistant"):
+                yield obj
 
 
 def parse_lines_with_uuids(lines: Iterable[str]) -> Generator[dict, None, None]:
@@ -46,7 +59,9 @@ def parse_lines_with_uuids(lines: Iterable[str]) -> Generator[dict, None, None]:
             obj = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if isinstance(obj, dict) and obj.get("uuid"):
+        if not is_valid_entry(obj):
+            continue
+        if obj.get("uuid"):
             yield obj
 
 

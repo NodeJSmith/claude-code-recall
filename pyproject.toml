@@ -21,6 +21,9 @@ dependencies = [
     "numpy==2.2.6; python_version < '3.11'",
     "numpy==2.4.6; python_version >= '3.11'",
     "whenever==0.10.0",
+    # Pin pydantic exactly so its native (Rust) pydantic-core dep resolves to a
+    # known ABI — same rationale as the native wheels above.
+    "pydantic==2.13.4",
 ]
 
 [project.scripts]

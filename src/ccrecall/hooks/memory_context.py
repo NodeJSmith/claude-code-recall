@@ -21,6 +21,7 @@ import sqlite3
 import sys
 from pathlib import Path
 
+from pydantic import ValidationError
 from whenever import Instant
 
 # Add path to shared utils
@@ -36,6 +37,7 @@ from ccrecall.formatting import (
     get_project_key,
     normalize_cwd,
 )
+from ccrecall.models import HookInput
 from ccrecall.session_tail import (
     find_pending_question,
     format_pending_block,
@@ -410,14 +412,17 @@ def main():
     logger = setup_logging(settings)
 
     # Read hook input from stdin
+    raw = sys.stdin.read()
     try:
-        hook_input = json.load(sys.stdin)
-    except (json.JSONDecodeError, EOFError):
-        hook_input = {}
+        hook_input = HookInput.model_validate_json(raw) if raw else HookInput()
+    except ValidationError:
+        hook_input = HookInput()
 
-    cwd = hook_input.get("cwd")
-    session_id = hook_input.get("session_id")
-    source = hook_input.get("source", "startup")
+    cwd = hook_input.cwd
+    session_id = hook_input.session_id
+    # Default only when absent (None), mirroring the old .get("source", "startup");
+    # an explicit "" must stay "" so the source gate below still rejects it.
+    source = hook_input.source if hook_input.source is not None else "startup"
 
     # Only inject on fresh sessions
     if source not in ("startup", "clear"):

@@ -16,12 +16,15 @@ import re
 import sys
 from pathlib import Path
 
+from pydantic import ValidationError
+
 from ccrecall.db import (
     DEFAULT_PROJECTS_DIR,
     get_db_connection,
     load_settings,
     setup_logging,
 )
+from ccrecall.models import HookInput
 from ccrecall.session_ops import sync_session
 
 _UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE)
@@ -89,20 +92,22 @@ def main():
     # Read hook input from file or stdin
     if args.input_file:
         try:
-            hook_input = json.loads(args.input_file.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            hook_input = {}
+            raw = args.input_file.read_text(encoding="utf-8")
+        except OSError:
+            raw = ""
         finally:
             # Clean up temp file
             with contextlib.suppress(OSError):
                 args.input_file.unlink()
     else:
-        try:
-            hook_input = json.load(sys.stdin)
-        except (json.JSONDecodeError, EOFError):
-            hook_input = {}
+        raw = sys.stdin.read()
 
-    session_id = hook_input.get("session_id")
+    try:
+        hook_input = HookInput.model_validate_json(raw) if raw else HookInput()
+    except ValidationError:
+        hook_input = HookInput()
+
+    session_id = hook_input.session_id
 
     if not session_id or not validate_session_id(session_id):
         # No session ID or invalid format — exit silently
