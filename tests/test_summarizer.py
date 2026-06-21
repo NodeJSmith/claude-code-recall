@@ -11,6 +11,9 @@ from ccrecall.db import CONTENT_ERROR_VERSION
 from ccrecall.hooks import backfill_summaries, memory_setup
 from ccrecall.schema import SCHEMA
 from ccrecall.summarizer import (
+    DISPOSITION_ABANDONED,
+    DISPOSITION_COMPLETED,
+    DISPOSITION_IN_PROGRESS,
     build_context_summary_json,
     build_exchange_pairs,
     compute_context_summary,
@@ -431,13 +434,13 @@ class TestDetectDispositionWithCommits:
         """Non-empty commits list returns COMPLETED regardless of exchange content."""
         exchanges = [{"user": "start", "assistant": "working...", "timestamp": "t0"}]
         result = detect_disposition(exchanges, commits=["fix: resolve issue #42"])
-        assert result == "COMPLETED"
+        assert result == DISPOSITION_COMPLETED
 
     def test_detect_disposition_completed_with_multiple_commits(self):
         """Multiple commits still return COMPLETED."""
         exchanges = [{"user": "what now?", "assistant": "no idea", "timestamp": "t0"}]
         result = detect_disposition(exchanges, commits=["feat: add thing", "fix: bug"])
-        assert result == "COMPLETED"
+        assert result == DISPOSITION_COMPLETED
 
     def test_detect_disposition_completed_with_text_only(self):
         """Existing text heuristics still work when commits is None (or empty)."""
@@ -450,7 +453,7 @@ class TestDetectDispositionWithCommits:
             {"user": "ok", "assistant": "", "timestamp": "t1"},
         ]
         result = detect_disposition(exchanges, commits=None)
-        assert result == "COMPLETED"
+        assert result == DISPOSITION_COMPLETED
 
     def test_detect_disposition_completed_with_empty_commits(self):
         """Empty commits list does not trigger COMPLETED — falls through to text heuristics."""
@@ -462,12 +465,12 @@ class TestDetectDispositionWithCommits:
             },
         ]
         result = detect_disposition(exchanges, commits=[])
-        assert result == "IN_PROGRESS"
+        assert result == DISPOSITION_IN_PROGRESS
 
     def test_detect_disposition_abandoned_replaces_interrupted(self):
         """Zero-exchange sessions return ABANDONED (not INTERRUPTED)."""
         result = detect_disposition([])
-        assert result == "ABANDONED"
+        assert result == DISPOSITION_ABANDONED
         # Confirm INTERRUPTED is not returned
         assert result != "INTERRUPTED"
 
@@ -483,7 +486,7 @@ class TestDetectDispositionWithCommits:
         # We can test this by checking disposition of a last exchange where user="" and assistant is non-empty
         exchanges_with_no_reply = [*exchanges[:2], {"user": "", "assistant": "No followup.", "timestamp": "t3"}]
         result = detect_disposition(exchanges_with_no_reply)
-        assert result == "ABANDONED"
+        assert result == DISPOSITION_ABANDONED
 
     def test_detect_disposition_not_abandoned_for_short_sessions(self):
         """Sessions with <=2 exchanges are not classified as ABANDONED when no user followup."""
@@ -491,7 +494,7 @@ class TestDetectDispositionWithCommits:
         exchanges = [{"user": "", "assistant": "Some response.", "timestamp": "t0"}]
         result = detect_disposition(exchanges)
         # Should not be ABANDONED (<=2 exchanges condition not met)
-        assert result != "ABANDONED"
+        assert result != DISPOSITION_ABANDONED
 
 
 class TestBuildContextSummaryJsonTruncation:
