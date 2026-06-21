@@ -5,6 +5,7 @@ for the token ingest pipeline.
 
 import json
 import sqlite3
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -153,6 +154,15 @@ def turn_cost(
         + ephem_1h * pricing["cache_write_1h"]
     ) / 1_000_000
     return cost
+
+
+def row_cost(row: Sequence, *, model_idx: int, token_indices: Sequence[int]) -> float:
+    """Price one grouped query row: look up pricing by row[model_idx], then turn_cost
+    over the six token columns at token_indices (explicit indices, not a slice, so
+    model_split's skipped thinking column is handled correctly)."""
+    pricing = get_pricing(row[model_idx])
+    cols = [row[i] or 0 for i in token_indices]
+    return turn_cost(*cols, pricing)
 
 
 @dataclass

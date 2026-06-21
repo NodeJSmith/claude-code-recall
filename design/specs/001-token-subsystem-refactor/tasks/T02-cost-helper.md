@@ -1,7 +1,7 @@
 ---
 task_id: "T02"
 title: "Add shared cost-accumulation helper in token_parser"
-status: "planned"
+status: "done"
 depends_on: ["T01"]
 implements: ["FR#6", "AC#5"]
 ---
