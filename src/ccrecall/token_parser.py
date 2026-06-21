@@ -10,6 +10,8 @@ from pathlib import Path
 
 from whenever import Instant
 
+from ccrecall.models import TokenLine, is_valid
+
 PROJECTS_DIR = Path.home() / ".claude" / "projects"
 
 BATCH_SIZE = 50
@@ -299,6 +301,11 @@ def parse_session(filepath: Path, jnl: JnlFile) -> ParsedSession | None:
             line = json.loads(raw_line)
         except json.JSONDecodeError:
             continue
+        # Validate the envelope (message/usage/content types) but keep using the
+        # raw dict below — this is a guard, not a transform. A malformed line is
+        # skipped here instead of crashing the field access that follows.
+        if not is_valid(TokenLine, line, "token line"):
+            continue
 
         line_type = line.get("type")
         subtype = line.get("subtype", "")
@@ -389,7 +396,8 @@ def parse_session(filepath: Path, jnl: JnlFile) -> ParsedSession | None:
                         tool_name=block.get("name", "unknown"),
                         tool_use_id=block.get("id", ""),
                     )
-                    inp = block.get("input", {}) or {}
+                    block_input = block.get("input")
+                    inp = block_input if isinstance(block_input, dict) else {}
                     # Extract file_path from various tool input formats
                     tc.file_path = inp.get("file_path") or inp.get("path") or inp.get("file") or None
                     if "command" in inp:
