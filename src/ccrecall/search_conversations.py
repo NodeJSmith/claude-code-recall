@@ -3,7 +3,8 @@
 Search conversations using full-text search with FTS5/FTS4/LIKE fallback,
 optionally fused with vector KNN via Reciprocal Rank Fusion.
 
-Returns markdown by default (token-efficient), JSON with --format json.
+Returns markdown by default (token-efficient), or JSON when output_format="json"
+(the CLI maps the global --json flag onto that argument).
 """
 
 import json

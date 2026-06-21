@@ -2,7 +2,8 @@
 """
 Retrieve recent conversation sessions from the memory database.
 
-Returns markdown by default (token-efficient), JSON with --format json.
+Returns markdown by default (token-efficient), or JSON when output_format="json"
+(the CLI maps the global --json flag onto that argument).
 """
 
 import json

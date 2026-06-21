@@ -18,7 +18,7 @@ ccrecall recent --n 3
 | `--project NAME`          | Filter by project name(s), comma-separated             |
 | `--path SUBSTR`           | Filter by cwd substring (e.g. worktree name)           |
 | `--verbose`               | Include files_modified and commits                     |
-| `--format`                | 'markdown' (default) or 'json'                         |
+| `--json`                  | Global flag (any position): emit JSON instead of markdown |
 | `--include-notifications` | Include task notification messages (hidden by default) |
 
 Use `--verbose` for lenses that need file/commit context (restore-context, review-process, run-retro).
@@ -42,7 +42,7 @@ ccrecall search --query "keyword"
 | `--project NAME` | Filter by project name(s), comma-separated |
 | `--path SUBSTR` | Filter by cwd substring (e.g. worktree name) |
 | `--verbose` | Include files_modified and commits |
-| `--format` | 'markdown' (default) or 'json' |
+| `--json` | Global flag (any position): emit JSON instead of markdown |
 | `--include-notifications` | Include task notification messages (hidden by default) |
 
 **Output**: Default markdown format (token-efficient):
@@ -56,4 +56,4 @@ Session: abc123
 **Assistant:** ...
 ```
 
-Use `--format json` when structured data is needed.
+Use `--json` (before the subcommand, e.g. `ccrecall --json search -q "keyword"`) when structured data is needed.

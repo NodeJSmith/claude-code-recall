@@ -17,6 +17,7 @@ from ccrecall import search_conversations as search_mod
 from ccrecall import session_tail as session_tail_mod
 from ccrecall import token_dashboard as token_dashboard_mod
 from ccrecall.cli import app, backfill_app
+from ccrecall.cli.context import DEFAULT_CLI_CONTEXT, CLIContextParam
 from ccrecall.db import DEFAULT_DB_PATH, DEFAULT_PROJECTS_DIR
 from ccrecall.embeddings import DEFAULT_EMBED_THREADS
 from ccrecall.hooks import backfill_embeddings as backfill_embeddings_mod
@@ -48,17 +49,16 @@ def _exactly_one_query_or_status(arguments: ArgumentCollection) -> None:
 # exactly-one validator at parse time — the flags carry no logic themselves.
 _SEARCH_MODE = Group("Search mode", validator=_exactly_one_query_or_status)
 
-# A few run() parameters are renamed from their CLI flag to avoid shadowing a
-# builtin/module: json_mode -> --json (the json module), output_format ->
-# --format (the format builtin), list_sessions -> --list (the list builtin). The
-# explicit Parameter(name=...) below keeps the user-facing flag name intact.
+# Output format is global: the meta launcher's --json fills ctx.json_mode, which
+# read commands map to their run()'s output_format kwd. list_sessions -> --list
+# is renamed to avoid shadowing the list builtin; Parameter(name=...) keeps the
+# user-facing flag intact.
 
 # Shared flag types mirroring the former cm-* read tools.
 _VERBOSE = Annotated[bool, _FLAG, Parameter(name=["--verbose", "-v"], help="Include files_modified and commits.")]
 _NOTIFS = Annotated[
     bool, _FLAG, Parameter(name=["--include-notifications"], help="Include task notification messages.")
 ]
-_FORMAT = Annotated[Literal["markdown", "json"], Parameter(name=["--format"], help="Output format.")]
 _DB = Annotated[Path, Parameter(name=["--db"], help="Database path.")]
 # Default for `tail -n`, sourced from session_tail so the two never drift.
 _TAIL_DEFAULT_N = session_tail_mod.DEFAULT_TAIL_EVENTS
@@ -108,9 +108,6 @@ def cmd_backfill_summaries() -> None:
 def cmd_backfill_embeddings(
     *,
     status: Annotated[bool, _FLAG, Parameter(help="Report progress and exit without embedding (read-only).")] = False,
-    json_mode: Annotated[
-        bool, _FLAG, Parameter(name="--json", help="Emit a machine-readable result on stdout.")
-    ] = False,
     days: Annotated[
         int | None,
         Parameter(validator=Number(gte=1), help="Only embed branches ended within the last N days (>= 1)."),
@@ -123,12 +120,13 @@ def cmd_backfill_embeddings(
         int, Parameter(help="Print a progress line every N newly embedded branches.")
     ] = backfill_embeddings_mod.DEFAULT_PROGRESS_EVERY,
     threads: Annotated[int, Parameter(help="Inference threads.")] = DEFAULT_EMBED_THREADS,
+    ctx: CLIContextParam = DEFAULT_CLI_CONTEXT,
 ) -> None:
     """Seed historical embeddings for active-leaf branch summaries (opt-in)."""
     try:
         code = backfill_embeddings_mod.run(
             status=status,
-            json_mode=json_mode,
+            json_mode=ctx.json_mode,
             days=days,
             limit=limit,
             progress_every=progress_every,
@@ -158,10 +156,10 @@ def cmd_recent(
     session: Annotated[str | None, Parameter(help="Filter by session UUID (prefix match).")] = None,
     project: Annotated[str | None, Parameter(help="Filter by project name(s), comma-separated.")] = None,
     path: Annotated[str | None, Parameter(help="Filter by cwd substring (e.g. worktree name).")] = None,
-    output_format: _FORMAT = "markdown",
     verbose: _VERBOSE = False,
     include_notifications: _NOTIFS = False,
     db: _DB = DEFAULT_DB_PATH,
+    ctx: CLIContextParam = DEFAULT_CLI_CONTEXT,
 ) -> None:
     """List recent conversation sessions."""
     recent_chats_mod.run(
@@ -172,7 +170,7 @@ def cmd_recent(
         session=session,
         project=project,
         path=path,
-        output_format=output_format,
+        output_format=ctx.output_format,
         verbose=verbose,
         include_notifications=include_notifications,
         db=db,
@@ -196,10 +194,10 @@ def cmd_search(
     session: Annotated[str | None, Parameter(help="Filter by session UUID (prefix match).")] = None,
     project: Annotated[str | None, Parameter(help="Filter by project name(s), comma-separated.")] = None,
     path: Annotated[str | None, Parameter(help="Filter by cwd substring (e.g. worktree name).")] = None,
-    output_format: _FORMAT = "markdown",
     verbose: _VERBOSE = False,
     include_notifications: _NOTIFS = False,
     db: _DB = DEFAULT_DB_PATH,
+    ctx: CLIContextParam = DEFAULT_CLI_CONTEXT,
 ) -> None:
     """Search conversation sessions (keyword + vector fusion)."""
     search_mod.run(
@@ -210,7 +208,7 @@ def cmd_search(
         session=session,
         project=project,
         path=path,
-        output_format=output_format,
+        output_format=ctx.output_format,
         verbose=verbose,
         include_notifications=include_notifications,
         db=db,
