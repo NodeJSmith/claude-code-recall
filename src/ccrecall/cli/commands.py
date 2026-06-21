@@ -27,6 +27,11 @@ from ccrecall.hooks import write_config as write_config_mod
 # store_true flags carry no --no-<flag> negation, matching the former argparse.
 _FLAG = Parameter(negative=[])
 
+# A few run() parameters are renamed from their CLI flag to avoid shadowing a
+# builtin/module: json_mode -> --json (the json module), output_format ->
+# --format (the format builtin), list_sessions -> --list (the list builtin). The
+# explicit Parameter(name=...) below keeps the user-facing flag name intact.
+
 # Shared flag types mirroring the former cm-* read tools.
 _VERBOSE = Annotated[bool, _FLAG, Parameter(name=["--verbose", "-v"], help="Include files_modified and commits.")]
 _NOTIFS = Annotated[
@@ -34,7 +39,8 @@ _NOTIFS = Annotated[
 ]
 _FORMAT = Annotated[Literal["markdown", "json"], Parameter(name=["--format"], help="Output format.")]
 _DB = Annotated[Path, Parameter(name=["--db"], help="Database path.")]
-_TAIL_DEFAULT_N = session_tail_mod._DEFAULT_TAIL_EVENTS
+# Default for `tail -n`, sourced from session_tail so the two never drift.
+_TAIL_DEFAULT_N = session_tail_mod.DEFAULT_TAIL_EVENTS
 
 
 @app.command(name="sync-current")

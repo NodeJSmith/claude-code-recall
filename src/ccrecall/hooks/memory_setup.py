@@ -22,9 +22,9 @@ from ccrecall.summarizer import SUMMARY_VERSION
 _PID_DIR = DEFAULT_DB_PATH.parent
 
 
-def _pid_file_path(cmd: str) -> Path:
-    """Return the PID file path for a given entry point name."""
-    return _PID_DIR / f".pid-{cmd}"
+def _pid_file_path(pid_key: str) -> Path:
+    """Return the PID file path for a given spawn pid_key."""
+    return _PID_DIR / f".pid-{pid_key}"
 
 
 def _spawn_background(argv: list[str], pid_key: str) -> None:

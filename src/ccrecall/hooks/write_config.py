@@ -29,7 +29,7 @@ def run(*, defaults: bool = False, auto_inject_context: bool | None = None) -> N
             if isinstance(existing, dict):
                 config.update(existing)
 
-    # Apply CLI arguments (only reached when --defaults is not set)
+    # Apply explicit overrides (only when --defaults is not set)
     if not defaults and auto_inject_context is not None:
         config["auto_inject_context"] = auto_inject_context
 

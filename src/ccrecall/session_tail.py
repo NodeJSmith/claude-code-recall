@@ -57,7 +57,7 @@ _TEXT_CLIP = 600
 # Lines of transcript tail the SessionStart hook parses — enough to catch the
 # trailing AskUserQuestion + its result without reading a multi-MB file in full.
 _HOOK_TAIL_LINES = 400
-_DEFAULT_TAIL_EVENTS = 8  # CLI -n default
+DEFAULT_TAIL_EVENTS = 8  # CLI -n default
 
 
 def transcript_dir(cwd: str, projects_dir: Path = DEFAULT_PROJECTS_DIR) -> Path:
@@ -333,7 +333,7 @@ def run(
     *,
     list_sessions: bool = False,
     cwd: str | None = None,
-    n: int = _DEFAULT_TAIL_EVENTS,
+    n: int = DEFAULT_TAIL_EVENTS,
 ) -> int:
     """Print the tail of a prior session's transcript for fast resume."""
     if cwd is None:

@@ -36,10 +36,11 @@ Flat branches — handle the user's reply to the notice:
 
 1. Session context injection (auto-recall last session on startup): Yes / No
 
-Then run `ccrecall write-config` with the chosen value (pass
-`--auto-inject-context` to enable, `--no-auto-inject-context` to disable):
+Then run `ccrecall write-config` with the chosen value — these are bare
+boolean flags, do NOT pass `true`/`false` as a value:
 ```
-ccrecall write-config --auto-inject-context
+ccrecall write-config --auto-inject-context      # to enable
+ccrecall write-config --no-auto-inject-context   # to disable
 ```
 Confirm: preferences saved, features activate next session.
 

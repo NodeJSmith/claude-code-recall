@@ -17,7 +17,6 @@ without embedding, progress lines carry elapsed/ETA, and abort paths exit
 non-zero so the scheduler sees the failure.
 """
 
-import argparse
 import contextlib
 import json
 import os
@@ -186,60 +185,6 @@ def run_status(*, days, json_mode, settings, logger) -> int:
     if counts["errored"]:
         print(f"  errored:   {counts['errored']}  (content errors, won't retry)")
     return EXIT_OK
-
-
-def _main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Embed active-leaf branch summaries (opt-in; not auto-spawned).")
-    parser.add_argument(
-        "--status",
-        action="store_true",
-        help="Report progress (embedded/remaining/errored/total) and exit without "
-        "embedding. Read-only; safe to run while a backfill is in progress.",
-    )
-    parser.add_argument(
-        "--json",
-        action="store_true",
-        help="Emit a machine-readable result on stdout (status counts, or a "
-        "final run summary); per-batch progress stays on stderr. On failure the "
-        "exit code is non-zero and the reason is on stderr.",
-    )
-    parser.add_argument(
-        "--days",
-        type=int,
-        default=None,
-        help="Only embed branches ended within the last N days (default: all history; "
-        "branches with no recorded end-time are excluded when this flag is used)",
-    )
-    parser.add_argument(
-        "--limit",
-        type=int,
-        default=None,
-        help="Stop after embedding at most N branches this run",
-    )
-    parser.add_argument(
-        "--progress-every",
-        type=int,
-        default=DEFAULT_PROGRESS_EVERY,
-        metavar="N",
-        help="Print a progress line (with elapsed/ETA) once at least N more "
-        "branches have embedded, checked at each batch commit (default: %(default)s)",
-    )
-    parser.add_argument(
-        "--threads",
-        type=int,
-        default=DEFAULT_EMBED_THREADS,
-        help="inference threads (default: %(default)s). Raise it on "
-        "an idle machine to finish faster; 1 keeps the box responsive.",
-    )
-    ns = parser.parse_args(argv)
-    return run(
-        status=ns.status,
-        json_mode=ns.json,
-        days=ns.days,
-        limit=ns.limit,
-        progress_every=ns.progress_every,
-        threads=ns.threads,
-    )
 
 
 def run(

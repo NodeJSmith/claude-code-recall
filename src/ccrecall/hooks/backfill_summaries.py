@@ -26,7 +26,11 @@ _PID_FILE = DEFAULT_DB_PATH.parent / f".pid-{PID_KEY}"
 
 
 def run():
-    """Backfill context summaries for branches that lack a current one."""
+    """Backfill context summaries for branches that lack a current one.
+
+    Wraps the ``_main()`` work in PID-file cleanup. ``_main()`` is kept separate
+    so tests can exercise the backfill logic without the PID-file lifecycle.
+    """
     try:
         _main()
     finally:

@@ -17,15 +17,6 @@ def _patch_config_path(monkeypatch, path: Path) -> None:
     monkeypatch.setattr(write_config, "CONFIG_PATH", path)
 
 
-def _run_main(args=None):
-    """Call write_config.run(), translating the former cm-write-config CLI args."""
-    args = args or []
-    auto_inject_context = None
-    if "--auto-inject-context" in args:
-        auto_inject_context = args[args.index("--auto-inject-context") + 1] == "true"
-    write_config.run(defaults="--defaults" in args, auto_inject_context=auto_inject_context)
-
-
 # Tests
 
 
@@ -35,7 +26,7 @@ class TestWriteConfigDefaults:
         cfg = tmp_path / "config.json"
         _patch_config_path(monkeypatch, cfg)
 
-        _run_main(["--defaults"])
+        write_config.run(defaults=True)
 
         result = json.loads(cfg.read_text())
         assert result["onboarding_completed"] is True
@@ -45,7 +36,7 @@ class TestWriteConfigDefaults:
         cfg = tmp_path / "config.json"
         _patch_config_path(monkeypatch, cfg)
 
-        _run_main(["--defaults"])
+        write_config.run(defaults=True)
 
         result = json.loads(cfg.read_text())
         assert result["onboarding_version"] == CURRENT_ONBOARDING_VERSION
@@ -55,7 +46,7 @@ class TestWriteConfigDefaults:
         cfg = tmp_path / "config.json"
         _patch_config_path(monkeypatch, cfg)
 
-        _run_main(["--defaults"])
+        write_config.run(defaults=True)
 
         result = json.loads(cfg.read_text())
         assert isinstance(result, dict)
@@ -65,7 +56,7 @@ class TestWriteConfigDefaults:
         cfg = tmp_path / "config.json"
         _patch_config_path(monkeypatch, cfg)
 
-        _run_main(["--defaults"])
+        write_config.run(defaults=True)
 
         result = json.loads(cfg.read_text())
         assert "auto_inject_context" in result
@@ -84,7 +75,7 @@ class TestWriteConfigDefaults:
         cfg.write_text(json.dumps({"auto_inject_context": False, "onboarding_completed": True}))
         _patch_config_path(monkeypatch, cfg)
 
-        _run_main(["--defaults"])
+        write_config.run(defaults=True)
 
         result = json.loads(cfg.read_text())
         assert result["auto_inject_context"] is True
@@ -101,7 +92,7 @@ class TestWriteConfigNonDictExistingConfig:
         cfg.write_text(json.dumps([1, 2, 3]))
         _patch_config_path(monkeypatch, cfg)
 
-        _run_main(["--defaults"])
+        write_config.run(defaults=True)
 
         result = json.loads(cfg.read_text())
         assert isinstance(result, dict)
@@ -114,7 +105,7 @@ class TestWriteConfigNonDictExistingConfig:
         _patch_config_path(monkeypatch, cfg)
 
         # Should not raise
-        _run_main(["--defaults"])
+        write_config.run(defaults=True)
 
 
 class TestWriteConfigAtomicWrite:
@@ -132,7 +123,7 @@ class TestWriteConfigAtomicWrite:
         monkeypatch.setattr(os, "fdopen", exploding_fdopen)
 
         with pytest.raises(OSError, match="simulated write failure"):
-            _run_main(["--defaults"])
+            write_config.run(defaults=True)
 
         tmp_files = list(tmp_path.glob("*.tmp"))
         assert tmp_files == [], f"Leftover .tmp files found: {tmp_files}"
@@ -151,7 +142,7 @@ class TestWriteConfigAtomicWrite:
         monkeypatch.setattr(os, "fdopen", exploding_fdopen)
 
         with pytest.raises(OSError, match="simulated write failure"):
-            _run_main(["--defaults"])
+            write_config.run(defaults=True)
 
         surviving = json.loads(cfg.read_text())
         assert surviving["sentinel"] == "original-value"
@@ -166,7 +157,7 @@ class TestWriteConfigParentDirCreation:
         cfg = tmp_path / "subdir" / "nested" / "config.json"
         _patch_config_path(monkeypatch, cfg)
 
-        _run_main(["--defaults"])
+        write_config.run(defaults=True)
 
         assert cfg.exists(), "Config file should be written even when parent dirs are missing"
         result = json.loads(cfg.read_text())
@@ -179,7 +170,17 @@ class TestWriteConfigCliArgs:
         cfg = tmp_path / "config.json"
         _patch_config_path(monkeypatch, cfg)
 
-        _run_main(["--auto-inject-context", "false"])
+        write_config.run(auto_inject_context=False)
 
         result = json.loads(cfg.read_text())
         assert result["auto_inject_context"] is False
+
+    def test_auto_inject_context_true(self, tmp_path, monkeypatch):
+        """--auto-inject-context (enable) must persist as True in config."""
+        cfg = tmp_path / "config.json"
+        _patch_config_path(monkeypatch, cfg)
+
+        write_config.run(auto_inject_context=True)
+
+        result = json.loads(cfg.read_text())
+        assert result["auto_inject_context"] is True
