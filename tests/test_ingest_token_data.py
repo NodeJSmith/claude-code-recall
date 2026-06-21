@@ -9,6 +9,7 @@ import sqlite3
 from pathlib import Path
 
 import pytest
+from token_helpers import token_session, token_turn
 
 from ccrecall.token_analytics import import_session
 from ccrecall.token_parser import (
@@ -27,11 +28,11 @@ from ccrecall.token_schema import (
     ensure_schema,
 )
 
-# Helpers
+# Helpers — the token_db fixture lives in conftest.py.
 
 
 def _minimal_jnl(tmp_path: Path) -> JnlFile:
-    """A JnlFile pointing at a dummy path (file not actually read in these tests)."""
+    """A JnlFile pointing at a real (empty) file — needed by the mtime/skip tests."""
     fake_path = tmp_path / "fake-session.jsonl"
     fake_path.write_text("")
     return JnlFile(
@@ -43,30 +44,11 @@ def _minimal_jnl(tmp_path: Path) -> JnlFile:
 
 
 def _make_session(session_id: str, turns: list[Turn]) -> ParsedSession:
-    """Build a minimal ParsedSession from an explicit turn list."""
-    s = ParsedSession(session_id=session_id, project_path="/test/project")
-    s.turns = turns
-    return s
+    return token_session(session_id, turns, project_path="/test/project")
 
 
 def _make_turn(index: int, input_tokens: int = 100, output_tokens: int = 50) -> Turn:
-    return Turn(
-        index=index,
-        message_id=f"msg-{index}",
-        timestamp=f"2026-03-01T10:0{index}:00Z",
-        input_tokens=input_tokens,
-        output_tokens=output_tokens,
-    )
-
-
-@pytest.fixture
-def token_db():
-    """In-memory DB with full token ingest schema."""
-    conn = sqlite3.connect(":memory:")
-    ensure_schema(conn)
-    conn.commit()
-    yield conn
-    conn.close()
+    return token_turn(index, input_tokens=input_tokens, output_tokens=output_tokens)
 
 
 # Gap 4a — turns are append-only (skip-if-exists)
