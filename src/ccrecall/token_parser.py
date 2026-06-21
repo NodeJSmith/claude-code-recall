@@ -17,6 +17,8 @@ PROJECTS_DIR = Path.home() / ".claude" / "projects"
 BATCH_SIZE = 50
 PROGRESS_INTERVAL = 100
 COMMAND_TRUNCATE = 200
+CHARS_PER_TOKEN = 4
+SLUG_LABEL_MAX = 30
 
 # SQL fragment: true Bash antipatterns — standalone cat/grep/find/ls that have
 # a dedicated tool equivalent. Excludes legitimate patterns:
@@ -46,7 +48,7 @@ _BASH_ANTIPATTERN_PREDICATE = """
     AND tc.command NOT LIKE 'tail % | %'
 """.strip()
 
-# ── Pricing (USD per million tokens) ─────────────────────────────────
+# Pricing (USD per million tokens)
 # Source: https://docs.anthropic.com/en/docs/about-claude/pricing
 # Keys are substrings matched against model IDs (checked in order).
 # cache_write_5m = 1.25x input, cache_write_1h = 2x input, cache_read = 0.1x input.
@@ -153,9 +155,6 @@ def turn_cost(
     return cost
 
 
-# ── File Discovery ────────────────────────────────────────────────────
-
-
 @dataclass
 class JnlFile:
     path: Path
@@ -214,9 +213,6 @@ def record_import(conn: sqlite3.Connection, filepath: Path, session_id: str, tur
     )
 
 
-# ── JSONL Parser ──────────────────────────────────────────────────────
-
-
 @dataclass
 class ToolCall:
     tool_name: str
@@ -269,10 +265,6 @@ class ParsedSession:
     hook_calls: list[dict] = field(default_factory=list)
 
 
-def _parse_timestamp(line: dict) -> str | None:
-    return line.get("timestamp")
-
-
 def _extract_usage(msg: dict) -> dict:
     usage = msg.get("usage", {}) or {}
     cache_creation = usage.get("cache_creation", {}) or {}
@@ -314,7 +306,7 @@ def parse_session(filepath: Path, jnl: JnlFile) -> ParsedSession | None:
 
         line_type = line.get("type")
         subtype = line.get("subtype", "")
-        ts = _parse_timestamp(line)
+        ts = line.get("timestamp")
 
         # Capture session metadata from any line that has it
         if not metadata_captured:
@@ -393,8 +385,8 @@ def parse_session(filepath: Path, jnl: JnlFile) -> ParsedSession | None:
                 if btype == "thinking":
                     # Count thinking text length as proxy (actual token count not in JSONL)
                     thinking_text = block.get("thinking", "")
-                    # Rough estimate: 1 token ≈ 4 chars
-                    current_turn.thinking_tokens += len(thinking_text) // 4
+                    # Rough estimate: 1 token ≈ CHARS_PER_TOKEN chars
+                    current_turn.thinking_tokens += len(thinking_text) // CHARS_PER_TOKEN
 
                 elif btype == "tool_use":
                     tc = ToolCall(
@@ -457,7 +449,7 @@ def parse_session(filepath: Path, jnl: JnlFile) -> ParsedSession | None:
                                 if isinstance(result_content, list):
                                     texts = [c.get("text", "") for c in result_content if isinstance(c, dict)]
                                     result_content = " ".join(texts)
-                                tc.error_text = str(result_content)[:200] if result_content else None
+                                tc.error_text = str(result_content)[:COMMAND_TRUNCATE] if result_content else None
 
         # ── System events ──
         elif line_type == "system":
@@ -501,9 +493,6 @@ def parse_session(filepath: Path, jnl: JnlFile) -> ParsedSession | None:
         session.session_id = filepath.stem
 
     return session if session.turns else None
-
-
-# ── Session Analytics ─────────────────────────────────────────────────
 
 
 def _detect_cache_ttl_ms(session: ParsedSession) -> tuple[int, str]:
@@ -578,9 +567,6 @@ def compute_session_analytics(session: ParsedSession) -> dict:
     }
 
 
-# ── Helpers ───────────────────────────────────────────────────────────
-
-
 _WORKTREE_MARKERS = ("/.claude/worktrees/", "//claude/worktrees/")
 
 
@@ -629,4 +615,4 @@ def project_slug(path: str | None) -> str:
     else:
         slug = "-".join(meaningful[-3:])
     # Cap length for chart labels
-    return slug[:30] if slug else "unknown"
+    return slug[:SLUG_LABEL_MAX] if slug else "unknown"
