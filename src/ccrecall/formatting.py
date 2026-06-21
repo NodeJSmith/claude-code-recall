@@ -23,7 +23,7 @@ def format_time(ts_str: str | None, fmt: str = "%H:%M") -> str:
         # so cross back at the boundary for the caller's custom format string.
         local = Instant.parse_iso(ts_str).to_system_tz()
         return local.to_stdlib().strftime(fmt)
-    except Exception:
+    except ValueError:
         return ts_str[:16] if ts_str else "??:??"
 
 

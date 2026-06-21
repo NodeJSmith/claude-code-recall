@@ -20,6 +20,7 @@ non-zero so the scheduler sees the failure.
 import contextlib
 import json
 import os
+import sqlite3
 import sys
 import time
 
@@ -156,7 +157,7 @@ def run_status(*, days, json_mode, settings, logger) -> int:
     """Report done/eligible/errored/total without embedding anything (read-only)."""
     try:
         conn = get_db_connection(settings, load_vec=True)
-    except Exception as e:
+    except (sqlite3.Error, OSError) as e:
         logger.error("Backfill status: failed to connect to DB: %s", e)
         print(f"ccrecall backfill embeddings: failed to connect to DB: {e}", file=sys.stderr)
         return EXIT_ABORT
@@ -231,7 +232,7 @@ def run(
 
     try:
         conn = get_db_connection(settings, load_vec=True)
-    except Exception as e:
+    except (sqlite3.Error, OSError) as e:
         logger.error("Backfill embeddings: failed to connect to DB: %s", e)
         print(
             f"ccrecall backfill embeddings: failed to connect to DB: {e}",

@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import logging
 import sqlite3
 import tempfile
 from pathlib import Path
@@ -543,3 +544,49 @@ class TestEmbedOnWriteSuccess:
 
         assert active_embedded, "expected at least one embedded active leaf"
         conn.close()
+
+
+class TestSummaryWriteExceptionHandling:
+    """sync_session classifies summary-write failures (issue #10): content and
+    infra errors skip the branch's summary so the import keeps going, but a
+    genuine bug propagates instead of being masked as "no summary"."""
+
+    def run_with_summary_error(self, conn, side_effect):
+        """sync the single_rewind fixture with compute_context_summary forced to raise."""
+        fixture_path = FIXTURE_DIR / "single_rewind.jsonl"
+        with (
+            patch("ccrecall.session_ops.compute_context_summary", side_effect=side_effect),
+            tempfile.TemporaryDirectory() as tmpdir,
+        ):
+            return sync_session(conn, fixture_path, Path(tmpdir))
+
+    def test_content_error_skips_summary_without_failing(self, memory_db):
+        """A malformed-content error (ValueError) leaves the summary unset but sync succeeds."""
+        result = self.run_with_summary_error(memory_db, ValueError("bad summary data"))
+
+        assert result >= 0, "sync must complete despite the content error"
+        cursor = memory_db.cursor()
+        cursor.execute("SELECT context_summary FROM branches")
+        rows = cursor.fetchall()
+        assert rows, "branches should still be created"
+        assert all(r[0] is None for r in rows), "summary stays unset on a content error"
+
+    def test_infra_error_is_skipped_and_logged_not_aborted(self, memory_db, caplog):
+        """A DB error (sqlite3.Error) is caught per-branch and logged — sync still completes.
+
+        This pins the regression fix: a summary-write DB failure must not propagate
+        and abort the whole import; it skips the branch and surfaces in the log.
+        """
+        with caplog.at_level(logging.ERROR, logger="claude-memory"):
+            result = self.run_with_summary_error(memory_db, sqlite3.OperationalError("database is locked"))
+
+        assert result >= 0, "sync must complete (per-branch skip, not import abort)"
+        cursor = memory_db.cursor()
+        cursor.execute("SELECT context_summary FROM branches")
+        assert all(r[0] is None for r in cursor.fetchall()), "summary stays unset on an infra error"
+        assert "summary write failed" in caplog.text, "infra failure must be observable in the log"
+
+    def test_genuine_bug_propagates(self, memory_db):
+        """An unexpected error (AttributeError) is NOT swallowed — it surfaces rather than masking."""
+        with pytest.raises(AttributeError):
+            self.run_with_summary_error(memory_db, AttributeError("real bug"))

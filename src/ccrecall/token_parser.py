@@ -296,7 +296,7 @@ def parse_session(filepath: Path, jnl: JnlFile) -> ParsedSession | None:
 
     try:
         lines = filepath.read_text(encoding="utf-8").splitlines()
-    except Exception:
+    except (OSError, ValueError):
         return None
 
     for raw_line in lines:

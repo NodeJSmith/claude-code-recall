@@ -1,0 +1,13 @@
+codecov:
+  branch: main
+
+coverage:
+  status:
+    project:
+      default:
+        target: auto
+        # Allow small drops so docs/CI-only PRs don't fail on a tiny blip.
+        threshold: 0.5%
+    patch:
+      default:
+        target: auto

@@ -46,7 +46,33 @@ where = ["src"]
 dev = [
     "pytest>=8.0",
     "hypothesis>=6.0",
+    "pytest-cov>=7.0.0",
+    "coverage[toml]>=7.10.7",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.coverage.run]
+branch = true          # measure branch coverage, not just lines
+source = ["ccrecall"]
+parallel = true        # suffix data files so per-Python-version CI shards combine cleanly
+relative_files = true  # stable paths across CI runners
+omit = ["*/__init__.py", "*/__main__.py"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+# fail_under = 80  # enable once a baseline is established; CI can override
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "if __name__ == .__main__.:",
+    "raise NotImplementedError",
+]
+
+[tool.coverage.html]
+directory = "htmlcov"
+
+[tool.coverage.xml]
+output = "coverage.xml"

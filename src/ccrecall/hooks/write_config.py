@@ -24,7 +24,8 @@ def run(*, defaults: bool = False, auto_inject_context: bool | None = None) -> N
     }
     config = write_config_defaults.copy()
     if CONFIG_PATH.exists() and not defaults:
-        with contextlib.suppress(Exception):
+        # Malformed existing config falls back to defaults; an unexpected bug still surfaces.
+        with contextlib.suppress(OSError, ValueError):
             existing = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
             if isinstance(existing, dict):
                 config.update(existing)

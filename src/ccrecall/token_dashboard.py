@@ -35,7 +35,7 @@ def deploy_dashboard(json_str: str, dashboard_out_path: Path) -> None:
             1,
         )
         dashboard_out_path.write_text(html, encoding="utf-8")
-    except Exception as e:
+    except OSError as e:
         print(f"Warning: could not deploy dashboard: {e}", file=sys.stderr)
 
 
@@ -74,6 +74,9 @@ def run() -> None:
                 import_session(conn, session, jnl)
                 record_import(conn, jnl.path, session.session_id, len(session.turns))
                 imported += 1
+        # Deliberately broad: per-file resilience over a bulk import. One bad
+        # file must not abort the run; failures are surfaced (counted, first 5
+        # printed to stderr) rather than silently swallowed.
         except Exception as e:
             errors += 1
             if errors <= 5:

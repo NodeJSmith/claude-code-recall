@@ -36,11 +36,71 @@ jobs:
 
             - run: uv sync
 
-            - name: Run tests
-              run: uv run pytest -q
+            - name: Run tests with coverage
+              env:
+                  COVERAGE_FILE: .coverage.${{ matrix.python-version }}
+              run: uv run pytest -q --cov
+
+            - name: Upload coverage data
+              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+              with:
+                  name: coverage-${{ matrix.python-version }}
+                  path: .coverage.${{ matrix.python-version }}*
+                  include-hidden-files: true
+
+    combine-and-report:
+        needs: [test]
+        if: always() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+              with:
+                  persist-credentials: false
+
+            - name: Install uv
+              uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8
+              with:
+                  python-version: "3.13"
+
+            - name: Download coverage shards
+              uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+              with:
+                  path: coverage-parts
+                  pattern: coverage-*
+                  merge-multiple: true
+
+            - name: Combine coverage and report
+              run: |
+                  uvx --from 'coverage[toml]' coverage combine coverage-parts
+                  uvx --from 'coverage[toml]' coverage report
+                  uvx --from 'coverage[toml]' coverage xml
+                  uvx --from 'coverage[toml]' coverage html
+
+            - name: Upload HTML report (artifact)
+              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+              with:
+                  name: coverage-html
+                  path: htmlcov
+
+            - name: Upload XML for integrations
+              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+              with:
+                  name: coverage-xml
+                  path: coverage.xml
+
+            - name: Upload coverage to Codecov
+              if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+              continue-on-error: true
+              uses: codecov/codecov-action@75cd11691c0faa626561e295848008c8a7dddffe # v5
+              with:
+                  files: coverage.xml
+                  fail_ci_if_error: true
+                  verbose: true
+                  name: codecov-${{ github.run_id }}
+                  token: ${{ secrets.CODECOV_TOKEN }}
 
     tests-complete:
-        needs: [test]
+        needs: [test, combine-and-report]
         if: always()
         runs-on: ubuntu-latest
         steps:

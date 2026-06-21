@@ -178,7 +178,7 @@ def detect_fts_support(conn: sqlite3.Connection) -> str | None:
     """Detect the best available FTS extension."""
     try:
         opts = {row[0] for row in conn.execute("PRAGMA compile_options").fetchall()}
-    except Exception:
+    except sqlite3.Error:
         return None
     if "ENABLE_FTS5" in opts:
         return "fts5"

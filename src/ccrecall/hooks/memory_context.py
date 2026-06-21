@@ -17,6 +17,7 @@ Output: JSON with hookSpecificOutput for context injection
 
 import contextlib
 import json
+import logging
 import sqlite3
 import sys
 from pathlib import Path
@@ -70,6 +71,10 @@ def _pending_question_block(sessions: list[dict], cwd: str) -> str:
             return ""
         return format_pending_block(payload, for_injection=True) + "\n\n"
     except Exception:
+        # Deliberately broad: this optional warning must never break the
+        # SessionStart hook or drop the main context injection. Log best-effort
+        # (no-op unless logging_enabled) so the failure isn't silently lost.
+        logging.getLogger("claude-memory").exception("pending-question block failed")
         return ""
 
 
@@ -209,7 +214,7 @@ def _find_cleared_from_session_uuid(db_path: Path, cwd: str) -> str | None:
                 with contextlib.suppress(OSError):
                     handoff_path.unlink()
                 return None
-        except Exception:
+        except ValueError:
             # Unparseable timestamp — treat as invalid; delete and reject
             with contextlib.suppress(OSError):
                 handoff_path.unlink()
