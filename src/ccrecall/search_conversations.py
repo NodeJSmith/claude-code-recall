@@ -469,6 +469,10 @@ def run(
         print_status(settings)
         return  # print_status calls sys.exit(0), but be explicit
 
+    # Past the status branch with the xor-validation above satisfied, query is
+    # guaranteed present (status is False, so a missing query already exited 2).
+    assert query is not None  # noqa: S101 — type-checker narrowing; the real guard is the exit above
+
     try:
         conn = get_db_connection(settings, load_vec=True)
         fts_level = detect_fts_support(conn)
