@@ -6,6 +6,7 @@ import json
 import sqlite3
 import tempfile
 from pathlib import Path
+from typing import ClassVar
 from unittest.mock import patch
 
 import pytest
@@ -25,7 +26,7 @@ from ccrecall.db import (
 )
 from ccrecall.embeddings import EMBEDDING_DIM
 from ccrecall.migrations import _migrate_project_paths, migrate_columns, migrate_db
-from ccrecall.schema import SCHEMA
+from ccrecall.schema import SCHEMA, detect_fts_support
 
 
 class TestSchemaCreation:
@@ -1722,4 +1723,174 @@ class TestLoadVecParameter:
         # Must be able to read branches without touching branch_vec
         count = conn.execute("SELECT COUNT(*) FROM branches").fetchone()[0]
         assert count == 0
+        conn.close()
+
+
+class TestSchemaEquivalencePin:
+    """Characterization pin — guards the migrations squash to v6 baseline.
+
+    This pin captures the schema a fresh conversation DB produces today via the
+    production get_db_connection path and asserts it matches an inline expected
+    literal.  After T02 lifts the embedding DDL into SCHEMA_CORE and T04 deletes
+    migrations.py, a fresh DB must still match this snapshot exactly — proving the
+    schema is unchanged except for the intentionally-removed token_snapshots table.
+
+    Exclusion rule: we exclude from the snapshot any table whose name contains
+    '_fts_' (those are FTS5 shadow tables auto-created alongside the virtual FTS
+    tables — e.g. messages_fts_data, branches_fts_idx) plus token_snapshots (dead
+    duplicate that migrations.py creates; it will be absent post-squash) and
+    sqlite_* internals.  The FTS virtual tables themselves (messages_fts,
+    branches_fts) do NOT contain '_fts_' so they ARE included.
+    """
+
+    # Expected schema derived by running this test against current code (SCHEMA_CORE
+    # + SCHEMA_FTS5 + migrate_columns) on 2026-06-21 and pasting the observed output.
+    # token_snapshots is intentionally absent — the exclusion is applied in the query
+    # below, so this literal will remain valid after the squash drops it from creation.
+    EXPECTED_TABLES: ClassVar[list[str]] = [
+        "branch_messages",
+        "branches",
+        "branches_fts",
+        "import_log",
+        "messages",
+        "messages_fts",
+        "projects",
+        "sessions",
+    ]
+
+    # Per-table column info: (cid, name, type, notnull, dflt_value, pk)
+    EXPECTED_COLUMNS: ClassVar[dict[str, list[tuple]]] = {
+        "branch_messages": [
+            (0, "branch_id", "INTEGER", 1, None, 1),
+            (1, "message_id", "INTEGER", 1, None, 2),
+        ],
+        "branches": [
+            (0, "id", "INTEGER", 0, None, 1),
+            (1, "session_id", "INTEGER", 1, None, 0),
+            (2, "leaf_uuid", "TEXT", 1, None, 0),
+            (3, "fork_point_uuid", "TEXT", 0, None, 0),
+            (4, "is_active", "INTEGER", 0, "1", 0),
+            (5, "started_at", "DATETIME", 0, None, 0),
+            (6, "ended_at", "DATETIME", 0, None, 0),
+            (7, "exchange_count", "INTEGER", 0, "0", 0),
+            (8, "files_modified", "TEXT", 0, None, 0),
+            (9, "commits", "TEXT", 0, None, 0),
+            (10, "tool_counts", "TEXT", 0, None, 0),
+            (11, "aggregated_content", "TEXT", 0, None, 0),
+            (12, "context_summary", "TEXT", 0, None, 0),
+            (13, "context_summary_json", "TEXT", 0, None, 0),
+            (14, "summary_version", "INTEGER", 0, "0", 0),
+            (15, "embedding_version", "INTEGER", 0, "0", 0),
+            (16, "embedding_model", "TEXT", 0, None, 0),
+            (17, "summary_version_at_embed", "INTEGER", 0, None, 0),
+        ],
+        "branches_fts": [
+            (0, "aggregated_content", "", 0, None, 0),
+        ],
+        "import_log": [
+            (0, "id", "INTEGER", 0, None, 1),
+            (1, "file_path", "TEXT", 1, None, 0),
+            (2, "file_hash", "TEXT", 0, None, 0),
+            (3, "imported_at", "DATETIME", 0, "CURRENT_TIMESTAMP", 0),
+            (4, "messages_imported", "INTEGER", 0, "0", 0),
+        ],
+        "messages": [
+            (0, "id", "INTEGER", 0, None, 1),
+            (1, "session_id", "INTEGER", 1, None, 0),
+            (2, "uuid", "TEXT", 0, None, 0),
+            (3, "parent_uuid", "TEXT", 0, None, 0),
+            (4, "timestamp", "DATETIME", 0, None, 0),
+            (5, "role", "TEXT", 0, None, 0),
+            (6, "content", "TEXT", 1, None, 0),
+            (7, "tool_summary", "TEXT", 0, None, 0),
+            (8, "has_tool_use", "INTEGER", 0, "0", 0),
+            (9, "has_thinking", "INTEGER", 0, "0", 0),
+            (10, "is_notification", "INTEGER", 0, "0", 0),
+            (11, "origin", "TEXT", 0, None, 0),
+        ],
+        "messages_fts": [
+            (0, "content", "", 0, None, 0),
+        ],
+        "projects": [
+            (0, "id", "INTEGER", 0, None, 1),
+            (1, "path", "TEXT", 1, None, 0),
+            (2, "key", "TEXT", 1, None, 0),
+            (3, "name", "TEXT", 0, None, 0),
+            (4, "created_at", "DATETIME", 0, "CURRENT_TIMESTAMP", 0),
+        ],
+        "sessions": [
+            (0, "id", "INTEGER", 0, None, 1),
+            (1, "uuid", "TEXT", 1, None, 0),
+            (2, "project_id", "INTEGER", 0, None, 0),
+            (3, "parent_session_id", "INTEGER", 0, None, 0),
+            (4, "git_branch", "TEXT", 0, None, 0),
+            (5, "cwd", "TEXT", 0, None, 0),
+            (6, "imported_at", "DATETIME", 0, "CURRENT_TIMESTAMP", 0),
+        ],
+    }
+
+    EXPECTED_IDX_INDEXES: ClassVar[list[str]] = [
+        "idx_branch_messages_message",
+        "idx_branches_active",
+        "idx_branches_embedding_version",
+        "idx_branches_session",
+        "idx_branches_summary_version",
+        "idx_messages_session",
+        "idx_messages_session_uuid",
+        "idx_messages_timestamp",
+        "idx_projects_key",
+        "idx_sessions_project",
+    ]
+
+    def test_schema_snapshot_fts5(self, tmp_path):
+        """Pin: fresh conv DB schema matches the expected literal (FTS5 path).
+
+        Only runs when FTS5 is available — mirrors how other test_db.py tests
+        guard FTS-specific assertions via detect_fts_support.
+        """
+        conn = get_db_connection(settings={"db_path": str(tmp_path / "conv.db")})
+        fts = detect_fts_support(conn)
+        if fts != "fts5":
+            pytest.skip("FTS5 not available in this SQLite build")
+
+        cursor = conn.cursor()
+
+        # Tables: exclude token_snapshots, sqlite_* internals, and FTS shadow tables
+        # (shadow tables contain '_fts_' in their name, e.g. messages_fts_data).
+        # The FTS virtual tables (messages_fts, branches_fts) do NOT match '_fts_%'
+        # so they are correctly included.
+        cursor.execute("""
+            SELECT name FROM sqlite_master
+            WHERE type='table'
+            AND name NOT LIKE 'sqlite_%'
+            AND name != 'token_snapshots'
+            AND name NOT LIKE '%_fts_%'
+            ORDER BY name
+        """)
+        actual_tables = [row[0] for row in cursor.fetchall()]
+        assert actual_tables == self.EXPECTED_TABLES, (
+            f"Table set mismatch.\nExpected: {self.EXPECTED_TABLES}\nActual:   {actual_tables}"
+        )
+
+        # Per-table column info (preserves column order)
+        for tbl in actual_tables:
+            cursor.execute(f"PRAGMA table_info({tbl})")
+            actual_cols = [tuple(row) for row in cursor.fetchall()]
+            assert actual_cols == self.EXPECTED_COLUMNS[tbl], (
+                f"Column mismatch for table '{tbl}'.\nExpected: {self.EXPECTED_COLUMNS[tbl]}\nActual:   {actual_cols}"
+            )
+
+        # idx_* indexes only (skip sqlite auto-indexes and token_snapshots indexes)
+        cursor.execute("""
+            SELECT name FROM sqlite_master
+            WHERE type='index'
+            AND name LIKE 'idx_%'
+            AND name NOT LIKE 'idx_token_%'
+            ORDER BY name
+        """)
+        actual_indexes = [row[0] for row in cursor.fetchall()]
+        assert actual_indexes == self.EXPECTED_IDX_INDEXES, (
+            f"Index set mismatch.\nExpected: {self.EXPECTED_IDX_INDEXES}\nActual:   {actual_indexes}"
+        )
+
         conn.close()

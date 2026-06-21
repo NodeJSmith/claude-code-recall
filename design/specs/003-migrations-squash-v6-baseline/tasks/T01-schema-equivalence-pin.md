@@ -1,7 +1,7 @@
 ---
 task_id: "T01"
 title: "Add schema-equivalence snapshot pin for the conversation DB"
-status: "planned"
+status: "done"
 depends_on: []
 implements: ["AC#1"]
 ---
