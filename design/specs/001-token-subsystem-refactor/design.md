@@ -92,6 +92,7 @@ This matters now because issue #15's clean-code pass (PR #19) split the worst of
 - **Immutability does not apply to the parser's accumulation.** `parse_session` builds `Turn`/`ParsedSession` by in-place accumulation today; the decomposition keeps that accumulation model (threaded through an explicit parse-state object) rather than converting to a returns-only style — converting accumulation semantics is a behavior risk and out of scope.
 - **No new public API surface** beyond the `Insight`/`Solution` dataclasses (which replace anonymous dicts internally; the JSON/HTML boundary still emits dicts).
 - **Existing `token_parser` dataclasses stay importable from `token_parser`.** `conftest.py` imports `ToolCall`, and `token_helpers.py` imports `JnlFile`, `ParsedSession`, `Turn`, directly from `ccrecall.token_parser`. If the parse decomposition introduces a `SessionParseState`, the existing four dataclasses must remain in (or be re-exported from) `token_parser` — do not relocate them to a new module.
+- **`_normalize_worktree_path` stays importable from `token_parser`.** `tests/test_ingest_token_data.py` imports it directly (along with `record_import`, `should_skip_file`, `project_slug`). It is out of scope for the parse decomposition (it sits below `parse_session`), but must not be renamed or inlined as incidental cleanup — the test depends on the name.
 
 ## Dependencies and Assumptions
 
@@ -113,7 +114,7 @@ def row_cost(row: Sequence, *, model_idx: int, token_indices: Sequence[int]) -> 
     so model_split's skipped thinking column is handled)."""
 ```
 
-The exact signature is an implementation detail for planning — the contract is: given a grouped query row carrying a model column and the six token columns `turn_cost` expects (which are **not always contiguous** — see the `model_split` asymmetry in the Problem section), return that row's dollar cost. Callers accumulate `row_cost` over their rows: the single-total cases (`model_split`, `_window_kpis`) sum it; the per-key cases (`cost_by_day`, `cost_by_project`) add it into their keyed dict. Because the token columns differ per query, the helper takes **explicit token-column indices** rather than a slice — `model_split` passes `[1, 2, 4, 5, 6, 7]` (skipping `thinking` at 3), the others pass their contiguous indices. Planning may instead choose a `sum_cost(rows, ...)` total-only helper plus a thin per-key wrapper; either way the `get_pricing`+`turn_cost` arithmetic exists exactly once.
+The exact signature is an implementation detail for planning — the contract is: given a grouped query row carrying a model column and the six token columns `turn_cost` expects (which are **not always contiguous** — see the `model_split` asymmetry in the Problem section), return that row's dollar cost. Callers accumulate `row_cost` over their rows: the single-total cases (`model_split`, `_window_kpis`) sum it; the per-key cases (`cost_by_day`, `cost_by_project`) add it into their keyed dict. Because the token columns differ per query, the helper takes **explicit token-column indices** (and an explicit `model_idx`) rather than a slice. The three layouts: `model_split` → `model_idx=0`, tokens `[1, 2, 4, 5, 6, 7]` (skipping `thinking` at 3); `cost_by_day`/`cost_by_project` → `model_idx=1`, tokens `[2, 3, 4, 5, 6, 7]` (a group key precedes the model column); `_window_kpis` → `model_idx=0`, tokens `[1, 2, 3, 4, 5, 6]`. Planning may instead choose a `sum_cost(rows, ...)` total-only helper plus a thin per-key wrapper; either way the `get_pricing`+`turn_cost` arithmetic exists exactly once.
 
 ### token_output.py
 
@@ -145,7 +146,7 @@ Decompose `parse_session`'s loop into per-line-type handlers operating on an exp
 
 ## Replacement Targets
 
-The inline cost-accumulation loops in `build_output` (model_split, cost_by_day, cost_by_project) and `_window_kpis` are replaced by `accumulate_cost` — remove the inline loops, do not leave them alongside the helper. The anonymous insight dict literals in `_build_insights` are replaced by `Insight`/`Solution` construction — the dicts are superseded, not kept in parallel. No other code is being replaced.
+The inline cost-accumulation loops are replaced by the shared cost helper — remove each inline loop, do not leave it alongside the helper call. The loops being removed are: `build_output`'s three (model_split, cost_by_day, cost_by_project) **and** `_window_kpis`'s loop in `token_insights`. The anonymous insight dict literals in `_build_insights` are replaced by `Insight`/`Solution` construction — the dicts are superseded, not kept in parallel. No other code is being replaced.
 
 ## Convention Examples
 

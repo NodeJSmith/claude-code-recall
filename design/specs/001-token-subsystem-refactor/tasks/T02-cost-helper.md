@@ -29,10 +29,12 @@ def row_cost(row: Sequence, *, model_idx: int, token_indices: Sequence[int]) -> 
 ```
 If a total-only convenience reads cleaner for the single-total callers, you may additionally add `sum_cost(rows, *, model_idx, token_indices) -> float` that sums `row_cost` over an iterable. Do not add anything the consumers won't use.
 
-Add a unit test in `tests/test_token_parser.py` (new test class, alongside `TestTurnCost`) that:
+Add a unit test in `tests/test_token_parser.py` (new test class, alongside `TestTurnCost`) that covers **all three real caller layouts** — the helper must work for each, and a layout-specific off-by-one must fail the test (not slip through to be caught only by T03/T04's golden pins):
 - Builds 2+ fake rows with **different models** (e.g. one opus-4-6, one sonnet) and known token columns.
 - Asserts the accumulated total equals the sum of explicit `turn_cost(...)` calls with `get_pricing(model)` for each row — derive the expected value from the pricing dict, do NOT hardcode a dollar figure (see the pricing-derived-assertion convention in `context.md`).
-- Includes a case proving the `token_indices` handling skips a non-token column (mirror `model_split`'s layout: a row `(model, inp, out, think, cr, cc, e5, e1)` with `token_indices=[1,2,4,5,6,7]`, asserting `think` at index 3 does not enter the cost).
+- **Layout A — `model_split` (skip):** row `(model, inp, out, think, cr, cc, e5, e1)`, `model_idx=0`, `token_indices=[1, 2, 4, 5, 6, 7]`; assert `think` at index 3 does NOT enter the cost (set it to a large value and confirm the total is unchanged).
+- **Layout B — `cost_by_day`/`cost_by_project` (offset model):** row `(group_key, model, inp, out, cr, cc, e5, e1)`, `model_idx=1`, `token_indices=[2, 3, 4, 5, 6, 7]`; proves the helper reads the model from index 1 and tokens from 2–7, not a hardcoded `model_idx=0`/`token_indices` starting at 1.
+- **Layout C — `_window_kpis` (contiguous from 1):** row `(model, inp, out, cr, cc, e5, e1)`, `model_idx=0`, `token_indices=[1, 2, 3, 4, 5, 6]`; include a row with a `None` token column to confirm the `or 0` coalescing.
 
 Run `uv run pytest -q tests/test_token_parser.py` and confirm green. Also run the full suite to confirm T01's pins still pass (this task adds code but changes no existing behavior).
 
@@ -45,4 +47,4 @@ Run `uv run pytest -q tests/test_token_parser.py` and confirm green. Also run th
 
 ## Verify
 - [ ] FR#6: The new helper, given grouped rows + pricing, produces the same per-row/accumulated dollar totals as the inline `get_pricing`+`turn_cost` calls it will replace — proven for ≥2 distinct models.
-- [ ] AC#5: A direct unit test in `tests/test_token_parser.py` asserts equality with a hand-computed multi-model total (pricing-derived, not hardcoded) and proves the skipped-column (`model_split`) layout is handled.
+- [ ] AC#5: A direct unit test in `tests/test_token_parser.py` asserts equality with a hand-computed multi-model total (pricing-derived, not hardcoded) and covers all three caller layouts — `model_split` skip (`model_idx=0`, `[1,2,4,5,6,7]`), `cost_by_day`/`cost_by_project` offset (`model_idx=1`, `[2,3,4,5,6,7]`), and `_window_kpis` contiguous (`model_idx=0`, `[1,2,3,4,5,6]`) with `None`-coalescing.
