@@ -37,7 +37,7 @@ Run the T01 pin after this change — it must still pass, since `get_db_connecti
 See `## Architecture` step 1 and `## Convention Examples` in the design doc for the exact placement.
 
 ## Focus
-- `SCHEMA_CORE` is `src/ccrecall/schema.py:12-95`; the `branches` table is lines 36-53, ending `summary_version INTEGER DEFAULT 0,` then `UNIQUE(session_id, leaf_uuid)`. Branch indexes are lines 54-56.
+- `SCHEMA_CORE` is `src/ccrecall/schema.py:12-95`; in the `branches` table, `summary_version INTEGER DEFAULT 0,` is the last column (line ~51), followed by `UNIQUE(session_id, leaf_uuid)` (line ~52) and the closing `);` (line ~53). Insert the three new columns between `summary_version` and the `UNIQUE(...)` line. Branch indexes are lines ~54-56.
 - `SCHEMA = SCHEMA_CORE + SCHEMA_FTS5` (schema.py:174) — fixtures and the AC#2 test that use `SCHEMA` automatically pick up the new columns once they're in `SCHEMA_CORE`.
 - Column order is load-bearing: `migrate_columns` appends via `ALTER TABLE ADD COLUMN`, which puts them at the end. Placing them last in the `CREATE TABLE` reproduces that order so positional access / `SELECT *` is identical (design `## Edge Cases` — column-order drift). The T01 pin enforces this.
 - Existing test_db.py tests at lines ~1376-1490 assert the embedding columns exist via `migrate_columns` (`test_new_columns_exist_via_migrate_columns`, the `memory_db`-fixture column test, the `idx_branches_embedding_version` test). Leave those for now — they still pass (migrate_columns still exists and is idempotent). They are removed/re-expressed in T03/T04. The AC#2 test you add here is the SCHEMA-sourced replacement.

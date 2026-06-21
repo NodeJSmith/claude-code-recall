@@ -28,7 +28,7 @@ The test must:
 
 Derive the expected literal by running the test once against current code and pasting the observed schema (so it is green immediately). Add a comment explaining that this pin guards the squash: after T02 lifts the embedding DDL into `SCHEMA_CORE` and T04 deletes `migrations.py`, this same test must still pass — proving the fresh-DB schema is unchanged except for the intentionally-removed `token_snapshots`.
 
-Do NOT include `token_snapshots` in the snapshot — it is the one table the squash intentionally removes from the conversation DB, so including it would make the pin go red at T04 for the wrong reason. (AC#3 separately asserts its absence in T04.)
+**Calibration trap — the exclusion must be in the snapshot-building code, not just the pasted literal.** On current code `migrate_columns` creates `token_snapshots` on every fresh DB, so it WILL appear in the live query output. The snapshot-builder must filter `token_snapshots` out of the queried table set **before** you derive/paste the expected literal — so the expected literal never contains it. If you paste a raw observed snapshot that includes `token_snapshots`, the pin is green today but goes red at T04 for the wrong reason (T04 correctly stops creating it). Concretely: in the test, exclude `token_snapshots` in the `WHERE` clause / Python filter that builds the table set, and confirm by eye that the expected literal has no `token_snapshots` entry. (AC#3 separately asserts its absence in T04.)
 
 See the design doc's `## Test Strategy → New Test Coverage` and `## Edge Cases` (column-order drift) for the intent.
 
