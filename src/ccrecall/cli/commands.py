@@ -13,6 +13,8 @@ from cyclopts import Parameter
 
 from ccrecall.cli import app, backfill_app
 from ccrecall.db import DEFAULT_DB_PATH, DEFAULT_PROJECTS_DIR
+from ccrecall.embeddings import DEFAULT_EMBED_THREADS
+from ccrecall.hooks import backfill_embeddings as backfill_embeddings_mod
 from ccrecall.hooks import backfill_summaries as backfill_summaries_mod
 from ccrecall.hooks import import_conversations as import_mod
 from ccrecall.hooks import sync_current as sync_current_mod
@@ -51,3 +53,34 @@ def cmd_import(
 def cmd_backfill_summaries() -> None:
     """Backfill context summaries for branches that lack a current one."""
     backfill_summaries_mod.run()
+
+
+@backfill_app.command(name="embeddings")
+def cmd_backfill_embeddings(
+    *,
+    status: Annotated[bool, _FLAG, Parameter(help="Report progress and exit without embedding (read-only).")] = False,
+    json_mode: Annotated[
+        bool, _FLAG, Parameter(name="--json", help="Emit a machine-readable result on stdout.")
+    ] = False,
+    days: Annotated[int | None, Parameter(help="Only embed branches ended within the last N days.")] = None,
+    limit: Annotated[int | None, Parameter(help="Stop after embedding at most N branches this run.")] = None,
+    progress_every: Annotated[
+        int, Parameter(help="Print a progress line every N newly embedded branches.")
+    ] = backfill_embeddings_mod.DEFAULT_PROGRESS_EVERY,
+    threads: Annotated[int, Parameter(help="Inference threads.")] = DEFAULT_EMBED_THREADS,
+) -> None:
+    """Seed historical embeddings for active-leaf branch summaries (opt-in)."""
+    try:
+        code = backfill_embeddings_mod.run(
+            status=status,
+            json_mode=json_mode,
+            days=days,
+            limit=limit,
+            progress_every=progress_every,
+            threads=threads,
+        )
+    finally:
+        # Status is read-only: never disturb a concurrent backfill's PID marker.
+        if not status:
+            backfill_embeddings_mod.cleanup_pid()
+    raise SystemExit(code)
