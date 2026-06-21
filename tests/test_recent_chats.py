@@ -72,7 +72,7 @@ class TestRecentChatsInvariant:
 
     @pytest.fixture
     def vec_db(self):
-        """DB with schema + _migrate_columns + branch_vec virtual table loaded."""
+        """DB with schema + migrate_columns + branch_vec virtual table loaded."""
         try:
             conn = make_vec_conn()
         except Exception:

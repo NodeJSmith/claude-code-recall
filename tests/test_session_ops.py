@@ -9,8 +9,10 @@ from unittest.mock import patch
 
 import pytest
 
-from ccrecall.db import SCHEMA, _ensure_vec_schema, _migrate_columns, vec_available
+from ccrecall.db import _ensure_vec_schema, vec_available
 from ccrecall.embeddings import EMBEDDING_DIM, EMBEDDING_MODEL, EMBEDDING_VERSION
+from ccrecall.migrations import migrate_columns
+from ccrecall.schema import SCHEMA
 from ccrecall.session_ops import sync_session
 from ccrecall.summarizer import SUMMARY_VERSION
 
@@ -396,7 +398,7 @@ def _make_vec_conn(tmp_path: Path) -> sqlite3.Connection | None:
     conn = sqlite3.connect(str(tmp_path / "t.db"))
     conn.executescript(SCHEMA)
     conn.commit()
-    _migrate_columns(conn)
+    migrate_columns(conn)
     if not vec_available(conn):
         conn.close()
         return None
@@ -415,7 +417,7 @@ class TestEmbedOnWriteModelUnavailable:
         conn = sqlite3.connect(":memory:")
         conn.executescript(SCHEMA)
         conn.commit()
-        _migrate_columns(conn)
+        migrate_columns(conn)
 
         with (
             patch("ccrecall.session_ops.embed_text", side_effect=RuntimeError("no model")),
@@ -452,7 +454,7 @@ class TestEmbedOnWriteOrderingInvariant:
         conn = sqlite3.connect(":memory:")
         conn.executescript(SCHEMA)
         conn.commit()
-        _migrate_columns(conn)
+        migrate_columns(conn)
 
         # Precondition: branch_vec must not exist before sync so the upsert raises
         assert (

@@ -9,7 +9,7 @@ from ccrecall.content import (
     is_teammate_message,
     is_tool_result,
 )
-from ccrecall.db import SCHEMA, _migrate_columns
+from ccrecall.migrations import migrate_columns
 from ccrecall.parsing import (
     aggregate_branch_content,
     compute_branch_metadata,
@@ -17,6 +17,7 @@ from ccrecall.parsing import (
     parse_all_with_uuids,
     parse_jsonl_file,
 )
+from ccrecall.schema import SCHEMA
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures"
 NOTIF_FIXTURE = FIXTURE_DIR / "with_notifications.jsonl"
@@ -27,7 +28,7 @@ def _setup_db_and_import(filepath: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     conn.executescript(SCHEMA)
     conn.commit()
-    _migrate_columns(conn)
+    migrate_columns(conn)
     cursor = conn.cursor()
 
     # Create project and session

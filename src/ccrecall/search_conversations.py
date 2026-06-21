@@ -21,7 +21,6 @@ from ccrecall.db import (
     DEFAULT_DB_PATH,
     EMBEDDABLE_BRANCH_FILTER,
     branch_vec_queryable,
-    detect_fts_support,
     get_db_connection,
 )
 from ccrecall.embeddings import (
@@ -33,6 +32,7 @@ from ccrecall.embeddings import (
 )
 from ccrecall.formatting import format_json_sessions, format_markdown_session
 from ccrecall.fusion import rrf
+from ccrecall.schema import detect_fts_support
 from ccrecall.serialization import decode_json_column
 
 
