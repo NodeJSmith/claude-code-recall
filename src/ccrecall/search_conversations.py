@@ -1,7 +1,4 @@
-#!/usr/bin/env python3
-"""
-Search conversations using full-text search with FTS5/FTS4/LIKE fallback,
-optionally fused with vector KNN via Reciprocal Rank Fusion.
+"""Search conversations with FTS5/FTS4/LIKE, optionally fused with vector KNN via RRF.
 
 Returns markdown by default (token-efficient), or JSON when output_format="json"
 (the CLI maps the global --json flag onto that argument).
@@ -15,8 +12,6 @@ from pathlib import Path
 import sqlite_vec
 
 from ccrecall.content import sanitize_fts_term
-
-# Local imports
 from ccrecall.db import (
     DEFAULT_DB_PATH,
     EMBEDDABLE_BRANCH_FILTER,
@@ -38,6 +33,11 @@ from ccrecall.serialization import decode_json_column
 # Upper bound on --max-results, single-sourced here and referenced by the CLI
 # validator (cli/commands.py) so the clamp and the validator can't drift apart.
 MAX_SEARCH_RESULTS = 10
+
+# Each ranker (FTS, vector KNN) is over-fetched before fusion + per-session dedup,
+# so the post-filter top-N still has enough candidates: top_k = max(N * mult, floor).
+OVERFETCH_MULTIPLIER = 4
+OVERFETCH_FLOOR = 20
 
 
 def _get_fts_branch_ids(
@@ -151,10 +151,9 @@ def _get_vec_branch_ids(
     """
     try:
         serialized = sqlite_vec.serialize_float32(query_vec)
-        knn_k = top_k
         rows = cursor.execute(
             "SELECT branch_id, distance FROM branch_vec WHERE embedding MATCH ? AND k = ? ORDER BY distance",
-            (serialized, knn_k),
+            (serialized, top_k),
         ).fetchall()
     except sqlite3.Error:
         return []
@@ -179,8 +178,8 @@ def _get_vec_branch_ids(
     filter_params: list = [*list(candidate_ids), EMBEDDING_VERSION, EMBEDDING_MODEL]
 
     if projects:
-        ph2 = ",".join("?" * len(projects))
-        filter_sql += f" AND p.name IN ({ph2})"
+        proj_placeholders = ",".join("?" * len(projects))
+        filter_sql += f" AND p.name IN ({proj_placeholders})"
         filter_params.extend(projects)
 
     if session_id:
@@ -216,12 +215,12 @@ def _dedup_by_session(cursor: sqlite3.Cursor, ordered_branch_ids: list[int]) -> 
         ordered_branch_ids,
     ).fetchall()
 
-    id_to_session: dict[int, int] = {row[0]: row[1] for row in rows}
+    branch_to_session: dict[int, int] = {row[0]: row[1] for row in rows}
 
     seen_sessions: set[int] = set()
     deduped: list[int] = []
     for bid in ordered_branch_ids:
-        sess = id_to_session.get(bid)
+        sess = branch_to_session.get(bid)
         if sess is None:
             continue
         if sess not in seen_sessions:
@@ -331,7 +330,7 @@ def search_sessions(
         return []
 
     cursor = conn.cursor()
-    top_k = max(max_results * 4, 20)
+    top_k = max(max_results * OVERFETCH_MULTIPLIER, OVERFETCH_FLOOR)
 
     use_fusion = not keyword_only
     query_vec: list[float] | None = None

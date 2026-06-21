@@ -1,6 +1,4 @@
-#!/usr/bin/env python3
-"""
-Retrieve recent conversation sessions from the memory database.
+"""Retrieve recent conversation sessions from the memory database.
 
 Returns markdown by default (token-efficient), or JSON when output_format="json"
 (the CLI maps the global --json flag onto that argument).
@@ -11,7 +9,6 @@ import sqlite3
 import sys
 from pathlib import Path
 
-# Local imports
 from ccrecall.db import DEFAULT_DB_PATH, get_db_connection
 from ccrecall.formatting import format_json_sessions, format_markdown_session
 from ccrecall.serialization import decode_json_column

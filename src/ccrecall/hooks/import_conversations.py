@@ -1,6 +1,4 @@
-#!/usr/bin/env python3
-"""
-Import Claude Code JSONL conversations into SQLite memory database.
+"""Import Claude Code JSONL conversations into the SQLite memory database.
 
 Extracts only searchable text content, skipping progress entries (90% of file size).
 Detects conversation branches (from rewind) and stores each branch separately.
@@ -26,12 +24,20 @@ from ccrecall.parsing import extract_session_uuid
 from ccrecall.project_ops import upsert_project
 from ccrecall.session_ops import sync_session
 
+# Chunk size for streaming a file through the change-detection hash (bounded memory).
+HASH_CHUNK_SIZE = 8192
+BYTES_PER_MB = 1024 * 1024
+
+# PID key — must stay in sync with the spawn in memory_setup (`ccrecall import`).
+PID_KEY = "ccrecall-import"
+_PID_FILE = DEFAULT_DB_PATH.parent / f".pid-{PID_KEY}"
+
 
 def get_file_hash(filepath: Path) -> str:
     """Get MD5 hash of file for change detection."""
     h = hashlib.md5(usedforsecurity=False)
     with open(filepath, "rb") as f:
-        for chunk in iter(lambda: f.read(8192), b""):
+        for chunk in iter(lambda: f.read(HASH_CHUNK_SIZE), b""):
             h.update(chunk)
     return h.hexdigest()
 
@@ -79,10 +85,10 @@ def import_session(
     session_uuid = extract_session_uuid(filepath)
 
     cursor.execute("SELECT id FROM sessions WHERE uuid = ?", (session_uuid,))
-    row = cursor.fetchone()
-    if not row:
+    session_row = cursor.fetchone()
+    if not session_row:
         return -1, 0
-    session_id = row[0]
+    session_id = session_row[0]
 
     cursor.execute("SELECT COUNT(*) FROM messages WHERE session_id = ?", (session_id,))
     total_messages = cursor.fetchone()[0]
@@ -133,8 +139,8 @@ def import_project(
 
     # Check exclusion after we know the real project name
     cursor.execute("SELECT name FROM projects WHERE id = ?", (project_id,))
-    row = cursor.fetchone()
-    project_name = row[0] if row else extract_project_name(str(project_dir))
+    project_row = cursor.fetchone()
+    project_name = project_row[0] if project_row else extract_project_name(str(project_dir))
 
     if exclude_projects and project_name in exclude_projects:
         return 0, 0, 0
@@ -155,11 +161,6 @@ def import_project(
             messages_imported += msg_count
 
     return sessions_imported, messages_imported, sessions_skipped
-
-
-# PID key — must stay in sync with the spawn in memory_setup (`ccrecall import`).
-PID_KEY = "ccrecall-import"
-_PID_FILE = DEFAULT_DB_PATH.parent / f".pid-{PID_KEY}"
 
 
 def print_stats(db: Path = DEFAULT_DB_PATH) -> None:
@@ -194,7 +195,7 @@ def print_stats(db: Path = DEFAULT_DB_PATH) -> None:
     db_size = db_path.stat().st_size if db_path.exists() else 0
 
     print(f"Database: {db_path}")
-    print(f"Size: {db_size / 1024 / 1024:.2f} MB")
+    print(f"Size: {db_size / BYTES_PER_MB:.2f} MB")
     print(f"Projects: {projects}")
     print(f"Sessions: {sessions}")
     print(f"Branches: {total_branches} ({active} active, {abandoned} abandoned)")
@@ -268,4 +269,4 @@ def _run(
 
     if db_path.exists():
         db_size = db_path.stat().st_size
-        print(f"Database size: {db_size / 1024 / 1024:.2f} MB")
+        print(f"Database size: {db_size / BYTES_PER_MB:.2f} MB")

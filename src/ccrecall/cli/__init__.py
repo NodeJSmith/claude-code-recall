@@ -92,9 +92,7 @@ def main() -> None:
 
 # Importing the commands module registers every subcommand on ``app`` /
 # ``backfill_app`` via the @app.command decorators it defines. Kept at the
-# bottom so ``app`` and ``backfill_app`` exist before the decorators run.
-from ccrecall.cli import commands  # noqa: E402
-
-# Reference the side-effect import so ruff and pyright see it as used; the real
-# effect is the subcommand registration that ran at import time.
-_ = commands
+# bottom so ``app`` and ``backfill_app`` exist before the decorators run. The
+# redundant ``as commands`` alias marks it as an intentional side-effect import,
+# so ruff and pyright don't flag it unused without needing a separate sentinel.
+from ccrecall.cli import commands as commands  # noqa: E402
