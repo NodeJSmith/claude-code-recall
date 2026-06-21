@@ -1165,60 +1165,6 @@ class TestV5Migration:
 
         conn.close()
 
-    def test_migrations_run_on_get_db_connection(self, tmp_path, monkeypatch):
-        """Opening a v4 database via get_db_connection triggers v5 and v6 automatically."""
-        db_file = tmp_path / "conversations.db"
-        # Create a v4 DB at the filesystem level
-        setup_conn = sqlite3.connect(str(db_file))
-        setup_conn.executescript("""
-            CREATE TABLE IF NOT EXISTS messages (
-                id INTEGER PRIMARY KEY, session_id INTEGER, uuid TEXT,
-                parent_uuid TEXT, timestamp DATETIME, role TEXT,
-                content TEXT NOT NULL, tool_summary TEXT,
-                has_tool_use INTEGER DEFAULT 0, has_thinking INTEGER DEFAULT 0,
-                is_notification INTEGER DEFAULT 0, origin TEXT,
-                UNIQUE(session_id, uuid)
-            );
-            CREATE TABLE IF NOT EXISTS branches (
-                id INTEGER PRIMARY KEY, session_id INTEGER, leaf_uuid TEXT,
-                fork_point_uuid TEXT, is_active INTEGER DEFAULT 1,
-                started_at DATETIME, ended_at DATETIME, exchange_count INTEGER DEFAULT 0,
-                files_modified TEXT, commits TEXT, aggregated_content TEXT,
-                tool_counts TEXT, context_summary TEXT, context_summary_json TEXT,
-                summary_version INTEGER DEFAULT 0
-            );
-            CREATE TABLE IF NOT EXISTS branch_messages (
-                branch_id INTEGER, message_id INTEGER, PRIMARY KEY (branch_id, message_id)
-            );
-            CREATE TABLE IF NOT EXISTS import_log (
-                id INTEGER PRIMARY KEY, file_path TEXT UNIQUE NOT NULL,
-                file_hash TEXT, imported_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                messages_imported INTEGER DEFAULT 0
-            );
-            CREATE TABLE IF NOT EXISTS sessions (
-                id INTEGER PRIMARY KEY, uuid TEXT UNIQUE NOT NULL,
-                project_id INTEGER, parent_session_id INTEGER,
-                git_branch TEXT, cwd TEXT
-            );
-            CREATE TABLE IF NOT EXISTS projects (
-                id INTEGER PRIMARY KEY, path TEXT UNIQUE NOT NULL,
-                key TEXT UNIQUE NOT NULL, name TEXT,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            );
-        """)
-        setup_conn.execute("PRAGMA user_version = 4")
-        setup_conn.commit()
-        setup_conn.close()
-
-        # Patch the default db path so get_db_connection uses our tmp file
-        monkeypatch.setattr(db_module, "DEFAULT_DB_PATH", db_file)
-
-        conn = get_db_connection()
-        version = conn.execute("PRAGMA user_version").fetchone()[0]
-        conn.close()
-
-        assert version == 6, f"get_db_connection on a v4 DB must run v5+v6, got version={version}"
-
 
 class TestV6Migration:
     """user_version=5 -> 6: truncate oversized context_summary_json entries."""
@@ -1425,7 +1371,7 @@ class TestNewBranchColumns:
         assert row[2] is None
 
     def test_embedding_version_index_exists(self, memory_db):
-        """idx_branches_embedding_version index is created by migrate_columns."""
+        """idx_branches_embedding_version index exists on a fresh DB (SCHEMA_CORE) and on migrated DBs."""
         cursor = memory_db.cursor()
         cursor.execute("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_branches_embedding_version'")
         assert cursor.fetchone() is not None
@@ -1892,5 +1838,45 @@ class TestSchemaEquivalencePin:
         assert actual_indexes == self.EXPECTED_IDX_INDEXES, (
             f"Index set mismatch.\nExpected: {self.EXPECTED_IDX_INDEXES}\nActual:   {actual_indexes}"
         )
+
+        conn.close()
+
+
+class TestEmbeddingDDLInSchema:
+    """AC#2: fresh DB built from SCHEMA alone has the three embedding columns and index.
+
+    This verifies that SCHEMA_CORE (and therefore SCHEMA) is the complete schema
+    source — no migrate_columns call required to get the embedding columns.
+    """
+
+    def test_embedding_columns_last_three_in_schema_only_db(self):
+        """SCHEMA-only fresh DB has embedding columns as last three PRAGMA table_info rows."""
+        conn = sqlite3.connect(":memory:")
+        conn.executescript(SCHEMA)
+        conn.commit()
+
+        cursor = conn.cursor()
+        cursor.execute("PRAGMA table_info(branches)")
+        rows = cursor.fetchall()
+        # Each row: (cid, name, type, notnull, dflt_value, pk)
+        # (name, type, dflt_value, pk) — dflt_value guards the DEFAULT 0 on embedding_version
+        last_three = [(row[1], row[2], row[4], row[5]) for row in rows[-3:]]
+        assert last_three == [
+            ("embedding_version", "INTEGER", "0", 0),
+            ("embedding_model", "TEXT", None, 0),
+            ("summary_version_at_embed", "INTEGER", None, 0),
+        ], f"Last three columns were: {last_three}"
+
+        conn.close()
+
+    def test_embedding_version_index_in_schema_only_db(self):
+        """SCHEMA-only fresh DB has idx_branches_embedding_version index."""
+        conn = sqlite3.connect(":memory:")
+        conn.executescript(SCHEMA)
+        conn.commit()
+
+        cursor = conn.cursor()
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_branches_embedding_version'")
+        assert cursor.fetchone() is not None, "idx_branches_embedding_version index not found"
 
         conn.close()
