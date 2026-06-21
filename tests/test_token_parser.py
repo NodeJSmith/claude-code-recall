@@ -1,14 +1,19 @@
-"""Tests for token_parser.parse_session.
+"""Tests for token_parser: parse_session, pricing, and cost computation.
 
-The characterization tests here pin parse_session's behavior on realistic JSONL,
-so that boundary-validation changes stay provably behavior-preserving on valid
-input.
+The parse_session characterization tests pin its behavior on realistic JSONL, so
+boundary-validation changes stay provably behavior-preserving on valid input.
 """
 
 import json
 from pathlib import Path
 
-from ccrecall.token_parser import JnlFile, parse_session
+from ccrecall.token_parser import (
+    DEFAULT_PRICING,
+    JnlFile,
+    get_pricing,
+    parse_session,
+    turn_cost,
+)
 
 
 def _jnl(tmp_path: Path, lines: list[dict], name: str = "sess.jsonl") -> JnlFile:
@@ -133,3 +138,59 @@ class TestParseSessionCharacterization:
         assert session is not None
         assert len(session.turns) == 1
         assert session.turns[0].input_tokens == 5
+
+
+# ── Pricing ────────────────────────────────────────────────────────────────
+
+
+class TestGetPricing:
+    def test_opus_46(self):
+        assert get_pricing("claude-opus-4-6-20260101")["input"] == 5.0
+
+    def test_opus_41_distinct_from_46(self):
+        # opus-4-1 is the older, pricier tier — must not collide with opus-4-6.
+        assert get_pricing("claude-opus-4-1-20250805")["input"] == 15.0
+
+    def test_sonnet(self):
+        assert get_pricing("claude-sonnet-4-5")["input"] == 3.0
+
+    def test_haiku_uppercase_matches(self):
+        # get_pricing lowercases the model id before matching.
+        assert get_pricing("CLAUDE-HAIKU-4-5")["input"] == 1.0
+
+    def test_unknown_model_falls_back_to_sonnet(self):
+        # The fallback-by-name fix: an unrecognized model gets Sonnet rates.
+        assert get_pricing("gpt-4-turbo") == DEFAULT_PRICING
+        assert get_pricing("gpt-4-turbo")["input"] == 3.0
+
+    def test_none_falls_back_to_sonnet(self):
+        assert get_pricing(None) == DEFAULT_PRICING
+
+    def test_default_pricing_is_sonnet(self):
+        assert get_pricing("claude-sonnet-4-5") == DEFAULT_PRICING
+
+
+# ── Cost computation ─────────────────────────────────────────────────────────
+
+
+class TestTurnCost:
+    # Exactly 1M tokens of each kind, so cost == the per-million rate from the
+    # pricing dict — derived from the dict so it can't drift if rates change.
+    def test_input_and_output(self):
+        p = get_pricing("claude-sonnet-4-5")
+        assert turn_cost(1_000_000, 0, 0, 0, 0, 0, p) == p["input"]
+        assert turn_cost(0, 1_000_000, 0, 0, 0, 0, p) == p["output"]
+
+    def test_cache_tiers(self):
+        p = get_pricing("claude-sonnet-4-5")
+        assert turn_cost(0, 0, 1_000_000, 0, 0, 0, p) == p["cache_read"]
+        assert turn_cost(0, 0, 0, 0, 1_000_000, 0, p) == p["cache_write_5m"]
+        assert turn_cost(0, 0, 0, 0, 0, 1_000_000, p) == p["cache_write_1h"]
+
+    def test_unclassified_creation_billed_at_5m(self):
+        # cache_creation beyond the classified 5m/1h tiers is attributed to 5m.
+        p = get_pricing("claude-sonnet-4-5")
+        assert turn_cost(0, 0, 0, 1_000_000, 0, 0, p) == p["cache_write_5m"]
+
+    def test_zero_everything(self):
+        assert turn_cost(0, 0, 0, 0, 0, 0, get_pricing(None)) == 0.0

@@ -115,6 +115,11 @@ MODEL_PRICING: list[tuple[str, dict[str, float]]] = [
 ]
 
 
+# Fallback rates for unknown/missing models. Resolved by name so reordering
+# MODEL_PRICING can't silently change the default (was a hardcoded [4][1] index).
+DEFAULT_PRICING = next(rates for substr, rates in MODEL_PRICING if substr == "sonnet")
+
+
 def get_pricing(model: str | None) -> dict[str, float]:
     """Return pricing dict for a model ID, falling back to Sonnet rates."""
     if model:
@@ -122,7 +127,7 @@ def get_pricing(model: str | None) -> dict[str, float]:
         for substr, rates in MODEL_PRICING:
             if substr in m:
                 return rates
-    return MODEL_PRICING[4][1]  # default: sonnet
+    return DEFAULT_PRICING
 
 
 def turn_cost(
