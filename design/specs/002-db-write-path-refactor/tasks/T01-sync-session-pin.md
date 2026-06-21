@@ -1,7 +1,7 @@
 ---
 task_id: "T01"
 title: "Pin sync_session DB-write behavior before the split"
-status: "planned"
+status: "done"
 depends_on: []
 implements: ["AC#1"]
 ---
