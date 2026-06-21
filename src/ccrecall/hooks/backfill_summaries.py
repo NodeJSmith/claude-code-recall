@@ -19,10 +19,14 @@ from ccrecall.summarizer import SUMMARY_VERSION, compute_context_summary
 
 BATCH_SIZE = 50
 
-_PID_FILE = DEFAULT_DB_PATH.parent / ".pid-cm-backfill-summaries"
+# PID key — must stay in sync with the spawn in memory_setup
+# (`ccrecall backfill summaries`).
+PID_KEY = "ccrecall-backfill-summaries"
+_PID_FILE = DEFAULT_DB_PATH.parent / f".pid-{PID_KEY}"
 
 
-def main():
+def run():
+    """Backfill context summaries for branches that lack a current one."""
     try:
         _main()
     finally:
@@ -92,7 +96,3 @@ def _main():
 
     conn.close()
     logger.info("Backfill complete: %s branches summarized", total_updated)
-
-
-if __name__ == "__main__":
-    main()

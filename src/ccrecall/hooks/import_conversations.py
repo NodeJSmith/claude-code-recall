@@ -8,7 +8,6 @@ Detects conversation branches (from rewind) and stores each branch separately.
 v3 schema: messages stored once per session, branches as separate index.
 """
 
-import argparse
 import contextlib
 import hashlib
 import sqlite3
@@ -161,51 +160,50 @@ def import_project(
     return sessions_imported, messages_imported, sessions_skipped
 
 
-_PID_FILE = DEFAULT_DB_PATH.parent / ".pid-cm-import-conversations"
+# PID key — must stay in sync with the spawn in memory_setup (`ccrecall import`).
+PID_KEY = "ccrecall-import"
+_PID_FILE = DEFAULT_DB_PATH.parent / f".pid-{PID_KEY}"
 
 
-def main():
+def run(
+    *,
+    db: Path = DEFAULT_DB_PATH,
+    projects_dir: Path = DEFAULT_PROJECTS_DIR,
+    project: str | None = None,
+    search: str | None = None,
+    limit: int = 20,
+    stats: bool = False,
+) -> None:
+    """Import (or search) Claude Code conversations into the memory DB."""
     try:
-        _main()
+        _run(db=db, projects_dir=projects_dir, project=project, search=search, limit=limit, stats=stats)
     finally:
         # Delete PID file so _spawn_background can spawn again next session
         with contextlib.suppress(OSError):
             _PID_FILE.unlink(missing_ok=True)
 
 
-def _main():
-    parser = argparse.ArgumentParser(description="Import Claude Code conversations into SQLite")
-    parser.add_argument(
-        "--db",
-        type=Path,
-        default=DEFAULT_DB_PATH,
-        help=f"Database path (default: {DEFAULT_DB_PATH})",
-    )
-    parser.add_argument(
-        "--projects-dir",
-        type=Path,
-        default=DEFAULT_PROJECTS_DIR,
-        help=f"Projects directory (default: {DEFAULT_PROJECTS_DIR})",
-    )
-    parser.add_argument("--project", type=str, help="Import only specific project (by directory name)")
-    parser.add_argument("--search", type=str, help="Search conversations instead of importing")
-    parser.add_argument("--limit", type=int, default=20, help="Search result limit")
-    parser.add_argument("--stats", action="store_true", help="Show database statistics")
-
-    args = parser.parse_args()
-
+def _run(
+    *,
+    db: Path,
+    projects_dir: Path,
+    project: str | None,
+    search: str | None,
+    limit: int,
+    stats: bool,
+) -> None:
     settings = load_settings()
     logger = setup_logging(settings)
 
-    if args.db != DEFAULT_DB_PATH:
-        settings["db_path"] = str(args.db)
+    if db != DEFAULT_DB_PATH:
+        settings["db_path"] = str(db)
     db_path = get_db_path(settings)
     exclude_projects = settings.get("exclude_projects", [])
 
     # Use get_db_connection which handles migration
     conn = get_db_connection(settings, load_vec=True)
 
-    if args.stats:
+    if stats:
         cursor = conn.cursor()
         cursor.execute("SELECT COUNT(*) FROM projects")
         projects = cursor.fetchone()[0]
@@ -230,9 +228,9 @@ def _main():
         print(f"Messages: {messages}")
         return
 
-    if args.search:
+    if search:
         cursor = conn.cursor()
-        terms = args.search.split()
+        terms = search.split()
         fts_level = detect_fts_support(conn)
 
         if fts_level in ("fts5", "fts4"):
@@ -273,15 +271,15 @@ def _main():
                 """
             params: list = [fts_query]
 
-            if args.project:
+            if project:
                 sql += " AND p.name LIKE ?"
-                params.append(f"%{args.project}%")
+                params.append(f"%{project}%")
 
             if fts_level == "fts5":
                 sql += " ORDER BY rank LIMIT ?"
             else:
                 sql += " ORDER BY m.timestamp DESC LIMIT ?"
-            params.append(args.limit)
+            params.append(limit)
 
         else:
             # LIKE fallback
@@ -300,12 +298,12 @@ def _main():
             """
             params = [f"%{term}%" for term in terms]
 
-            if args.project:
+            if project:
                 sql += " AND p.name LIKE ?"
-                params.append(f"%{args.project}%")
+                params.append(f"%{project}%")
 
             sql += " ORDER BY m.timestamp DESC LIMIT ?"
-            params.append(args.limit)
+            params.append(limit)
 
         cursor.execute(sql, params)
 
@@ -327,8 +325,8 @@ def _main():
     total_messages = 0
     total_skipped = 0
 
-    if args.project:
-        project_dir = args.projects_dir / args.project
+    if project:
+        project_dir = projects_dir / project
         if not project_dir.exists():
             print(f"Project not found: {project_dir}")
             return
@@ -338,9 +336,9 @@ def _main():
         total_sessions += sessions
         total_messages += messages
         total_skipped += skipped
-        print(f"Imported {args.project}: {sessions} branches, {messages} messages")
+        print(f"Imported {project}: {sessions} branches, {messages} messages")
     else:
-        for project_dir in args.projects_dir.iterdir():
+        for project_dir in projects_dir.iterdir():
             if not project_dir.is_dir() or project_dir.name.startswith("."):
                 continue
 
@@ -361,7 +359,3 @@ def _main():
     if db_path.exists():
         db_size = db_path.stat().st_size
         print(f"Database size: {db_size / 1024 / 1024:.2f} MB")
-
-
-if __name__ == "__main__":
-    main()
