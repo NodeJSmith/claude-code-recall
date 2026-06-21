@@ -2,7 +2,6 @@
 
 import json
 import os
-import sys
 from pathlib import Path
 
 import pytest
@@ -19,13 +18,12 @@ def _patch_config_path(monkeypatch, path: Path) -> None:
 
 
 def _run_main(args=None):
-    """Call write_config.main() with sys.argv set to args."""
-    original_argv = sys.argv[:]
-    sys.argv = ["write_config.py"] + (args or [])
-    try:
-        write_config.main()
-    finally:
-        sys.argv = original_argv
+    """Call write_config.run(), translating the former cm-write-config CLI args."""
+    args = args or []
+    auto_inject_context = None
+    if "--auto-inject-context" in args:
+        auto_inject_context = args[args.index("--auto-inject-context") + 1] == "true"
+    write_config.run(defaults="--defaults" in args, auto_inject_context=auto_inject_context)
 
 
 # Tests

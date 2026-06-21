@@ -22,6 +22,7 @@ from ccrecall.hooks import backfill_embeddings as backfill_embeddings_mod
 from ccrecall.hooks import backfill_summaries as backfill_summaries_mod
 from ccrecall.hooks import import_conversations as import_mod
 from ccrecall.hooks import sync_current as sync_current_mod
+from ccrecall.hooks import write_config as write_config_mod
 
 # store_true flags carry no --no-<flag> negation, matching the former argparse.
 _FLAG = Parameter(negative=[])
@@ -177,3 +178,15 @@ def cmd_tail(
 def cmd_tokens() -> None:
     """Ingest token data, refresh the dashboard, and print a slim summary."""
     token_dashboard_mod.run()
+
+
+@app.command(name="write-config")
+def cmd_write_config(
+    *,
+    defaults: Annotated[bool, _FLAG, Parameter(help="Write recommended defaults without explicit flags.")] = False,
+    auto_inject_context: Annotated[
+        bool | None, Parameter(name=["--auto-inject-context"], help="Enable session context injection on startup.")
+    ] = None,
+) -> None:
+    """Write or update the ccrecall config from onboarding choices."""
+    write_config_mod.run(defaults=defaults, auto_inject_context=auto_inject_context)

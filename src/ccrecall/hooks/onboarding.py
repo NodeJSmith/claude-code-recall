@@ -36,17 +36,17 @@ Flat branches — handle the user's reply to the notice:
 
 1. Session context injection (auto-recall last session on startup): Yes / No
 
-Then run cm-write-config with chosen values:
+Then run `ccrecall write-config` with the chosen value (pass
+`--auto-inject-context` to enable, `--no-auto-inject-context` to disable):
 ```
-cm-write-config \\
-  --auto-inject-context <true|false>
+ccrecall write-config --auto-inject-context
 ```
 Confirm: preferences saved, features activate next session.
 
 **Explicit defaults** — only when the user specifically says "defaults", \
 "just use defaults", or "skip the walkthrough". Run via Bash:
 ```
-cm-write-config --defaults
+ccrecall write-config --defaults
 ```
 Confirm briefly: setup complete, features activate next session.
 

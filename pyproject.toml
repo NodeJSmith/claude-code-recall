@@ -38,8 +38,6 @@ cm-memory-sync           = "ccrecall.hooks.memory_sync:main"
 cm-memory-context        = "ccrecall.hooks.memory_context:main"
 cm-onboarding            = "ccrecall.hooks.onboarding:main"
 cm-clear-handoff         = "ccrecall.hooks.clear_handoff:main"
-# Internal helpers (called as subprocesses by hooks above)
-cm-write-config          = "ccrecall.hooks.write_config:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
