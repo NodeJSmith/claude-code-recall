@@ -13,9 +13,16 @@ import sqlite3
 from ccrecall.formatting import format_time, format_time_full
 from ccrecall.serialization import decode_json_field
 
+# Schema version stamped on each generated summary. Bumped when the JSON shape
+# or extraction logic changes so the backfill path can detect stale summaries.
+SUMMARY_VERSION = 3
+
 # Truncation limits
 _FRONT_CHARS = 300
 _BACK_CHARS = 600
+# Extra slack before mid-truncation kicks in: text within front+back+this margin
+# is short enough to keep whole rather than insert a "[... truncated ...]" marker.
+_TRUNCATE_MARGIN = 20
 
 # Exchange retention: a session at or below the short threshold renders all its
 # exchanges once; a longer one keeps the first FIRST_EXCHANGES + last
@@ -37,6 +44,18 @@ _MAX_TOOLS_SHOWN = 8
 # Compact file-basename previews (gap summary and footer).
 _MAX_FILE_PREVIEW = 3
 
+# Session disposition values stamped into the summary JSON.
+DISPOSITION_COMPLETED = "COMPLETED"
+DISPOSITION_IN_PROGRESS = "IN_PROGRESS"
+DISPOSITION_ABANDONED = "ABANDONED"
+
+# A trailing user message at or below this length counts as a brief sign-off
+# (not a substantive new turn) when classifying disposition.
+_SHORT_USER_REPLY_MAX_CHARS = 30
+# An ABANDONED classification requires more than this many exchanges — a session
+# with fewer that lacks a final user reply is normal, not abandoned.
+_ABANDONED_MIN_EXCHANGES = 2
+
 # Session disposition patterns
 _COMPLETION_RE = re.compile(
     r"(?:done|pushed|merged|all (?:tests? )?pass|completed|finished|shipped|deployed|"
@@ -52,7 +71,7 @@ _NEW_INSTRUCTION_RE = re.compile(r"^(?:now |next |also |can you |let\'?s |please
 
 def truncate_mid(text: str, front: int = _FRONT_CHARS, back: int = _BACK_CHARS) -> str:
     """Mid-truncate text, keeping front and back portions."""
-    if not text or len(text) <= front + back + 20:
+    if not text or len(text) <= front + back + _TRUNCATE_MARGIN:
         return text
     return text[:front] + "\n[... truncated ...]\n" + text[-back:]
 
@@ -69,10 +88,10 @@ def detect_disposition(exchanges: list[dict], commits: list[str] | None = None) 
     """
     # Non-empty commits list is a strong COMPLETED signal — a commit was made
     if commits:
-        return "COMPLETED"
+        return DISPOSITION_COMPLETED
 
     if not exchanges:
-        return "ABANDONED"
+        return DISPOSITION_ABANDONED
 
     last = exchanges[-1]
     last_user = last.get("user", "").strip()
@@ -80,26 +99,26 @@ def detect_disposition(exchanges: list[dict], commits: list[str] | None = None) 
 
     # If user's last message is a new instruction, work is in progress
     if _NEW_INSTRUCTION_RE.search(last_user):
-        return "IN_PROGRESS"
+        return DISPOSITION_IN_PROGRESS
 
     # If assistant used completion language and user confirmed briefly
     if _COMPLETION_RE.search(last_asst) and _SHORT_CONFIRM_RE.match(last_user):
-        return "COMPLETED"
+        return DISPOSITION_COMPLETED
 
     # If assistant used completion language (even without user confirm — session may have ended)
-    if _COMPLETION_RE.search(last_asst) and len(last_user) < 30:
-        return "COMPLETED"
+    if _COMPLETION_RE.search(last_asst) and len(last_user) < _SHORT_USER_REPLY_MAX_CHARS:
+        return DISPOSITION_COMPLETED
 
     # If user confirmed briefly (likely accepting the work)
     if _SHORT_CONFIRM_RE.match(last_user):
-        return "COMPLETED"
+        return DISPOSITION_COMPLETED
 
-    # ABANDONED: assistant responded but no subsequent user message, and session
-    # has more than 2 exchanges (short sessions without a reply are normal)
-    if last_asst and not last_user and len(exchanges) > 2:
-        return "ABANDONED"
+    # ABANDONED: assistant responded but no subsequent user message, and the session
+    # has more than _ABANDONED_MIN_EXCHANGES (short sessions without a reply are normal)
+    if last_asst and not last_user and len(exchanges) > _ABANDONED_MIN_EXCHANGES:
+        return DISPOSITION_ABANDONED
 
-    return "IN_PROGRESS"
+    return DISPOSITION_IN_PROGRESS
 
 
 def build_exchange_pairs(messages: list[dict]) -> list[dict]:
@@ -143,9 +162,6 @@ def build_exchange_pairs(messages: list[dict]) -> list[dict]:
         )
 
     return exchanges
-
-
-SUMMARY_VERSION = 3
 
 
 def build_context_summary_json(branch_row: dict, messages: list[dict]) -> dict:

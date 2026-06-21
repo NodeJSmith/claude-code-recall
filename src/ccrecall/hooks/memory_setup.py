@@ -25,6 +25,9 @@ from ccrecall.summarizer import SUMMARY_VERSION
 # Stale sync temp files older than this (seconds) are reaped on SessionStart.
 STALE_TEMP_FILE_MAX_AGE_SECONDS = 3600
 
+# PID-file permissions: owner read/write only.
+PID_FILE_MODE = 0o600
+
 
 def _spawn_background(argv: list[str], pid_key: str) -> None:
     """Spawn an installed entry point as a detached background process.
@@ -42,7 +45,7 @@ def _spawn_background(argv: list[str], pid_key: str) -> None:
     while True:
         try:
             # Atomic create — fails with FileExistsError if file already exists
-            fd = os.open(str(pid_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            fd = os.open(str(pid_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, PID_FILE_MODE)
         except FileExistsError:  # noqa: PERF203 — the try/except IS the retry mechanism for atomic PID-file creation
             # File exists — check if the owning process is alive
             try:
