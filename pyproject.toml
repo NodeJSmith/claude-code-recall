@@ -24,9 +24,14 @@ dependencies = [
     # Pin pydantic exactly so its native (Rust) pydantic-core dep resolves to a
     # known ABI — same rationale as the native wheels above.
     "pydantic==2.13.4",
+    "cyclopts>=4.16",
 ]
 
 [project.scripts]
+# Unified CLI — single entry point. Subcommands replace the former skill-facing
+# and helper cm-* tools. The hook entry points below keep their cm-* names for
+# now (folded into `ccrecall hook ...` in a later phase).
+ccrecall                 = "ccrecall.cli:app"
 # Hook entry points (wired in settings.json)
 cm-memory-setup          = "ccrecall.hooks.memory_setup:main"
 cm-memory-sync           = "ccrecall.hooks.memory_sync:main"
