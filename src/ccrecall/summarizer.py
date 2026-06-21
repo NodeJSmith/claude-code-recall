@@ -11,6 +11,7 @@ import re
 import sqlite3
 
 from ccrecall.formatting import format_time, format_time_full
+from ccrecall.serialization import decode_json_field
 
 # Truncation limits
 _FRONT_CHARS = 300
@@ -151,27 +152,10 @@ def build_context_summary_json(branch_row: dict, messages: list[dict]) -> dict:
     if len(topic) > 120:
         topic = topic[:120] + "..."
 
-    # Parse JSON fields from branch_row
-    files = branch_row.get("files_modified") or "[]"
-    if isinstance(files, str):
-        try:
-            files = json.loads(files)
-        except (json.JSONDecodeError, TypeError):
-            files = []
-
-    commits = branch_row.get("commits") or "[]"
-    if isinstance(commits, str):
-        try:
-            commits = json.loads(commits)
-        except (json.JSONDecodeError, TypeError):
-            commits = []
-
-    tool_counts = branch_row.get("tool_counts") or "{}"
-    if isinstance(tool_counts, str):
-        try:
-            tool_counts = json.loads(tool_counts)
-        except (json.JSONDecodeError, TypeError):
-            tool_counts = {}
+    # Parse JSON fields from branch_row (raw column strings or already decoded)
+    files = decode_json_field(branch_row.get("files_modified"), [])
+    commits = decode_json_field(branch_row.get("commits"), [])
+    tool_counts = decode_json_field(branch_row.get("tool_counts"), {})
 
     disposition = detect_disposition(exchanges, commits=commits)
 

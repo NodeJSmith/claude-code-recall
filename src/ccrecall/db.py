@@ -14,7 +14,7 @@ import sqlite_vec
 
 from ccrecall.content import parse_origin
 from ccrecall.embeddings import EMBEDDING_DIM, EMBEDDING_MODEL, EMBEDDING_VERSION
-from ccrecall.parsing import build_aggregated_content
+from ccrecall.parsing import build_aggregated_content, extract_session_uuid
 from ccrecall.summarizer import truncate_mid
 
 # Default paths
@@ -655,14 +655,10 @@ def _backfill_origin(conn: sqlite3.Connection, cursor: sqlite3.Cursor) -> None:
         return
 
     # Build file_path -> session mapping from import_log + sessions
-    # The file stem (minus .jsonl and optional agent- prefix) is the session uuid
     file_session_map = {}
     all_import_rows = cursor.execute("SELECT file_path FROM import_log").fetchall()
     for (file_path,) in all_import_rows:
-        p = Path(file_path)
-        stem = p.stem
-        if stem.startswith("agent-"):
-            stem = stem[6:]
+        stem = extract_session_uuid(Path(file_path))
         row = cursor.execute("SELECT id FROM sessions WHERE uuid = ?", (stem,)).fetchone()
         if row:
             file_session_map[file_path] = row[0]

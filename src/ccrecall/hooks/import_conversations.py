@@ -26,6 +26,7 @@ from ccrecall.db import (
     setup_logging,
 )
 from ccrecall.formatting import extract_project_name, normalize_project_key
+from ccrecall.parsing import extract_session_uuid
 from ccrecall.project_ops import upsert_project
 from ccrecall.session_ops import sync_session
 
@@ -79,9 +80,7 @@ def import_session(
         return -1, 0
 
     # Gather branch and message counts for the return value
-    session_uuid = filepath.stem
-    if session_uuid.startswith("agent-"):
-        session_uuid = session_uuid[6:]
+    session_uuid = extract_session_uuid(filepath)
 
     cursor.execute("SELECT id FROM sessions WHERE uuid = ?", (session_uuid,))
     row = cursor.fetchone()

@@ -35,6 +35,7 @@ from ccrecall.parsing import (
     build_aggregated_content,
     compute_branch_metadata,
     extract_session_metadata,
+    extract_session_uuid,
     find_all_branches,
     parse_all_with_uuids,
     parse_jsonl_file,
@@ -112,10 +113,7 @@ def sync_session(
     # Extract session-level metadata
     meta = extract_session_metadata(all_entries)
 
-    # Session UUID
-    session_uuid = filepath.stem
-    if session_uuid.startswith("agent-"):
-        session_uuid = session_uuid[6:]
+    session_uuid = extract_session_uuid(filepath)
 
     # Project upsert (skip when caller pre-resolved project_id)
     if _project_id is not None:

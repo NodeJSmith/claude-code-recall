@@ -38,6 +38,7 @@ from ccrecall.formatting import (
     normalize_cwd,
 )
 from ccrecall.models import HookInput
+from ccrecall.serialization import decode_json_column
 from ccrecall.session_tail import (
     find_pending_question,
     format_pending_block,
@@ -91,8 +92,8 @@ def _row_to_entry(row) -> dict:
         "started_at": started_at,
         "ended_at": ended_at,
         "exchange_count": exchange_count,
-        "files_modified": json.loads(files_json) if files_json else [],
-        "commits": json.loads(commits_json) if commits_json else [],
+        "files_modified": decode_json_column(files_json, []),
+        "commits": decode_json_column(commits_json, []),
         "git_branch": git_branch,
         "branch_db_id": branch_db_id,
         "context_summary": context_summary,

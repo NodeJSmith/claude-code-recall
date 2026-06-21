@@ -33,6 +33,7 @@ from ccrecall.content import (
 from ccrecall.db import DEFAULT_PROJECTS_DIR
 from ccrecall.parsing import (
     extract_session_metadata,
+    extract_session_uuid,
     parse_all_with_uuids,
     parse_lines_with_uuids,
 )
@@ -290,8 +291,10 @@ def emit(path: Path, k: int) -> int:
         print(f"cm-session-tail: transcript is empty: {path}", file=sys.stderr)
         return 1
     meta = extract_session_metadata(entries)
-    # sessionId is Any (untyped JSON) and the path.stem fallback is str; str() narrows for the type checker.
-    sid = str(next((e.get("sessionId") for e in entries if e.get("sessionId")), path.stem))
+    # Prefer an entry's sessionId; fall back to the filename UUID (agent- prefix
+    # stripped so it matches the session record). sessionId is Any (untyped JSON)
+    # and the fallback is str, so str() narrows for the type checker.
+    sid = str(next((e.get("sessionId") for e in entries if e.get("sessionId")), extract_session_uuid(path)))
 
     print(f"RESUME — prior session {sid[:8]}")
     print(f"  transcript:  {path}")
