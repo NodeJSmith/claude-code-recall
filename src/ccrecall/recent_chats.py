@@ -33,7 +33,7 @@ def get_recent_sessions(
     """Get n most recent sessions with all their messages."""
     cursor = conn.cursor()
 
-    # Check if tool_counts column exists (may not on pre-migration DBs)
+    # Check if tool_counts column exists (absent on DBs created before it was added to SCHEMA_CORE)
     cursor.execute("PRAGMA table_info(branches)")
     branch_columns = {row[1] for row in cursor.fetchall()}
     has_tool_counts = "tool_counts" in branch_columns

@@ -72,15 +72,11 @@ def _spawn_background(argv: list[str], pid_key: str) -> None:
         os.close(fd)
 
 
-def _ensure_schema(settings: dict | None = None) -> None:
-    """Open DB connection to trigger migrate_columns (creates token_snapshots if missing)."""
-    with contextlib.suppress(sqlite3.Error, OSError):
-        conn = get_db_connection(settings)
-        conn.close()
-
-
 def _needs_reimport(settings: dict | None = None) -> bool:
-    """Check if any import_log entries have NULL file_hash (set by v3 migration for channel sessions)."""
+    """Check if any import_log entries have NULL file_hash.
+
+    NULL file_hash is written by the normal sync path when file_hash is unavailable.
+    """
     try:
         conn = get_db_connection(settings)
         cursor = conn.cursor()
@@ -141,7 +137,6 @@ def main():
         if not DEFAULT_DB_PATH.exists():
             _spawn_background(["ccrecall", "import"], import_conversations.PID_KEY)
         else:
-            _ensure_schema(settings)
             if _needs_reimport(settings):
                 _spawn_background(["ccrecall", "import"], import_conversations.PID_KEY)
 

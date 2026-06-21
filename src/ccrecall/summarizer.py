@@ -385,8 +385,8 @@ def compute_context_summary(cursor: sqlite3.Cursor, branch_db_id: int) -> tuple[
     }
 
     # Fetch messages for this branch. Standalone (not db.fetch_branch_messages):
-    # summarizer sits below db in the import graph (db -> migrations -> summarizer),
-    # so it can't import db; this query also needs only the 3 non-notification columns.
+    # summarizer sits below db in the import graph, so it can't import db;
+    # this query also needs only the 3 non-notification columns.
     cursor.execute(
         """
         SELECT m.role, m.content, m.timestamp

@@ -1,7 +1,7 @@
 ---
 task_id: "T04"
 title: "Delete migrations.py and remove its production consumers"
-status: "planned"
+status: "done"
 depends_on: ["T03"]
 implements: ["FR#1", "FR#3", "FR#4", "FR#5", "FR#6", "AC#3", "AC#4", "AC#5", "AC#6"]
 ---

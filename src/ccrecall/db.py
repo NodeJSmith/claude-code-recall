@@ -1,6 +1,6 @@
 """Database connection, config/settings, vec (embedding) operations, and logging.
 
-Schema constants live in ccrecall.schema; migrations in ccrecall.migrations.
+Schema constants live in ccrecall.schema.
 """
 
 import contextlib
@@ -13,7 +13,6 @@ from pathlib import Path
 import sqlite_vec
 
 from ccrecall.embeddings import EMBEDDING_DIM, EMBEDDING_MODEL, EMBEDDING_VERSION
-from ccrecall.migrations import migrate_columns, migrate_db
 from ccrecall.models import BUSY_TIMEOUT_MS, LOGGER_NAME
 from ccrecall.schema import SCHEMA_CORE, SCHEMA_FTS4, SCHEMA_FTS5, detect_fts_support
 
@@ -239,7 +238,7 @@ def get_db_path(settings: dict | None = None) -> Path:
 
 
 def get_db_connection(settings: dict | None = None, load_vec: bool = False) -> sqlite3.Connection:
-    """Get database connection, initializing schema and running migrations if needed.
+    """Get database connection, initializing the schema on first use (idempotent).
 
     Uses the settings-based db_path when provided and applies the base pragmas for
     concurrent-safe access. When ``load_vec`` is True, loads the sqlite-vec extension
@@ -253,25 +252,14 @@ def get_db_connection(settings: dict | None = None, load_vec: bool = False) -> s
     conn = sqlite3.connect(db_path)
     apply_base_pragmas(conn)
 
-    # Check if migration needed (old schema -> v3)
-    migrated = migrate_db(conn)
-    if migrated:
-        # Connection was closed during migration, reconnect
-        conn = sqlite3.connect(db_path)
-        apply_base_pragmas(conn)
-
-    if not migrated:
-        # Apply schema (handles fresh databases, idempotent)
-        fts = detect_fts_support(conn)
-        conn.executescript(SCHEMA_CORE)
-        if fts == "fts5":
-            conn.executescript(SCHEMA_FTS5)
-        elif fts == "fts4":
-            conn.executescript(SCHEMA_FTS4)
-        conn.commit()
-
-    # Add any missing columns and run versioned data migrations (v1-v6).
-    migrate_columns(conn)
+    # Apply schema (handles fresh databases and existing ones idempotently).
+    fts = detect_fts_support(conn)
+    conn.executescript(SCHEMA_CORE)
+    if fts == "fts5":
+        conn.executescript(SCHEMA_FTS5)
+    elif fts == "fts4":
+        conn.executescript(SCHEMA_FTS4)
+    conn.commit()
 
     if load_vec and vec_available(conn):
         # First and only place the vec extension is loaded for this connection.

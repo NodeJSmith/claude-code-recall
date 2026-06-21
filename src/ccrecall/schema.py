@@ -49,7 +49,7 @@ CREATE TABLE IF NOT EXISTS branches (
   context_summary TEXT,
   context_summary_json TEXT,
   summary_version INTEGER DEFAULT 0,
-  -- lifted from migrate_columns, kept in ALTER-append order (trailing):
+  -- kept in ALTER-append order (trailing) to preserve SELECT * and positional access:
   embedding_version INTEGER DEFAULT 0,
   embedding_model TEXT,
   summary_version_at_embed INTEGER,

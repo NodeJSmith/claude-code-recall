@@ -234,8 +234,8 @@ def _run(
     total_messages = 0
     total_skipped = 0
 
-    # get_db_connection handles migration; closing() releases the connection on
-    # every exit path (missing-project, normal completion).
+    # get_db_connection applies the schema on open; closing() releases the connection
+    # on every exit path (missing-project, normal completion).
     with contextlib.closing(get_db_connection(settings, load_vec=True)) as conn:
         if project:
             project_dir = projects_dir / project
