@@ -31,7 +31,7 @@ Read `design/specs/002-db-write-path-refactor/design.md` (especially `## Test St
 - The DDL adds (messages: `tool_summary`/`is_notification`/`origin`; branches columns + indexes; `token_snapshots` table + `data_source`).
 - Note (do NOT add behavior): the v4 gate calls `_backup_db_before_migration` and **discards** its return — if you pin v4, the DML must run regardless of backup outcome. Do not assert a guard that doesn't exist.
 
-Do **not** add the `foreign_keys=ON` assertion here — that pins NEW behavior introduced in T02 and would fail on current code. It belongs in T02.
+Do **not** add any `foreign_keys` assertion (here or anywhere) — T02's recreate-path `foreign_keys=ON` is non-observable (connection closed after DDL, pragma connection-scoped), so there is nothing to assert; the design names this as an observability gap. `TestMigrateDb`'s boolean/decision matrix is the migrate_db pin and stays unchanged.
 
 **Add a `sync_session` DB-state pin** to `tests/test_session_ops.py` only where the existing tests leave a write path unasserted. Concretely, pin the exact `import_log` row outcome on the NULL-hash-stale path (a stored NULL `file_hash` with a provided `file_hash` is treated as stale and re-processed → row updated, not a `-1` skip) and the exact `-1`-return on an exact non-NULL hash match. Reuse the `memory_db` fixture and `fixtures/*.jsonl`.
 
