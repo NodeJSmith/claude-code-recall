@@ -17,6 +17,26 @@ from ccrecall.serialization import decode_json_field
 _FRONT_CHARS = 300
 _BACK_CHARS = 600
 
+# Exchange retention: a session at or below the short threshold renders all its
+# exchanges once; a longer one keeps the first FIRST_EXCHANGES + last
+# LAST_EXCHANGES with a gap marker between. The threshold is their sum, so the
+# split never drops a middle exchange that both ends already cover.
+FIRST_EXCHANGES = 2
+LAST_EXCHANGES = 6
+SHORT_SESSION_MAX_EXCHANGES = FIRST_EXCHANGES + LAST_EXCHANGES
+
+# Topic truncation lengths: the full topic stored in JSON vs. the shorter form
+# used in the recall-priming footer.
+_TOPIC_MAX_CHARS = 120
+_TOPIC_FOOTER_MAX_CHARS = 80
+
+# Metadata display caps in the rendered markdown.
+_MAX_FILES_SHOWN = 6
+_MAX_COMMITS_SHOWN = 3
+_MAX_TOOLS_SHOWN = 8
+# Compact file-basename previews (gap summary and footer).
+_MAX_FILE_PREVIEW = 3
+
 # Session disposition patterns
 _COMPLETION_RE = re.compile(
     r"(?:done|pushed|merged|all (?:tests? )?pass|completed|finished|shipped|deployed|"
@@ -83,11 +103,10 @@ def detect_disposition(exchanges: list[dict], commits: list[str] | None = None) 
 
 
 def build_exchange_pairs(messages: list[dict]) -> list[dict]:
-    """
-    Build exchange pairs from sequential messages.
+    """Pair sequential messages into user/assistant exchanges.
 
-    Each message is {"role": str, "content": str, "timestamp": str}.
-    Returns list of {"user": str, "assistant": str, "timestamp": str, "index": int}.
+    All assistant parts following a user message accumulate into that exchange's
+    single ``assistant`` string (joined with blank lines) until the next user turn.
     """
     exchanges = []
     current_user = None
@@ -149,8 +168,8 @@ def build_context_summary_json(branch_row: dict, messages: list[dict]) -> dict:
 
     # Topic from first user message
     topic = exchanges[0]["user"]
-    if len(topic) > 120:
-        topic = topic[:120] + "..."
+    if len(topic) > _TOPIC_MAX_CHARS:
+        topic = topic[:_TOPIC_MAX_CHARS] + "..."
 
     # Parse JSON fields from branch_row (raw column strings or already decoded)
     files = decode_json_field(branch_row.get("files_modified"), [])
@@ -159,18 +178,18 @@ def build_context_summary_json(branch_row: dict, messages: list[dict]) -> dict:
 
     disposition = detect_disposition(exchanges, commits=commits)
 
-    # First exchanges (up to 2) — truncate exchange text to bound JSON size
+    # First exchanges — truncate exchange text to bound JSON size
     first_exchanges = [
         {
             "user": truncate_mid(ex["user"]),
             "assistant": truncate_mid(ex["assistant"]),
             "timestamp": ex["timestamp"],
         }
-        for ex in exchanges[:2]
+        for ex in exchanges[:FIRST_EXCHANGES]
     ]
 
-    # Last exchanges (up to 6) — truncate exchange text to bound JSON size
-    if len(exchanges) <= 8:
+    # Last exchanges — truncate exchange text to bound JSON size
+    if len(exchanges) <= SHORT_SESSION_MAX_EXCHANGES:
         # Short/medium session: all exchanges go into last_exchanges
         last_exchanges = [
             {
@@ -181,14 +200,13 @@ def build_context_summary_json(branch_row: dict, messages: list[dict]) -> dict:
             for ex in exchanges
         ]
     else:
-        # Take last 6 exchanges
         last_exchanges = [
             {
                 "user": truncate_mid(ex["user"]),
                 "assistant": truncate_mid(ex["assistant"]),
                 "timestamp": ex["timestamp"],
             }
-            for ex in exchanges[-6:]
+            for ex in exchanges[-LAST_EXCHANGES:]
         ]
 
     return {
@@ -213,9 +231,22 @@ def _build_gap_summary(summary_json: dict) -> str:
     """Build a one-line summary of what happened in the omitted middle exchanges."""
     files = summary_json.get("metadata", {}).get("files_modified", [])
     if files:
-        short = [f.rsplit("/", 1)[-1] for f in files[:3]]
+        short = [f.rsplit("/", 1)[-1] for f in files[:_MAX_FILE_PREVIEW]]
         return ", ".join(short)
     return ""
+
+
+def render_exchange_block(exchanges: list[dict], lines: list[str]) -> None:
+    """Append the User/Assistant markdown for each exchange to ``lines``."""
+    for ex in exchanges:
+        t = format_time(ex.get("timestamp"))
+        lines.append(f"**[{t}] User:**")
+        lines.append(ex["user"])
+        lines.append("")
+        if ex["assistant"]:
+            lines.append(f"**[{t}] Assistant:**")
+            lines.append(truncate_mid(ex["assistant"]))
+            lines.append("")
 
 
 def render_context_summary(summary_json: dict) -> str:
@@ -255,20 +286,20 @@ def render_context_summary(summary_json: dict) -> str:
     # Metadata: files, commits, tools
     files = meta.get("files_modified", [])
     if files:
-        file_strs = [f"`{f}`" for f in files[:6]]
+        file_strs = [f"`{f}`" for f in files[:_MAX_FILES_SHOWN]]
         line = "Modified: " + ", ".join(file_strs)
-        if len(files) > 6:
-            line += f" +{len(files) - 6} more"
+        if len(files) > _MAX_FILES_SHOWN:
+            line += f" +{len(files) - _MAX_FILES_SHOWN} more"
         lines.append(line)
 
     commits = meta.get("commits", [])
     if commits:
-        commit_strs = commits[:3]
+        commit_strs = commits[:_MAX_COMMITS_SHOWN]
         lines.append("Commits: " + "; ".join(commit_strs))
 
     tool_counts = meta.get("tool_counts", {})
     if tool_counts:
-        sorted_tools = sorted(tool_counts.items(), key=lambda x: x[1], reverse=True)[:8]
+        sorted_tools = sorted(tool_counts.items(), key=lambda x: x[1], reverse=True)[:_MAX_TOOLS_SHOWN]
         tools_str = ", ".join(f"{name}({count})" for name, count in sorted_tools)
         lines.append("Tools: " + tools_str)
 
@@ -279,31 +310,15 @@ def render_context_summary(summary_json: dict) -> str:
     first_exs = summary_json.get("first_exchanges", [])
     last_exs = summary_json.get("last_exchanges", [])
 
-    if exchange_count <= 8:
+    if exchange_count <= SHORT_SESSION_MAX_EXCHANGES:
         # Short/medium session: render all exchanges once
         lines.append("### Conversation\n")
-        for ex in last_exs:
-            t = format_time(ex.get("timestamp"))
-            lines.append(f"**[{t}] User:**")
-            lines.append(ex["user"])
-            lines.append("")
-            if ex["assistant"]:
-                lines.append(f"**[{t}] Assistant:**")
-                lines.append(truncate_mid(ex["assistant"]))
-                lines.append("")
+        render_exchange_block(last_exs, lines)
     else:
         # Where We Left Off first — most recent context at top, where attention is
         # highest and where inline-preview truncation (if any) clips from below.
         lines.append("### Where We Left Off\n")
-        for ex in last_exs:
-            t = format_time(ex.get("timestamp"))
-            lines.append(f"**[{t}] User:**")
-            lines.append(ex["user"])
-            lines.append("")
-            if ex["assistant"]:
-                lines.append(f"**[{t}] Assistant:**")
-                lines.append(truncate_mid(ex["assistant"]))
-                lines.append("")
+        render_exchange_block(last_exs, lines)
 
         # Gap indicator with summary of middle exchanges
         gap = exchange_count - len(first_exs) - len(last_exs)
@@ -317,25 +332,15 @@ def render_context_summary(summary_json: dict) -> str:
         # Earlier in This Session — first 2 exchanges kept for origin context,
         # placed last so they're the first thing clipped under truncation.
         lines.append("### Earlier in This Session\n")
-        for ex in first_exs:
-            t = format_time(ex.get("timestamp"))
-            lines.append(f"**[{t}] User:**")
-            lines.append(ex["user"])
-            lines.append("")
-            if ex["assistant"]:
-                lines.append(f"**[{t}] Assistant:**")
-                lines.append(truncate_mid(ex["assistant"]))
-                lines.append("")
+        render_exchange_block(first_exs, lines)
 
-    # Contextual recall priming footer
-    topic = summary_json.get("topic", "")
-    files = meta.get("files_modified", [])
+    # Contextual recall priming footer (topic and files reused from above)
     footer_parts = [f"{exchange_count} exchanges"]
     if topic:
-        short_topic = topic[:80] + "..." if len(topic) > 80 else topic
+        short_topic = topic[:_TOPIC_FOOTER_MAX_CHARS] + "..." if len(topic) > _TOPIC_FOOTER_MAX_CHARS else topic
         footer_parts.append(f'about "{short_topic}"')
     if files:
-        short_files = [f.rsplit("/", 1)[-1] for f in files[:3]]
+        short_files = [f.rsplit("/", 1)[-1] for f in files[:_MAX_FILE_PREVIEW]]
         footer_parts.append(f"({', '.join(short_files)})")
     footer = " ".join(footer_parts)
     lines.append(
@@ -379,7 +384,9 @@ def compute_context_summary(cursor: sqlite3.Cursor, branch_db_id: int) -> tuple[
         "git_branch": row[6],
     }
 
-    # Fetch messages for this branch
+    # Fetch messages for this branch. Standalone (not db.fetch_branch_messages):
+    # summarizer sits below db in the import graph (db -> migrations -> summarizer),
+    # so it can't import db; this query also needs only the 3 non-notification columns.
     cursor.execute(
         """
         SELECT m.role, m.content, m.timestamp

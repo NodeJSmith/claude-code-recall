@@ -23,9 +23,6 @@ from ccrecall.token_schema import connect_token_db, ensure_schema
 DASHBOARD_TEMPLATE_PATH = Path(__file__).parent / "templates" / "dashboard.html"
 
 
-# ── Dashboard Deploy ──────────────────────────────────────────────────
-
-
 def deploy_dashboard(json_str: str, dashboard_out_path: Path) -> None:
     try:
         html = DASHBOARD_TEMPLATE_PATH.read_text(encoding="utf-8")
@@ -39,9 +36,6 @@ def deploy_dashboard(json_str: str, dashboard_out_path: Path) -> None:
         print(f"Warning: could not deploy dashboard: {e}", file=sys.stderr)
 
 
-# ── Main ──────────────────────────────────────────────────────────────
-
-
 def run() -> None:
     """Ingest token data, refresh the dashboard, and print a slim summary to stdout."""
     db_path = get_db_path()
@@ -51,18 +45,15 @@ def run() -> None:
 
     ensure_schema(conn)
 
-    # Discover files
     files = discover_jsonl_files()
     print(f"Discovered {len(files)} JSONL files", file=sys.stderr)
 
-    # Filter to files needing import
     to_import = [f for f in files if not should_skip_file(conn, f.path)]
     print(
         f"Files to import: {len(to_import)} (skipping {len(files) - len(to_import)} unchanged)",
         file=sys.stderr,
     )
 
-    # Parse and import
     imported = 0
     errors = 0
     for i, jnl in enumerate(to_import):
@@ -88,7 +79,6 @@ def run() -> None:
     conn.commit()
     print(f"Imported {imported} sessions ({errors} errors)", file=sys.stderr)
 
-    # Backfill token_snapshots
     print("Backfilling token_snapshots...", file=sys.stderr)
     backfill_token_snapshots(conn)
 
@@ -96,7 +86,6 @@ def run() -> None:
     conn.execute("ANALYZE")
     conn.commit()
 
-    # Build output
     output = build_output(conn)
     conn.close()
 

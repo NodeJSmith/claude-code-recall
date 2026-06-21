@@ -28,35 +28,21 @@ def upsert_project(
     cwd: str | None = None,
     project_dir: Path | None = None,
 ) -> int:
-    """Upsert a project row and return its database ID.
+    """Upsert a project row and return its ``projects.id``.
 
-    Path derivation strategy:
-    - When ``cwd`` is provided (sync path), use it directly (after normalization).
-    - When ``project_dir`` is provided (import path), probe the first JSONL in that
-      directory for cwd metadata; fall back to lossy hyphen reconstruction if no
-      metadata is found.
-    - If neither is provided, fall back to lossy hyphen reconstruction from the key.
-
-    Args:
-        cursor: SQLite cursor for the current connection.
-        project_key: The encoded project directory name (e.g. ``-home-user-repo``).
-                     Worktree suffixes are stripped automatically.
-        cwd: Working directory from session metadata (sync path).
-        project_dir: Project directory to probe for JSONL metadata (import path).
-
-    Returns:
-        The ``projects.id`` of the upserted row.
+    ``project_key`` is the encoded project directory name (e.g. ``-home-user-repo``);
+    worktree suffixes are stripped automatically. The project path is derived by one
+    of three strategies, in order: a provided ``cwd`` (sync path) is used directly
+    after normalization; otherwise a provided ``project_dir`` (import path) is probed
+    for cwd metadata in its first JSONL; if neither yields a path, fall back to lossy
+    hyphen reconstruction from the key.
     """
     normalized_key = normalize_project_key(project_key)
 
-    # Determine raw path using the appropriate strategy
     raw_path: str | None = None
-
     if cwd is not None:
-        # Sync path: use cwd directly
         raw_path = cwd
     elif project_dir is not None:
-        # Import path: probe first JSONL for real cwd metadata
         raw_path = _probe_project_dir(project_dir)
 
     if not raw_path:
@@ -66,7 +52,6 @@ def upsert_project(
     project_path = normalize_cwd(raw_path)
     project_name = extract_project_name(project_path)
 
-    # Find existing project by key
     cursor.execute("SELECT id, path FROM projects WHERE key = ?", (normalized_key,))
     existing = cursor.fetchone()
 

@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""
-Load previous session context from memory database for SessionStart hook.
+"""Load previous session context from the memory database for the SessionStart hook.
 
 Selection Algorithm (startup):
   Exclude current session, find most recent substantive (>2 exchanges)
@@ -25,8 +24,8 @@ from pathlib import Path
 from pydantic import ValidationError
 from whenever import Instant
 
-# Add path to shared utils
 from ccrecall.db import (
+    CLEAR_HANDOFF_FILENAME,
     get_db_connection,
     get_db_path,
     load_config,
@@ -38,7 +37,7 @@ from ccrecall.formatting import (
     get_project_key,
     normalize_cwd,
 )
-from ccrecall.models import HookInput
+from ccrecall.models import LOGGER_NAME, HookInput
 from ccrecall.serialization import decode_json_column
 from ccrecall.session_tail import (
     find_pending_question,
@@ -50,6 +49,18 @@ from ccrecall.summarizer import (
     build_context_summary_json,
     render_context_summary,
 )
+
+# Reject a clear-handoff written more than this many seconds ago (stale guard).
+HANDOFF_STALE_SECONDS = 30
+# Uncached topic fallback truncates the first user message to this many chars.
+TOPIC_PREVIEW_MAX_CHARS = 120
+# Most recent prior branches scanned when picking sessions to inject.
+_CANDIDATE_LIMIT = 20
+
+
+def _emit_empty() -> None:
+    """Print the empty SessionStart response (inject no context)."""
+    print(json.dumps({}))
 
 
 def _pending_question_block(sessions: list[dict], cwd: str) -> str:
@@ -74,7 +85,7 @@ def _pending_question_block(sessions: list[dict], cwd: str) -> str:
         # Deliberately broad: this optional warning must never break the
         # SessionStart hook or drop the main context injection. Log best-effort
         # (no-op unless logging_enabled) so the failure isn't silently lost.
-        logging.getLogger("claude-memory").exception("pending-question block failed")
+        logging.getLogger(LOGGER_NAME).exception("pending-question block failed")
         return ""
 
 
@@ -105,7 +116,7 @@ def _row_to_entry(row) -> dict:
     }
 
 
-_CANDIDATE_QUERY = """
+_CANDIDATE_QUERY = f"""
     SELECT s.id, s.uuid, b.started_at, b.ended_at, b.exchange_count,
            b.files_modified, b.commits, s.git_branch, b.id as branch_db_id,
            b.context_summary
@@ -115,7 +126,7 @@ _CANDIDATE_QUERY = """
       AND s.uuid != ?
       AND s.parent_session_id IS NULL
     ORDER BY b.ended_at DESC
-    LIMIT 20
+    LIMIT {_CANDIDATE_LIMIT}
 """
 
 _SESSION_BY_UUID_QUERY = """
@@ -178,14 +189,13 @@ def _finalize(entries: list[dict]) -> list[dict]:
 
 
 def _find_cleared_from_session_uuid(db_path: Path, cwd: str) -> str | None:
-    """
-    Read and consume the clear-handoff.json file written by the SessionEnd hook.
+    """Read and consume the clear-handoff file written by the SessionEnd hook.
+
     Returns the previous session_id if valid (recent, same cwd), otherwise None.
     Deletes on: valid consumption, stale timestamp, corrupt JSON.
     Preserves on: cwd mismatch (another session may claim it).
     """
-
-    handoff_path = db_path.parent / "clear-handoff.json"
+    handoff_path = db_path.parent / CLEAR_HANDOFF_FILENAME
     if not handoff_path.exists():
         return None
     try:
@@ -204,13 +214,13 @@ def _find_cleared_from_session_uuid(db_path: Path, cwd: str) -> str | None:
     if not session_id or normalize_cwd(handoff_cwd or "") != normalize_cwd(cwd):
         return None
 
-    # Stale guard: reject handoffs older than 30 seconds
+    # Stale guard: reject handoffs older than HANDOFF_STALE_SECONDS
     if timestamp_str:
         try:
             written = Instant.parse_iso(timestamp_str)
             # TimeDelta.total() takes a unit string; this is age in seconds.
             age = (Instant.now() - written).total("seconds")
-            if age > 30:
+            if age > HANDOFF_STALE_SECONDS:
                 with contextlib.suppress(OSError):
                     handoff_path.unlink()
                 return None
@@ -225,6 +235,30 @@ def _find_cleared_from_session_uuid(db_path: Path, cwd: str) -> str | None:
         handoff_path.unlink()
 
     return session_id
+
+
+def _select_cleared_sessions(cursor, project_id: int, prev_session_uuid: str, max_sessions: int) -> list[dict] | None:
+    """Hard-link to the cleared-from session, plus an optional supplementary substantive one.
+
+    Returns the session list, or None to fall through to startup selection (session not
+    in the DB, or it had zero exchanges).
+    """
+    cursor.execute(_SESSION_BY_UUID_QUERY, (project_id, prev_session_uuid))
+    prev_row = cursor.fetchone()
+    if not prev_row:
+        return None
+
+    cleared_from = _row_to_entry(prev_row)
+    if cleared_from["exchange_count"] <= 0:
+        return None
+
+    filtered = [cleared_from]
+    # If cleared-from is not substantive, add the most recent substantive session.
+    if cleared_from["exchange_count"] <= 2 and max_sessions > 1:
+        supplementary = _find_first_substantive(cursor, project_id, prev_session_uuid)
+        if supplementary:
+            filtered.append(supplementary)
+    return filtered
 
 
 def select_sessions(
@@ -248,7 +282,6 @@ def select_sessions(
     """
     cursor = conn.cursor()
 
-    # Get project ID
     cursor.execute("SELECT id FROM projects WHERE key = ?", (project_key,))
     row = cursor.fetchone()
     if not row:
@@ -258,26 +291,11 @@ def select_sessions(
     # Clear path: hard-link via handoff file written by SessionEnd hook
     if source == "clear" and db_path is not None:
         prev_session_uuid = _find_cleared_from_session_uuid(db_path, cwd)
-
         if prev_session_uuid:
-            cursor.execute(_SESSION_BY_UUID_QUERY, (project_id, prev_session_uuid))
-            prev_row = cursor.fetchone()
-
-            if prev_row:
-                cleared_from = _row_to_entry(prev_row)
-
-                if cleared_from["exchange_count"] > 0:
-                    filtered = [cleared_from]
-
-                    # If cleared-from is not substantive, add supplementary
-                    if cleared_from["exchange_count"] <= 2 and max_sessions > 1:
-                        supplementary = _find_first_substantive(cursor, project_id, prev_session_uuid)
-                        if supplementary:
-                            filtered.append(supplementary)
-
-                    _load_messages_for(cursor, filtered)
-                    return _finalize(filtered)
-
+            cleared = _select_cleared_sessions(cursor, project_id, prev_session_uuid, max_sessions)
+            if cleared is not None:
+                _load_messages_for(cursor, cleared)
+                return _finalize(cleared)
         # Session not found in DB or no recent /clear — fall through to startup logic
 
     # Startup path (also fallback for clear with no handoff)
@@ -353,7 +371,7 @@ def _extract_topic(session: dict) -> str:
     for msg in session.get("messages", []):
         if msg.get("role") == "user":
             content = msg.get("content", "")
-            return (content[:120] + "...") if len(content) > 120 else content
+            return (content[:TOPIC_PREVIEW_MAX_CHARS] + "...") if len(content) > TOPIC_PREVIEW_MAX_CHARS else content
     return ""
 
 
@@ -413,11 +431,9 @@ def build_context(sessions: list[dict]) -> str:
 
 
 def main():
-    # Load settings
     settings = load_settings()
     logger = setup_logging(settings)
 
-    # Read hook input from stdin
     raw = sys.stdin.read()
     try:
         hook_input = HookInput.model_validate_json(raw) if raw else HookInput()
@@ -432,29 +448,27 @@ def main():
 
     # Only inject on fresh sessions
     if source not in ("startup", "clear"):
-        print(json.dumps({}))
+        _emit_empty()
         return
 
     # Gate: require onboarding to be completed before injecting context
     config = load_config()
     if not config.get("onboarding_completed"):
-        print(json.dumps({}))
+        _emit_empty()
         return
 
-    # Check if auto-inject is disabled
     if not settings.get("auto_inject_context", True):
         logger.info("Context injection disabled by settings")
-        print(json.dumps({}))
+        _emit_empty()
         return
 
     if not cwd or not session_id:
-        print(json.dumps({}))
+        _emit_empty()
         return
 
-    # Check if database exists
     db_path = get_db_path(settings)
     if not db_path.exists():
-        print(json.dumps({}))
+        _emit_empty()
         return
 
     try:
@@ -473,12 +487,12 @@ def main():
         conn.close()
 
         if not sessions:
-            print(json.dumps({}))
+            _emit_empty()
             return
 
         context = build_context(sessions)
         if not context:
-            print(json.dumps({}))
+            _emit_empty()
             return
 
         logger.info("Injecting context from %s session(s) for project %s", len(sessions), project_key)
@@ -517,7 +531,7 @@ def main():
     except Exception as e:
         logger.error("Context injection error: %s", e)
         # Don't block session start on errors
-        print(json.dumps({}))
+        _emit_empty()
         sys.exit(0)
 
 

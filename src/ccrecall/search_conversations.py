@@ -1,7 +1,4 @@
-#!/usr/bin/env python3
-"""
-Search conversations using full-text search with FTS5/FTS4/LIKE fallback,
-optionally fused with vector KNN via Reciprocal Rank Fusion.
+"""Search conversations with FTS5/FTS4/LIKE, optionally fused with vector KNN via RRF.
 
 Returns markdown by default (token-efficient), or JSON when output_format="json"
 (the CLI maps the global --json flag onto that argument).
@@ -15,12 +12,12 @@ from pathlib import Path
 import sqlite_vec
 
 from ccrecall.content import sanitize_fts_term
-
-# Local imports
 from ccrecall.db import (
     DEFAULT_DB_PATH,
     EMBEDDABLE_BRANCH_FILTER,
     branch_vec_queryable,
+    escape_like,
+    fetch_branch_messages,
     get_db_connection,
 )
 from ccrecall.embeddings import (
@@ -38,6 +35,11 @@ from ccrecall.serialization import decode_json_column
 # Upper bound on --max-results, single-sourced here and referenced by the CLI
 # validator (cli/commands.py) so the clamp and the validator can't drift apart.
 MAX_SEARCH_RESULTS = 10
+
+# Each ranker (FTS, vector KNN) is over-fetched before fusion + per-session dedup,
+# so the post-filter top-N still has enough candidates: top_k = max(N * mult, floor).
+OVERFETCH_MULTIPLIER = 4
+OVERFETCH_FLOOR = 20
 
 
 def _get_fts_branch_ids(
@@ -85,13 +87,11 @@ def _get_fts_branch_ids(
 
         if session_id:
             sql += " AND s.uuid LIKE ? ESCAPE '\\'"
-            escaped = session_id.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-            params.append(f"{escaped}%")
+            params.append(f"{escape_like(session_id)}%")
 
         if path:
             sql += " AND s.cwd LIKE ? ESCAPE '\\'"
-            escaped = path.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-            params.append(f"%{escaped}%")
+            params.append(f"%{escape_like(path)}%")
 
         if fts_level == "fts5":
             sql += " ORDER BY bm25(branches_fts) LIMIT ?"
@@ -119,13 +119,11 @@ def _get_fts_branch_ids(
 
         if session_id:
             sql += " AND s.uuid LIKE ? ESCAPE '\\'"
-            escaped = session_id.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-            params.append(f"{escaped}%")
+            params.append(f"{escape_like(session_id)}%")
 
         if path:
             sql += " AND s.cwd LIKE ? ESCAPE '\\'"
-            escaped = path.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-            params.append(f"%{escaped}%")
+            params.append(f"%{escape_like(path)}%")
 
         sql += " ORDER BY b.ended_at DESC LIMIT ?"
         params.append(top_k)
@@ -151,10 +149,9 @@ def _get_vec_branch_ids(
     """
     try:
         serialized = sqlite_vec.serialize_float32(query_vec)
-        knn_k = top_k
         rows = cursor.execute(
             "SELECT branch_id, distance FROM branch_vec WHERE embedding MATCH ? AND k = ? ORDER BY distance",
-            (serialized, knn_k),
+            (serialized, top_k),
         ).fetchall()
     except sqlite3.Error:
         return []
@@ -176,22 +173,20 @@ def _get_vec_branch_ids(
           AND b.embedding_version = ?
           AND b.embedding_model = ?
     """
-    filter_params: list = [*list(candidate_ids), EMBEDDING_VERSION, EMBEDDING_MODEL]
+    filter_params: list = [*candidate_ids, EMBEDDING_VERSION, EMBEDDING_MODEL]
 
     if projects:
-        ph2 = ",".join("?" * len(projects))
-        filter_sql += f" AND p.name IN ({ph2})"
+        proj_placeholders = ",".join("?" * len(projects))
+        filter_sql += f" AND p.name IN ({proj_placeholders})"
         filter_params.extend(projects)
 
     if session_id:
         filter_sql += " AND s.uuid LIKE ? ESCAPE '\\'"
-        escaped = session_id.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-        filter_params.append(f"{escaped}%")
+        filter_params.append(f"{escape_like(session_id)}%")
 
     if path:
         filter_sql += " AND s.cwd LIKE ? ESCAPE '\\'"
-        escaped = path.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-        filter_params.append(f"%{escaped}%")
+        filter_params.append(f"%{escape_like(path)}%")
 
     try:
         valid_ids = {row[0] for row in cursor.execute(filter_sql, filter_params).fetchall()}
@@ -216,12 +211,12 @@ def _dedup_by_session(cursor: sqlite3.Cursor, ordered_branch_ids: list[int]) -> 
         ordered_branch_ids,
     ).fetchall()
 
-    id_to_session: dict[int, int] = {row[0]: row[1] for row in rows}
+    branch_to_session: dict[int, int] = {row[0]: row[1] for row in rows}
 
     seen_sessions: set[int] = set()
     deduped: list[int] = []
     for bid in ordered_branch_ids:
-        sess = id_to_session.get(bid)
+        sess = branch_to_session.get(bid)
         if sess is None:
             continue
         if sess not in seen_sessions:
@@ -274,21 +269,7 @@ def _hydrate_branches(
             branch_db_id,
         ) = row
 
-        cursor.execute(
-            """
-            SELECT m.role, m.content, m.timestamp, COALESCE(m.is_notification, 0) as is_notification
-            FROM branch_messages bm
-            JOIN messages m ON bm.message_id = m.id
-            WHERE bm.branch_id = ?
-              AND (? OR COALESCE(m.is_notification, 0) = 0)
-            ORDER BY m.timestamp ASC
-        """,
-            (branch_db_id, include_notifications),
-        )
-
-        messages = [
-            {"role": r, "content": c, "timestamp": t, "is_notification": notif} for r, c, t, notif in cursor.fetchall()
-        ]
+        messages = fetch_branch_messages(cursor, branch_db_id, include_notifications)
 
         session_data = {
             "uuid": uuid,
@@ -331,7 +312,7 @@ def search_sessions(
         return []
 
     cursor = conn.cursor()
-    top_k = max(max_results * 4, 20)
+    top_k = max(max_results * OVERFETCH_MULTIPLIER, OVERFETCH_FLOOR)
 
     use_fusion = not keyword_only
     query_vec: list[float] | None = None

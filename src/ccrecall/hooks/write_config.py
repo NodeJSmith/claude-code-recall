@@ -17,12 +17,12 @@ def run(*, defaults: bool = False, auto_inject_context: bool | None = None) -> N
     """Write or update ~/.claude-memory/config.json from onboarding choices."""
     # Build initial config from DEFAULT_SETTINGS (plus write_config-specific keys).
     # Skip merge when --defaults is set so it always writes fresh defaults.
-    write_config_defaults = {
+    initial_config = {
         "onboarding_completed": False,
         "onboarding_version": 0,
         "auto_inject_context": DEFAULT_SETTINGS["auto_inject_context"],
     }
-    config = write_config_defaults.copy()
+    config = initial_config.copy()
     if CONFIG_PATH.exists() and not defaults:
         # Malformed existing config falls back to defaults; an unexpected bug still surfaces.
         with contextlib.suppress(OSError, ValueError):
@@ -34,7 +34,6 @@ def run(*, defaults: bool = False, auto_inject_context: bool | None = None) -> N
     if not defaults and auto_inject_context is not None:
         config["auto_inject_context"] = auto_inject_context
 
-    # Mark onboarding complete
     config["onboarding_completed"] = True
     config["onboarding_version"] = CURRENT_ONBOARDING_VERSION
 

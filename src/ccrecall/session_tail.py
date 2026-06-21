@@ -59,6 +59,11 @@ _TEXT_CLIP = 600
 _HOOK_TAIL_LINES = 400
 DEFAULT_TAIL_EVENTS = 8  # CLI -n default
 
+# Clip lengths for pending-question option descriptions and the session preview.
+_INJECTION_OPTION_CLIP = 160
+_CLI_OPTION_CLIP = 140
+_PREVIEW_CLIP = 90
+
 
 def transcript_dir(cwd: str, projects_dir: Path = DEFAULT_PROJECTS_DIR) -> Path:
     """Directory holding this cwd's transcripts (raw slug — see module docstring)."""
@@ -196,8 +201,8 @@ def last_assistant_text(entries: list[dict]) -> str | None:
 
 
 def build_tail(entries: list[dict], k: int) -> list[tuple[str, str]]:
-    """Last K main-chain events as (kind, body). One assistant entry can yield
-    several events (its text plus each tool_use); K bounds the output, not input."""
+    """Last ``k`` main-chain events as (kind, body). One assistant entry can yield
+    several events (its text plus each tool_use); ``k`` bounds the output, not input."""
     if k <= 0:
         return []
     events: list[tuple[str, str]] = []
@@ -236,7 +241,8 @@ def format_pending_block(payload: dict, *, for_injection: bool = False) -> str:
         for q in payload.get("questions", []):
             lines.append(f"- **Q:** {q.get('question', '')}")
             lines.extend(
-                f"  - {opt.get('label', '')}: {clip(opt.get('description', ''), 160)}" for opt in q.get("options", [])
+                f"  - {opt.get('label', '')}: {clip(opt.get('description', ''), _INJECTION_OPTION_CLIP)}"
+                for opt in q.get("options", [])
             )
     else:
         lines.append("⚠ PENDING QUESTION — prior session stopped at an UNANSWERED AskUserQuestion.")
@@ -244,7 +250,7 @@ def format_pending_block(payload: dict, *, for_injection: bool = False) -> str:
         for q in payload.get("questions", []):
             lines.append(f"  Q: {q.get('question', '')}")
             for i, opt in enumerate(q.get("options", []), 1):
-                desc = clip(opt.get("description", ""), 140)
+                desc = clip(opt.get("description", ""), _CLI_OPTION_CLIP)
                 lines.append(f"     {i}. {opt.get('label', '')} — {desc}")
     return "\n".join(lines)
 
@@ -280,7 +286,7 @@ def first_typed_preview(path: Path) -> str:
     for entry in load_entries(path):
         text = typed_instruction(entry)
         if text:
-            return clip(text, 90)
+            return clip(text, _PREVIEW_CLIP)
     return "(no user message)"
 
 

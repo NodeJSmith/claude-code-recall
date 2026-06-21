@@ -13,20 +13,17 @@ from pathlib import Path
 from ccrecall.db import (
     CONTENT_ERROR_VERSION,
     DEFAULT_DB_PATH,
+    SYNC_TEMP_PREFIX,
     get_db_connection,
     load_settings,
     log_hook_exception,
+    pid_file_path,
 )
 from ccrecall.hooks import backfill_summaries, import_conversations
 from ccrecall.summarizer import SUMMARY_VERSION
 
-# PID files live in the same directory as the DB
-_PID_DIR = DEFAULT_DB_PATH.parent
-
-
-def _pid_file_path(pid_key: str) -> Path:
-    """Return the PID file path for a given spawn pid_key."""
-    return _PID_DIR / f".pid-{pid_key}"
+# Stale sync temp files older than this (seconds) are reaped on SessionStart.
+STALE_TEMP_FILE_MAX_AGE_SECONDS = 3600
 
 
 def _spawn_background(argv: list[str], pid_key: str) -> None:
@@ -40,7 +37,7 @@ def _spawn_background(argv: list[str], pid_key: str) -> None:
     concurrent instance of the given command is running.  If a stale PID file
     exists (dead process), it is reaped and the new process is spawned.
     """
-    pid_path = _pid_file_path(pid_key)
+    pid_path = pid_file_path(pid_key)
 
     while True:
         try:
@@ -124,16 +121,15 @@ def _reap_stale_temp_files() -> None:
     before it can clean up its own input file.
     """
     tmp_dir = Path(tempfile.gettempdir())
-    one_hour_ago = time.time() - 3600
-    for path in tmp_dir.glob("claude-memory-sync-*.json"):
+    cutoff = time.time() - STALE_TEMP_FILE_MAX_AGE_SECONDS
+    for path in tmp_dir.glob(f"{SYNC_TEMP_PREFIX}*.json"):
         with contextlib.suppress(OSError):
-            if path.stat().st_mtime < one_hour_ago:
+            if path.stat().st_mtime < cutoff:
                 path.unlink()
 
 
 def main():
     try:
-        # Create directory
         DEFAULT_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
         # Clean up stale temp files from crashed/killed sync processes

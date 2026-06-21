@@ -7,7 +7,7 @@ import sys
 from pydantic import ValidationError
 from whenever import Instant
 
-from ccrecall.db import get_db_path, load_settings
+from ccrecall.db import CLEAR_HANDOFF_FILENAME, get_db_path, load_settings
 from ccrecall.models import HookInput
 
 
@@ -32,7 +32,7 @@ def main():
     with contextlib.suppress(Exception):
         settings = load_settings()
         db_path = get_db_path(settings)
-        handoff_path = db_path.parent / "clear-handoff.json"
+        handoff_path = db_path.parent / CLEAR_HANDOFF_FILENAME
         handoff_path.write_text(
             json.dumps(
                 {

@@ -17,8 +17,6 @@ from ccrecall.token_parser import (
     turn_cost,
 )
 
-# ── Build Output ──────────────────────────────────────────────────────
-
 
 def build_output(conn: sqlite3.Connection) -> dict:
     cur = conn.cursor()

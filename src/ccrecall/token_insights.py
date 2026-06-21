@@ -12,7 +12,17 @@ from ccrecall.token_parser import (
     turn_cost,
 )
 
-# ── Public API ─────────────────────────────────────────────────────────
+# Per-insight waste-token estimates (tokens wasted per occurrence).
+WASTE_TOKENS_PER_CACHE_CLIFF = 15000
+WASTE_TOKENS_PER_MAX_TOKEN_STOP = 5000
+WASTE_TOKENS_PER_BASH_ANTIPATTERN = 200
+WASTE_TOKENS_PER_REDUNDANT_READ = 500
+WASTE_TOKENS_PER_EDIT_RETRY = 300
+WASTE_TOKENS_PER_IDLE_GAP = 2000
+
+# Fallback per-million-token cost rates when no model split is available.
+FALLBACK_INPUT_CPM = 5.0
+FALLBACK_OUTPUT_CPM = 25.0
 
 
 def build_insights_and_trends(
@@ -65,8 +75,8 @@ def build_insights_and_trends(
     ]
 
     # Weighted average cost rates for waste-to-dollar conversion
-    avg_input_cpm = 5.0
-    avg_output_cpm = 25.0
+    avg_input_cpm = FALLBACK_INPUT_CPM
+    avg_output_cpm = FALLBACK_OUTPUT_CPM
     if model_split:
         weighted_in = sum(m["input_tokens"] * get_pricing(m["model"])["input"] for m in model_split)
         weighted_out = sum(m["output_tokens"] * get_pricing(m["model"])["output"] for m in model_split)
@@ -111,9 +121,6 @@ def build_insights_and_trends(
         "recommendations": recommendations,
         "trends": trends,
     }
-
-
-# ── Trends Engine (week-on-week comparison) ───────────────────────────
 
 
 def build_trends(conn: sqlite3.Connection) -> dict:
@@ -346,9 +353,6 @@ def build_trends(conn: sqlite3.Connection) -> dict:
     }
 
 
-# ── Insights Engine (findings + root causes + solutions) ──────────────
-
-
 def _build_insights(**kw) -> list[dict]:
     """Build unified insights: finding + root cause + solution + dollar cost.
 
@@ -357,8 +361,8 @@ def _build_insights(**kw) -> list[dict]:
     """
     insights = []
     sessions = kw["total_sessions"] or 1
-    avg_input_rate = kw.get("avg_input_cost_per_mtok", 5.0)
-    avg_output_rate = kw.get("avg_output_cost_per_mtok", 25.0)
+    avg_input_rate = kw.get("avg_input_cost_per_mtok", FALLBACK_INPUT_CPM)
+    avg_output_rate = kw.get("avg_output_cost_per_mtok", FALLBACK_OUTPUT_CPM)
 
     def _waste_usd(tokens: int, is_output: bool = False) -> float:
         rate = avg_output_rate if is_output else avg_input_rate
@@ -372,11 +376,10 @@ def _build_insights(**kw) -> list[dict]:
             return "WARNING"
         return "INFO"
 
-    # ── Cache Cliffs ──
     tier = kw.get("dominant_cache_tier", "1h")
     ttl_label = "5 minutes" if tier == "5m" else "1 hour"
     if kw["cache_cliffs"] > 0:
-        waste_tok = kw["cache_cliffs"] * 15000
+        waste_tok = kw["cache_cliffs"] * WASTE_TOKENS_PER_CACHE_CLIFF
         waste_dollars = _waste_usd(waste_tok)
         cliff_projects = kw.get("cache_cliff_projects", [])
         top_proj = cliff_projects[0] if cliff_projects else None
@@ -405,9 +408,8 @@ def _build_insights(**kw) -> list[dict]:
             }
         )
 
-    # ── Context Pressure (max_tokens) ──
     if kw["max_token_stops"] > 0:
-        waste_tok = kw["max_token_stops"] * 5000
+        waste_tok = kw["max_token_stops"] * WASTE_TOKENS_PER_MAX_TOKEN_STOP
         waste_dollars = _waste_usd(waste_tok, is_output=True)
         insights.append(
             {
@@ -429,9 +431,8 @@ def _build_insights(**kw) -> list[dict]:
             }
         )
 
-    # ── Bash Antipatterns ──
     if kw["bash_antipatterns"] > 0:
-        waste_tok = kw["bash_antipatterns"] * 200
+        waste_tok = kw["bash_antipatterns"] * WASTE_TOKENS_PER_BASH_ANTIPATTERN
         waste_dollars = _waste_usd(waste_tok, is_output=True)
         bash_projects = kw.get("bash_antipattern_projects", [])
         top_cmds = kw.get("top_bash_antipattern_cmds", [])
@@ -489,9 +490,8 @@ def _build_insights(**kw) -> list[dict]:
             }
         )
 
-    # ── Redundant Reads ──
     if kw["redundant_reads"] > 0:
-        waste_tok = kw["redundant_reads"] * 500
+        waste_tok = kw["redundant_reads"] * WASTE_TOKENS_PER_REDUNDANT_READ
         waste_dollars = _waste_usd(waste_tok)
         top_files = kw.get("top_redundant_files", [])
         file_detail = (
@@ -523,9 +523,8 @@ def _build_insights(**kw) -> list[dict]:
             }
         )
 
-    # ── Edit Retry Chains ──
     if kw["edit_retries"] > 0:
-        waste_tok = kw["edit_retries"] * 300
+        waste_tok = kw["edit_retries"] * WASTE_TOKENS_PER_EDIT_RETRY
         waste_dollars = _waste_usd(waste_tok, is_output=True)
         retry_projects = kw.get("edit_retry_projects", [])
         proj_detail = (
@@ -557,7 +556,6 @@ def _build_insights(**kw) -> list[dict]:
             }
         )
 
-    # ── Thinking Token Overhead ──
     if kw["total_thinking"] > 0:
         pct = round(kw["total_thinking"] / kw["total_output"] * 100, 1) if kw["total_output"] else 0
         thinking_dollars = _waste_usd(kw["total_thinking"], is_output=True)
@@ -584,7 +582,6 @@ def _build_insights(**kw) -> list[dict]:
             }
         )
 
-    # ── Idle Gap Impact ──
     tier = kw.get("dominant_cache_tier", "1h")
     ttl_label = "5 minutes" if tier == "5m" else "1 hour"
     rtd = kw["response_time_dist"]
@@ -595,7 +592,7 @@ def _build_insights(**kw) -> list[dict]:
     if idle_over_ttl > 0:
         total_gaps = sum(rtd.values())
         pct = round(idle_over_ttl / total_gaps * 100, 1) if total_gaps else 0
-        waste_tok = idle_over_ttl * 2000
+        waste_tok = idle_over_ttl * WASTE_TOKENS_PER_IDLE_GAP
         waste_dollars = _waste_usd(waste_tok)
         insights.append(
             {
@@ -618,7 +615,6 @@ def _build_insights(**kw) -> list[dict]:
             }
         )
 
-    # ── Cost Concentration ──
     cost_by_project = kw.get("cost_by_project", [])
     total_cost = kw.get("total_cost_usd", 0)
     if cost_by_project and total_cost > 0:
@@ -646,7 +642,6 @@ def _build_insights(**kw) -> list[dict]:
                 }
             )
 
-    # ── Context Overhead ──
     seg = kw.get("context_seg_summary", {})
     base_pct = seg.get("base_overhead_pct", 0)
     avg_base = seg.get("avg_base_ctx", 0)

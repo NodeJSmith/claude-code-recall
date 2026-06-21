@@ -14,12 +14,13 @@ import time
 from pathlib import Path
 
 from ccrecall.content import parse_origin
+from ccrecall.models import BUSY_TIMEOUT_MS
 from ccrecall.parsing import build_aggregated_content, extract_session_uuid
 from ccrecall.schema import SCHEMA_CORE, SCHEMA_FTS4, SCHEMA_FTS5, detect_fts_support
 from ccrecall.summarizer import truncate_mid
 
 _MIGRATION_BATCH_SIZE = 50
-_MIGRATION_V6_MAX_JSON_BYTES = 51200  # 50 KB
+_MIGRATION_V6_MAX_JSON_BYTES = 50 * 1024
 
 
 def migrate_db(conn: sqlite3.Connection) -> bool:
@@ -70,7 +71,7 @@ def migrate_db(conn: sqlite3.Connection) -> bool:
     # Reconnect and create fresh schema
     new_conn = sqlite3.connect(str(db_path) if db_path else ":memory:")
     new_conn.execute("PRAGMA journal_mode = WAL")
-    new_conn.execute("PRAGMA busy_timeout = 5000")
+    new_conn.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
     fts = detect_fts_support(new_conn)
     new_conn.executescript(SCHEMA_CORE)
     if fts == "fts5":

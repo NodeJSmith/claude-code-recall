@@ -12,8 +12,6 @@ from ccrecall.token_parser import (
     compute_session_analytics,
 )
 
-# ── DB Import ─────────────────────────────────────────────────���───────
-
 
 def import_session(conn: sqlite3.Connection, session: ParsedSession, jnl: JnlFile) -> None:
     sid = session.session_id
@@ -136,9 +134,6 @@ def import_session(conn: sqlite3.Connection, session: ParsedSession, jnl: JnlFil
                    VALUES (?,?,?,?)""",
                 (sid, hc["hook_command"], hc["duration_ms"], hc["is_error"]),
             )
-
-
-# ── Backfill token_snapshots ─────────────────────────────────────────
 
 
 def backfill_token_snapshots(conn: sqlite3.Connection) -> None:

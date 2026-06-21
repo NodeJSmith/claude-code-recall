@@ -1,5 +1,4 @@
-"""
-Backfill embeddings for existing active-leaf branches.
+"""Backfill embeddings for existing active-leaf branches.
 
 Opt-in: invoke manually via `ccrecall backfill embeddings` to seed historical
 embeddings. NOT auto-spawned on SessionStart (embedding inference is CPU-bound);
@@ -26,11 +25,11 @@ import time
 
 from ccrecall.db import (
     CONTENT_ERROR_VERSION,
-    DEFAULT_DB_PATH,
     EMBEDDABLE_BRANCH_FILTER,
     branch_vec_queryable,
     get_db_connection,
     load_settings,
+    remove_pid_file,
     setup_logging,
     write_branch_embedding,
 )
@@ -47,19 +46,20 @@ BATCH_SIZE = 20
 BACKFILL_BATCH_DELAY_SECONDS = 0.05
 DEFAULT_PROGRESS_EVERY = BATCH_SIZE
 
+# Lower scheduling priority for this background CPU job so interactive work wins.
+BACKFILL_NICE_LEVEL = 10
+
 EXIT_OK = 0
 EXIT_ABORT = 1
 
 # PID key for the self-concurrency guard (this command is manual-only, never
 # auto-spawned; the marker is cleaned up by the CLI command on exit).
 PID_KEY = "ccrecall-backfill-embeddings"
-_PID_FILE = DEFAULT_DB_PATH.parent / f".pid-{PID_KEY}"
 
 
 def cleanup_pid() -> None:
     """Remove the self-concurrency PID marker (no-op if absent)."""
-    with contextlib.suppress(OSError):
-        _PID_FILE.unlink(missing_ok=True)
+    remove_pid_file(PID_KEY)
 
 
 def build_selection(days: int | None) -> tuple[str, list]:
@@ -217,7 +217,7 @@ def run(
     # threads yield to interactive work (machines.md thrash risk). Best-effort —
     # os.nice is POSIX-only and may be denied; either way the run proceeds.
     with contextlib.suppress(AttributeError, OSError):
-        os.nice(10)
+        os.nice(BACKFILL_NICE_LEVEL)
 
     # ABORT level: check model availability before touching any rows.
     # model_available() warms the singleton session on success — no extra cost.

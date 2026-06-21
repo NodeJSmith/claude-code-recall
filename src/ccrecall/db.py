@@ -1,5 +1,4 @@
-"""
-Database connection, config/settings, vec (embedding) operations, and logging.
+"""Database connection, config/settings, vec (embedding) operations, and logging.
 
 Schema constants live in ccrecall.schema; migrations in ccrecall.migrations.
 """
@@ -15,6 +14,7 @@ import sqlite_vec
 
 from ccrecall.embeddings import EMBEDDING_DIM, EMBEDDING_MODEL, EMBEDDING_VERSION
 from ccrecall.migrations import migrate_columns, migrate_db
+from ccrecall.models import BUSY_TIMEOUT_MS, LOGGER_NAME
 from ccrecall.schema import SCHEMA_CORE, SCHEMA_FTS4, SCHEMA_FTS5, detect_fts_support
 
 # Default paths
@@ -22,6 +22,10 @@ DEFAULT_DB_PATH = Path.home() / ".claude-memory" / "conversations.db"
 DEFAULT_PROJECTS_DIR = Path.home() / ".claude" / "projects"
 DEFAULT_LOG_PATH = Path.home() / ".claude-memory" / "memory.log"
 CONFIG_PATH = Path.home() / ".claude-memory" / "config.json"
+
+# Hook filenames/prefixes — writer and reader live in different modules and must agree.
+CLEAR_HANDOFF_FILENAME = "clear-handoff.json"
+SYNC_TEMP_PREFIX = "claude-memory-sync-"
 
 # Shared SQL predicate for "branches that are candidates to embed": active
 # leaves (the query path only returns is_active=1) with a usable summary. This
@@ -52,6 +56,42 @@ _CONFIG_KEYS = {
 }
 
 CURRENT_ONBOARDING_VERSION = 1
+
+# Vec-loaded connections (concurrent embedding writers) wait longer than the
+# base BUSY_TIMEOUT_MS on a collision.
+VEC_BUSY_TIMEOUT_MS = 30000
+
+# Rotating memory-log handler sizing.
+LOG_MAX_BYTES = 1_000_000
+LOG_BACKUP_COUNT = 2
+
+
+def apply_base_pragmas(conn: sqlite3.Connection) -> None:
+    """Set WAL mode, busy_timeout, and foreign-key enforcement for concurrent-safe access.
+
+    WAL lets readers and writers proceed without blocking each other; busy_timeout
+    waits instead of failing on a writer-writer collision; foreign_keys=ON prevents
+    orphaned rows.
+    """
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
+    conn.execute("PRAGMA foreign_keys = ON")
+
+
+def pid_file_path(pid_key: str) -> Path:
+    """Path to a background job's PID sentinel (lives beside the DB)."""
+    return DEFAULT_DB_PATH.parent / f".pid-{pid_key}"
+
+
+def remove_pid_file(pid_key: str) -> None:
+    """Delete a job's PID sentinel so the next session can spawn again (best-effort)."""
+    with contextlib.suppress(OSError):
+        pid_file_path(pid_key).unlink(missing_ok=True)
+
+
+def escape_like(value: str) -> str:
+    """Escape SQLite LIKE wildcards so a user value matches literally (pair with ESCAPE '\\')."""
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def vec_available(conn: sqlite3.Connection) -> bool:
@@ -116,6 +156,22 @@ def write_branch_embedding(
         "UPDATE branches SET embedding_version = ?, embedding_model = ?, summary_version_at_embed = ? WHERE id = ?",
         (EMBEDDING_VERSION, EMBEDDING_MODEL, summary_version, branch_id),
     )
+
+
+def fetch_branch_messages(cursor: sqlite3.Cursor, branch_id: int, include_notifications: bool) -> list[dict]:
+    """Return a branch's messages ordered by timestamp; notifications included only when asked."""
+    cursor.execute(
+        """
+        SELECT m.role, m.content, m.timestamp, COALESCE(m.is_notification, 0) as is_notification
+        FROM branch_messages bm
+        JOIN messages m ON bm.message_id = m.id
+        WHERE bm.branch_id = ?
+          AND (? OR COALESCE(m.is_notification, 0) = 0)
+        ORDER BY m.timestamp ASC
+        """,
+        (branch_id, include_notifications),
+    )
+    return [{"role": r, "content": c, "timestamp": t, "is_notification": notif} for r, c, t, notif in cursor.fetchall()]
 
 
 def _ensure_vec_schema(conn: sqlite3.Connection) -> None:
@@ -185,37 +241,24 @@ def get_db_path(settings: dict | None = None) -> Path:
 def get_db_connection(settings: dict | None = None, load_vec: bool = False) -> sqlite3.Connection:
     """Get database connection, initializing schema and running migrations if needed.
 
-    Uses settings-based path if provided.
-    Sets WAL mode and busy_timeout for concurrent access safety.
-
-    Args:
-        settings: Optional settings dict (for db_path override).
-        load_vec: When True, load the sqlite-vec extension on the returned
-            connection and raise busy_timeout to 30000. Use this for
-            connections that query or write branch_vec (search, write path,
-            backfill). Default False keeps the extension unloaded — cheaper
-            for recent-chats, token analytics, and setup paths that never
-            touch branch_vec.
+    Uses the settings-based db_path when provided and applies the base pragmas for
+    concurrent-safe access. When ``load_vec`` is True, loads the sqlite-vec extension
+    and raises busy_timeout to VEC_BUSY_TIMEOUT_MS — use it for connections that query
+    or write branch_vec (search, write path, backfill). Default False keeps the
+    extension unloaded, cheaper for recent-chats, token analytics, and setup paths
+    that never touch branch_vec.
     """
     db_path = get_db_path(settings)
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path)
-
-    # WAL mode: readers never block writers, writers never block readers
-    conn.execute("PRAGMA journal_mode = WAL")
-    # busy_timeout: wait up to 5s on writer-writer collisions instead of failing
-    conn.execute("PRAGMA busy_timeout = 5000")
-    # Enforce foreign key constraints to prevent orphaned data
-    conn.execute("PRAGMA foreign_keys = ON")
+    apply_base_pragmas(conn)
 
     # Check if migration needed (old schema -> v3)
     migrated = migrate_db(conn)
     if migrated:
         # Connection was closed during migration, reconnect
         conn = sqlite3.connect(db_path)
-        conn.execute("PRAGMA journal_mode = WAL")
-        conn.execute("PRAGMA busy_timeout = 5000")
-        conn.execute("PRAGMA foreign_keys = ON")
+        apply_base_pragmas(conn)
 
     if not migrated:
         # Apply schema (handles fresh databases, idempotent)
@@ -236,17 +279,14 @@ def get_db_connection(settings: dict | None = None, load_vec: bool = False) -> s
         # raise busy_timeout for concurrent vec writers.
         _ensure_vec_schema(conn)
         conn.commit()
-        conn.execute("PRAGMA busy_timeout = 30000")
+        conn.execute(f"PRAGMA busy_timeout = {VEC_BUSY_TIMEOUT_MS}")
 
     return conn
 
 
 def setup_logging(settings: dict | None = None) -> logging.Logger:
-    """
-    Set up logging with rotation.
-    Returns a null logger if logging is disabled.
-    """
-    logger = logging.getLogger("claude-memory")
+    """Set up logging with rotation. Returns a null logger if logging is disabled."""
+    logger = logging.getLogger(LOGGER_NAME)
     logger.handlers.clear()
 
     if not settings or not settings.get("logging_enabled", False):
@@ -258,8 +298,8 @@ def setup_logging(settings: dict | None = None) -> logging.Logger:
 
     handler = RotatingFileHandler(
         log_path,
-        maxBytes=1_000_000,  # 1MB
-        backupCount=2,
+        maxBytes=LOG_MAX_BYTES,
+        backupCount=LOG_BACKUP_COUNT,
     )
     formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
     handler.setFormatter(formatter)
