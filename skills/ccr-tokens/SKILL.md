@@ -14,7 +14,7 @@ Parse JSONL conversation files from `~/.claude/projects/*/` into per-turn analyt
 ## Step 1: Ingest
 
 ```bash
-cm-ingest-token-data
+ccrecall tokens
 ```
 
 First run processes all files (~100s for ~2500 files) — warn the user about the wait before running. Incremental runs complete in under 5s. The script populates analytics tables, deploys an interactive dashboard to `~/.claude-memory/dashboard.html` (built from `templates/dashboard.html`), and prints a slim JSON blob to stdout (full data goes to dashboard only).

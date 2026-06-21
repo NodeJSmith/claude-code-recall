@@ -25,7 +25,7 @@ Your choice gets written to `~/.claude-memory/config.json`. You can edit that fi
 To skip the walkthrough and use recommended defaults immediately:
 
 ```bash
-cm-write-config --defaults
+ccrecall write-config --defaults
 ```
 
 ## Semantic search
@@ -43,10 +43,10 @@ New sessions are embedded automatically as they sync (embed-on-write), so covera
 Embedding runs on CPU via fastembed. jina-v2-small-en is light — a few milliseconds for a short summary, up to ~400ms for a long one — but seeding a large history (~2k active leaves) is still a bounded chunk of work, and a parallel run can thrash a small or shared box. It is therefore **opt-in** — it is *not* auto-spawned on SessionStart — so it never fires unbidden. Run it yourself when you want to seed:
 
 ```bash
-cm-backfill-embeddings              # all active leaves, all history
-cm-backfill-embeddings --days 14    # only the last 14 days
-cm-backfill-embeddings --limit 500  # cap this run at 500 branches
-cm-backfill-embeddings --threads 4  # use 4 inference threads (idle machine)
+ccrecall backfill embeddings              # all active leaves, all history
+ccrecall backfill embeddings --days 14    # only the last 14 days
+ccrecall backfill embeddings --limit 500  # cap this run at 500 branches
+ccrecall backfill embeddings --threads 4  # use 4 inference threads (idle machine)
 ```
 
 It runs at low scheduling priority (`nice`) and a single inference thread by default so it yields to interactive work. Tune the thread count with `--threads` (e.g. `--threads 4` on an idle workstation to finish faster). Progress prints to stderr (one line per batch); the run is resumable — re-running skips already-embedded branches.
@@ -75,7 +75,7 @@ Semantic fusion is automatically disabled when:
 - `fastembed` cannot be imported
 - `sqlite-vec` cannot be loaded on the connection (e.g. Python built without loadable extensions)
 
-In all cases, search falls back to keyword-only and returns results normally. Use `cm-search-conversations --status` to check which path is active.
+In all cases, search falls back to keyword-only and returns results normally. Use `ccrecall search --status` to check which path is active.
 
 ## Entry points
 
@@ -85,7 +85,7 @@ These are wired into `settings.json` and fire on their respective Claude Code ev
 
 | Entry point | Event | What it does |
 |---|---|---|
-| `cm-memory-setup` | SessionStart | Creates `~/.claude-memory/` if needed, opens the DB to apply any pending migrations, then spawns `cm-import-conversations` and `cm-backfill-summaries` as background processes |
+| `cm-memory-setup` | SessionStart | Creates `~/.claude-memory/` if needed, opens the DB to apply any pending migrations, then spawns `ccrecall import` and `ccrecall backfill summaries` as background processes |
 | `cm-onboarding` | SessionStart (startup only) | One-time first-run onboarding. Injects setup instructions into Claude's context if `config.json` is missing or onboarding hasn't been completed. Silent no-op after that |
 | `cm-memory-context` | SessionStart (startup + clear) | Injects a summary of your most recent session into Claude's context so it knows what you were working on. On `/clear`, reads a handoff file to link directly to the session you just cleared from |
 | `cm-clear-handoff` | SessionEnd (clear only) | Writes a small handoff file so the next session start knows which session to link to after a `/clear`. Without this, context injection falls back to "most recent session" heuristic |
@@ -95,21 +95,21 @@ These are wired into `settings.json` and fire on their respective Claude Code ev
 
 | Entry point | What it does |
 |---|---|
-| `cm-sync-current` | Syncs a single session file to the DB. Called by `cm-memory-sync` with the session ID from stdin |
-| `cm-import-conversations` | Full import of all JSONL files in `~/.claude/projects/`. Skips files that haven't changed since last import (file hash check). Run on first install and whenever new sessions need backfilling |
-| `cm-backfill-summaries` | Generates context summaries for any DB branches that don't have one yet. Runs in the background after `cm-memory-setup` |
-| `cm-write-config` | Writes `~/.claude-memory/config.json`. Called by Claude during onboarding to persist your settings choices. You can also call it directly — run `cm-write-config --help` for flags |
+| `ccrecall sync-current` | Syncs a single session file to the DB. Called by `cm-memory-sync` with the session ID from stdin |
+| `ccrecall import` | Full import of all JSONL files in `~/.claude/projects/`. Skips files that haven't changed since last import (file hash check). Run on first install and whenever new sessions need backfilling |
+| `ccrecall backfill summaries` | Generates context summaries for any DB branches that don't have one yet. Runs in the background after `cm-memory-setup` |
+| `ccrecall write-config` | Writes `~/.claude-memory/config.json`. Called by Claude during onboarding to persist your settings choices. You can also call it directly — run `ccrecall write-config --help` for flags |
 
 ### Skill CLIs (called from skill files — can also be used directly)
 
-These are the entry points that the `cm-*` skills invoke. You can run them from the terminal too.
+These are the `ccrecall` subcommands the `ccr-*` skills invoke. You can run them from the terminal too.
 
 | Entry point | What it does |
 |---|---|
-| `cm-recent-chats` | Prints recent sessions from the DB in markdown (default) or JSON. Used by `/cm-recall-conversations` |
-| `cm-search-conversations` | Searches sessions by keyword fused with vector similarity (FTS5 → FTS4 → LIKE fallback, RRF-fused with jina embeddings when available). Used by `/cm-recall-conversations` |
-| `cm-backfill-embeddings` | Opt-in seeding of embeddings for historical active-leaf branches (jina-v2-small-en via fastembed). Not auto-spawned. Supports `--days N` / `--limit N` / `--threads N`; throttled via `nice` + a single inference thread by default. Resumable |
-| `cm-ingest-token-data` | Parses JSONL files for token usage analytics — cost, cache hits, model mix, skill/agent/hook patterns. Populates analytics tables and builds `~/.claude-memory/dashboard.html`. Used by `/cm-get-token-insights` |
+| `ccrecall recent` | Prints recent sessions from the DB in markdown (default) or JSON. Used by `/cm-recall-conversations` |
+| `ccrecall search` | Searches sessions by keyword fused with vector similarity (FTS5 → FTS4 → LIKE fallback, RRF-fused with jina embeddings when available). Used by `/cm-recall-conversations` |
+| `ccrecall backfill embeddings` | Opt-in seeding of embeddings for historical active-leaf branches (jina-v2-small-en via fastembed). Not auto-spawned. Supports `--days N` / `--limit N` / `--threads N`; throttled via `nice` + a single inference thread by default. Resumable |
+| `ccrecall tokens` | Parses JSONL files for token usage analytics — cost, cache hits, model mix, skill/agent/hook patterns. Populates analytics tables and builds `~/.claude-memory/dashboard.html`. Used by `/cm-get-token-insights` |
 
 ## Skills
 
@@ -123,16 +123,16 @@ These are the entry points that the `cm-*` skills invoke. You can run them from 
 ```
 Session ends
   └─ cm-memory-sync (Stop hook)
-       └─ cm-sync-current (background)
+       └─ ccrecall sync-current (background)
             └─ writes to ~/.claude-memory/conversations.db
             └─ embeds the active leaf via jina if model available (drops silently on failure)
 
 Session starts
   └─ cm-memory-setup (SessionStart)
-  │    └─ cm-import-conversations (background, first run / new files)
+  │    └─ ccrecall import (background, first run / new files)
   │         └─ embeds each new active leaf via jina if model available
-  │    └─ cm-backfill-summaries (background, if summaries missing)
-  │    └─ (embedding backfill is NOT auto-spawned — opt-in via cm-backfill-embeddings)
+  │    └─ ccrecall backfill summaries (background, if summaries missing)
+  │    └─ (embedding backfill is NOT auto-spawned — opt-in via ccrecall backfill embeddings)
   ├─ cm-onboarding (SessionStart, startup only — one-time)
   └─ cm-memory-context (SessionStart, startup + clear)
        └─ injects last session summary into Claude's context
@@ -140,7 +140,7 @@ Session starts
 
 ## Config file
 
-`~/.claude-memory/config.json` — written by `cm-write-config` during onboarding:
+`~/.claude-memory/config.json` — written by `ccrecall write-config` during onboarding:
 
 ```json
 {
@@ -160,7 +160,7 @@ Session starts
 - `branch_messages` — join table linking messages to branches
 - `import_log` — tracks which JSONL files have been imported and their hashes
 - `branch_vec` — vec0 virtual table (sqlite-vec) storing 512-dim jina embeddings for each branch, used for KNN search
-- `token_snapshots`, `turns`, `turn_tool_calls`, `session_metrics` — analytics tables populated by `cm-ingest-token-data`
+- `token_snapshots`, `turns`, `turn_tool_calls`, `session_metrics` — analytics tables populated by `ccrecall tokens`
 
 ## Running tests
 

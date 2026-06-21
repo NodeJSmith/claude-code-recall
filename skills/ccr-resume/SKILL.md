@@ -29,11 +29,11 @@ $ARGUMENTS — optional. A session-id substring to target a specific prior sessi
 Run the lever — it locates the prior session's JSONL and prints the tail, the last typed instruction, and any **unanswered** `AskUserQuestion`:
 
 ```bash
-cm-session-tail $ARGUMENTS
+ccrecall tail $ARGUMENTS
 ```
 
-- Auto-detect picks the second-newest session (the newest is *this* one, live). If the wrong session comes up or you need to choose, run `cm-session-tail --list` and re-run with the right id substring.
-- If `cm-session-tail` finds nothing (no project dir, only the current session, or a moved cwd), fall back to `/ccr-recall` to retrieve the tail — never substitute disk artifacts for the transcript.
+- Auto-detect picks the second-newest session (the newest is *this* one, live). If the wrong session comes up or you need to choose, run `ccrecall tail --list` and re-run with the right id substring.
+- If `ccrecall tail` finds nothing (no project dir, only the current session, or a moved cwd), fall back to `/ccr-recall` to retrieve the tail — never substitute disk artifacts for the transcript.
 - A clear/startup may already have surfaced an "Unresolved Decision From Prior Session" block at the top of context — if so, this confirms and expands it; reconcile and proceed to Phase 2.
 
 Read the output fully before doing anything else.
@@ -49,7 +49,7 @@ Name any mismatch between "what the transcript wanted" and "what the disk shows.
 
 ## Phase 3: Surface — never auto-resolve
 
-**If `cm-session-tail` reported a PENDING QUESTION:** the prior session stopped on a decision the user never made. Re-present it with `AskUserQuestion`, reusing the exact option labels and descriptions from the tail output (the picker appends "Other" automatically). Then **stop** — do not pick an option, and do not act on the work the question gates.
+**If `ccrecall tail` reported a PENDING QUESTION:** the prior session stopped on a decision the user never made. Re-present it with `AskUserQuestion`, reusing the exact option labels and descriptions from the tail output (the picker appends "Other" automatically). Then **stop** — do not pick an option, and do not act on the work the question gates.
 
 **If there is no pending question:** give a 3–5 line orientation — where things stand, what the last instruction was, what's reconciled vs. mismatched — and ask how the user wants to proceed before taking any action.
 
