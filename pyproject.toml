@@ -40,11 +40,6 @@ cm-onboarding            = "ccrecall.hooks.onboarding:main"
 cm-clear-handoff         = "ccrecall.hooks.clear_handoff:main"
 # Internal helpers (called as subprocesses by hooks above)
 cm-write-config          = "ccrecall.hooks.write_config:main"
-# Skill CLI tools (called from SKILL.md files)
-cm-recent-chats          = "ccrecall.recent_chats:main"
-cm-search-conversations  = "ccrecall.search_conversations:main"
-cm-ingest-token-data     = "ccrecall.token_dashboard:main"
-cm-session-tail          = "ccrecall.session_tail:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

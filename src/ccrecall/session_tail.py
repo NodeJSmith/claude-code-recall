@@ -1,7 +1,7 @@
 """Recover a prior session's tail for fast resume.
 
 Powers two things:
-  - the ``cm-session-tail`` CLI (invoked by the ccr-resume skill), and
+  - the ``ccrecall tail`` CLI (invoked by the ccr-resume skill), and
   - the SessionStart context injection's "unresolved decision" warning
     (``memory_context.py``).
 
@@ -19,7 +19,6 @@ sessions share a DB project key with the base repo — correct for the DB, wrong
 for locating files. So we encode the raw cwd here.
 """
 
-import argparse
 import sys
 from collections import deque
 from pathlib import Path
@@ -288,7 +287,7 @@ def first_typed_preview(path: Path) -> str:
 def emit(path: Path, k: int) -> int:
     entries = load_entries(path)
     if not entries:
-        print(f"cm-session-tail: transcript is empty: {path}", file=sys.stderr)
+        print(f"ccrecall tail: transcript is empty: {path}", file=sys.stderr)
         return 1
     meta = extract_session_metadata(entries)
     # Prefer an entry's sessionId; fall back to the filename UUID (agent- prefix
@@ -329,37 +328,32 @@ def emit(path: Path, k: int) -> int:
     return 0
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser(
-        prog="cm-session-tail",
-        description="Print the tail of a prior session's transcript for fast resume.",
-    )
-    ap.add_argument("selector", nargs="?", help="session id or substring to target")
-    ap.add_argument("--list", action="store_true", help="list sessions and exit")
-    ap.add_argument("--cwd", default=str(Path.cwd()), help="derive project dir from this path")
-    ap.add_argument(
-        "-n",
-        type=int,
-        default=_DEFAULT_TAIL_EVENTS,
-        help="number of tail events to show",
-    )
-    args = ap.parse_args()
-    if args.n < 1:
-        print("cm-session-tail: -n must be >= 1", file=sys.stderr)
+def run(
+    selector: str | None = None,
+    *,
+    list_sessions: bool = False,
+    cwd: str | None = None,
+    n: int = _DEFAULT_TAIL_EVENTS,
+) -> int:
+    """Print the tail of a prior session's transcript for fast resume."""
+    if cwd is None:
+        cwd = str(Path.cwd())
+    if n < 1:
+        print("ccrecall tail: -n must be >= 1", file=sys.stderr)
         return 2
 
-    pdir = transcript_dir(args.cwd)
+    pdir = transcript_dir(cwd)
     if not pdir.is_dir():
         print(
-            f"cm-session-tail: no project dir for {args.cwd}\n  expected: {pdir}",
+            f"ccrecall tail: no project dir for {cwd}\n  expected: {pdir}",
             file=sys.stderr,
         )
         return 2
 
-    if args.list:
+    if list_sessions:
         sessions = list_transcripts(pdir)
         if not sessions:
-            print("cm-session-tail: no sessions found", file=sys.stderr)
+            print("ccrecall tail: no sessions found", file=sys.stderr)
             return 2
         print(f"Sessions in {pdir.name} (newest first; newest is the current session):")
         for i, p in enumerate(sessions):
@@ -367,22 +361,18 @@ def main() -> int:
             print(f"  {p.stem[:8]}  {first_typed_preview(p)}{marker}")
         return 0
 
-    target = resolve_target(pdir, args.selector)
+    target = resolve_target(pdir, selector)
     if target is None:
-        if args.selector:
+        if selector:
             print(
-                f"cm-session-tail: no session matching '{args.selector}'",
+                f"ccrecall tail: no session matching '{selector}'",
                 file=sys.stderr,
             )
         else:
             print(
-                "cm-session-tail: no prior session found (only the current one exists)",
+                "ccrecall tail: no prior session found (only the current one exists)",
                 file=sys.stderr,
             )
         return 2
 
-    return emit(target, args.n)
-
-
-if __name__ == "__main__":
-    sys.exit(main())
+    return emit(target, n)

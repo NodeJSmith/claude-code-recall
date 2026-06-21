@@ -7,10 +7,14 @@ argument-parsing layer changed (argparse -> cyclopts).
 """
 
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
 from cyclopts import Parameter
 
+from ccrecall import recent_chats as recent_chats_mod
+from ccrecall import search_conversations as search_mod
+from ccrecall import session_tail as session_tail_mod
+from ccrecall import token_dashboard as token_dashboard_mod
 from ccrecall.cli import app, backfill_app
 from ccrecall.db import DEFAULT_DB_PATH, DEFAULT_PROJECTS_DIR
 from ccrecall.embeddings import DEFAULT_EMBED_THREADS
@@ -21,6 +25,15 @@ from ccrecall.hooks import sync_current as sync_current_mod
 
 # store_true flags carry no --no-<flag> negation, matching the former argparse.
 _FLAG = Parameter(negative=[])
+
+# Shared flag types mirroring the former cm-* read tools.
+_VERBOSE = Annotated[bool, _FLAG, Parameter(name=["--verbose", "-v"], help="Include files_modified and commits.")]
+_NOTIFS = Annotated[
+    bool, _FLAG, Parameter(name=["--include-notifications"], help="Include task notification messages.")
+]
+_FORMAT = Annotated[Literal["markdown", "json"], Parameter(name=["--format"], help="Output format.")]
+_DB = Annotated[Path, Parameter(name=["--db"], help="Database path.")]
+_TAIL_DEFAULT_N = session_tail_mod._DEFAULT_TAIL_EVENTS
 
 
 @app.command(name="sync-current")
@@ -84,3 +97,83 @@ def cmd_backfill_embeddings(
         if not status:
             backfill_embeddings_mod.cleanup_pid()
     raise SystemExit(code)
+
+
+@app.command(name="recent")
+def cmd_recent(
+    *,
+    n: Annotated[int, Parameter(name=["--n", "-n"], help="Number of sessions (1-20).")] = 3,
+    sort_order: Annotated[Literal["desc", "asc"], Parameter(name=["--sort-order"], help="Sort order.")] = "desc",
+    before: Annotated[str | None, Parameter(help="Sessions before this datetime (ISO).")] = None,
+    after: Annotated[str | None, Parameter(help="Sessions after this datetime (ISO).")] = None,
+    session: Annotated[str | None, Parameter(help="Filter by session UUID (prefix match).")] = None,
+    project: Annotated[str | None, Parameter(help="Filter by project name(s), comma-separated.")] = None,
+    path: Annotated[str | None, Parameter(help="Filter by cwd substring (e.g. worktree name).")] = None,
+    output_format: _FORMAT = "markdown",
+    verbose: _VERBOSE = False,
+    include_notifications: _NOTIFS = False,
+    db: _DB = DEFAULT_DB_PATH,
+) -> None:
+    """List recent conversation sessions."""
+    recent_chats_mod.run(
+        n=n,
+        sort_order=sort_order,
+        before=before,
+        after=after,
+        session=session,
+        project=project,
+        path=path,
+        output_format=output_format,
+        verbose=verbose,
+        include_notifications=include_notifications,
+        db=db,
+    )
+
+
+@app.command(name="search")
+def cmd_search(
+    *,
+    query: Annotated[str | None, Parameter(name=["--query", "-q"], help="Search keywords.")] = None,
+    status: Annotated[bool, _FLAG, Parameter(help="Print diagnostic status and exit.")] = False,
+    keyword_only: Annotated[bool, _FLAG, Parameter(help="Skip embedding; keyword search only.")] = False,
+    max_results: Annotated[int, Parameter(name=["--max-results"], help="Max sessions (1-10).")] = 5,
+    session: Annotated[str | None, Parameter(help="Filter by session UUID (prefix match).")] = None,
+    project: Annotated[str | None, Parameter(help="Filter by project name(s), comma-separated.")] = None,
+    path: Annotated[str | None, Parameter(help="Filter by cwd substring (e.g. worktree name).")] = None,
+    output_format: _FORMAT = "markdown",
+    verbose: _VERBOSE = False,
+    include_notifications: _NOTIFS = False,
+    db: _DB = DEFAULT_DB_PATH,
+) -> None:
+    """Search conversation sessions (keyword + vector fusion)."""
+    search_mod.run(
+        query=query,
+        status=status,
+        keyword_only=keyword_only,
+        max_results=max_results,
+        session=session,
+        project=project,
+        path=path,
+        output_format=output_format,
+        verbose=verbose,
+        include_notifications=include_notifications,
+        db=db,
+    )
+
+
+@app.command(name="tail")
+def cmd_tail(
+    selector: Annotated[str | None, Parameter(help="Session id or substring to target.")] = None,
+    *,
+    list_sessions: Annotated[bool, _FLAG, Parameter(name=["--list"], help="List sessions and exit.")] = False,
+    cwd: Annotated[str | None, Parameter(name=["--cwd"], help="Derive project dir from this path.")] = None,
+    n: Annotated[int, Parameter(name=["-n"], help="Number of tail events to show.")] = _TAIL_DEFAULT_N,
+) -> None:
+    """Print the tail of a prior session's transcript for fast resume."""
+    raise SystemExit(session_tail_mod.run(selector, list_sessions=list_sessions, cwd=cwd, n=n))
+
+
+@app.command(name="tokens")
+def cmd_tokens() -> None:
+    """Ingest token data, refresh the dashboard, and print a slim summary."""
+    token_dashboard_mod.run()

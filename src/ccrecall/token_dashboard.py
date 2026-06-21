@@ -42,7 +42,8 @@ def deploy_dashboard(json_str: str, dashboard_out_path: Path) -> None:
 # ── Main ──────────────────────────────────────────────────────────────
 
 
-def main() -> None:
+def run() -> None:
+    """Ingest token data, refresh the dashboard, and print a slim summary to stdout."""
     db_path = get_db_path()
     dashboard_out_path = db_path.parent / "dashboard.html"
 
@@ -124,7 +125,3 @@ def main() -> None:
     slim_kb = len(slim_json) / 1024
     print(f"Slim stdout: {slim_kb:.0f}KB (full: {full_kb:.0f}KB)", file=sys.stderr)
     print(slim_json)
-
-
-if __name__ == "__main__":
-    main()

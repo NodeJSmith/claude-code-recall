@@ -16,9 +16,9 @@ import pytest
 from ccrecall.hooks import memory_setup, memory_sync
 from ccrecall.hooks.sync_current import sync_session, validate_session_id
 from ccrecall.migrations import migrate_columns
-from ccrecall.recent_chats import main as recent_chats_main
+from ccrecall.recent_chats import run as recent_chats_run
 from ccrecall.schema import SCHEMA
-from ccrecall.search_conversations import main as search_conversations_main
+from ccrecall.search_conversations import run as search_conversations_run
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures"
 
@@ -540,11 +540,10 @@ class TestRecentChatsDbFlag:
         conn.commit()
         conn.close()
 
-        # Call main() with --db pointing to our custom DB
-        with patch("sys.argv", ["cm-recent-chats", "--db", str(custom_db)]):
-            captured = io.StringIO()
-            with patch("sys.stdout", captured):
-                recent_chats_main()
+        # Call run() with --db pointing to our custom DB
+        captured = io.StringIO()
+        with patch("sys.stdout", captured):
+            recent_chats_run(db=custom_db)
 
         output = captured.getvalue()
         assert "test-project" in output or "hello from custom db" in output or "Recent Conversations" in output
@@ -595,14 +594,10 @@ class TestSearchConversationsDbFlag:
         conn.commit()
         conn.close()
 
-        # Call main() with --db and --query flags
-        with patch(
-            "sys.argv",
-            ["cm-search", "--query", "uniqueterm12345", "--db", str(custom_db)],
-        ):
-            captured = io.StringIO()
-            with patch("sys.stdout", captured):
-                search_conversations_main()
+        # Call run() with query and db
+        captured = io.StringIO()
+        with patch("sys.stdout", captured):
+            search_conversations_run(query="uniqueterm12345", db=custom_db)
 
         output = captured.getvalue()
         assert "Error" not in output
