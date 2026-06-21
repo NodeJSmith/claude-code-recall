@@ -1,7 +1,7 @@
 ---
 task_id: "T02"
 title: "Split sync_session into per-responsibility helpers"
-status: "planned"
+status: "done"
 depends_on: ["T01"]
 implements: ["FR#1", "FR#2", "FR#3", "FR#4", "AC#2", "AC#3", "AC#4"]
 ---
