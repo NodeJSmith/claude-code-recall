@@ -1,7 +1,4 @@
-#!/usr/bin/env python3
-"""
-Incremental sync for current session only.
-Designed to be called from a Stop hook - fast and lightweight.
+"""Incremental sync for the current session only (Stop-hook helper — fast and lightweight).
 
 Reads session_id from stdin (or --input-file) and only syncs that session file.
 Detects conversation branches (from rewind) and stores each branch separately.
@@ -35,7 +32,7 @@ def validate_session_id(session_id: str) -> bool:
 
 
 def _is_under(path: Path, base: Path) -> bool:
-    """Check if resolved path is under base directory (Python 3.7+ compatible)."""
+    """Check whether path resolves to a location under base (symlink-escape guard)."""
     try:
         path.resolve().relative_to(base.resolve())
         return True
@@ -71,11 +68,9 @@ def get_session_file(projects_dir: Path, session_id: str) -> Path | None:
 
 def run(input_file: Path | None = None) -> None:
     """Sync only the current session into the memory DB (Stop-hook helper)."""
-    # Load settings
     settings = load_settings()
     logger = setup_logging(settings)
 
-    # Check if sync is disabled
     if not settings.get("sync_on_stop", True):
         logger.info("Sync disabled by settings")
         print(json.dumps({"continue": True}))
@@ -106,14 +101,12 @@ def run(input_file: Path | None = None) -> None:
         print(json.dumps({"continue": True}))
         return
 
-    # Find session file
     session_file = get_session_file(DEFAULT_PROJECTS_DIR, session_id)
 
     if not session_file:
         print(json.dumps({"continue": True}))
         return
 
-    # Sync
     try:
         conn = get_db_connection(settings, load_vec=True)
         project_dir = session_file.parent

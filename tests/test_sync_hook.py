@@ -358,7 +358,7 @@ class TestPidGuard:
         """When a live PID file exists, _spawn_background skips spawning."""
 
         pid_path = tmp_path / ".pid-cm-test-cmd"
-        monkeypatch.setattr(memory_setup, "_PID_DIR", tmp_path)
+        monkeypatch.setattr(memory_setup, "pid_file_path", lambda pid_key: tmp_path / f".pid-{pid_key}")
 
         # Write our own PID (current process) as a "live" PID
         pid_path.write_text(str(os.getpid()))
@@ -371,7 +371,7 @@ class TestPidGuard:
         """When PID file holds a dead PID, _spawn_background reaps it and spawns."""
 
         pid_path = tmp_path / ".pid-cm-test-cmd"
-        monkeypatch.setattr(memory_setup, "_PID_DIR", tmp_path)
+        monkeypatch.setattr(memory_setup, "pid_file_path", lambda pid_key: tmp_path / f".pid-{pid_key}")
 
         # We need a real PID that is guaranteed dead. Spawn a trivial subprocess
         # and reap it. Deliberately NOT os.fork(): by the time this test runs the
@@ -399,7 +399,7 @@ class TestPidGuard:
     def test_pid_guard_atomic_create(self, tmp_path, monkeypatch):
         """PID file creation uses O_CREAT | O_EXCL to prevent TOCTOU races."""
 
-        monkeypatch.setattr(memory_setup, "_PID_DIR", tmp_path)
+        monkeypatch.setattr(memory_setup, "pid_file_path", lambda pid_key: tmp_path / f".pid-{pid_key}")
 
         created_flags = []
 

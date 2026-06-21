@@ -17,6 +17,7 @@ from ccrecall.db import (
     get_db_connection,
     get_db_path,
     load_settings,
+    remove_pid_file,
     setup_logging,
 )
 from ccrecall.formatting import extract_project_name, normalize_project_key
@@ -30,7 +31,6 @@ BYTES_PER_MB = 1024 * 1024
 
 # PID key — must stay in sync with the spawn in memory_setup (`ccrecall import`).
 PID_KEY = "ccrecall-import"
-_PID_FILE = DEFAULT_DB_PATH.parent / f".pid-{PID_KEY}"
 
 
 def get_file_hash(filepath: Path) -> str:
@@ -213,8 +213,7 @@ def run(
         _run(db=db, projects_dir=projects_dir, project=project)
     finally:
         # Delete PID file so _spawn_background can spawn again next session
-        with contextlib.suppress(OSError):
-            _PID_FILE.unlink(missing_ok=True)
+        remove_pid_file(PID_KEY)
 
 
 def _run(

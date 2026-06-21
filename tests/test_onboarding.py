@@ -20,9 +20,8 @@ from ccrecall.db import CURRENT_ONBOARDING_VERSION
 
 
 def _patch_config_path(monkeypatch, path: Path) -> None:
-    """Patch CONFIG_PATH in both ccrecall.db and the onboarding module."""
+    """Patch CONFIG_PATH in ccrecall.db (onboarding reads config via db.load_config)."""
     monkeypatch.setattr(_db_mod, "CONFIG_PATH", path)
-    monkeypatch.setattr(onboarding, "CONFIG_PATH", path)
 
 
 def _run_main_captured(monkeypatch, cfg_path: Path) -> dict:

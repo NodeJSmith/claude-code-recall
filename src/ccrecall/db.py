@@ -23,6 +23,10 @@ DEFAULT_PROJECTS_DIR = Path.home() / ".claude" / "projects"
 DEFAULT_LOG_PATH = Path.home() / ".claude-memory" / "memory.log"
 CONFIG_PATH = Path.home() / ".claude-memory" / "config.json"
 
+# Hook filenames/prefixes — writer and reader live in different modules and must agree.
+CLEAR_HANDOFF_FILENAME = "clear-handoff.json"
+SYNC_TEMP_PREFIX = "claude-memory-sync-"
+
 # Shared SQL predicate for "branches that are candidates to embed": active
 # leaves (the query path only returns is_active=1) with a usable summary. This
 # is the single source of truth for the embedding universe — build_selection()
@@ -73,6 +77,17 @@ def apply_base_pragmas(conn: sqlite3.Connection) -> None:
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
     conn.execute("PRAGMA foreign_keys = ON")
+
+
+def pid_file_path(pid_key: str) -> Path:
+    """Path to a background job's PID sentinel (lives beside the DB)."""
+    return DEFAULT_DB_PATH.parent / f".pid-{pid_key}"
+
+
+def remove_pid_file(pid_key: str) -> None:
+    """Delete a job's PID sentinel so the next session can spawn again (best-effort)."""
+    with contextlib.suppress(OSError):
+        pid_file_path(pid_key).unlink(missing_ok=True)
 
 
 def vec_available(conn: sqlite3.Connection) -> bool:

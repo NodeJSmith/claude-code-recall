@@ -9,17 +9,16 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from ccrecall.db import log_hook_exception
+from ccrecall.db import SYNC_TEMP_PREFIX, log_hook_exception
 
 
 def main():
     try:
-        # Read hook input from stdin
         hook_input = sys.stdin.read()
 
         # Write to temp file (cross-platform stdin piping to detached process is unreliable)
         # Use os.fdopen on the fd directly to avoid TOCTOU race; mkstemp already sets 0o600
-        fd, tmp_path = tempfile.mkstemp(prefix="claude-memory-sync-", suffix=".json")
+        fd, tmp_path = tempfile.mkstemp(prefix=SYNC_TEMP_PREFIX, suffix=".json")
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write(hook_input)
@@ -29,7 +28,6 @@ def main():
                 Path(tmp_path).unlink()
             raise
 
-        # Background the sync
         # Heterogeneous values (DEVNULL ints here, bool/int platform flags added below);
         # dict[str, Any] lets **kwargs satisfy Popen's individually-typed keyword params.
         kwargs: dict[str, Any] = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}

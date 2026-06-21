@@ -1,19 +1,17 @@
-"""
-Backfill context summaries for existing branches.
+"""Backfill context summaries for existing branches.
 
 Runs as a background process spawned by memory-setup.py on SessionStart.
 Processes branches in batches, commits between batches, and marks errors
 with summary_version = -1 to avoid infinite retry.
 """
 
-import contextlib
 import sqlite3
 
 from ccrecall.db import (
     CONTENT_ERROR_VERSION,
-    DEFAULT_DB_PATH,
     get_db_connection,
     load_settings,
+    remove_pid_file,
     setup_logging,
 )
 from ccrecall.summarizer import SUMMARY_VERSION, compute_context_summary
@@ -23,7 +21,6 @@ BATCH_SIZE = 50
 # PID key — must stay in sync with the spawn in memory_setup
 # (`ccrecall backfill summaries`).
 PID_KEY = "ccrecall-backfill-summaries"
-_PID_FILE = DEFAULT_DB_PATH.parent / f".pid-{PID_KEY}"
 
 
 def run():
@@ -36,8 +33,7 @@ def run():
         _main()
     finally:
         # Delete PID file so _spawn_background can spawn again next session
-        with contextlib.suppress(OSError):
-            _PID_FILE.unlink(missing_ok=True)
+        remove_pid_file(PID_KEY)
 
 
 def _main():
