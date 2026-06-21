@@ -4,7 +4,6 @@ Called by Claude during onboarding to persist user configuration choices.
 Atomic write via tmp+replace to prevent partial writes.
 """
 
-import argparse
 import contextlib
 import json
 import os
@@ -14,38 +13,25 @@ from pathlib import Path
 from ccrecall.db import CONFIG_PATH, CURRENT_ONBOARDING_VERSION, DEFAULT_SETTINGS
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Write claude-memory config")
-    parser.add_argument(
-        "--defaults",
-        action="store_true",
-        help="Write recommended defaults without requiring explicit flags",
-    )
-    parser.add_argument(
-        "--auto-inject-context",
-        choices=["true", "false"],
-        help="Enable session context injection on startup",
-    )
-    args = parser.parse_args()
-
+def run(*, defaults: bool = False, auto_inject_context: bool | None = None) -> None:
+    """Write or update ~/.claude-memory/config.json from onboarding choices."""
     # Build initial config from DEFAULT_SETTINGS (plus write_config-specific keys).
     # Skip merge when --defaults is set so it always writes fresh defaults.
-    _write_config_defaults = {
+    write_config_defaults = {
         "onboarding_completed": False,
         "onboarding_version": 0,
         "auto_inject_context": DEFAULT_SETTINGS["auto_inject_context"],
     }
-    config = _write_config_defaults.copy()
-    if CONFIG_PATH.exists() and not args.defaults:
+    config = write_config_defaults.copy()
+    if CONFIG_PATH.exists() and not defaults:
         with contextlib.suppress(Exception):
             existing = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
             if isinstance(existing, dict):
                 config.update(existing)
 
-    # Apply CLI arguments (only reached when --defaults is not set)
-    if not args.defaults:
-        if args.auto_inject_context is not None:
-            config["auto_inject_context"] = args.auto_inject_context == "true"
+    # Apply explicit overrides (only when --defaults is not set)
+    if not defaults and auto_inject_context is not None:
+        config["auto_inject_context"] = auto_inject_context
 
     # Mark onboarding complete
     config["onboarding_completed"] = True
@@ -63,7 +49,3 @@ def main():
         raise
 
     print(f"Config saved to {CONFIG_PATH}")
-
-
-if __name__ == "__main__":
-    main()

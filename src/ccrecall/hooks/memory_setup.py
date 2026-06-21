@@ -15,25 +15,30 @@ from ccrecall.db import (
     get_db_connection,
     load_settings,
 )
+from ccrecall.hooks import backfill_summaries, import_conversations
 from ccrecall.summarizer import SUMMARY_VERSION
 
 # PID files live in the same directory as the DB
 _PID_DIR = DEFAULT_DB_PATH.parent
 
 
-def _pid_file_path(cmd: str) -> Path:
-    """Return the PID file path for a given entry point name."""
-    return _PID_DIR / f".pid-{cmd}"
+def _pid_file_path(pid_key: str) -> Path:
+    """Return the PID file path for a given spawn pid_key."""
+    return _PID_DIR / f".pid-{pid_key}"
 
 
-def _spawn_background(cmd: str) -> None:
+def _spawn_background(argv: list[str], pid_key: str) -> None:
     """Spawn an installed entry point as a detached background process.
+
+    ``argv`` is the command to run (e.g. ``["ccrecall", "import"]``); ``pid_key``
+    names the PID file (``.pid-<pid_key>``) and must match the constant the
+    spawned command unlinks on exit.
 
     Uses an atomic PID-file guard (O_CREAT | O_EXCL) to ensure at most one
     concurrent instance of the given command is running.  If a stale PID file
     exists (dead process), it is reaped and the new process is spawned.
     """
-    pid_path = _pid_file_path(cmd)
+    pid_path = _pid_file_path(pid_key)
 
     while True:
         try:
@@ -61,7 +66,7 @@ def _spawn_background(cmd: str) -> None:
     else:
         kwargs["start_new_session"] = True
     try:
-        proc = subprocess.Popen([cmd], **kwargs)  # noqa: S603 — spawns a trusted internal command, not untrusted input
+        proc = subprocess.Popen(argv, **kwargs)  # noqa: S603 — spawns a trusted internal command, not untrusted input
         # Write child PID so the child process can clean up the file on exit
         os.write(fd, str(proc.pid).encode())
     finally:
@@ -113,8 +118,8 @@ def _needs_backfill(settings: dict | None = None) -> bool:
 def _reap_stale_temp_files() -> None:
     """Delete claude-memory-sync-*.json temp files older than 1 hour.
 
-    These are left behind when cm-sync-current crashes or is killed before it
-    can clean up its own input file.
+    These are left behind when `ccrecall sync-current` crashes or is killed
+    before it can clean up its own input file.
     """
     tmp_dir = Path(tempfile.gettempdir())
     one_hour_ago = time.time() - 3600
@@ -136,19 +141,19 @@ def main():
 
         # Run initial import in background if DB doesn't exist
         if not DEFAULT_DB_PATH.exists():
-            _spawn_background("cm-import-conversations")
+            _spawn_background(["ccrecall", "import"], import_conversations.PID_KEY)
         else:
             _ensure_schema(settings)
             if _needs_reimport(settings):
-                _spawn_background("cm-import-conversations")
+                _spawn_background(["ccrecall", "import"], import_conversations.PID_KEY)
 
         if _needs_backfill(settings):
-            _spawn_background("cm-backfill-summaries")
+            _spawn_background(["ccrecall", "backfill", "summaries"], backfill_summaries.PID_KEY)
 
         # Note: embedding backfill is NOT auto-spawned. Embeddings are filled
         # forward by embed-on-write (active leaves only); historical seeding is
-        # opt-in via `cm-backfill-embeddings [--days N] [--limit N]` so embedding
-        # the full history never fires unbidden (machines.md thrash risk).
+        # opt-in via `ccrecall backfill embeddings [--days N] [--limit N]` so
+        # embedding the full history never fires unbidden (machines.md thrash risk).
     except Exception:  # noqa: S110 — top-level hook guard: must never crash the session start
         pass
 

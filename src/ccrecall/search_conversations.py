@@ -6,7 +6,6 @@ optionally fused with vector KNN via Reciprocal Rank Fusion.
 Returns markdown by default (token-efficient), JSON with --format json.
 """
 
-import argparse
 import json
 import sqlite3
 import sys
@@ -34,6 +33,10 @@ from ccrecall.formatting import format_json_sessions, format_markdown_session
 from ccrecall.fusion import rrf
 from ccrecall.schema import detect_fts_support
 from ccrecall.serialization import decode_json_column
+
+# Upper bound on --max-results, single-sourced here and referenced by the CLI
+# validator (cli/commands.py) so the clamp and the validator can't drift apart.
+MAX_SEARCH_RESULTS = 10
 
 
 def _get_fts_branch_ids(
@@ -405,7 +408,7 @@ def print_status(settings: dict | None) -> None:
         try:
             # Denominator is the shared embeddable universe (db.EMBEDDABLE_BRANCH_FILTER),
             # the same predicate the backfill's build_selection()/count_status() use,
-            # so this diagnostic can't drift from `cm-backfill-embeddings --status`.
+            # so this diagnostic can't drift from `ccrecall backfill embeddings --status`.
             total = conn.execute(f"SELECT count(*) FROM branches WHERE {EMBEDDABLE_BRANCH_FILTER}").fetchone()[0]
             embedded = conn.execute(
                 f"SELECT count(*) FROM branches WHERE {EMBEDDABLE_BRANCH_FILTER}"
@@ -423,51 +426,36 @@ def print_status(settings: dict | None) -> None:
     sys.exit(0)
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Search conversation sessions")
-    parser.add_argument("--query", "-q", type=str, help="Search keywords")
-    parser.add_argument("--status", action="store_true", help="Print diagnostic status and exit")
-    parser.add_argument(
-        "--keyword-only",
-        action="store_true",
-        help="Skip embedding, use keyword search only",
-    )
-    parser.add_argument("--max-results", type=int, default=5, help="Max sessions (1-10, default: 5)")
-    parser.add_argument("--session", type=str, help="Filter by session UUID (prefix match)")
-    parser.add_argument("--project", type=str, help="Filter by project name(s), comma-separated")
-    parser.add_argument("--path", type=str, help="Filter by cwd substring (e.g. worktree name)")
-    parser.add_argument(
-        "--format",
-        choices=["markdown", "json"],
-        default="markdown",
-        help="Output format (default: markdown)",
-    )
-    parser.add_argument(
-        "--verbose",
-        "-v",
-        action="store_true",
-        help="Include files_modified and commits",
-    )
-    parser.add_argument(
-        "--include-notifications",
-        action="store_true",
-        help="Include task notification messages (hidden by default)",
-    )
-    parser.add_argument("--db", type=Path, default=DEFAULT_DB_PATH, help="Database path")
+def run(
+    *,
+    query: str | None = None,
+    status: bool = False,
+    keyword_only: bool = False,
+    max_results: int = 5,
+    session: str | None = None,
+    project: str | None = None,
+    path: str | None = None,
+    output_format: str = "markdown",
+    verbose: bool = False,
+    include_notifications: bool = False,
+    db: Path = DEFAULT_DB_PATH,
+) -> None:
+    """Search conversation sessions (keyword + vector fusion)."""
+    # Validate: exactly one of --query / --status must be provided.
+    if not status and not query:
+        print("error: one of --query/-q or --status is required", file=sys.stderr)
+        sys.exit(2)
+    if status and query:
+        print("error: --query and --status are mutually exclusive", file=sys.stderr)
+        sys.exit(2)
 
-    args = parser.parse_args()
+    # Backstop for direct callers; the CLI validator rejects out-of-range
+    # --max-results before reaching here. Both sides bound on MAX_SEARCH_RESULTS.
+    max_results = max(1, min(MAX_SEARCH_RESULTS, max_results))
+    projects = [p.strip() for p in project.split(",")] if project else None
 
-    # Validate: exactly one of --query / --status must be provided
-    if not args.status and not args.query:
-        parser.error("one of --query/-q or --status is required")
-    if args.status and args.query:
-        parser.error("--query and --status are mutually exclusive")
-
-    max_results = max(1, min(10, args.max_results))
-    projects = [p.strip() for p in args.project.split(",")] if args.project else None
-
-    if not args.db.exists():
-        if args.status:
+    if not db.exists():
+        if status:
             # For --status, report missing DB gracefully rather than hard-exiting.
             # Model identity is independent of the DB, so report it even when the
             # DB is absent (deps check only — no download in a read-only path).
@@ -475,17 +463,21 @@ def main():
             print(f"model: {EMBEDDING_MODEL} (deps {'available' if DEPS_AVAILABLE else 'missing'})")
             print("embedded branches: error (database not found)")
             sys.exit(0)
-        if args.format == "json":
-            print(json.dumps({"error": "Database not found", "sessions": [], "query": args.query}))
+        if output_format == "json":
+            print(json.dumps({"error": "Database not found", "sessions": [], "query": query}))
         else:
             print("Error: Database not found. Run memory setup first.")
         sys.exit(1)
 
-    settings = {"db_path": str(args.db)} if args.db != DEFAULT_DB_PATH else None
+    settings = {"db_path": str(db)} if db != DEFAULT_DB_PATH else None
 
-    if args.status:
+    if status:
         print_status(settings)
         return  # print_status calls sys.exit(0), but be explicit
+
+    # Past the status branch with the xor-validation above satisfied, query is
+    # guaranteed present (status is False, so a missing query already exited 2).
+    assert query is not None  # noqa: S101 — type-checker narrowing; the real guard is the exit above
 
     try:
         conn = get_db_connection(settings, load_vec=True)
@@ -493,30 +485,26 @@ def main():
 
         sessions = search_sessions(
             conn,
-            query=args.query,
+            query=query,
             fts_level=fts_level,
             max_results=max_results,
             projects=projects,
-            session_id=args.session,
-            path=args.path,
-            verbose=args.verbose,
-            include_notifications=args.include_notifications,
-            keyword_only=args.keyword_only,
+            session_id=session,
+            path=path,
+            verbose=verbose,
+            include_notifications=include_notifications,
+            keyword_only=keyword_only,
         )
         conn.close()
 
-        if args.format == "json":
-            print(format_json_sessions(sessions, {"query": args.query}))
+        if output_format == "json":
+            print(format_json_sessions(sessions, {"query": query}))
         else:
-            print(format_markdown(sessions, args.query, verbose=args.verbose))
+            print(format_markdown(sessions, query, verbose=verbose))
 
     except Exception as e:
-        if args.format == "json":
-            print(json.dumps({"error": str(e), "sessions": [], "query": args.query}))
+        if output_format == "json":
+            print(json.dumps({"error": str(e), "sessions": [], "query": query}))
         else:
             print(f"Error: {e}")
         sys.exit(1)
-
-
-if __name__ == "__main__":
-    main()

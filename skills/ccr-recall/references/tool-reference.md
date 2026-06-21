@@ -1,11 +1,11 @@
 # Tool Reference
 
-## recent_chats.py
+## ccrecall recent
 
 Retrieve recent conversation sessions with all messages.
 
 ```bash
-cm-recent-chats --n 3
+ccrecall recent --n 3
 ```
 
 | Option                    | Effect                                                 |
@@ -23,12 +23,12 @@ cm-recent-chats --n 3
 
 Use `--verbose` for lenses that need file/commit context (restore-context, review-process, run-retro).
 
-## search_conversations.py
+## ccrecall search
 
-Search for sessions using keyword full-text search (FTS5/FTS4/LIKE cascade) fused with vector similarity via RRF when both the bge-m3 model and the sqlite-vec vector path (queryable `branch_vec`) are available. If either is missing, search degrades to keyword-only.
+Search for sessions using keyword full-text search (FTS5/FTS4/LIKE cascade) fused with vector similarity via RRF when both the embedding model and the sqlite-vec vector path (queryable `branch_vec`) are available. If either is missing, search degrades to keyword-only.
 
 ```bash
-cm-search-conversations --query "keyword"
+ccrecall search --query "keyword"
 ```
 
 

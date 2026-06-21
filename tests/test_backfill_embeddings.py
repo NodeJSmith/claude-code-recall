@@ -19,7 +19,7 @@ import sqlite_vec
 from conftest import make_vec_conn
 
 from ccrecall.embeddings import EMBEDDING_DIM, EMBEDDING_MODEL, EMBEDDING_VERSION
-from ccrecall.hooks.backfill_embeddings import BATCH_SIZE, _main
+from ccrecall.hooks.backfill_embeddings import BATCH_SIZE, run
 from ccrecall.summarizer import SUMMARY_VERSION
 
 # A fixed EMBEDDING_DIM-dim float vector for stubbing embed_text.
@@ -98,8 +98,8 @@ def _has_vec(conn: sqlite3.Connection, branch_id: int) -> bool:
 class _NoCloseConn:
     """Wrapper that delegates to a sqlite3.Connection but makes close() a no-op.
 
-    _main() calls conn.close() at the end; wrapping prevents the test from losing
-    access to the connection after _main() returns.
+    run() calls conn.close() at the end; wrapping prevents the test from losing
+    access to the connection after run() returns.
     """
 
     def __init__(self, conn: sqlite3.Connection):
@@ -112,11 +112,8 @@ class _NoCloseConn:
         return getattr(self._conn, name)
 
 
-def _run_backfill_with_stub(conn: sqlite3.Connection, argv: list[str] | None = None):
-    """Run _main(argv) with embed_text stubbed to _FIXED_VEC, using given conn.
-
-    argv defaults to [] so the run never reads pytest's own sys.argv.
-    """
+def _run_backfill_with_stub(conn: sqlite3.Connection, *, days=None, limit=None):
+    """Run run(...) with embed_text stubbed to _FIXED_VEC, using given conn."""
     with (
         patch("ccrecall.hooks.backfill_embeddings.model_available", return_value=True),
         patch(
@@ -130,7 +127,7 @@ def _run_backfill_with_stub(conn: sqlite3.Connection, argv: list[str] | None = N
         patch("ccrecall.hooks.backfill_embeddings.load_settings", return_value={}),
         patch("ccrecall.hooks.backfill_embeddings.time.sleep"),
     ):
-        _main(argv if argv is not None else [])
+        run(days=days, limit=limit)
 
 
 # backfill embeds all eligible branches
@@ -231,7 +228,7 @@ class TestBackfillResume:
             patch("ccrecall.hooks.backfill_embeddings.load_settings", return_value={}),
             patch("ccrecall.hooks.backfill_embeddings.time.sleep"),
         ):
-            _main([])
+            run()
 
         first_run_calls = call_count[0]
         assert first_run_calls == len(ids)
@@ -254,7 +251,7 @@ class TestBackfillResume:
             patch("ccrecall.hooks.backfill_embeddings.load_settings", return_value={}),
             patch("ccrecall.hooks.backfill_embeddings.time.sleep"),
         ):
-            _main([])
+            run()
 
         assert call_count[0] == 0
 
@@ -424,7 +421,7 @@ class TestBackfillNoProgressGuard:
             patch("ccrecall.hooks.backfill_embeddings.load_settings", return_value={}),
             patch("ccrecall.hooks.backfill_embeddings.time.sleep"),
         ):
-            _main([])  # must return, not hang
+            run()  # must return, not hang
 
         # Row was never actually stamped (write was a no-op), confirming
         # _main() exited via the guard, not via the row becoming done.
@@ -453,7 +450,7 @@ class TestBackfillFailureModes:
             ),
             patch("ccrecall.hooks.backfill_embeddings.load_settings", return_value={}),
         ):
-            _main([])
+            run()
 
         # All rows still eligible (embedding_version still NULL or 0, not -1)
         for bid in ids:
@@ -489,7 +486,7 @@ class TestBackfillFailureModes:
             patch("ccrecall.hooks.backfill_embeddings.load_settings", return_value={}),
             patch("ccrecall.hooks.backfill_embeddings.time.sleep"),
         ):
-            _main([])
+            run()
 
         # Bad row marked -1
         assert _branch_embedding_version(conn, bad_id) == -1
@@ -525,7 +522,7 @@ class TestBackfillFailureModes:
             patch("ccrecall.hooks.backfill_embeddings.load_settings", return_value={}),
             patch("ccrecall.hooks.backfill_embeddings.time.sleep"),
         ):
-            _main([])
+            run()
 
         # No rows should be marked -1 — infra failure aborts without marking
         for bid in ids:
@@ -562,7 +559,7 @@ class TestBackfillFailureModes:
             patch("ccrecall.hooks.backfill_embeddings.load_settings", return_value={}),
             patch("ccrecall.hooks.backfill_embeddings.time.sleep"),
         ):
-            _main([])
+            run()
 
         assert call_count[0] == 0
 
@@ -605,7 +602,7 @@ class TestBackfillFlags:
         )
         conn.commit()
 
-        _run_backfill_with_stub(conn, argv=["--days", "30"])
+        _run_backfill_with_stub(conn, days=30)
 
         assert _has_vec(conn, recent)
         assert not _has_vec(conn, old)
@@ -617,7 +614,7 @@ class TestBackfillFlags:
         for i in range(5):
             _insert_branch(conn, f"summary {i}")
 
-        _run_backfill_with_stub(conn, argv=["--limit", "2"])
+        _run_backfill_with_stub(conn, limit=2)
 
         assert _vec_count(conn) == 2
 
@@ -625,8 +622,8 @@ class TestBackfillFlags:
 # --status: read-only progress reader (done / eligible / errored / total)
 
 
-def _run_status(conn: sqlite3.Connection, argv: list[str], capsys):
-    """Invoke `_main(--status ...)` against `conn`; return captured stdout."""
+def _run_status(conn: sqlite3.Connection, capsys, *, json_mode=False, days=None):
+    """Invoke run(status=True, ...) against conn; return captured stdout."""
     with (
         patch(
             "ccrecall.hooks.backfill_embeddings.get_db_connection",
@@ -634,7 +631,7 @@ def _run_status(conn: sqlite3.Connection, argv: list[str], capsys):
         ),
         patch("ccrecall.hooks.backfill_embeddings.load_settings", return_value={}),
     ):
-        code = _main(["--status", *argv])
+        code = run(status=True, json_mode=json_mode, days=days)
     assert code == 0
     return capsys.readouterr().out
 
@@ -656,7 +653,7 @@ class TestBackfillStatus:
         conn = make_vec_conn()
         self._seed_mixed(conn)
 
-        out = _run_status(conn, ["--json"], capsys)
+        out = _run_status(conn, capsys, json_mode=True)
         data = json.loads(out)
 
         assert data["universe"] == 6
@@ -669,7 +666,7 @@ class TestBackfillStatus:
         conn = make_vec_conn()
         self._seed_mixed(conn)
 
-        out = _run_status(conn, [], capsys)
+        out = _run_status(conn, capsys)
 
         assert "embedded:  3 / 6" in out
         assert "remaining: 2" in out
@@ -700,7 +697,7 @@ class TestBackfillStatus:
         conn.execute("UPDATE branches SET embedding_version = -1 WHERE id = ?", (recent_err,))
         conn.commit()
 
-        out = _run_status(conn, ["--json", "--days", "30"], capsys)
+        out = _run_status(conn, capsys, json_mode=True, days=30)
         data = json.loads(out)
 
         # Only `recent` (eligible) and `recent_err` (errored) are within the
@@ -717,6 +714,6 @@ class TestBackfillStatus:
         _insert_branch(conn, "untouched")
 
         before = _vec_count(conn)
-        _run_status(conn, ["--json"], capsys)
+        _run_status(conn, capsys, json_mode=True)
 
         assert _vec_count(conn) == before == 0

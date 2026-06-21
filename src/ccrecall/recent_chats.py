@@ -5,7 +5,6 @@ Retrieve recent conversation sessions from the memory database.
 Returns markdown by default (token-efficient), JSON with --format json.
 """
 
-import argparse
 import json
 import sqlite3
 import sys
@@ -15,6 +14,10 @@ from pathlib import Path
 from ccrecall.db import DEFAULT_DB_PATH, get_db_connection
 from ccrecall.formatting import format_json_sessions, format_markdown_session
 from ccrecall.serialization import decode_json_column
+
+# Upper bound on --n, single-sourced here and referenced by the CLI validator
+# (cli/commands.py) so the clamp and the validator can't drift apart.
+MAX_RECENT_SESSIONS = 20
 
 
 def get_recent_sessions(
@@ -160,79 +163,58 @@ def format_markdown(sessions: list[dict], verbose: bool = False) -> str:
     return "\n".join(lines)
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Get recent conversation sessions")
-    parser.add_argument("--n", "-n", type=int, default=3, help="Number of sessions (1-20, default: 3)")
-    parser.add_argument(
-        "--sort-order",
-        choices=["desc", "asc"],
-        default="desc",
-        help="Sort order (default: desc)",
-    )
-    parser.add_argument("--before", type=str, help="Sessions before this datetime (ISO)")
-    parser.add_argument("--after", type=str, help="Sessions after this datetime (ISO)")
-    parser.add_argument("--session", type=str, help="Filter by session UUID (prefix match)")
-    parser.add_argument("--project", type=str, help="Filter by project name(s), comma-separated")
-    parser.add_argument("--path", type=str, help="Filter by cwd substring (e.g. worktree name)")
-    parser.add_argument(
-        "--format",
-        choices=["markdown", "json"],
-        default="markdown",
-        help="Output format (default: markdown)",
-    )
-    parser.add_argument(
-        "--verbose",
-        "-v",
-        action="store_true",
-        help="Include files_modified and commits",
-    )
-    parser.add_argument(
-        "--include-notifications",
-        action="store_true",
-        help="Include task notification messages (hidden by default)",
-    )
-    parser.add_argument("--db", type=Path, default=DEFAULT_DB_PATH, help="Database path")
+def run(
+    *,
+    n: int = 3,
+    sort_order: str = "desc",
+    before: str | None = None,
+    after: str | None = None,
+    session: str | None = None,
+    project: str | None = None,
+    path: str | None = None,
+    output_format: str = "markdown",
+    verbose: bool = False,
+    include_notifications: bool = False,
+    db: Path = DEFAULT_DB_PATH,
+) -> None:
+    """Get recent conversation sessions."""
+    # Backstop for direct callers; the CLI validator rejects out-of-range --n
+    # before reaching here. Both sides bound on MAX_RECENT_SESSIONS.
+    n = max(1, min(MAX_RECENT_SESSIONS, n))
+    projects = [p.strip() for p in project.split(",")] if project else None
 
-    args = parser.parse_args()
-    n = max(1, min(20, args.n))
-    projects = [p.strip() for p in args.project.split(",")] if args.project else None
-
-    if not args.db.exists():
-        if args.format == "json":
+    if not db.exists():
+        if output_format == "json":
             print(json.dumps({"error": "Database not found", "sessions": [], "total_sessions": 0}))
         else:
             print("Error: Database not found. Run memory setup first.")
         sys.exit(1)
 
     try:
-        settings = {"db_path": str(args.db)} if args.db != DEFAULT_DB_PATH else None
+        settings = {"db_path": str(db)} if db != DEFAULT_DB_PATH else None
         conn = get_db_connection(settings)
         sessions = get_recent_sessions(
             conn,
             n=n,
-            sort_order=args.sort_order,
-            before=args.before,
-            after=args.after,
+            sort_order=sort_order,
+            before=before,
+            after=after,
             projects=projects,
-            session_id=args.session,
-            path=args.path,
-            verbose=args.verbose,
-            include_notifications=args.include_notifications,
+            session_id=session,
+            path=path,
+            verbose=verbose,
+            include_notifications=include_notifications,
         )
         conn.close()
 
-        if args.format == "json":
+        if output_format == "json":
             print(format_json_sessions(sessions))
         else:
-            print(format_markdown(sessions, verbose=args.verbose))
+            print(format_markdown(sessions, verbose=verbose))
 
     except Exception as e:
-        if args.format == "json":
+        if output_format == "json":
             print(json.dumps({"error": str(e), "sessions": [], "total_sessions": 0}))
         else:
             print(f"Error: {e}")
         sys.exit(1)
-
-
-if __name__ == "__main__":
-    main()

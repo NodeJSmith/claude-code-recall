@@ -1,7 +1,6 @@
 """Tests for search_conversations.py and recent_chats.py — search and retrieval."""
 
 import sqlite3
-import sys
 from unittest.mock import patch
 
 import pytest
@@ -18,8 +17,8 @@ from ccrecall.schema import SCHEMA, SCHEMA_CORE, detect_fts_support
 from ccrecall.search_conversations import (
     _dedup_by_session,
     _get_vec_branch_ids,
-    main,
     print_status,
+    run,
     search_sessions,
 )
 
@@ -855,7 +854,7 @@ class TestStatusFlag:
         assert "model:" in captured.out
         assert "embedded branches:" in captured.out
 
-    def test_status_does_not_require_query(self, tmp_path, monkeypatch):
+    def test_status_does_not_require_query(self, tmp_path):
         """--status works without --query."""
         db_path = tmp_path / "conv.db"
         c = sqlite3.connect(str(db_path))
@@ -864,17 +863,11 @@ class TestStatusFlag:
         migrate_columns(c)
         c.close()
 
-        monkeypatch.setattr(
-            sys,
-            "argv",
-            ["search_conversations", "--status", "--db", str(db_path)],
-        )
-
         with pytest.raises(SystemExit) as exc:
-            main()
+            run(status=True, db=db_path)
         assert exc.value.code == 0
 
-    def test_status_ignores_keyword_only(self, tmp_path, monkeypatch, capsys):
+    def test_status_ignores_keyword_only(self, tmp_path):
         """--status combined with --keyword-only still exits 0."""
         db_path = tmp_path / "conv2.db"
         c = sqlite3.connect(str(db_path))
@@ -883,33 +876,15 @@ class TestStatusFlag:
         migrate_columns(c)
         c.close()
 
-        monkeypatch.setattr(
-            sys,
-            "argv",
-            [
-                "search_conversations",
-                "--status",
-                "--keyword-only",
-                "--db",
-                str(db_path),
-            ],
-        )
-
         with pytest.raises(SystemExit) as exc:
-            main()
+            run(status=True, keyword_only=True, db=db_path)
         assert exc.value.code == 0
 
-    def test_main_errors_without_query_or_status(self, tmp_path, monkeypatch):
-        """main() errors when neither --query nor --status is provided."""
+    def test_run_errors_without_query_or_status(self, tmp_path):
+        """run() errors when neither --query nor --status is provided."""
         db_path = tmp_path / "conv3.db"
 
-        monkeypatch.setattr(
-            sys,
-            "argv",
-            ["search_conversations", "--db", str(db_path)],
-        )
-
         with pytest.raises(SystemExit) as exc:
-            main()
-        # argparse calls sys.exit(2) for errors
+            run(db=db_path)
+        # run() exits 2 when neither --query nor --status is given
         assert exc.value.code != 0

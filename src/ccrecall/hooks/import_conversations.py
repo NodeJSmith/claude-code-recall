@@ -8,14 +8,11 @@ Detects conversation branches (from rewind) and stores each branch separately.
 v3 schema: messages stored once per session, branches as separate index.
 """
 
-import argparse
 import contextlib
 import hashlib
 import sqlite3
-import sys
 from pathlib import Path
 
-from ccrecall.content import sanitize_fts_term
 from ccrecall.db import (
     DEFAULT_DB_PATH,
     DEFAULT_PROJECTS_DIR,
@@ -27,7 +24,6 @@ from ccrecall.db import (
 from ccrecall.formatting import extract_project_name, normalize_project_key
 from ccrecall.parsing import extract_session_uuid
 from ccrecall.project_ops import upsert_project
-from ccrecall.schema import detect_fts_support
 from ccrecall.session_ops import sync_session
 
 
@@ -161,51 +157,26 @@ def import_project(
     return sessions_imported, messages_imported, sessions_skipped
 
 
-_PID_FILE = DEFAULT_DB_PATH.parent / ".pid-cm-import-conversations"
+# PID key — must stay in sync with the spawn in memory_setup (`ccrecall import`).
+PID_KEY = "ccrecall-import"
+_PID_FILE = DEFAULT_DB_PATH.parent / f".pid-{PID_KEY}"
 
 
-def main():
-    try:
-        _main()
-    finally:
-        # Delete PID file so _spawn_background can spawn again next session
-        with contextlib.suppress(OSError):
-            _PID_FILE.unlink(missing_ok=True)
+def print_stats(db: Path = DEFAULT_DB_PATH) -> None:
+    """Print row counts and on-disk size for the memory DB to stdout.
 
-
-def _main():
-    parser = argparse.ArgumentParser(description="Import Claude Code conversations into SQLite")
-    parser.add_argument(
-        "--db",
-        type=Path,
-        default=DEFAULT_DB_PATH,
-        help=f"Database path (default: {DEFAULT_DB_PATH})",
-    )
-    parser.add_argument(
-        "--projects-dir",
-        type=Path,
-        default=DEFAULT_PROJECTS_DIR,
-        help=f"Projects directory (default: {DEFAULT_PROJECTS_DIR})",
-    )
-    parser.add_argument("--project", type=str, help="Import only specific project (by directory name)")
-    parser.add_argument("--search", type=str, help="Search conversations instead of importing")
-    parser.add_argument("--limit", type=int, default=20, help="Search result limit")
-    parser.add_argument("--stats", action="store_true", help="Show database statistics")
-
-    args = parser.parse_args()
-
+    Read-only: deliberately does NOT touch the import PID file (it shares no
+    lifecycle with run()), so `ccrecall stats` can't delete a live background
+    import's PID sentinel and let the session hook spawn a duplicate import.
+    load_vec=False keeps it genuinely read-only — the counts never query
+    branch_vec, so there's no reason to create and commit the vec schema here.
+    """
     settings = load_settings()
-    logger = setup_logging(settings)
-
-    if args.db != DEFAULT_DB_PATH:
-        settings["db_path"] = str(args.db)
+    if db != DEFAULT_DB_PATH:
+        settings["db_path"] = str(db)
     db_path = get_db_path(settings)
-    exclude_projects = settings.get("exclude_projects", [])
 
-    # Use get_db_connection which handles migration
-    conn = get_db_connection(settings, load_vec=True)
-
-    if args.stats:
+    with contextlib.closing(get_db_connection(settings, load_vec=False)) as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT COUNT(*) FROM projects")
         projects = cursor.fetchone()[0]
@@ -220,140 +191,77 @@ def _main():
         cursor.execute("SELECT COUNT(*) FROM branches WHERE is_active = 0")
         abandoned = cursor.fetchone()[0]
 
-        db_size = db_path.stat().st_size if db_path.exists() else 0
+    db_size = db_path.stat().st_size if db_path.exists() else 0
 
-        print(f"Database: {db_path}")
-        print(f"Size: {db_size / 1024 / 1024:.2f} MB")
-        print(f"Projects: {projects}")
-        print(f"Sessions: {sessions}")
-        print(f"Branches: {total_branches} ({active} active, {abandoned} abandoned)")
-        print(f"Messages: {messages}")
-        return
+    print(f"Database: {db_path}")
+    print(f"Size: {db_size / 1024 / 1024:.2f} MB")
+    print(f"Projects: {projects}")
+    print(f"Sessions: {sessions}")
+    print(f"Branches: {total_branches} ({active} active, {abandoned} abandoned)")
+    print(f"Messages: {messages}")
 
-    if args.search:
-        cursor = conn.cursor()
-        terms = args.search.split()
-        fts_level = detect_fts_support(conn)
 
-        if fts_level in ("fts5", "fts4"):
-            sanitized_terms = [sanitize_fts_term(term) for term in terms]
-            sanitized_terms = [t for t in sanitized_terms if t]  # Remove empty terms
-            if not sanitized_terms:
-                print("No valid search terms after sanitization")
-                sys.exit(0)
-            fts_query = " OR ".join(f'"{term}"' for term in sanitized_terms)
+def run(
+    *,
+    db: Path = DEFAULT_DB_PATH,
+    projects_dir: Path = DEFAULT_PROJECTS_DIR,
+    project: str | None = None,
+) -> None:
+    """Import Claude Code conversations into the memory DB."""
+    try:
+        _run(db=db, projects_dir=projects_dir, project=project)
+    finally:
+        # Delete PID file so _spawn_background can spawn again next session
+        with contextlib.suppress(OSError):
+            _PID_FILE.unlink(missing_ok=True)
 
-            if fts_level == "fts5":
-                sql = """
-                    SELECT
-                        m.id, m.timestamp, m.role,
-                        snippet(messages_fts, 0, '>>>', '<<<', '...', 32) as snippet,
-                        m.content, s.uuid as session_uuid,
-                        p.name as project_name, p.path as project_path,
-                        bm25(messages_fts) as rank
-                    FROM messages_fts
-                    JOIN messages m ON messages_fts.rowid = m.id
-                    JOIN sessions s ON m.session_id = s.id
-                    JOIN projects p ON s.project_id = p.id
-                    WHERE messages_fts MATCH ?
-                """
-            else:
-                sql = """
-                    SELECT
-                        m.id, m.timestamp, m.role,
-                        snippet(messages_fts, '>>>', '<<<', '...', -1, 32) as snippet,
-                        m.content, s.uuid as session_uuid,
-                        p.name as project_name, p.path as project_path,
-                        0 as rank
-                    FROM messages_fts
-                    JOIN messages m ON messages_fts.rowid = m.id
-                    JOIN sessions s ON m.session_id = s.id
-                    JOIN projects p ON s.project_id = p.id
-                    WHERE messages_fts MATCH ?
-                """
-            params: list = [fts_query]
 
-            if args.project:
-                sql += " AND p.name LIKE ?"
-                params.append(f"%{args.project}%")
+def _run(
+    *,
+    db: Path,
+    projects_dir: Path,
+    project: str | None,
+) -> None:
+    settings = load_settings()
+    logger = setup_logging(settings)
 
-            if fts_level == "fts5":
-                sql += " ORDER BY rank LIMIT ?"
-            else:
-                sql += " ORDER BY m.timestamp DESC LIMIT ?"
-            params.append(args.limit)
+    if db != DEFAULT_DB_PATH:
+        settings["db_path"] = str(db)
+    db_path = get_db_path(settings)
+    exclude_projects = settings.get("exclude_projects", [])
 
-        else:
-            # LIKE fallback
-            like_clauses = " AND ".join("m.content LIKE ?" for _ in terms)
-            sql = f"""
-                SELECT
-                    m.id, m.timestamp, m.role,
-                    substr(m.content, 1, 200) as snippet,
-                    m.content, s.uuid as session_uuid,
-                    p.name as project_name, p.path as project_path,
-                    0 as rank
-                FROM messages m
-                JOIN sessions s ON m.session_id = s.id
-                JOIN projects p ON s.project_id = p.id
-                WHERE {like_clauses}
-            """
-            params = [f"%{term}%" for term in terms]
-
-            if args.project:
-                sql += " AND p.name LIKE ?"
-                params.append(f"%{args.project}%")
-
-            sql += " ORDER BY m.timestamp DESC LIMIT ?"
-            params.append(args.limit)
-
-        cursor.execute(sql, params)
-
-        results = cursor.fetchall()
-        if not results:
-            print("No results found.")
-            return
-
-        for row in results:
-            print(f"\n{'-' * 60}")
-            print(f"{row[6]} / {row[5][:8]} - {row[1]} - {row[2]}")
-            print(f"{row[3]}")
-        print(f"\n{'-' * 60}")
-        print(f"Found {len(results)} results")
-        return
-
-    # Import mode
     total_sessions = 0
     total_messages = 0
     total_skipped = 0
 
-    if args.project:
-        project_dir = args.projects_dir / args.project
-        if not project_dir.exists():
-            print(f"Project not found: {project_dir}")
-            return
-
-        sessions, messages, skipped = import_project(conn, project_dir, exclude_projects)
-        conn.commit()
-        total_sessions += sessions
-        total_messages += messages
-        total_skipped += skipped
-        print(f"Imported {args.project}: {sessions} branches, {messages} messages")
-    else:
-        for project_dir in args.projects_dir.iterdir():
-            if not project_dir.is_dir() or project_dir.name.startswith("."):
-                continue
+    # get_db_connection handles migration; closing() releases the connection on
+    # every exit path (missing-project, normal completion).
+    with contextlib.closing(get_db_connection(settings, load_vec=True)) as conn:
+        if project:
+            project_dir = projects_dir / project
+            if not project_dir.exists():
+                print(f"Project not found: {project_dir}")
+                return
 
             sessions, messages, skipped = import_project(conn, project_dir, exclude_projects)
-            conn.commit()  # Per-project commit to minimize write-lock window
+            conn.commit()
             total_sessions += sessions
             total_messages += messages
             total_skipped += skipped
+            print(f"Imported {project}: {sessions} branches, {messages} messages")
+        else:
+            for project_dir in projects_dir.iterdir():
+                if not project_dir.is_dir() or project_dir.name.startswith("."):
+                    continue
 
-            if sessions > 0 or messages > 0:
-                print(f"Imported {project_dir.name}: {sessions} branches, {messages} messages")
+                sessions, messages, skipped = import_project(conn, project_dir, exclude_projects)
+                conn.commit()  # Per-project commit to minimize write-lock window
+                total_sessions += sessions
+                total_messages += messages
+                total_skipped += skipped
 
-    conn.close()
+                if sessions > 0 or messages > 0:
+                    print(f"Imported {project_dir.name}: {sessions} branches, {messages} messages")
 
     logger.info("Import complete: %s branches, %s messages", total_sessions, total_messages)
     print(f"\nTotal: {total_sessions} branches, {total_messages} messages imported ({total_skipped} unchanged)")
@@ -361,7 +269,3 @@ def _main():
     if db_path.exists():
         db_size = db_path.stat().st_size
         print(f"Database size: {db_size / 1024 / 1024:.2f} MB")
-
-
-if __name__ == "__main__":
-    main()

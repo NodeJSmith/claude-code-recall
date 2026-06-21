@@ -37,11 +37,11 @@ def main():
             kwargs["start_new_session"] = True
         try:
             subprocess.Popen(  # noqa: S603 — spawns the project's own installed CLI, not untrusted input
-                ["cm-sync-current", "--input-file", tmp_path],  # noqa: S607 — entrypoint resolved via PATH by design
+                ["ccrecall", "sync-current", "--input-file", tmp_path],  # noqa: S607 — entrypoint resolved via PATH by design
                 **kwargs,
             )
         except Exception:
-            # Popen failed — clean up the temp file (cm-sync-current won't run to do it)
+            # Popen failed — clean up the temp file (ccrecall sync-current won't run to do it)
             with contextlib.suppress(OSError):
                 Path(tmp_path).unlink()
             raise

@@ -14,16 +14,16 @@ description: >
 
 Two scripts retrieve data. For full option catalogs, load `references/tool-reference.md`.
 
-Semantic recall is active: `cm-search-conversations` fuses keyword ranking with bge-m3 vector similarity by default. No behavior change required — the skill uses the same commands as before.
+Semantic recall is active: `ccrecall search` fuses keyword ranking with vector similarity by default.
 
 **recent_chats.py** — retrieve recent sessions:
 ```bash
-cm-recent-chats --n 3
+ccrecall recent --n 3
 ```
 
 **search_conversations.py** — keyword search across all sessions:
 ```bash
-cm-search-conversations --query "keyword"
+ccrecall search --query "keyword"
 ```
 
 ---
@@ -44,8 +44,8 @@ cm-search-conversations --query "keyword"
    Load `references/lenses.md` for per-lens parameters, core questions, and supplementary search patterns.
 
 2. **Gather context** using lens-appropriate tools:
-   - For recent context: `cm-recent-chats --n N`
-   - For keyword search: `cm-search-conversations --query "keywords"`
+   - For recent context: `ccrecall recent --n N`
+   - For keyword search: `ccrecall search --query "keywords"`
 
 3. **Apply lens questions** to analyze the retrieved conversations.
 

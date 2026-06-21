@@ -1,7 +1,7 @@
 """
 Backfill embeddings for existing active-leaf branches.
 
-Opt-in: invoke manually via `cm-backfill-embeddings` to seed historical
+Opt-in: invoke manually via `ccrecall backfill embeddings` to seed historical
 embeddings. NOT auto-spawned on SessionStart (embedding inference is CPU-bound);
 forward coverage comes from embed-on-write instead.
 Processes branches in batches, commits between batches, and marks per-row
@@ -17,7 +17,6 @@ without embedding, progress lines carry elapsed/ETA, and abort paths exit
 non-zero so the scheduler sees the failure.
 """
 
-import argparse
 import contextlib
 import json
 import os
@@ -50,7 +49,16 @@ DEFAULT_PROGRESS_EVERY = BATCH_SIZE
 EXIT_OK = 0
 EXIT_ABORT = 1
 
-_PID_FILE = DEFAULT_DB_PATH.parent / ".pid-cm-backfill-embeddings"
+# PID key for the self-concurrency guard (this command is manual-only, never
+# auto-spawned; the marker is cleaned up by the CLI command on exit).
+PID_KEY = "ccrecall-backfill-embeddings"
+_PID_FILE = DEFAULT_DB_PATH.parent / f".pid-{PID_KEY}"
+
+
+def cleanup_pid() -> None:
+    """Remove the self-concurrency PID marker (no-op if absent)."""
+    with contextlib.suppress(OSError):
+        _PID_FILE.unlink(missing_ok=True)
 
 
 def build_selection(days: int | None) -> tuple[str, list]:
@@ -144,34 +152,34 @@ def format_duration(seconds: float) -> str:
     return f"{h}h{m:02d}m"
 
 
-def run_status(args, settings, logger) -> int:
+def run_status(*, days, json_mode, settings, logger) -> int:
     """Report done/eligible/errored/total without embedding anything (read-only)."""
     try:
         conn = get_db_connection(settings, load_vec=True)
     except Exception as e:
         logger.error("Backfill status: failed to connect to DB: %s", e)
-        print(f"cm-backfill-embeddings: failed to connect to DB: {e}", file=sys.stderr)
+        print(f"ccrecall backfill embeddings: failed to connect to DB: {e}", file=sys.stderr)
         return EXIT_ABORT
 
     if not branch_vec_queryable(conn):
-        print("cm-backfill-embeddings: sqlite-vec unavailable", file=sys.stderr)
+        print("ccrecall backfill embeddings: sqlite-vec unavailable", file=sys.stderr)
         conn.close()
         return EXIT_ABORT
 
     try:
-        counts = count_status(conn.cursor(), args.days)
+        counts = count_status(conn.cursor(), days)
     finally:
         conn.close()
 
-    if args.json:
-        print(json.dumps({**counts, "days": args.days}))
+    if json_mode:
+        print(json.dumps({**counts, "days": days}))
         return EXIT_OK
 
     universe = counts["universe"]
     done = counts["done"]
     pct = (done / universe * 100) if universe else 0.0
-    scope = f" (last {args.days}d)" if args.days is not None else ""
-    print(f"cm-backfill-embeddings status{scope}:")
+    scope = f" (last {days}d)" if days is not None else ""
+    print(f"ccrecall backfill embeddings status{scope}:")
     print(f"  embedded:  {done} / {universe}  ({pct:.0f}%)")
     print(f"  remaining: {counts['eligible']}")
     if counts["errored"]:
@@ -179,74 +187,30 @@ def run_status(args, settings, logger) -> int:
     return EXIT_OK
 
 
-def main():
-    # Skip the PID cleanup for the read-only status path: it must never disturb
-    # a concurrently-running backfill's PID marker. Detected straight from argv
-    # because _main() owns the argparse pass; --status is a store_true flag, so
-    # the `--status=x` forms argparse would reject can't reach here as a false
-    # positive. On an unhandled exception _main() raises through the finally and
-    # the traceback (non-zero exit) propagates — which is the right signal for a
-    # timer — so sys.exit() below only runs on the normal integer-return paths.
-    is_status = "--status" in sys.argv[1:]
-    try:
-        code = _main()
-    finally:
-        if not is_status:
-            with contextlib.suppress(OSError):
-                _PID_FILE.unlink(missing_ok=True)
-    sys.exit(code)
-
-
-def _main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Embed active-leaf branch summaries (opt-in; not auto-spawned).")
-    parser.add_argument(
-        "--status",
-        action="store_true",
-        help="Report progress (embedded/remaining/errored/total) and exit without "
-        "embedding. Read-only; safe to run while a backfill is in progress.",
-    )
-    parser.add_argument(
-        "--json",
-        action="store_true",
-        help="Emit a machine-readable result on stdout (status counts, or a "
-        "final run summary); per-batch progress stays on stderr. On failure the "
-        "exit code is non-zero and the reason is on stderr.",
-    )
-    parser.add_argument(
-        "--days",
-        type=int,
-        default=None,
-        help="Only embed branches ended within the last N days (default: all history; "
-        "branches with no recorded end-time are excluded when this flag is used)",
-    )
-    parser.add_argument(
-        "--limit",
-        type=int,
-        default=None,
-        help="Stop after embedding at most N branches this run",
-    )
-    parser.add_argument(
-        "--progress-every",
-        type=int,
-        default=DEFAULT_PROGRESS_EVERY,
-        metavar="N",
-        help="Print a progress line (with elapsed/ETA) once at least N more "
-        "branches have embedded, checked at each batch commit (default: %(default)s)",
-    )
-    parser.add_argument(
-        "--threads",
-        type=int,
-        default=DEFAULT_EMBED_THREADS,
-        help="inference threads (default: %(default)s). Raise it on "
-        "an idle machine to finish faster; 1 keeps the box responsive.",
-    )
-    args = parser.parse_args(argv)
+def run(
+    *,
+    status: bool = False,
+    json_mode: bool = False,
+    days: int | None = None,
+    limit: int | None = None,
+    progress_every: int = DEFAULT_PROGRESS_EVERY,
+    threads: int = DEFAULT_EMBED_THREADS,
+) -> int:
+    """Embed active-leaf branch summaries (opt-in; not auto-spawned)."""
+    # Backstop for direct callers; the CLI validators reject <1 before reaching
+    # here. A negative --days flips to a future date (no-op); --limit < 1 stops
+    # the loop immediately — both silent. Raise rather than clamp (unlike
+    # recent/search, which clamp to range): a silently wrong window is worse here.
+    if days is not None and days < 1:
+        raise ValueError("days must be >= 1")
+    if limit is not None and limit < 1:
+        raise ValueError("limit must be >= 1")
 
     settings = load_settings()
     logger = setup_logging(settings)
 
-    if args.status:
-        return run_status(args, settings, logger)
+    if status:
+        return run_status(days=days, json_mode=json_mode, settings=settings, logger=logger)
 
     # Background CPU job: lower scheduling priority so the bounded inference
     # threads yield to interactive work (machines.md thrash risk). Best-effort —
@@ -257,10 +221,10 @@ def _main(argv: list[str] | None = None) -> int:
     # ABORT level: check model availability before touching any rows.
     # model_available() warms the singleton session on success — no extra cost.
     # Pass --threads here since this is the call that constructs the session.
-    if not model_available(threads=args.threads):
+    if not model_available(threads=threads):
         logger.error("Backfill embeddings: model not available, aborting (no rows marked)")
         print(
-            "cm-backfill-embeddings: model not available, aborting (no rows marked)",
+            "ccrecall backfill embeddings: model not available, aborting (no rows marked)",
             file=sys.stderr,
         )
         return EXIT_ABORT
@@ -270,7 +234,7 @@ def _main(argv: list[str] | None = None) -> int:
     except Exception as e:
         logger.error("Backfill embeddings: failed to connect to DB: %s", e)
         print(
-            f"cm-backfill-embeddings: failed to connect to DB: {e}",
+            f"ccrecall backfill embeddings: failed to connect to DB: {e}",
             file=sys.stderr,
         )
         return EXIT_ABORT
@@ -284,7 +248,7 @@ def _main(argv: list[str] | None = None) -> int:
     if not branch_vec_queryable(conn):
         logger.error("Backfill embeddings: sqlite-vec unavailable, aborting (no rows marked)")
         print(
-            "cm-backfill-embeddings: sqlite-vec unavailable, aborting (no rows marked)",
+            "ccrecall backfill embeddings: sqlite-vec unavailable, aborting (no rows marked)",
             file=sys.stderr,
         )
         conn.close()
@@ -295,22 +259,22 @@ def _main(argv: list[str] | None = None) -> int:
     last_batch_ids: list[int] | None = None
     started = time.monotonic()
 
-    where, params = build_selection(args.days)
+    where, params = build_selection(days)
 
     # Compute total-eligible count once (Fix 3: avoid per-batch full COUNT).
     cursor.execute(f"SELECT COUNT(*) FROM branches {where}", params)
     total_eligible = cursor.fetchone()[0]
-    if args.limit is not None:
-        total_eligible = min(total_eligible, args.limit)
+    if limit is not None:
+        total_eligible = min(total_eligible, limit)
 
     logger.info("Backfill embeddings: starting, %s branches to embed", total_eligible)
     print(
-        f"cm-backfill-embeddings: starting, {total_eligible} to embed",
+        f"ccrecall backfill embeddings: starting, {total_eligible} to embed",
         file=sys.stderr,
     )
 
     while True:
-        if args.limit is not None and total_updated >= args.limit:
+        if limit is not None and total_updated >= limit:
             break
 
         # ORDER BY id keeps batch order deterministic: the no-progress guard
@@ -326,14 +290,14 @@ def _main(argv: list[str] | None = None) -> int:
             break
 
         # Honor --limit precisely even though batches are BATCH_SIZE-wide.
-        if args.limit is not None:
-            rows = rows[: args.limit - total_updated]
+        if limit is not None:
+            rows = rows[: limit - total_updated]
 
         current_ids = [r[0] for r in rows]
         if current_ids == last_batch_ids:
             logger.error("Backfill embeddings: no progress — same batch re-selected; aborting to avoid infinite loop")
             print(
-                "cm-backfill-embeddings: no progress — same batch re-selected, aborting",
+                "ccrecall backfill embeddings: no progress — same batch re-selected, aborting",
                 file=sys.stderr,
             )
             conn.close()
@@ -371,7 +335,7 @@ def _main(argv: list[str] | None = None) -> int:
 
         # Progress: cadence-gated, with elapsed + ETA for unattended runs.
         # Python arithmetic instead of a second COUNT.
-        if total_updated - last_progress >= args.progress_every:
+        if total_updated - last_progress >= progress_every:
             elapsed = time.monotonic() - started
             remaining = max(0, total_eligible - total_updated)
             rate = total_updated / elapsed if elapsed > 0 else 0.0
@@ -381,7 +345,7 @@ def _main(argv: list[str] | None = None) -> int:
                 f"{format_duration(elapsed)} elapsed, ETA {eta}"
             )
             logger.info("Backfill embeddings: %s", msg)
-            print(f"cm-backfill-embeddings: {msg}", file=sys.stderr)
+            print(f"ccrecall backfill embeddings: {msg}", file=sys.stderr)
             last_progress = total_updated
 
         time.sleep(BACKFILL_BATCH_DELAY_SECONDS)
@@ -390,7 +354,7 @@ def _main(argv: list[str] | None = None) -> int:
     elapsed = time.monotonic() - started
     remaining = max(0, total_eligible - total_updated)
     logger.info("Backfill embeddings complete: %s branches embedded in %s", total_updated, format_duration(elapsed))
-    if args.json:
+    if json_mode:
         print(
             json.dumps(
                 {
@@ -403,11 +367,7 @@ def _main(argv: list[str] | None = None) -> int:
         )
     else:
         print(
-            f"cm-backfill-embeddings: complete — {total_updated} embedded in {format_duration(elapsed)}",
+            f"ccrecall backfill embeddings: complete — {total_updated} embedded in {format_duration(elapsed)}",
             file=sys.stderr,
         )
     return EXIT_OK
-
-
-if __name__ == "__main__":
-    main()

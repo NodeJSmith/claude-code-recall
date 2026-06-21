@@ -16,9 +16,9 @@ import pytest
 from ccrecall.hooks import memory_setup, memory_sync
 from ccrecall.hooks.sync_current import sync_session, validate_session_id
 from ccrecall.migrations import migrate_columns
-from ccrecall.recent_chats import main as recent_chats_main
+from ccrecall.recent_chats import run as recent_chats_run
 from ccrecall.schema import SCHEMA
-from ccrecall.search_conversations import main as search_conversations_main
+from ccrecall.search_conversations import run as search_conversations_run
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures"
 
@@ -364,7 +364,7 @@ class TestPidGuard:
         pid_path.write_text(str(os.getpid()))
 
         with patch("subprocess.Popen") as mock_popen:
-            memory_setup._spawn_background("cm-test-cmd")
+            memory_setup._spawn_background(["cm-test-cmd"], "cm-test-cmd")
             mock_popen.assert_not_called()
 
     def test_pid_guard_reaps_stale_pid(self, tmp_path, monkeypatch):
@@ -389,7 +389,7 @@ class TestPidGuard:
         mock_proc.pid = 99999
 
         with patch("subprocess.Popen", return_value=mock_proc) as mock_popen, patch("os.write"):
-            memory_setup._spawn_background("cm-test-cmd")
+            memory_setup._spawn_background(["cm-test-cmd"], "cm-test-cmd")
             mock_popen.assert_called_once()
 
         # PID file should have been reaped (it no longer exists or has been rewritten)
@@ -419,7 +419,7 @@ class TestPidGuard:
             patch("os.write"),
             patch("os.close"),
         ):
-            memory_setup._spawn_background("cm-test-cmd")
+            memory_setup._spawn_background(["cm-test-cmd"], "cm-test-cmd")
 
         assert created_flags, "os.open must have been called for the PID file"
         flags = created_flags[0]
@@ -540,11 +540,10 @@ class TestRecentChatsDbFlag:
         conn.commit()
         conn.close()
 
-        # Call main() with --db pointing to our custom DB
-        with patch("sys.argv", ["cm-recent-chats", "--db", str(custom_db)]):
-            captured = io.StringIO()
-            with patch("sys.stdout", captured):
-                recent_chats_main()
+        # Call run() with --db pointing to our custom DB
+        captured = io.StringIO()
+        with patch("sys.stdout", captured):
+            recent_chats_run(db=custom_db)
 
         output = captured.getvalue()
         assert "test-project" in output or "hello from custom db" in output or "Recent Conversations" in output
@@ -595,14 +594,10 @@ class TestSearchConversationsDbFlag:
         conn.commit()
         conn.close()
 
-        # Call main() with --db and --query flags
-        with patch(
-            "sys.argv",
-            ["cm-search", "--query", "uniqueterm12345", "--db", str(custom_db)],
-        ):
-            captured = io.StringIO()
-            with patch("sys.stdout", captured):
-                search_conversations_main()
+        # Call run() with query and db
+        captured = io.StringIO()
+        with patch("sys.stdout", captured):
+            search_conversations_run(query="uniqueterm12345", db=custom_db)
 
         output = captured.getvalue()
         assert "Error" not in output

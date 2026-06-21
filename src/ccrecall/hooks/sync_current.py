@@ -9,7 +9,6 @@ Detects conversation branches (from rewind) and stores each branch separately.
 v3 schema: messages stored once per session, branches as a separate index.
 """
 
-import argparse
 import contextlib
 import json
 import re
@@ -70,15 +69,8 @@ def get_session_file(projects_dir: Path, session_id: str) -> Path | None:
     return None
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Sync current session to memory database")
-    parser.add_argument(
-        "--input-file",
-        type=Path,
-        help="Read hook input from file instead of stdin (used by memory-sync.py wrapper)",
-    )
-    args = parser.parse_args()
-
+def run(input_file: Path | None = None) -> None:
+    """Sync only the current session into the memory DB (Stop-hook helper)."""
     # Load settings
     settings = load_settings()
     logger = setup_logging(settings)
@@ -90,15 +82,15 @@ def main():
         return
 
     # Read hook input from file or stdin
-    if args.input_file:
+    if input_file:
         try:
-            raw = args.input_file.read_text(encoding="utf-8")
+            raw = input_file.read_text(encoding="utf-8")
         except OSError:
             raw = ""
         finally:
             # Clean up temp file
             with contextlib.suppress(OSError):
-                args.input_file.unlink()
+                input_file.unlink()
     else:
         raw = sys.stdin.read()
 
@@ -156,7 +148,3 @@ def main():
         # Don't block Claude on sync errors
         print(json.dumps({"continue": True}))
         sys.exit(0)
-
-
-if __name__ == "__main__":
-    main()

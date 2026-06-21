@@ -1,4 +1,4 @@
-"""cm-recent-chats invariant: output unaffected by embedding columns/tables.
+"""ccrecall recent invariant: output unaffected by embedding columns/tables.
 
 recent_chats uses get_db_connection with load_vec=False and performs no query
 or fusion. The invariant is that get_recent_sessions produces identical results

@@ -125,13 +125,13 @@ class TestOnboardingTriggered:
         assert "hookSpecificOutput" in result
 
     def test_injected_context_mentions_write_config(self, tmp_path, monkeypatch):
-        """Onboarding context must reference cm-write-config so Claude can invoke it."""
+        """Onboarding context must reference `ccrecall write-config` so Claude can invoke it."""
         cfg = tmp_path / "nonexistent.json"
 
         result = _run_main_captured(monkeypatch, cfg)
 
         context = result["hookSpecificOutput"]["additionalContext"]
-        assert "cm-write-config" in context
+        assert "ccrecall write-config" in context
 
 
 class TestOnboardingResiliency:
