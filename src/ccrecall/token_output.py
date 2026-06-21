@@ -60,7 +60,8 @@ def query_session_totals(cur: sqlite3.Cursor) -> dict:
 def derive_cache_metrics(totals: dict) -> tuple[str, float]:
     """Derive dominant_cache_tier and global_cache_ratio from session totals."""
     e5, e1 = totals["total_ephem_5m"], totals["total_ephem_1h"]
-    dominant_cache_tier = ("5m" if e5 > e1 else "1h") if e5 > 0 or e1 > 0 else "5m"
+    no_ephem_data = e5 == 0 and e1 == 0
+    dominant_cache_tier = "5m" if (no_ephem_data or e5 > e1) else "1h"
     cache_denom = totals["total_cache_read"] + totals["total_cache_creation"]
     global_cache_ratio = round(totals["total_cache_read"] / cache_denom, 4) if cache_denom > 0 else 0.0
     return dominant_cache_tier, global_cache_ratio
@@ -79,7 +80,7 @@ def build_kpis(cur: sqlite3.Cursor) -> dict:
         or 0
     )
 
-    dr = cur.execute("""
+    date_row = cur.execute("""
         SELECT MIN(first_turn_ts), MAX(last_turn_ts)
         FROM session_metrics WHERE is_sidechain = 0
     """).fetchone()
@@ -90,8 +91,8 @@ def build_kpis(cur: sqlite3.Cursor) -> dict:
         "global_cache_ratio": global_cache_ratio,
         "dominant_cache_tier": dominant_cache_tier,
         "date_range": {
-            "earliest": dr[0][:10] if dr and dr[0] else None,
-            "latest": dr[1][:10] if dr and dr[1] else None,
+            "earliest": date_row[0][:10] if date_row and date_row[0] else None,
+            "latest": date_row[1][:10] if date_row and date_row[1] else None,
         },
         # Partial kpis dict — total_cost_usd and bash_antipatterns added later
         "kpis_partial": {

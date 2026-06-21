@@ -221,7 +221,7 @@ The new `Insight`/`Solution` dataclasses follow this exact style: typed fields, 
 - **Golden characterization** for `build_output(populated_token_db)` minus `generated_at` (FR#1, AC#1) — capture the full dict, assert deep equality.
 - **Golden characterization** for `build_insights_and_trends` with a multi-insight kwargs set and the all-off set (FR#2, FR#5, AC#2).
 - **Golden characterization** for `build_trends` with current+prior window data (FR#3, AC#3).
-- **Unit test** for `accumulate_cost` proving equality with a hand-computed multi-model total (FR#6, AC#5).
+- **Unit test** for `row_cost` proving equality with a hand-computed multi-model total (FR#6, AC#5).
 - `parse_session` is already characterized (`TestParseSessionCharacterization`); confirm it covers the assistant/user/system/content-block paths the decomposition touches — extend only if a path (e.g. hook_summary, sidechain stem fixup) is unpinned.
 
 These golden tests are committed **first**, green on the current code, then kept green through each refactor commit.
@@ -236,12 +236,12 @@ No documentation updates required. These are internal modules with no user-facin
 ## Impact
 
 ### Changed Files
-- `src/ccrecall/token_parser.py` — modify: add `accumulate_cost`; decompose `parse_session` into line-type handlers + parse-state. (shared base — both other modules import it.)
+- `src/ccrecall/token_parser.py` — modify: add `row_cost`; decompose `parse_session` into line-type handlers + parse-state. (shared base — both other modules import it.)
 - `src/ccrecall/token_insights.py` — modify: add `Insight`/`Solution` dataclasses; split `_build_insights` into per-signal builders + collector; split `build_trends`; consume the shared cost helper.
 - `src/ccrecall/token_output.py` — modify: split `build_output` into per-chart builders; lift `_compute_seg_curve`; consume the shared cost helper; consolidate detail+total SQL pairs.
 - `tests/test_token_output.py` — modify: add golden characterization test.
 - `tests/test_token_insights.py` — modify: add golden characterization tests.
-- `tests/test_token_parser.py` — modify: add `accumulate_cost` unit test; extend parse coverage only if an affected path is unpinned.
+- `tests/test_token_parser.py` — modify: add `row_cost` unit test; extend parse coverage only if an affected path is unpinned.
 
 ### Behavioral Invariants
 - The output dicts of `build_output`, `build_insights_and_trends`, `build_trends`, and the `ParsedSession` from `parse_session` must be byte-identical to current behavior (excluding the inherently-varying `generated_at` timestamp).

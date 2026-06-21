@@ -684,13 +684,13 @@ def hook_perf_trends(cur: sqlite3.Cursor, current_clause: str, prior_clause: str
     """)
     )
     result = []
-    for h in sorted(set(current_perf) | set(prior_perf)):
-        cur_ms = current_perf.get(h)
-        pri_ms = prior_perf.get(h)
-        chg = None
-        if cur_ms is not None and pri_ms is not None and pri_ms > 0:
-            chg = round((cur_ms - pri_ms) / pri_ms * 100, 1)
-        result.append({"hook": h, "current_ms": cur_ms, "prior_ms": pri_ms, "change_pct": chg})
+    for hook_cmd in sorted(set(current_perf) | set(prior_perf)):
+        current_ms = current_perf.get(hook_cmd)
+        prior_ms = prior_perf.get(hook_cmd)
+        change_pct = None
+        if current_ms is not None and prior_ms is not None and prior_ms > 0:
+            change_pct = round((current_ms - prior_ms) / prior_ms * 100, 1)
+        result.append({"hook": hook_cmd, "current_ms": current_ms, "prior_ms": prior_ms, "change_pct": change_pct})
     return result
 
 
