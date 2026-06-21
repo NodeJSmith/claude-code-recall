@@ -24,7 +24,6 @@ def format_time(ts_str: str | None, fmt: str = "%H:%M") -> str:
         local = Instant.parse_iso(ts_str).to_system_tz()
         return local.to_stdlib().strftime(fmt)
     except ValueError:
-        # Unparseable/naive ISO string — fall back to the raw prefix.
         return ts_str[:16] if ts_str else "??:??"
 
 
