@@ -161,8 +161,8 @@ def row_cost(row: Sequence, *, model_idx: int, token_indices: Sequence[int]) -> 
     over the six token columns at token_indices (explicit indices, not a slice, so
     model_split's skipped thinking column is handled correctly)."""
     pricing = get_pricing(row[model_idx])
-    cols = [row[i] or 0 for i in token_indices]
-    return turn_cost(*cols, pricing)
+    inp, out, cache_read, cache_creation, ephem_5m, ephem_1h = (row[i] or 0 for i in token_indices)
+    return turn_cost(inp, out, cache_read, cache_creation, ephem_5m, ephem_1h, pricing)
 
 
 @dataclass
@@ -352,25 +352,27 @@ def apply_content_block(state: SessionParseState, block: dict) -> None:
         turn._pending_tools[tc.tool_use_id] = tc
 
 
-def finalize_and_start_turn(state: SessionParseState, mid: str, ts: str | None, model: str | None) -> None:
-    """Append the current turn (if any) and open a new one, computing the user gap."""
+def finalize_and_start_turn(state: SessionParseState, mid: str, ts: str | None, model: str | None) -> Turn:
+    """Append the current turn (if any) and open a new one, computing the user gap. Returns the new turn."""
     if state.current_turn:
         state.session.turns.append(state.current_turn)
     state.turn_index += 1
-    state.current_turn = Turn(
+    turn = Turn(
         index=state.turn_index,
         message_id=mid,
         timestamp=ts or "",
         model=model,
     )
+    state.current_turn = turn
     if state.last_assistant_ts and ts:
         try:
             prev = Instant.parse_iso(state.last_assistant_ts)
             curr = Instant.parse_iso(ts)
             # TimeDelta.total() takes a unit string; gap in ms.
-            state.current_turn.user_gap_ms = int((curr - prev).total("milliseconds"))
+            turn.user_gap_ms = int((curr - prev).total("milliseconds"))
         except (ValueError, TypeError):
             pass
+    return turn
 
 
 def handle_assistant_line(state: SessionParseState, line: dict) -> None:
@@ -382,28 +384,27 @@ def handle_assistant_line(state: SessionParseState, line: dict) -> None:
 
     ts = line.get("timestamp")
 
-    # Same logical turn?
+    # Same logical turn? Merge (accumulate into the existing turn) vs start a new one.
     if state.current_turn and state.current_turn.message_id == mid:
-        # Merge: accumulate tool_use blocks, update usage to latest
-        pass
+        turn = state.current_turn
     else:
-        finalize_and_start_turn(state, mid, ts, msg.get("model"))
+        turn = finalize_and_start_turn(state, mid, ts, msg.get("model"))
 
     # Always update usage from the latest event for this message.id
     u = _extract_usage(msg)
-    state.current_turn.input_tokens = u["input_tokens"]
-    state.current_turn.output_tokens = u["output_tokens"]
-    state.current_turn.cache_read_tokens = u["cache_read_tokens"]
-    state.current_turn.cache_creation_tokens = u["cache_creation_tokens"]
-    state.current_turn.ephem_5m_tokens = u["ephem_5m_tokens"]
-    state.current_turn.ephem_1h_tokens = u["ephem_1h_tokens"]
+    turn.input_tokens = u["input_tokens"]
+    turn.output_tokens = u["output_tokens"]
+    turn.cache_read_tokens = u["cache_read_tokens"]
+    turn.cache_creation_tokens = u["cache_creation_tokens"]
+    turn.ephem_5m_tokens = u["ephem_5m_tokens"]
+    turn.ephem_1h_tokens = u["ephem_1h_tokens"]
 
     stop = msg.get("stop_reason")
     if stop:
-        state.current_turn.stop_reason = stop
+        turn.stop_reason = stop
 
     if msg.get("model"):
-        state.current_turn.model = msg["model"]
+        turn.model = msg["model"]
 
     # Extract content blocks
     content = msg.get("content", []) or []

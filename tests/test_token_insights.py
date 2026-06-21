@@ -47,7 +47,7 @@ def _insight_kwargs(**overrides):
 
 # ── Golden snapshots ──────────────────────────────────────────────────────────
 
-# AC#2a: all-off case — every signal at zero, no insights fire.
+# All-off case — every signal at zero, no insights fire.
 _GOLDEN_INSIGHTS_ALL_OFF = {
     "insights": [],
     "findings": [],
@@ -55,7 +55,7 @@ _GOLDEN_INSIGHTS_ALL_OFF = {
     "trends": {},
 }
 
-# AC#2b: multi-insight case.
+# Multi-insight case.
 # Inputs chosen so that cache_cliffs, max_token_stops, bash_antipatterns,
 # redundant_reads, edit_retries, thinking, and cost_concentration all fire,
 # pinning the proj_detail / file_detail / cmd_detail formatting branches.
@@ -388,7 +388,7 @@ _GOLDEN_INSIGHTS_MULTI = {
     "trends": {},
 }
 
-# AC#3: build_trends golden for a DB with one current-window (1d ago) and one
+# build_trends golden for a DB with one current-window (1d ago) and one
 # prior-window (9d ago) session.  Each has 1 turn, in=100 out=50, model=claude-sonnet-4-5.
 # Cost = turn_cost(100, 50, 0, 0, 0, 0, pricing) = (100*3 + 50*15)/1e6 = 0.00105 → round(2) = 0.0
 # cost_per_session = round(0.00105 / 1, 2) = 0.0
