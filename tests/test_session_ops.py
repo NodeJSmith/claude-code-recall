@@ -1,6 +1,5 @@
 """Tests for the shared session_ops module."""
 
-import hashlib
 import json
 import logging
 import sqlite3
@@ -155,11 +154,7 @@ class TestImportSessionWritesRealHashImportLog:
         """When write_import_log=True with a real hash, import_log stores that hash."""
 
         fixture_path = FIXTURE_DIR / "linear_3_exchange.jsonl"
-        h = hashlib.md5(usedforsecurity=False)
-        with open(fixture_path, "rb") as fh:
-            for chunk in iter(lambda: fh.read(8192), b""):
-                h.update(chunk)
-        file_hash = h.hexdigest()
+        file_hash = get_file_hash(fixture_path)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             project_dir = Path(tmpdir)
@@ -387,11 +382,7 @@ class TestSyncThenImportDedupIntegration:
         assert messages_after_sync > 0
 
         # Step 2: import path computes hash and re-syncs
-        h = hashlib.md5(usedforsecurity=False)
-        with open(fixture_path, "rb") as fh:
-            for chunk in iter(lambda: fh.read(8192), b""):
-                h.update(chunk)
-        real_hash = h.hexdigest()
+        real_hash = get_file_hash(fixture_path)
 
         with tempfile.TemporaryDirectory() as tmpdir2:
             project_dir2 = Path(tmpdir2)

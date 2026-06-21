@@ -51,7 +51,7 @@ def import_log_skip_check(
     filepath: Path,
     write_import_log: bool,
     file_hash: str | None,
-) -> tuple[object, bool]:
+) -> tuple[tuple | None, bool]:
     """Probe import_log for an existing row; return (log_row, should_skip).
 
     Returns (log_row, True) when write_import_log is set, file_hash is provided,
@@ -95,8 +95,8 @@ def upsert_session(
 def build_message_row(
     entry: dict,
     session_id: int,
-    valid_branch_uuids: set,
-    existing_uuids: set,
+    valid_branch_uuids: set[str],
+    existing_uuids: set[str],
 ) -> tuple | None:
     """Build the INSERT params for one message entry, or return None to skip.
 
@@ -132,13 +132,14 @@ def build_message_row(
 def insert_new_messages(
     cursor: sqlite3.Cursor,
     session_id: int,
-    messages: list,
-    valid_branch_uuids: set,
-    existing_uuids: set,
+    messages: list[dict],
+    valid_branch_uuids: set[str],
+    existing_uuids: set[str],
 ) -> int:
     """Insert messages not yet in the DB; return the count of new rows.
 
-    Mutates existing_uuids in place as new rows are inserted.
+    Adds each inserted UUID to existing_uuids so later entries in the same call
+    dedup against rows written earlier in this loop.
     """
     new_count = 0
     for entry in messages:
@@ -255,7 +256,7 @@ def upsert_branch(
     commits_json: str | None,
     tool_counts_json: str | None,
     session_id: int,
-    existing_branches: dict,
+    existing_branches: dict[str, int],
 ) -> int:
     """INSERT or UPDATE the branches row; enforce single-active-branch; return branch_db_id."""
     leaf_uuid = branch["leaf_uuid"]
@@ -292,7 +293,6 @@ def upsert_branch(
     # lastrowid (INSERT, non-None after a successful insert). Narrow for the type checker.
     assert branch_db_id is not None  # noqa: S101 — type-checker narrowing; set on both branches above
 
-    # Ensure only one active branch per session
     if is_active:
         enforce_single_active_branch(cursor, session_id, branch_db_id)
 
@@ -302,8 +302,8 @@ def upsert_branch(
 def diff_branch_messages(
     cursor: sqlite3.Cursor,
     branch_db_id: int,
-    branch_uuids: list,
-    uuid_to_msg_id: dict,
+    branch_uuids: list[str],
+    uuid_to_msg_id: dict[str, int],
 ) -> None:
     """Diff branch_messages links: add missing, remove stale (not messages themselves)."""
     cursor.execute(
@@ -395,9 +395,9 @@ def embed_branch(
 def sync_branch(
     cursor: sqlite3.Cursor,
     branch: dict,
-    messages: list,
-    uuid_to_msg_id: dict,
-    existing_branches: dict,
+    messages: list[dict],
+    uuid_to_msg_id: dict[str, int],
+    existing_branches: dict[str, int],
     session_id: int,
     vec_writable: bool,
 ) -> None:
@@ -405,11 +405,9 @@ def sync_branch(
     branch_uuids = branch["uuids"]
     is_active = branch["is_active"]
 
-    # Filter messages to this branch
     branch_msgs = [m for m in messages if m.get("uuid") in branch_uuids]
     branch_msgs.sort(key=lambda e: e.get("timestamp") or "")
 
-    # Compute branch metadata
     branch_meta = extract_session_metadata(branch_msgs)
     exchange_count, files, commits, tool_counts = compute_branch_metadata(branch_msgs)
 
@@ -448,7 +446,7 @@ def upsert_import_log(
     filepath: Path,
     session_id: int,
     file_hash: str | None,
-    log_row: object,
+    log_row: tuple | None,
 ) -> None:
     """UPDATE or INSERT the import_log row for this file."""
     cursor.execute("SELECT COUNT(*) FROM messages WHERE session_id = ?", (session_id,))
