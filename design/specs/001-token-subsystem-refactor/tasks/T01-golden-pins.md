@@ -1,7 +1,7 @@
 ---
 task_id: "T01"
 title: "Add golden characterization pins for the read-side functions"
-status: "planned"
+status: "done"
 depends_on: []
 implements: ["AC#1", "AC#2", "AC#3"]
 ---
