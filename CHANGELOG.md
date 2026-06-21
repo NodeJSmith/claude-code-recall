@@ -10,6 +10,8 @@
 - Importing a session whose content all filters out (tool results, notifications, empty text) no longer crashes with `sqlite3.IntegrityError: FOREIGN KEY constraint failed`. `find_all_branches` inserts branch rows before content filtering, so a zero-message session still has children; the `total_messages == 0` cleanup now tears down `branch_messages → branches → sessions` in FK order instead of a bare session delete. Surfaced importing a large transcript set onto a fresh machine. The test fixtures now enable `PRAGMA foreign_keys = ON` to match production, so the existing FK-safe guard tests actually enforce the constraint.
 - The `data_source` column migration on `token_snapshots` now uses an explicit existence check instead of swallowing every `OperationalError`. #2 hardened the other `token_snapshots` migrations this way but missed this lone `ALTER`, so a real schema error (locked DB, disk full) was still silently ignored there. (#3)
 - `cm-backfill-embeddings` marks per-row content errors with the shared `CONTENT_ERROR_VERSION` constant instead of a hardcoded `-1`, keeping the error sentinel single-sourced with the selection and count queries that already reference it. (#3)
+- `ccrecall stats` is now fully read-only — it no longer shares the import PID lifecycle, so running it can't delete a live background import's sentinel and trigger a duplicate concurrent import.
+- `ccrecall backfill embeddings` rejects `--days`/`--limit` below 1 (exit 2) instead of silently embedding nothing.
 
 ### Changed
 

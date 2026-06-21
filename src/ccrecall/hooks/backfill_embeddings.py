@@ -197,6 +197,15 @@ def run(
     threads: int = DEFAULT_EMBED_THREADS,
 ) -> int:
     """Embed active-leaf branch summaries (opt-in; not auto-spawned)."""
+    # Backstop for direct callers; the CLI validators reject <1 before reaching
+    # here. A negative --days flips to a future date (no-op); --limit < 1 stops
+    # the loop immediately — both silent. Raise rather than clamp (unlike
+    # recent/search, which clamp to range): a silently wrong window is worse here.
+    if days is not None and days < 1:
+        raise ValueError("days must be >= 1")
+    if limit is not None and limit < 1:
+        raise ValueError("limit must be >= 1")
+
     settings = load_settings()
     logger = setup_logging(settings)
 

@@ -93,8 +93,9 @@ def cmd_stats(
     db: Annotated[Path, Parameter(help="Database path.")] = DEFAULT_DB_PATH,
 ) -> None:
     """Show memory database statistics."""
-    # stats reports DB-global counts, so projects_dir/project don't apply.
-    import_mod.run(db=db, stats=True)
+    # Read-only DB-global counts: print_stats() shares no PID lifecycle with
+    # import.run(), so it can't disturb a concurrent background import.
+    import_mod.print_stats(db=db)
 
 
 @backfill_app.command(name="summaries")
@@ -110,8 +111,14 @@ def cmd_backfill_embeddings(
     json_mode: Annotated[
         bool, _FLAG, Parameter(name="--json", help="Emit a machine-readable result on stdout.")
     ] = False,
-    days: Annotated[int | None, Parameter(help="Only embed branches ended within the last N days.")] = None,
-    limit: Annotated[int | None, Parameter(help="Stop after embedding at most N branches this run.")] = None,
+    days: Annotated[
+        int | None,
+        Parameter(validator=Number(gte=1), help="Only embed branches ended within the last N days (>= 1)."),
+    ] = None,
+    limit: Annotated[
+        int | None,
+        Parameter(validator=Number(gte=1), help="Stop after embedding at most N branches this run (>= 1)."),
+    ] = None,
     progress_every: Annotated[
         int, Parameter(help="Print a progress line every N newly embedded branches.")
     ] = backfill_embeddings_mod.DEFAULT_PROGRESS_EVERY,

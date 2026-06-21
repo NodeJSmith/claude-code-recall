@@ -162,16 +162,54 @@ PID_KEY = "ccrecall-import"
 _PID_FILE = DEFAULT_DB_PATH.parent / f".pid-{PID_KEY}"
 
 
+def print_stats(db: Path = DEFAULT_DB_PATH) -> None:
+    """Print row counts and on-disk size for the memory DB to stdout.
+
+    Read-only: deliberately does NOT touch the import PID file (it shares no
+    lifecycle with run()), so `ccrecall stats` can't delete a live background
+    import's PID sentinel and let the session hook spawn a duplicate import.
+    load_vec=False keeps it genuinely read-only — the counts never query
+    branch_vec, so there's no reason to create and commit the vec schema here.
+    """
+    settings = load_settings()
+    if db != DEFAULT_DB_PATH:
+        settings["db_path"] = str(db)
+    db_path = get_db_path(settings)
+
+    with contextlib.closing(get_db_connection(settings, load_vec=False)) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM projects")
+        projects = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM sessions")
+        sessions = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM messages")
+        messages = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM branches")
+        total_branches = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM branches WHERE is_active = 1")
+        active = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM branches WHERE is_active = 0")
+        abandoned = cursor.fetchone()[0]
+
+    db_size = db_path.stat().st_size if db_path.exists() else 0
+
+    print(f"Database: {db_path}")
+    print(f"Size: {db_size / 1024 / 1024:.2f} MB")
+    print(f"Projects: {projects}")
+    print(f"Sessions: {sessions}")
+    print(f"Branches: {total_branches} ({active} active, {abandoned} abandoned)")
+    print(f"Messages: {messages}")
+
+
 def run(
     *,
     db: Path = DEFAULT_DB_PATH,
     projects_dir: Path = DEFAULT_PROJECTS_DIR,
     project: str | None = None,
-    stats: bool = False,
 ) -> None:
-    """Import Claude Code conversations into the memory DB (or print stats)."""
+    """Import Claude Code conversations into the memory DB."""
     try:
-        _run(db=db, projects_dir=projects_dir, project=project, stats=stats)
+        _run(db=db, projects_dir=projects_dir, project=project)
     finally:
         # Delete PID file so _spawn_background can spawn again next session
         with contextlib.suppress(OSError):
@@ -183,7 +221,6 @@ def _run(
     db: Path,
     projects_dir: Path,
     project: str | None,
-    stats: bool,
 ) -> None:
     settings = load_settings()
     logger = setup_logging(settings)
@@ -198,33 +235,8 @@ def _run(
     total_skipped = 0
 
     # get_db_connection handles migration; closing() releases the connection on
-    # every exit path (stats, missing-project, normal completion).
+    # every exit path (missing-project, normal completion).
     with contextlib.closing(get_db_connection(settings, load_vec=True)) as conn:
-        if stats:
-            cursor = conn.cursor()
-            cursor.execute("SELECT COUNT(*) FROM projects")
-            projects = cursor.fetchone()[0]
-            cursor.execute("SELECT COUNT(*) FROM sessions")
-            sessions = cursor.fetchone()[0]
-            cursor.execute("SELECT COUNT(*) FROM messages")
-            messages = cursor.fetchone()[0]
-            cursor.execute("SELECT COUNT(*) FROM branches")
-            total_branches = cursor.fetchone()[0]
-            cursor.execute("SELECT COUNT(*) FROM branches WHERE is_active = 1")
-            active = cursor.fetchone()[0]
-            cursor.execute("SELECT COUNT(*) FROM branches WHERE is_active = 0")
-            abandoned = cursor.fetchone()[0]
-
-            db_size = db_path.stat().st_size if db_path.exists() else 0
-
-            print(f"Database: {db_path}")
-            print(f"Size: {db_size / 1024 / 1024:.2f} MB")
-            print(f"Projects: {projects}")
-            print(f"Sessions: {sessions}")
-            print(f"Branches: {total_branches} ({active} active, {abandoned} abandoned)")
-            print(f"Messages: {messages}")
-            return
-
         if project:
             project_dir = projects_dir / project
             if not project_dir.exists():
