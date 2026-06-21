@@ -1,7 +1,7 @@
 ---
 task_id: "T03"
 title: "Split build_output into per-chart builders"
-status: "planned"
+status: "done"
 depends_on: ["T01", "T02"]
 implements: ["FR#1", "FR#7", "FR#8", "AC#6", "AC#7"]
 ---
