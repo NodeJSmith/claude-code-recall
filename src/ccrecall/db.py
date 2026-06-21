@@ -14,7 +14,7 @@ import sqlite_vec
 
 from ccrecall.embeddings import EMBEDDING_DIM, EMBEDDING_MODEL, EMBEDDING_VERSION
 from ccrecall.migrations import migrate_columns, migrate_db
-from ccrecall.models import LOGGER_NAME
+from ccrecall.models import BUSY_TIMEOUT_MS, LOGGER_NAME
 from ccrecall.schema import SCHEMA_CORE, SCHEMA_FTS4, SCHEMA_FTS5, detect_fts_support
 
 # Default paths
@@ -57,9 +57,8 @@ _CONFIG_KEYS = {
 
 CURRENT_ONBOARDING_VERSION = 1
 
-# Base connections wait this long on a writer-writer collision; vec-loaded
-# connections (concurrent embedding writers) get a longer window.
-BUSY_TIMEOUT_MS = 5000
+# Vec-loaded connections (concurrent embedding writers) wait longer than the
+# base BUSY_TIMEOUT_MS on a collision.
 VEC_BUSY_TIMEOUT_MS = 30000
 
 # Rotating memory-log handler sizing.
@@ -88,6 +87,11 @@ def remove_pid_file(pid_key: str) -> None:
     """Delete a job's PID sentinel so the next session can spawn again (best-effort)."""
     with contextlib.suppress(OSError):
         pid_file_path(pid_key).unlink(missing_ok=True)
+
+
+def escape_like(value: str) -> str:
+    """Escape SQLite LIKE wildcards so a user value matches literally (pair with ESCAPE '\\')."""
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def vec_available(conn: sqlite3.Connection) -> bool:

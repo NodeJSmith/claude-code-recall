@@ -9,8 +9,7 @@ import sqlite3
 import sys
 from pathlib import Path
 
-from ccrecall.content import escape_like
-from ccrecall.db import DEFAULT_DB_PATH, fetch_branch_messages, get_db_connection
+from ccrecall.db import DEFAULT_DB_PATH, escape_like, fetch_branch_messages, get_db_connection
 from ccrecall.formatting import format_json_sessions, format_markdown_session
 from ccrecall.serialization import decode_json_column
 

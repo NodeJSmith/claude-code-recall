@@ -14,11 +14,11 @@ import time
 from pathlib import Path
 
 from ccrecall.content import parse_origin
+from ccrecall.models import BUSY_TIMEOUT_MS
 from ccrecall.parsing import build_aggregated_content, extract_session_uuid
 from ccrecall.schema import SCHEMA_CORE, SCHEMA_FTS4, SCHEMA_FTS5, detect_fts_support
 from ccrecall.summarizer import truncate_mid
 
-BUSY_TIMEOUT_MS = 5000
 _MIGRATION_BATCH_SIZE = 50
 _MIGRATION_V6_MAX_JSON_BYTES = 50 * 1024
 

@@ -8,11 +8,6 @@ import re
 MAX_COMMIT_MESSAGE_LEN = 100
 
 
-def escape_like(value: str) -> str:
-    """Escape SQLite LIKE wildcards so a user value matches literally (pair with ESCAPE '\\')."""
-    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-
-
 def sanitize_fts_term(term: str) -> str:
     """Remove FTS special characters from search term.
 

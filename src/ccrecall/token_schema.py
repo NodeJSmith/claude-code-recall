@@ -7,10 +7,10 @@ import sqlite3
 import sys
 from pathlib import Path
 
+from ccrecall.models import BUSY_TIMEOUT_MS
 from ccrecall.token_parser import _WORKTREE_MARKERS
 
 SCHEMA_VERSION = 4
-BUSY_TIMEOUT_MS = 5000
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS turns (

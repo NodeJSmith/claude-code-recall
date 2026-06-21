@@ -17,6 +17,11 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 # (the lowest-level module) so db/session_ops/hooks can import it without a cycle.
 LOGGER_NAME = "claude-memory"
 
+# Base SQLite busy_timeout (ms) for this app's connections. Lives here, the lowest
+# module, so db.py, migrations.py, and token_schema.py share one value without an
+# import cycle (db imports migrations; the token subsystem keeps db.py decoupled).
+BUSY_TIMEOUT_MS = 5000
+
 _LOG = logging.getLogger(LOGGER_NAME)
 
 

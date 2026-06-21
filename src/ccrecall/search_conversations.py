@@ -11,11 +11,12 @@ from pathlib import Path
 
 import sqlite_vec
 
-from ccrecall.content import escape_like, sanitize_fts_term
+from ccrecall.content import sanitize_fts_term
 from ccrecall.db import (
     DEFAULT_DB_PATH,
     EMBEDDABLE_BRANCH_FILTER,
     branch_vec_queryable,
+    escape_like,
     fetch_branch_messages,
     get_db_connection,
 )
