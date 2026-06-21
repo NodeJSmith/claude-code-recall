@@ -1,4 +1,4 @@
-"""Tests for ccrecall.db — schema creation, migration, settings."""
+"""Tests for ccrecall.db — schema creation, settings, and vec operations."""
 
 import json
 import sqlite3
@@ -518,24 +518,24 @@ class TestLoadVecParameter:
 class TestSchemaEquivalencePin:
     """Characterization pin — guards the migrations squash to v6 baseline.
 
-    This pin captures the schema a fresh conversation DB produces today via the
+    This pin captures the schema a fresh conversation DB produces via the
     production get_db_connection path and asserts it matches an inline expected
-    literal.  After T02 lifts the embedding DDL into SCHEMA_CORE and T04 deletes
-    migrations.py, a fresh DB must still match this snapshot exactly — proving the
-    schema is unchanged except for the intentionally-removed token_snapshots table.
+    literal.  SCHEMA_CORE now carries the embedding DDL and migrations.py is gone,
+    so a fresh DB matches this snapshot exactly — the schema is the v6 baseline
+    minus the intentionally-removed token_snapshots table.
 
     Exclusion rule: we exclude from the snapshot any table whose name contains
     '_fts_' (those are FTS5 shadow tables auto-created alongside the virtual FTS
-    tables — e.g. messages_fts_data, branches_fts_idx) plus token_snapshots (dead
-    duplicate that migrations.py creates; it will be absent post-squash) and
+    tables — e.g. messages_fts_data, branches_fts_idx) plus token_snapshots (owned
+    solely by token_schema.py; the conversation DB no longer creates it) and
     sqlite_* internals.  The FTS virtual tables themselves (messages_fts,
     branches_fts) do NOT contain '_fts_' so they ARE included.
     """
 
-    # Expected schema derived by running this test against current code (SCHEMA_CORE
-    # + SCHEMA_FTS5) on 2026-06-21 and pasting the observed output.
-    # token_snapshots is intentionally absent — the exclusion is applied in the query
-    # below, so this literal will remain valid after the squash drops it from creation.
+    # Expected schema captured from the production SCHEMA_CORE + SCHEMA_FTS5 output.
+    # token_snapshots is intentionally absent — SCHEMA_CORE and get_db_connection no
+    # longer create it; the exclusion clause keeps this literal stable on legacy DBs
+    # that still carry the table.
     EXPECTED_TABLES: ClassVar[list[str]] = [
         "branch_messages",
         "branches",
