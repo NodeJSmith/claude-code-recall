@@ -16,6 +16,11 @@ from ccrecall.content import (
 )
 from ccrecall.models import TranscriptEntry, is_valid
 
+# Recursion guard for the parent->child branch walk in find_all_branches — caps
+# descendant search depth so a pathological/cyclic transcript tree can't blow the
+# stack.
+MAX_BRANCH_DEPTH = 100
+
 
 def is_valid_entry(obj: object) -> bool:
     """Validate a raw transcript entry at the ingest boundary.
@@ -161,7 +166,7 @@ def find_all_branches(all_entries: list[dict]) -> list[dict]:
 
     # Step 2: Find rewind forks on the active path
     def has_user_descendant(uuid: str, depth: int = 0) -> bool:
-        if depth > 100:
+        if depth > MAX_BRANCH_DEPTH:
             return False
         entry = uuid_to_entry.get(uuid)
         if entry and entry.get("type") == "user":
@@ -263,11 +268,11 @@ def compute_branch_metadata(
         exchange_count += 1
 
     # Deduplicate files preserving order
-    seen = {}
+    seen_files = {}
     unique_files = []
     for f in all_files:
-        if f not in seen:
-            seen[f] = True
+        if f not in seen_files:
+            seen_files[f] = True
             unique_files.append(f)
 
     return exchange_count, unique_files, all_commits, tool_counts

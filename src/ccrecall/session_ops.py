@@ -32,6 +32,7 @@ from ccrecall.content import (
 from ccrecall.db import branch_vec_queryable, write_branch_embedding
 from ccrecall.embeddings import embed_text
 from ccrecall.formatting import normalize_project_key
+from ccrecall.models import LOGGER_NAME
 from ccrecall.parsing import (
     build_aggregated_content,
     compute_branch_metadata,
@@ -53,33 +54,20 @@ def sync_session(
     file_hash: str | None = None,
     _project_id: int | None = None,
 ) -> int:
-    """Import a single JSONL session file into the database.
+    """Import a single JSONL session file, returning the count of new messages inserted (or -1 if skipped).
 
     Handles session upsert, message insertion with UUID dedup (without
     ``has_tool_use`` / ``tool_summary`` in the INSERT), branch detection via
     ``find_all_branches``, branch metadata computation, branch_messages diff
     (add/remove), aggregated content assembly, and context summary computation.
 
-    Deduplication logic for ``import_log``:
-    - If ``write_import_log=True`` and ``file_hash`` matches an existing
-      *non-NULL* hash in ``import_log``, the file is unchanged — return -1.
-    - If the stored hash is ``NULL`` (sync wrote a placeholder) and
-      ``file_hash`` is provided, treat the row as stale and re-process.
-
-    Args:
-        conn: Open SQLite connection.
-        filepath: Path to the JSONL session file.
-        project_dir: Parent project directory (used for project upsert when
-            ``_project_id`` is not provided).
-        write_import_log: If True, create or update an ``import_log`` row.
-        file_hash: MD5 hash of the file, or None (sync path).
-        _project_id: Pre-resolved project database ID.  When provided,
-            the project upsert step is skipped.  Used by the import_session
-            adapter in import_conversations.py to respect a caller-resolved
-            project without triggering a second DB lookup.
-
-    Returns:
-        Number of *new* messages inserted (>= 0), or -1 if skipped.
+    ``write_import_log`` controls the ``import_log`` row, and ``file_hash``
+    drives its dedup: when ``write_import_log`` is set and ``file_hash`` matches
+    an existing *non-NULL* hash, the file is unchanged and the function returns
+    -1; a stored ``NULL`` hash (a sync-written placeholder) with a provided
+    ``file_hash`` is treated as stale and re-processed. ``_project_id``, when
+    provided by the import_conversations.py adapter, is used directly so the
+    project upsert step is skipped and no second DB lookup runs.
     """
     cursor = conn.cursor()
 
@@ -168,9 +156,8 @@ def sync_session(
         if uuid not in valid_branch_uuids:
             continue
 
-        notification = (
-            1 if (entry_type == "user" and (is_task_notification(content) or is_teammate_message(content))) else 0
-        )
+        is_notification = entry_type == "user" and (is_task_notification(content) or is_teammate_message(content))
+        notification = int(is_notification)
 
         text, _has_tool_use, has_thinking, _tool_summary = extract_text_content(content)
         if not text:
@@ -359,7 +346,7 @@ def sync_session(
             # outer handler in the import loop). The branch stays eligible for
             # backfill, and the failure is observable in the log instead of being
             # silently swallowed.
-            logging.getLogger("claude-memory").exception("sync: summary write failed for branch %s", branch_db_id)
+            logging.getLogger(LOGGER_NAME).exception("sync: summary write failed for branch %s", branch_db_id)
             summary_md = None
 
         # Embed-on-write: compute and upsert vector after summary succeeds.
