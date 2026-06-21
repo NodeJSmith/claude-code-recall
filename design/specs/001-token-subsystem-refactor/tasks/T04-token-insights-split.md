@@ -1,7 +1,7 @@
 ---
 task_id: "T04"
 title: "Type insights and split build_insights/build_trends"
-status: "planned"
+status: "done"
 depends_on: ["T01", "T02"]
 implements: ["FR#2", "FR#3", "FR#5", "FR#7", "FR#8", "AC#6", "AC#7"]
 ---
