@@ -301,8 +301,8 @@ def build_aggregated_content(
     """Build aggregated FTS content for a branch using SET semantics.
 
     Concatenates message text (excluding notifications), deduplicated full file
-    paths, and commit text.  Shared by the live sync/import path and the v5
-    database migration to ensure format consistency.
+    paths, and commit text.  Shared by the live sync and import paths to ensure
+    format consistency.
     """
     msg_text = aggregate_branch_content(cursor, branch_db_id)
     parts = [msg_text]

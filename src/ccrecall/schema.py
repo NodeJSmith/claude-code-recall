@@ -49,11 +49,16 @@ CREATE TABLE IF NOT EXISTS branches (
   context_summary TEXT,
   context_summary_json TEXT,
   summary_version INTEGER DEFAULT 0,
+  -- kept in ALTER-append order (trailing) to preserve SELECT * and positional access:
+  embedding_version INTEGER DEFAULT 0,
+  embedding_model TEXT,
+  summary_version_at_embed INTEGER,
   UNIQUE(session_id, leaf_uuid)
 );
 CREATE INDEX IF NOT EXISTS idx_branches_session ON branches(session_id);
 CREATE INDEX IF NOT EXISTS idx_branches_active ON branches(is_active);
 CREATE INDEX IF NOT EXISTS idx_branches_summary_version ON branches(summary_version);
+CREATE INDEX IF NOT EXISTS idx_branches_embedding_version ON branches(embedding_version);
 
 -- Messages table (ALL messages stored ONCE per session)
 CREATE TABLE IF NOT EXISTS messages (

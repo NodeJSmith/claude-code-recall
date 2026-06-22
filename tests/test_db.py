@@ -1,11 +1,8 @@
-"""Tests for ccrecall.db — schema creation, migration, settings."""
+"""Tests for ccrecall.db — schema creation, settings, and vec operations."""
 
-import contextlib
-import inspect
 import json
 import sqlite3
-import tempfile
-from pathlib import Path
+from typing import ClassVar
 from unittest.mock import patch
 
 import pytest
@@ -13,7 +10,6 @@ import sqlite_vec
 from conftest import make_vec_conn
 
 import ccrecall.db as db_module
-import ccrecall.migrations as migrations_module
 from ccrecall.db import (
     CURRENT_ONBOARDING_VERSION,
     DEFAULT_SETTINGS,
@@ -24,8 +20,8 @@ from ccrecall.db import (
     vec_available,
 )
 from ccrecall.embeddings import EMBEDDING_DIM
-from ccrecall.migrations import _migrate_project_paths, migrate_columns, migrate_db
-from ccrecall.schema import SCHEMA
+from ccrecall.schema import SCHEMA, detect_fts_support
+from ccrecall.token_schema import ensure_schema as token_ensure_schema
 
 
 class TestSchemaCreation:
@@ -71,336 +67,6 @@ class TestSchemaCreation:
         assert cursor.fetchone()[0] == "sess-1"
 
 
-def _pre_migration_db(include_tool_summary=False):
-    """Create in-memory DB with pre-migration schema (no is_notification column)."""
-    conn = sqlite3.connect(":memory:")
-    extra = ", tool_summary TEXT" if include_tool_summary else ""
-    conn.execute(f"""
-        CREATE TABLE messages (
-            id INTEGER PRIMARY KEY, session_id INTEGER, uuid TEXT,
-            parent_uuid TEXT, timestamp DATETIME, role TEXT,
-            content TEXT NOT NULL, has_tool_use INTEGER DEFAULT 0,
-            has_thinking INTEGER DEFAULT 0{extra},
-            UNIQUE(session_id, uuid)
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE branches (
-            id INTEGER PRIMARY KEY, session_id INTEGER, leaf_uuid TEXT,
-            fork_point_uuid TEXT, is_active INTEGER DEFAULT 1,
-            started_at DATETIME, ended_at DATETIME, exchange_count INTEGER DEFAULT 0,
-            files_modified TEXT, commits TEXT, aggregated_content TEXT
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE branch_messages (
-            branch_id INTEGER, message_id INTEGER, PRIMARY KEY (branch_id, message_id)
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE import_log (
-            id INTEGER PRIMARY KEY, file_path TEXT UNIQUE NOT NULL,
-            file_hash TEXT, imported_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            messages_imported INTEGER DEFAULT 0
-        )
-    """)
-    conn.commit()
-    return conn
-
-
-class TestMigrateColumns:
-    def test_adds_tool_summary_column(self):
-        """migrate_columns should add tool_summary and is_notification if missing."""
-        conn = _pre_migration_db()
-
-        migrate_columns(conn)
-
-        cursor = conn.cursor()
-        cursor.execute("PRAGMA table_info(messages)")
-        columns = {row[1] for row in cursor.fetchall()}
-        assert "tool_summary" in columns
-        assert "is_notification" in columns
-        conn.close()
-
-    def test_adds_context_summary_columns(self):
-        """migrate_columns should add context_summary, context_summary_json, summary_version to branches."""
-        conn = _pre_migration_db()
-
-        migrate_columns(conn)
-
-        cursor = conn.cursor()
-        cursor.execute("PRAGMA table_info(branches)")
-        columns = {row[1] for row in cursor.fetchall()}
-        assert "context_summary" in columns
-        assert "context_summary_json" in columns
-        assert "summary_version" in columns
-        conn.close()
-
-    def test_idempotent_when_column_exists(self, memory_db):
-        """migrate_columns should not fail when column already exists."""
-        migrate_columns(memory_db)  # Already called in fixture, call again
-
-    def test_migrate_backfills_notifications(self):
-        """Migration should flag existing task-notification messages."""
-        conn = _pre_migration_db(include_tool_summary=True)
-        conn.execute("INSERT INTO messages (id, session_id, role, content) VALUES (1, 1, 'user', 'Hello world')")
-        conn.execute("INSERT INTO messages (id, session_id, role, content) VALUES (2, 1, 'assistant', 'Hi there')")
-        conn.execute(
-            "INSERT INTO messages (id, session_id, role, content) VALUES (3, 1, 'user', '<task-notification><task-id>abc</task-id></task-notification>')"
-        )
-        conn.execute("INSERT INTO messages (id, session_id, role, content) VALUES (4, 1, 'user', 'Normal follow-up')")
-        conn.commit()
-
-        migrate_columns(conn)
-
-        cursor = conn.cursor()
-        cursor.execute("SELECT id, is_notification FROM messages ORDER BY id")
-        rows = cursor.fetchall()
-        assert rows[0] == (1, 0)  # Normal user
-        assert rows[1] == (2, 0)  # Assistant
-        assert rows[2] == (3, 1)  # Task notification
-        assert rows[3] == (4, 0)  # Normal user
-        conn.close()
-
-    def test_migrate_reaggregates_branches(self):
-        """Migration should re-aggregate branch content excluding notifications."""
-        conn = _pre_migration_db(include_tool_summary=True)
-        conn.execute(
-            "INSERT INTO messages (id, session_id, timestamp, role, content) VALUES (1, 1, '2025-01-01T10:00:00Z', 'user', 'Hello')"
-        )
-        conn.execute(
-            "INSERT INTO messages (id, session_id, timestamp, role, content) VALUES (2, 1, '2025-01-01T10:01:00Z', 'assistant', 'Hi there')"
-        )
-        conn.execute(
-            "INSERT INTO messages (id, session_id, timestamp, role, content) VALUES (3, 1, '2025-01-01T10:02:00Z', 'user', '<task-notification>big agent result</task-notification>')"
-        )
-        conn.execute(
-            "INSERT INTO branches (id, session_id, leaf_uuid, aggregated_content, exchange_count) VALUES (1, 1, 'leaf-1', 'Hello\nHi there\n<task-notification>big agent result</task-notification>', 2)"
-        )
-        conn.execute("INSERT INTO branch_messages VALUES (1, 1)")
-        conn.execute("INSERT INTO branch_messages VALUES (1, 2)")
-        conn.execute("INSERT INTO branch_messages VALUES (1, 3)")
-        conn.commit()
-
-        migrate_columns(conn)
-
-        cursor = conn.cursor()
-        cursor.execute("SELECT aggregated_content, exchange_count FROM branches WHERE id = 1")
-        agg, exc = cursor.fetchone()
-        assert "<task-notification>" not in agg
-        assert "Hello" in agg
-        assert "Hi there" in agg
-        # exchange_count should be corrected: only 1 real user message
-        assert exc == 1
-        conn.close()
-
-
-def _versioned_db(user_version=0, include_is_notification=True):
-    """Create in-memory DB with specific user_version for testing versioned migrations."""
-    conn = sqlite3.connect(":memory:")
-    notif_col = ", is_notification INTEGER DEFAULT 0" if include_is_notification else ""
-    conn.execute(f"""
-        CREATE TABLE messages (
-            id INTEGER PRIMARY KEY, session_id INTEGER, uuid TEXT,
-            parent_uuid TEXT, timestamp DATETIME, role TEXT,
-            content TEXT NOT NULL, tool_summary TEXT,
-            has_tool_use INTEGER DEFAULT 0, has_thinking INTEGER DEFAULT 0{notif_col},
-            UNIQUE(session_id, uuid)
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE branches (
-            id INTEGER PRIMARY KEY, session_id INTEGER, leaf_uuid TEXT,
-            fork_point_uuid TEXT, is_active INTEGER DEFAULT 1,
-            started_at DATETIME, ended_at DATETIME, exchange_count INTEGER DEFAULT 0,
-            files_modified TEXT, commits TEXT, aggregated_content TEXT
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE branch_messages (
-            branch_id INTEGER, message_id INTEGER, PRIMARY KEY (branch_id, message_id)
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE import_log (
-            id INTEGER PRIMARY KEY, file_path TEXT UNIQUE NOT NULL,
-            file_hash TEXT, imported_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            messages_imported INTEGER DEFAULT 0
-        )
-    """)
-    conn.execute(f"PRAGMA user_version = {user_version}")
-    conn.commit()
-    return conn
-
-
-class TestVersionedMigration:
-    def test_fresh_db_gets_latest_version(self):
-        """A fresh DB (no columns, version 0) should end up at the latest user_version."""
-        conn = _pre_migration_db()
-        migrate_columns(conn)
-        version = conn.execute("PRAGMA user_version").fetchone()[0]
-        assert version == 6
-        conn.close()
-
-    def test_v0_to_v2_backfills_both(self):
-        """From version 0, both task-notification and teammate messages get backfilled."""
-        conn = _versioned_db(user_version=0)
-        conn.execute("INSERT INTO messages (id, session_id, role, content) VALUES (1, 1, 'user', 'Hello')")
-        conn.execute(
-            "INSERT INTO messages (id, session_id, role, content) VALUES (2, 1, 'user', '<task-notification>task</task-notification>')"
-        )
-        conn.execute(
-            "INSERT INTO messages (id, session_id, role, content) VALUES (3, 1, 'user', '<teammate-message teammate_id=\"x\">report</teammate-message>')"
-        )
-        conn.commit()
-
-        migrate_columns(conn)
-
-        cursor = conn.cursor()
-        cursor.execute("SELECT id, is_notification FROM messages ORDER BY id")
-        rows = cursor.fetchall()
-        assert rows[0] == (1, 0)
-        assert rows[1] == (2, 1)
-        assert rows[2] == (3, 1)
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
-        conn.close()
-
-    def test_v1_to_v2_backfills_only_teammate(self):
-        """From version 1, only teammate messages get backfilled (task-notifications already done)."""
-        conn = _versioned_db(user_version=1)
-        # Simulate a DB where task-notifications were already flagged by version 1
-        conn.execute(
-            "INSERT INTO messages (id, session_id, role, content, is_notification) VALUES (1, 1, 'user', '<task-notification>task</task-notification>', 1)"
-        )
-        conn.execute(
-            "INSERT INTO messages (id, session_id, role, content, is_notification) VALUES (2, 1, 'user', '<teammate-message teammate_id=\"x\">report</teammate-message>', 0)"
-        )
-        conn.execute(
-            "INSERT INTO messages (id, session_id, role, content, is_notification) VALUES (3, 1, 'user', 'Normal message', 0)"
-        )
-        conn.commit()
-
-        migrate_columns(conn)
-
-        cursor = conn.cursor()
-        cursor.execute("SELECT id, is_notification FROM messages ORDER BY id")
-        rows = cursor.fetchall()
-        assert rows[0] == (1, 1)  # Already flagged, untouched
-        assert rows[1] == (2, 1)  # Newly flagged by version 2
-        assert rows[2] == (3, 0)  # Normal, untouched
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
-        conn.close()
-
-    def test_v2_skips_data_backfills(self):
-        """From version 2, data backfills (v1, v2) do not re-run; v3 origin backfill runs."""
-        conn = _versioned_db(user_version=2)
-        conn.execute(
-            "INSERT INTO messages (id, session_id, role, content, is_notification) VALUES (1, 1, 'user', '<teammate-message>should stay 0</teammate-message>', 0)"
-        )
-        conn.commit()
-
-        migrate_columns(conn)
-
-        # Teammate message should NOT have been re-flagged (v2 backfill already ran)
-        cursor = conn.cursor()
-        cursor.execute("SELECT is_notification FROM messages WHERE id = 1")
-        assert cursor.fetchone()[0] == 0
-        # v3 migration runs from v2, bumping version to 3
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
-        conn.close()
-
-    def test_v2_to_v3_preserves_import_log(self):
-        """v3 migration does selective backfill, not wholesale import_log clear."""
-        conn = _versioned_db(user_version=2)
-        conn.execute("INSERT INTO import_log (file_path, file_hash) VALUES ('/nonexistent/session.jsonl', 'abc123')")
-        conn.commit()
-
-        migrate_columns(conn)
-
-        # import_log row preserved (file doesn't exist, so backfill skips it)
-        count = conn.execute("SELECT COUNT(*) FROM import_log").fetchone()[0]
-        assert count == 1
-        hash_val = conn.execute("SELECT file_hash FROM import_log").fetchone()[0]
-        assert hash_val == "abc123"
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
-        conn.close()
-
-    def test_v3_backfill_updates_origin(self, tmp_path):
-        """v3 migration backfills origin from JSONL for existing messages."""
-        conn = _versioned_db(user_version=2)
-        # Create a session and message
-        conn.execute(
-            "CREATE TABLE sessions (id INTEGER PRIMARY KEY, uuid TEXT UNIQUE, project_id INTEGER, parent_session_id INTEGER, git_branch TEXT, cwd TEXT)"
-        )
-        conn.execute("INSERT INTO sessions (id, uuid) VALUES (1, 'test-uuid')")
-        conn.execute(
-            "INSERT INTO messages (id, session_id, uuid, role, content, is_notification) VALUES (1, 1, 'msg-uuid-1', 'user', 'Hello from Telegram', 0)"
-        )
-
-        # Create a JSONL file with origin data
-        jsonl_file = tmp_path / "test-uuid.jsonl"
-        jsonl_file.write_text(
-            json.dumps(
-                {
-                    "type": "user",
-                    "uuid": "msg-uuid-1",
-                    "origin": {"kind": "channel", "server": "plugin:telegram:telegram"},
-                }
-            )
-            + "\n"
-        )
-        conn.execute(
-            "INSERT INTO import_log (file_path, file_hash) VALUES (?, 'abc')",
-            (str(jsonl_file),),
-        )
-        conn.commit()
-
-        migrate_columns(conn)
-
-        origin = conn.execute("SELECT origin FROM messages WHERE id = 1").fetchone()[0]
-        assert origin == "telegram"
-        conn.close()
-
-    def test_v3_backfill_preserves_hash_for_channel_sessions(self, tmp_path):
-        """v3 migration preserves file_hash — no longer nullifies to trigger reimport.
-
-        Phase 2 hash nullification was removed because the reimport path was
-        destructive (delete-all-then-insert) and JSONL files expire after 30 days.
-        """
-        conn = _versioned_db(user_version=2)
-        conn.execute(
-            "CREATE TABLE sessions (id INTEGER PRIMARY KEY, uuid TEXT UNIQUE, project_id INTEGER, parent_session_id INTEGER, git_branch TEXT, cwd TEXT)"
-        )
-        conn.execute("INSERT INTO sessions (id, uuid) VALUES (1, 'chan-uuid')")
-
-        # Create JSONL with an isMeta+origin entry (channel message previously filtered)
-        jsonl_file = tmp_path / "chan-uuid.jsonl"
-        lines = [
-            json.dumps({"type": "user", "uuid": "u1", "message": {"content": "hi"}}),
-            json.dumps(
-                {
-                    "isMeta": True,
-                    "type": "user",
-                    "uuid": "u2",
-                    "origin": {"kind": "channel", "server": "plugin:telegram:telegram"},
-                    "message": {"content": "channel msg"},
-                }
-            ),
-        ]
-        jsonl_file.write_text("\n".join(lines) + "\n")
-        conn.execute(
-            "INSERT INTO import_log (file_path, file_hash) VALUES (?, 'original')",
-            (str(jsonl_file),),
-        )
-        conn.commit()
-
-        migrate_columns(conn)
-
-        hash_val = conn.execute("SELECT file_hash FROM import_log").fetchone()[0]
-        assert hash_val == "original"  # Hash preserved — no destructive reimport triggered
-        conn.close()
-
-
 class TestLoadSettings:
     def test_always_returns_defaults(self, tmp_path, monkeypatch):
         """load_settings returns hardcoded defaults when no config file exists."""
@@ -421,365 +87,6 @@ class TestLoadSettings:
         assert DEFAULT_SETTINGS["logging_enabled"] is False
         assert DEFAULT_SETTINGS["sync_on_stop"] is True
         assert isinstance(DEFAULT_SETTINGS["exclude_projects"], list)
-
-
-class TestMigrateDb:
-    """Test migrate_db — v2 schema detection and DB replacement."""
-
-    def test_fresh_db_no_tables(self):
-        """A fresh DB with no tables should return False (no migration needed)."""
-        conn = sqlite3.connect(":memory:")
-        result = migrate_db(conn)
-        assert result is False
-
-    def test_v3_db_no_migration(self):
-        """A DB with branches table (v3) should return False."""
-        conn = sqlite3.connect(":memory:")
-        conn.executescript(SCHEMA)
-        conn.commit()
-        result = migrate_db(conn)
-        assert result is False
-
-    def test_v2_db_file_migrated(self):
-        """A file-backed DB with sessions but no branches (v2) should be deleted and recreated."""
-        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
-            db_path = Path(f.name)
-
-        try:
-            # Create a v2-style DB (sessions exists, branches doesn't)
-            conn = sqlite3.connect(str(db_path))
-            conn.execute("""
-                CREATE TABLE sessions (
-                    id INTEGER PRIMARY KEY,
-                    uuid TEXT UNIQUE NOT NULL,
-                    project_id INTEGER
-                )
-            """)
-            conn.execute("INSERT INTO sessions (uuid) VALUES ('old-session')")
-            conn.commit()
-
-            result = migrate_db(conn)
-            assert result is True, "Should detect v2 schema and migrate"
-
-            # Old DB should have been deleted and recreated with v3 schema
-            # Verify new schema has branches table
-            new_conn = sqlite3.connect(str(db_path))
-            cursor = new_conn.cursor()
-            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='branches'")
-            assert cursor.fetchone() is not None, "Recreated DB should have branches table"
-
-            # Old session should be gone (DB was nuked)
-            cursor.execute("SELECT COUNT(*) FROM sessions")
-            assert cursor.fetchone()[0] == 0, "Old data should be gone after migration"
-            new_conn.close()
-        finally:
-            if db_path.exists():
-                db_path.unlink()
-
-    def test_v2_in_memory_migrated(self):
-        """An in-memory DB with v2 schema should return True and handle gracefully."""
-        conn = sqlite3.connect(":memory:")
-        conn.execute("""
-            CREATE TABLE sessions (
-                id INTEGER PRIMARY KEY,
-                uuid TEXT UNIQUE NOT NULL
-            )
-        """)
-        conn.commit()
-
-        result = migrate_db(conn)
-        assert result is True, "Should detect v2 schema in memory DB"
-
-
-def _project_path_db():
-    """Create an in-memory DB with full schema for project path migration tests."""
-    conn = sqlite3.connect(":memory:")
-    conn.executescript(SCHEMA)
-    conn.commit()
-    migrate_columns(conn)
-    return conn
-
-
-class TestMigrateProjectPaths:
-    def test_fixes_wrong_path_from_session_cwd(self):
-        """Migration corrects a project whose path was derived from a hyphenated key."""
-        conn = _project_path_db()
-        cursor = conn.cursor()
-
-        # Insert a project with a lossy hyphen-split path (e.g. meta-ads-cli became meta/ads/cli)
-        cursor.execute(
-            "INSERT INTO projects (path, key, name) VALUES (?, ?, ?)",
-            ("/Users/foo/repos/meta/ads/cli", "-Users-foo-repos-meta-ads-cli", "cli"),
-        )
-        proj_id = cursor.lastrowid
-
-        # Insert a session with the real cwd
-        cursor.execute(
-            "INSERT INTO sessions (uuid, project_id, cwd) VALUES (?, ?, ?)",
-            ("sess-uuid-1", proj_id, "/Users/foo/repos/meta-ads-cli"),
-        )
-        conn.commit()
-
-        _migrate_project_paths(conn)
-
-        cursor.execute("SELECT path, name FROM projects WHERE id = ?", (proj_id,))
-        path, name = cursor.fetchone()
-        assert path == "/Users/foo/repos/meta-ads-cli"
-        assert name == "meta-ads-cli"
-        conn.close()
-
-    def test_no_change_when_path_already_correct(self):
-        """Migration leaves projects alone when path already matches session cwd."""
-        conn = _project_path_db()
-        cursor = conn.cursor()
-
-        cursor.execute(
-            "INSERT INTO projects (path, key, name) VALUES (?, ?, ?)",
-            ("/Users/foo/repos/myproject", "-Users-foo-repos-myproject", "myproject"),
-        )
-        proj_id = cursor.lastrowid
-        cursor.execute(
-            "INSERT INTO sessions (uuid, project_id, cwd) VALUES (?, ?, ?)",
-            ("sess-uuid-2", proj_id, "/Users/foo/repos/myproject"),
-        )
-        conn.commit()
-
-        _migrate_project_paths(conn)
-
-        cursor.execute("SELECT path, name FROM projects WHERE id = ?", (proj_id,))
-        path, name = cursor.fetchone()
-        assert path == "/Users/foo/repos/myproject"
-        assert name == "myproject"
-        conn.close()
-
-    def test_merge_duplicate_on_path_collision(self):
-        """When fixing a path would create a duplicate, sessions are merged into the keeper."""
-        conn = _project_path_db()
-        cursor = conn.cursor()
-
-        # Project A: already has the correct path
-        cursor.execute(
-            "INSERT INTO projects (path, key, name) VALUES (?, ?, ?)",
-            (
-                "/Users/foo/repos/meta-ads-cli",
-                "-Users-foo-repos-meta-ads-cli-correct",
-                "meta-ads-cli",
-            ),
-        )
-        keeper_id = cursor.lastrowid
-        cursor.execute(
-            "INSERT INTO sessions (uuid, project_id, cwd) VALUES (?, ?, ?)",
-            ("sess-keeper", keeper_id, "/Users/foo/repos/meta-ads-cli"),
-        )
-
-        # Project B: wrong path, but its sessions' cwd matches A's path
-        cursor.execute(
-            "INSERT INTO projects (path, key, name) VALUES (?, ?, ?)",
-            (
-                "/Users/foo/repos/meta/ads/cli",
-                "-Users-foo-repos-meta-ads-cli-wrong",
-                "cli",
-            ),
-        )
-        dup_id = cursor.lastrowid
-        cursor.execute(
-            "INSERT INTO sessions (uuid, project_id, cwd) VALUES (?, ?, ?)",
-            ("sess-dup", dup_id, "/Users/foo/repos/meta-ads-cli"),
-        )
-        conn.commit()
-
-        _migrate_project_paths(conn)
-
-        # Duplicate project should be gone
-        cursor.execute("SELECT id FROM projects WHERE id = ?", (dup_id,))
-        assert cursor.fetchone() is None
-
-        # The orphaned session should now belong to the keeper
-        cursor.execute("SELECT project_id FROM sessions WHERE uuid = ?", ("sess-dup",))
-        assert cursor.fetchone()[0] == keeper_id
-
-        # Keeper's path is unchanged
-        cursor.execute("SELECT path FROM projects WHERE id = ?", (keeper_id,))
-        assert cursor.fetchone()[0] == "/Users/foo/repos/meta-ads-cli"
-        conn.close()
-
-    def test_idempotent(self):
-        """Running migration twice produces the same result."""
-        conn = _project_path_db()
-        cursor = conn.cursor()
-
-        cursor.execute(
-            "INSERT INTO projects (path, key, name) VALUES (?, ?, ?)",
-            ("/Users/foo/repos/meta/ads/cli", "-Users-foo-repos-meta-ads-cli", "cli"),
-        )
-        proj_id = cursor.lastrowid
-        cursor.execute(
-            "INSERT INTO sessions (uuid, project_id, cwd) VALUES (?, ?, ?)",
-            ("sess-idem", proj_id, "/Users/foo/repos/meta-ads-cli"),
-        )
-        conn.commit()
-
-        _migrate_project_paths(conn)
-        _migrate_project_paths(conn)  # Second run should be a no-op
-
-        cursor.execute("SELECT path, name FROM projects WHERE id = ?", (proj_id,))
-        row = cursor.fetchone()
-        assert row is not None
-        assert row[0] == "/Users/foo/repos/meta-ads-cli"
-        assert row[1] == "meta-ads-cli"
-        conn.close()
-
-    def test_uses_most_common_cwd(self):
-        """When sessions have different cwds, the most common one wins."""
-        conn = _project_path_db()
-        cursor = conn.cursor()
-
-        cursor.execute(
-            "INSERT INTO projects (path, key, name) VALUES (?, ?, ?)",
-            ("/Users/foo/repos/meta/ads/cli", "-Users-foo-repos-meta-ads-cli", "cli"),
-        )
-        proj_id = cursor.lastrowid
-
-        real_path = "/Users/foo/repos/meta-ads-cli"
-        other_path = "/Users/foo/repos/other"
-        for i, cwd in enumerate([real_path, real_path, real_path, other_path]):
-            cursor.execute(
-                "INSERT INTO sessions (uuid, project_id, cwd) VALUES (?, ?, ?)",
-                (f"sess-multi-{i}", proj_id, cwd),
-            )
-        conn.commit()
-
-        _migrate_project_paths(conn)
-
-        cursor.execute("SELECT path FROM projects WHERE id = ?", (proj_id,))
-        assert cursor.fetchone()[0] == real_path
-        conn.close()
-
-    def test_skips_project_with_no_sessions(self):
-        """Projects without sessions are left untouched."""
-        conn = _project_path_db()
-        cursor = conn.cursor()
-
-        cursor.execute(
-            "INSERT INTO projects (path, key, name) VALUES (?, ?, ?)",
-            ("/Users/foo/repos/meta/ads/cli", "-Users-foo-repos-meta-ads-cli", "cli"),
-        )
-        proj_id = cursor.lastrowid
-        conn.commit()
-
-        _migrate_project_paths(conn)
-
-        cursor.execute("SELECT path FROM projects WHERE id = ?", (proj_id,))
-        assert cursor.fetchone()[0] == "/Users/foo/repos/meta/ads/cli"
-        conn.close()
-
-
-def _v3_db_with_messages():
-    """Create an in-memory DB at user_version=3 with sample messages for v4 migration tests."""
-    conn = sqlite3.connect(":memory:")
-    conn.execute("""
-        CREATE TABLE messages (
-            id INTEGER PRIMARY KEY, session_id INTEGER, uuid TEXT,
-            parent_uuid TEXT, timestamp DATETIME, role TEXT,
-            content TEXT NOT NULL, tool_summary TEXT,
-            has_tool_use INTEGER DEFAULT 0, has_thinking INTEGER DEFAULT 0,
-            is_notification INTEGER DEFAULT 0, origin TEXT,
-            UNIQUE(session_id, uuid)
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE branches (
-            id INTEGER PRIMARY KEY, session_id INTEGER, leaf_uuid TEXT,
-            fork_point_uuid TEXT, is_active INTEGER DEFAULT 1,
-            started_at DATETIME, ended_at DATETIME, exchange_count INTEGER DEFAULT 0,
-            files_modified TEXT, commits TEXT, aggregated_content TEXT,
-            tool_counts TEXT, context_summary TEXT, context_summary_json TEXT,
-            summary_version INTEGER DEFAULT 0
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE branch_messages (
-            branch_id INTEGER, message_id INTEGER, PRIMARY KEY (branch_id, message_id)
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE import_log (
-            id INTEGER PRIMARY KEY, file_path TEXT UNIQUE NOT NULL,
-            file_hash TEXT, imported_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            messages_imported INTEGER DEFAULT 0
-        )
-    """)
-    conn.execute("PRAGMA user_version = 3")
-    conn.commit()
-    return conn
-
-
-class TestV4Migration:
-    """user_version=3 -> 4: clear stale task-notification values from origin column."""
-
-    def test_v4_bumps_user_version(self):
-        """After migration from v3, user_version progresses through all versions to latest."""
-        conn = _v3_db_with_messages()
-        migrate_columns(conn)
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
-        conn.close()
-
-    def test_v4_clears_task_notification_origin(self):
-        """Rows with origin='task-notification' are set to NULL — parse_origin kind-fallback bug fix."""
-        conn = _v3_db_with_messages()
-        conn.execute(
-            "INSERT INTO messages (id, session_id, role, content, origin) VALUES (1, 1, 'user', 'hello', 'task-notification')"
-        )
-        conn.execute(
-            "INSERT INTO messages (id, session_id, role, content, origin) VALUES (2, 1, 'user', 'telegram msg', 'telegram')"
-        )
-        conn.execute(
-            "INSERT INTO messages (id, session_id, role, content, origin) VALUES (3, 1, 'user', 'no origin', NULL)"
-        )
-        conn.commit()
-
-        migrate_columns(conn)
-
-        cursor = conn.cursor()
-        cursor.execute("SELECT id, origin FROM messages ORDER BY id")
-        rows = {row[0]: row[1] for row in cursor.fetchall()}
-        assert rows[1] is None, "task-notification origin should be cleared to NULL"
-        assert rows[2] == "telegram", "non-task-notification origin must be preserved"
-        assert rows[3] is None, "already-NULL origin must remain NULL"
-        conn.close()
-
-    def test_v4_idempotent(self):
-        """Re-running migrate_columns on a v4 DB is a safe no-op."""
-        conn = _v3_db_with_messages()
-        conn.execute(
-            "INSERT INTO messages (id, session_id, role, content, origin) VALUES (1, 1, 'user', 'hello', 'telegram')"
-        )
-        conn.commit()
-
-        migrate_columns(conn)  # v3->v6
-        migrate_columns(conn)  # no-op
-
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
-        origin = conn.execute("SELECT origin FROM messages WHERE id = 1").fetchone()[0]
-        assert origin == "telegram", "idempotent re-run must not corrupt already-correct data"
-        conn.close()
-
-    def test_v4_skips_when_already_v4(self):
-        """If user_version is already 4, the UPDATE must not run again."""
-        conn = _v3_db_with_messages()
-        # Pre-set to v4 with a 'task-notification' origin to confirm the DML is skipped
-        conn.execute(
-            "INSERT INTO messages (id, session_id, role, content, origin) VALUES (1, 1, 'user', 'hello', 'task-notification')"
-        )
-        conn.execute("PRAGMA user_version = 4")
-        conn.commit()
-
-        migrate_columns(conn)
-
-        # Because we're already at v4 the DML block is skipped — the value stays
-        origin = conn.execute("SELECT origin FROM messages WHERE id = 1").fetchone()[0]
-        assert origin == "task-notification", "DML should not re-run on a v4 DB"
-        conn.close()
 
 
 class TestLoadConfig:
@@ -900,458 +207,6 @@ class TestCurrentOnboardingVersion:
         assert CURRENT_ONBOARDING_VERSION == 1
 
 
-class TestMigrateDbBackupGuard:
-    """Gap 3 — backup failure must block the destructive nuke in migrate_db.
-
-    Prevents: a disk-full or permission error during backup silently destroying
-    the only copy of conversation data that predates the 30-day JSONL expiry.
-    """
-
-    def test_backup_failure_blocks_nuke(self, tmp_path, monkeypatch):
-        """When _backup_db_before_migration returns False, migrate_db must abort."""
-        # Create a file-backed v2 DB (sessions exists, branches does not)
-        db_file = tmp_path / "conversations.db"
-        conn = sqlite3.connect(str(db_file))
-        conn.execute("""
-            CREATE TABLE sessions (
-                id INTEGER PRIMARY KEY,
-                uuid TEXT UNIQUE NOT NULL,
-                project_id INTEGER
-            )
-        """)
-        conn.execute("INSERT INTO sessions (uuid) VALUES ('keep-me')")
-        conn.commit()
-
-        monkeypatch.setattr(migrations_module, "_backup_db_before_migration", lambda *_a, **_kw: False)
-
-        result = migrate_db(conn)
-
-        # Must refuse to migrate when backup fails
-        assert result is False, "migrate_db must return False when _backup_db_before_migration returns False"
-
-        # Original DB file must still exist
-        assert db_file.exists(), "DB file must not be deleted when backup failed"
-
-        # File must still be readable and contain original data
-        verify = sqlite3.connect(str(db_file))
-        count = verify.execute("SELECT COUNT(*) FROM sessions WHERE uuid = 'keep-me'").fetchone()[0]
-        verify.close()
-        assert count == 1, "Original session data must be intact after aborted migration"
-
-
-def _v4_db_for_v5_tests():
-    """Create an in-memory DB at user_version=4 with full branches schema for v5 migration tests."""
-    conn = sqlite3.connect(":memory:")
-    conn.execute("""
-        CREATE TABLE messages (
-            id INTEGER PRIMARY KEY, session_id INTEGER, uuid TEXT,
-            parent_uuid TEXT, timestamp DATETIME, role TEXT,
-            content TEXT NOT NULL, tool_summary TEXT,
-            has_tool_use INTEGER DEFAULT 0, has_thinking INTEGER DEFAULT 0,
-            is_notification INTEGER DEFAULT 0, origin TEXT,
-            UNIQUE(session_id, uuid)
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE branches (
-            id INTEGER PRIMARY KEY, session_id INTEGER, leaf_uuid TEXT,
-            fork_point_uuid TEXT, is_active INTEGER DEFAULT 1,
-            started_at DATETIME, ended_at DATETIME, exchange_count INTEGER DEFAULT 0,
-            files_modified TEXT, commits TEXT, aggregated_content TEXT,
-            tool_counts TEXT, context_summary TEXT, context_summary_json TEXT,
-            summary_version INTEGER DEFAULT 0
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE branch_messages (
-            branch_id INTEGER, message_id INTEGER, PRIMARY KEY (branch_id, message_id)
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE import_log (
-            id INTEGER PRIMARY KEY, file_path TEXT UNIQUE NOT NULL,
-            file_hash TEXT, imported_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            messages_imported INTEGER DEFAULT 0
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE sessions (
-            id INTEGER PRIMARY KEY, uuid TEXT UNIQUE NOT NULL,
-            project_id INTEGER, parent_session_id INTEGER,
-            git_branch TEXT, cwd TEXT
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE projects (
-            id INTEGER PRIMARY KEY, path TEXT UNIQUE NOT NULL,
-            key TEXT UNIQUE NOT NULL, name TEXT,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    # FTS5 branches table (for FTS rebuild test). FTS5 may not be available in all test environments.
-    with contextlib.suppress(Exception):
-        conn.execute("""
-            CREATE VIRTUAL TABLE IF NOT EXISTS branches_fts USING fts5(
-              aggregated_content,
-              content=branches,
-              content_rowid=id,
-              tokenize='porter unicode61'
-            )
-        """)
-    conn.execute("PRAGMA user_version = 4")
-    conn.commit()
-    return conn
-
-
-class TestV5Migration:
-    """user_version=4 -> 5: recompute aggregated_content with file paths and commits."""
-
-    def test_v5_migration_enriches_aggregated_content(self):
-        """v5 recomputes aggregated_content to include file paths for branches that have them."""
-        conn = _v4_db_for_v5_tests()
-        cursor = conn.cursor()
-
-        # Insert a branch with files_modified (JSON list)
-        cursor.execute(
-            "INSERT INTO branches (id, session_id, leaf_uuid, files_modified, commits, aggregated_content) VALUES (?, ?, ?, ?, ?, ?)",
-            (
-                1,
-                1,
-                "leaf-1",
-                json.dumps(["/src/main.py", "/src/utils.py"]),
-                None,
-                "old content",
-            ),
-        )
-        cursor.execute(
-            "INSERT INTO messages (id, session_id, uuid, timestamp, role, content) VALUES (?, ?, ?, ?, ?, ?)",
-            (1, 1, "msg-1", "2025-01-01T10:00:00Z", "user", "fix the bug"),
-        )
-        cursor.execute("INSERT INTO branch_messages VALUES (1, 1)")
-        conn.commit()
-
-        migrate_columns(conn)
-
-        agg = cursor.execute("SELECT aggregated_content FROM branches WHERE id = 1").fetchone()[0]
-        assert "/src/main.py" in agg, "File paths must be included in aggregated_content after v5"
-        assert "/src/utils.py" in agg, "File paths must be included in aggregated_content after v5"
-        conn.close()
-
-    def test_v5_migration_renames_interrupted_to_abandoned(self):
-        """v5 renames INTERRUPTED to ABANDONED in context_summary and context_summary_json."""
-        conn = _v4_db_for_v5_tests()
-        cursor = conn.cursor()
-
-        summary_json = json.dumps(
-            {
-                "version": 2,
-                "disposition": "INTERRUPTED",
-                "first_exchanges": [],
-                "last_exchanges": [],
-            }
-        )
-        cursor.execute(
-            "INSERT INTO branches (id, session_id, leaf_uuid, context_summary, context_summary_json) VALUES (?, ?, ?, ?, ?)",
-            (1, 1, "leaf-1", "**Status:** INTERRUPTED\nSome text", summary_json),
-        )
-        conn.commit()
-
-        migrate_columns(conn)
-
-        row = cursor.execute("SELECT context_summary, context_summary_json FROM branches WHERE id = 1").fetchone()
-        cs, csj = row
-        assert "INTERRUPTED" not in cs, "context_summary must not contain INTERRUPTED after v5"
-        assert "ABANDONED" in cs, "context_summary must contain ABANDONED after v5"
-        parsed = json.loads(csj)
-        assert parsed["disposition"] == "ABANDONED", "context_summary_json disposition must be ABANDONED"
-        conn.close()
-
-    def test_v5_migration_idempotent(self):
-        """Running v5 twice produces identical aggregated_content (SET not APPEND)."""
-        conn = _v4_db_for_v5_tests()
-        cursor = conn.cursor()
-
-        cursor.execute(
-            "INSERT INTO branches (id, session_id, leaf_uuid, files_modified, commits, aggregated_content) VALUES (?, ?, ?, ?, ?, ?)",
-            (1, 1, "leaf-1", json.dumps(["/src/a.py"]), None, "old"),
-        )
-        cursor.execute(
-            "INSERT INTO messages (id, session_id, uuid, timestamp, role, content) VALUES (?, ?, ?, ?, ?, ?)",
-            (1, 1, "msg-1", "2025-01-01T10:00:00Z", "user", "hello"),
-        )
-        cursor.execute("INSERT INTO branch_messages VALUES (1, 1)")
-        conn.commit()
-
-        migrate_columns(conn)
-        agg_first = cursor.execute("SELECT aggregated_content FROM branches WHERE id = 1").fetchone()[0]
-
-        # Reset version to 4 to simulate running v5 again
-        conn.execute("PRAGMA user_version = 4")
-        conn.commit()
-        migrate_columns(conn)
-        agg_second = cursor.execute("SELECT aggregated_content FROM branches WHERE id = 1").fetchone()[0]
-
-        assert agg_first == agg_second, "v5 is SET semantics — running twice must produce the same result"
-        conn.close()
-
-    def test_v5_migration_gates_project_paths(self):
-        """_migrate_project_paths is called inside v5, not on every get_db_connection call."""
-        # Verify that _migrate_project_paths is NOT called by examining the call path:
-        # get_db_connection should not call _migrate_project_paths unconditionally.
-        source = inspect.getsource(db_module.get_db_connection)
-        # An unconditional _migrate_project_paths(conn) at the end would be a bug — it
-        # must live inside the v5 migration block, not at the top level. Verify this
-        # structurally by checking migrate_columns source for _migrate_project_paths.
-        mc_source = inspect.getsource(migrations_module.migrate_columns)
-        assert "_migrate_project_paths" in mc_source, (
-            "_migrate_project_paths must be called inside migrate_columns (v5 block)"
-        )
-        assert "_migrate_project_paths" not in source, (
-            "_migrate_project_paths must NOT be called unconditionally in get_db_connection"
-        )
-
-    def test_v5_migration_handles_null_files_and_commits(self):
-        """v5 handles branches where files_modified and commits are NULL."""
-        conn = _v4_db_for_v5_tests()
-        cursor = conn.cursor()
-
-        cursor.execute(
-            "INSERT INTO branches (id, session_id, leaf_uuid, files_modified, commits, aggregated_content) VALUES (?, ?, ?, ?, ?, ?)",
-            (1, 1, "leaf-1", None, None, "some content"),
-        )
-        cursor.execute(
-            "INSERT INTO messages (id, session_id, uuid, timestamp, role, content) VALUES (?, ?, ?, ?, ?, ?)",
-            (1, 1, "msg-1", "2025-01-01T10:00:00Z", "user", "hello"),
-        )
-        cursor.execute("INSERT INTO branch_messages VALUES (1, 1)")
-        conn.commit()
-
-        # Should not raise even with NULL files/commits
-        migrate_columns(conn)
-
-        agg = cursor.execute("SELECT aggregated_content FROM branches WHERE id = 1").fetchone()[0]
-        assert agg is not None
-        conn.close()
-
-    def test_v5_fts_rebuild(self):
-        """After v5, branches_fts contains updated aggregated_content."""
-        conn = _v4_db_for_v5_tests()
-        cursor = conn.cursor()
-
-        cursor.execute(
-            "INSERT INTO branches (id, session_id, leaf_uuid, files_modified, aggregated_content) VALUES (?, ?, ?, ?, ?)",
-            (1, 1, "leaf-fts", json.dumps(["/repo/uniquefile_xyzzy.py"]), "old"),
-        )
-        cursor.execute(
-            "INSERT INTO messages (id, session_id, uuid, timestamp, role, content) VALUES (?, ?, ?, ?, ?, ?)",
-            (1, 1, "msg-1", "2025-01-01T10:00:00Z", "user", "fts test content"),
-        )
-        cursor.execute("INSERT INTO branch_messages VALUES (1, 1)")
-        conn.commit()
-
-        migrate_columns(conn)
-
-        # Check branches_fts exists and is queryable (FTS rebuild should have run)
-        try:
-            rows = cursor.execute(
-                "SELECT rowid FROM branches_fts WHERE branches_fts MATCH 'uniquefile_xyzzy'"
-            ).fetchall()
-            # If FTS5 is available, the file path should be findable
-            assert len(rows) >= 1, "branches_fts must contain the updated aggregated_content"
-        except sqlite3.OperationalError:
-            # FTS may not be available in this SQLite build — skip FTS assertion
-            pass
-
-        conn.close()
-
-    def test_migrations_run_on_get_db_connection(self, tmp_path, monkeypatch):
-        """Opening a v4 database via get_db_connection triggers v5 and v6 automatically."""
-        db_file = tmp_path / "conversations.db"
-        # Create a v4 DB at the filesystem level
-        setup_conn = sqlite3.connect(str(db_file))
-        setup_conn.executescript("""
-            CREATE TABLE IF NOT EXISTS messages (
-                id INTEGER PRIMARY KEY, session_id INTEGER, uuid TEXT,
-                parent_uuid TEXT, timestamp DATETIME, role TEXT,
-                content TEXT NOT NULL, tool_summary TEXT,
-                has_tool_use INTEGER DEFAULT 0, has_thinking INTEGER DEFAULT 0,
-                is_notification INTEGER DEFAULT 0, origin TEXT,
-                UNIQUE(session_id, uuid)
-            );
-            CREATE TABLE IF NOT EXISTS branches (
-                id INTEGER PRIMARY KEY, session_id INTEGER, leaf_uuid TEXT,
-                fork_point_uuid TEXT, is_active INTEGER DEFAULT 1,
-                started_at DATETIME, ended_at DATETIME, exchange_count INTEGER DEFAULT 0,
-                files_modified TEXT, commits TEXT, aggregated_content TEXT,
-                tool_counts TEXT, context_summary TEXT, context_summary_json TEXT,
-                summary_version INTEGER DEFAULT 0
-            );
-            CREATE TABLE IF NOT EXISTS branch_messages (
-                branch_id INTEGER, message_id INTEGER, PRIMARY KEY (branch_id, message_id)
-            );
-            CREATE TABLE IF NOT EXISTS import_log (
-                id INTEGER PRIMARY KEY, file_path TEXT UNIQUE NOT NULL,
-                file_hash TEXT, imported_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                messages_imported INTEGER DEFAULT 0
-            );
-            CREATE TABLE IF NOT EXISTS sessions (
-                id INTEGER PRIMARY KEY, uuid TEXT UNIQUE NOT NULL,
-                project_id INTEGER, parent_session_id INTEGER,
-                git_branch TEXT, cwd TEXT
-            );
-            CREATE TABLE IF NOT EXISTS projects (
-                id INTEGER PRIMARY KEY, path TEXT UNIQUE NOT NULL,
-                key TEXT UNIQUE NOT NULL, name TEXT,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            );
-        """)
-        setup_conn.execute("PRAGMA user_version = 4")
-        setup_conn.commit()
-        setup_conn.close()
-
-        # Patch the default db path so get_db_connection uses our tmp file
-        monkeypatch.setattr(db_module, "DEFAULT_DB_PATH", db_file)
-
-        conn = get_db_connection()
-        version = conn.execute("PRAGMA user_version").fetchone()[0]
-        conn.close()
-
-        assert version == 6, f"get_db_connection on a v4 DB must run v5+v6, got version={version}"
-
-
-class TestV6Migration:
-    """user_version=5 -> 6: truncate oversized context_summary_json entries."""
-
-    def _v5_db(self):
-        """Create an in-memory DB at user_version=5 for v6 migration tests."""
-        conn = sqlite3.connect(":memory:")
-        conn.execute("""
-            CREATE TABLE messages (
-                id INTEGER PRIMARY KEY, session_id INTEGER, uuid TEXT,
-                parent_uuid TEXT, timestamp DATETIME, role TEXT,
-                content TEXT NOT NULL, tool_summary TEXT,
-                has_tool_use INTEGER DEFAULT 0, has_thinking INTEGER DEFAULT 0,
-                is_notification INTEGER DEFAULT 0, origin TEXT,
-                UNIQUE(session_id, uuid)
-            )
-        """)
-        conn.execute("""
-            CREATE TABLE branches (
-                id INTEGER PRIMARY KEY, session_id INTEGER, leaf_uuid TEXT,
-                fork_point_uuid TEXT, is_active INTEGER DEFAULT 1,
-                started_at DATETIME, ended_at DATETIME, exchange_count INTEGER DEFAULT 0,
-                files_modified TEXT, commits TEXT, aggregated_content TEXT,
-                tool_counts TEXT, context_summary TEXT, context_summary_json TEXT,
-                summary_version INTEGER DEFAULT 0
-            )
-        """)
-        conn.execute("""
-            CREATE TABLE branch_messages (
-                branch_id INTEGER, message_id INTEGER, PRIMARY KEY (branch_id, message_id)
-            )
-        """)
-        conn.execute("""
-            CREATE TABLE import_log (
-                id INTEGER PRIMARY KEY, file_path TEXT UNIQUE NOT NULL,
-                file_hash TEXT, imported_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                messages_imported INTEGER DEFAULT 0
-            )
-        """)
-        conn.execute("PRAGMA user_version = 5")
-        conn.commit()
-        return conn
-
-    def _large_summary_json(self, size_bytes: int) -> str:
-        """Build a context_summary_json dict with large exchange text fields totalling size_bytes."""
-        padding = "x" * size_bytes
-        data = {
-            "version": 3,
-            "disposition": "IN_PROGRESS",
-            "first_exchanges": [{"user": padding, "assistant": "short", "timestamp": "2025-01-01"}],
-            "last_exchanges": [{"user": "short", "assistant": "short", "timestamp": "2025-01-01"}],
-        }
-        return json.dumps(data)
-
-    def test_v6_truncates_large_json(self):
-        """v6 truncates context_summary_json entries that exceed 50KB."""
-        conn = self._v5_db()
-        cursor = conn.cursor()
-
-        large_json = self._large_summary_json(60000)  # > 50KB
-        assert len(large_json) > 51200
-
-        cursor.execute(
-            "INSERT INTO branches (id, session_id, leaf_uuid, context_summary_json) VALUES (?, ?, ?, ?)",
-            (1, 1, "leaf-large", large_json),
-        )
-        conn.commit()
-
-        migrate_columns(conn)
-
-        result = cursor.execute("SELECT context_summary_json FROM branches WHERE id = 1").fetchone()[0]
-        assert result is not None
-        assert len(result) < 51200, f"context_summary_json must be < 50KB after v6, got {len(result)}"
-        conn.close()
-
-    def test_v6_leaves_small_json_unchanged(self):
-        """v6 does not modify context_summary_json entries that are within 50KB."""
-        conn = self._v5_db()
-        cursor = conn.cursor()
-
-        small_json = json.dumps(
-            {
-                "version": 3,
-                "disposition": "COMPLETED",
-                "first_exchanges": [{"user": "hello", "assistant": "world", "timestamp": "2025-01-01"}],
-                "last_exchanges": [],
-            }
-        )
-        assert len(small_json) < 51200
-
-        cursor.execute(
-            "INSERT INTO branches (id, session_id, leaf_uuid, context_summary_json) VALUES (?, ?, ?, ?)",
-            (1, 1, "leaf-small", small_json),
-        )
-        conn.commit()
-
-        migrate_columns(conn)
-
-        result = cursor.execute("SELECT context_summary_json FROM branches WHERE id = 1").fetchone()[0]
-        assert result == small_json, "Small JSON must be unchanged after v6 migration"
-        conn.close()
-
-    def test_v6_idempotent(self):
-        """Running v6 twice produces the same result."""
-        conn = self._v5_db()
-        cursor = conn.cursor()
-
-        large_json = self._large_summary_json(60000)
-        cursor.execute(
-            "INSERT INTO branches (id, session_id, leaf_uuid, context_summary_json) VALUES (?, ?, ?, ?)",
-            (1, 1, "leaf-idem", large_json),
-        )
-        conn.commit()
-
-        migrate_columns(conn)
-        result_first = cursor.execute("SELECT context_summary_json FROM branches WHERE id = 1").fetchone()[0]
-
-        # Reset to v5 to simulate re-run
-        conn.execute("PRAGMA user_version = 5")
-        conn.commit()
-        migrate_columns(conn)
-        result_second = cursor.execute("SELECT context_summary_json FROM branches WHERE id = 1").fetchone()[0]
-
-        assert result_first == result_second, "v6 is idempotent — running twice must produce the same result"
-        conn.close()
-
-    def test_v6_bumps_user_version(self):
-        """After running from v5, user_version must be 6."""
-        conn = self._v5_db()
-        migrate_columns(conn)
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
-        conn.close()
-
-
 # vec schema, columns, trigger, vec_available, load_vec
 
 
@@ -1368,70 +223,6 @@ def _vec_available_in_env() -> bool:
 
 
 _VEC_AVAILABLE = _vec_available_in_env()
-
-
-class TestNewBranchColumns:
-    """Three new columns on branches (embedding_version, embedding_model, summary_version_at_embed)."""
-
-    def test_new_columns_exist_via_migrate_columns(self):
-        """migrate_columns adds the three embedding columns to an existing branches table."""
-        conn = _pre_migration_db()
-        migrate_columns(conn)
-
-        cursor = conn.cursor()
-        cursor.execute("PRAGMA table_info(branches)")
-        columns = {row[1] for row in cursor.fetchall()}
-        assert "embedding_version" in columns
-        assert "embedding_model" in columns
-        assert "summary_version_at_embed" in columns
-        conn.close()
-
-    def test_new_columns_exist_on_memory_db_fixture(self, memory_db):
-        """The memory_db fixture (SCHEMA + migrate_columns) also has the three columns."""
-        cursor = memory_db.cursor()
-        cursor.execute("PRAGMA table_info(branches)")
-        columns = {row[1] for row in cursor.fetchall()}
-        assert "embedding_version" in columns
-        assert "embedding_model" in columns
-        assert "summary_version_at_embed" in columns
-
-    def test_embedding_version_defaults_to_zero(self, memory_db):
-        """New rows get embedding_version = 0 by default."""
-        cursor = memory_db.cursor()
-        cursor.execute(
-            "INSERT INTO projects (path, key, name) VALUES (?, ?, ?)",
-            ("/p", "-p", "p"),
-        )
-        proj_id = cursor.lastrowid
-        cursor.execute(
-            "INSERT INTO sessions (uuid, project_id) VALUES (?, ?)",
-            ("sess-emb-default", proj_id),
-        )
-        sess_id = cursor.lastrowid
-        cursor.execute(
-            "INSERT INTO branches (session_id, leaf_uuid) VALUES (?, ?)",
-            (sess_id, "leaf-emb"),
-        )
-        branch_id = cursor.lastrowid
-        memory_db.commit()
-
-        row = cursor.execute(
-            "SELECT embedding_version, embedding_model, summary_version_at_embed FROM branches WHERE id = ?",
-            (branch_id,),
-        ).fetchone()
-        assert row[0] == 0
-        assert row[1] is None
-        assert row[2] is None
-
-    def test_embedding_version_index_exists(self, memory_db):
-        """idx_branches_embedding_version index is created by migrate_columns."""
-        cursor = memory_db.cursor()
-        cursor.execute("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_branches_embedding_version'")
-        assert cursor.fetchone() is not None
-
-    def test_new_columns_idempotent(self, memory_db):
-        """Calling migrate_columns a second time does not raise."""
-        migrate_columns(memory_db)  # already called by fixture; call again
 
 
 class TestVecAvailable:
@@ -1483,11 +274,10 @@ class TestVecSchema:
     """branch_vec table and branches_vec_ad trigger — guarded by vec_available."""
 
     def test_raw_no_vec_connection_unaffected(self):
-        """migrate_columns never creates branch_vec — it belongs to load_vec=True only."""
+        """The plain schema path never creates branch_vec — it belongs to load_vec=True only."""
         conn = sqlite3.connect(":memory:")
         conn.executescript(SCHEMA)
         conn.commit()
-        migrate_columns(conn)
         tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
         # Core tables must always be there
         assert "branches" in tables
@@ -1722,4 +512,306 @@ class TestLoadVecParameter:
         # Must be able to read branches without touching branch_vec
         count = conn.execute("SELECT COUNT(*) FROM branches").fetchone()[0]
         assert count == 0
+        conn.close()
+
+
+class TestSchemaEquivalencePin:
+    """Characterization pin — guards the migrations squash to v6 baseline.
+
+    This pin captures the schema a fresh conversation DB produces via the
+    production get_db_connection path and asserts it matches an inline expected
+    literal.  SCHEMA_CORE now carries the embedding DDL and migrations.py is gone,
+    so a fresh DB matches this snapshot exactly — the schema is the v6 baseline
+    minus the intentionally-removed token_snapshots table.
+
+    Exclusion rule: we exclude from the snapshot any table whose name contains
+    '_fts_' (those are FTS5 shadow tables auto-created alongside the virtual FTS
+    tables — e.g. messages_fts_data, branches_fts_idx) plus token_snapshots (owned
+    solely by token_schema.py; the conversation DB no longer creates it) and
+    sqlite_* internals.  The FTS virtual tables themselves (messages_fts,
+    branches_fts) do NOT contain '_fts_' so they ARE included.
+    """
+
+    # Expected schema captured from the production SCHEMA_CORE + SCHEMA_FTS5 output.
+    # token_snapshots is intentionally absent — SCHEMA_CORE and get_db_connection no
+    # longer create it; the exclusion clause keeps this literal stable on legacy DBs
+    # that still carry the table.
+    EXPECTED_TABLES: ClassVar[list[str]] = [
+        "branch_messages",
+        "branches",
+        "branches_fts",
+        "import_log",
+        "messages",
+        "messages_fts",
+        "projects",
+        "sessions",
+    ]
+
+    # Per-table column info: (cid, name, type, notnull, dflt_value, pk)
+    EXPECTED_COLUMNS: ClassVar[dict[str, list[tuple]]] = {
+        "branch_messages": [
+            (0, "branch_id", "INTEGER", 1, None, 1),
+            (1, "message_id", "INTEGER", 1, None, 2),
+        ],
+        "branches": [
+            (0, "id", "INTEGER", 0, None, 1),
+            (1, "session_id", "INTEGER", 1, None, 0),
+            (2, "leaf_uuid", "TEXT", 1, None, 0),
+            (3, "fork_point_uuid", "TEXT", 0, None, 0),
+            (4, "is_active", "INTEGER", 0, "1", 0),
+            (5, "started_at", "DATETIME", 0, None, 0),
+            (6, "ended_at", "DATETIME", 0, None, 0),
+            (7, "exchange_count", "INTEGER", 0, "0", 0),
+            (8, "files_modified", "TEXT", 0, None, 0),
+            (9, "commits", "TEXT", 0, None, 0),
+            (10, "tool_counts", "TEXT", 0, None, 0),
+            (11, "aggregated_content", "TEXT", 0, None, 0),
+            (12, "context_summary", "TEXT", 0, None, 0),
+            (13, "context_summary_json", "TEXT", 0, None, 0),
+            (14, "summary_version", "INTEGER", 0, "0", 0),
+            (15, "embedding_version", "INTEGER", 0, "0", 0),
+            (16, "embedding_model", "TEXT", 0, None, 0),
+            (17, "summary_version_at_embed", "INTEGER", 0, None, 0),
+        ],
+        "branches_fts": [
+            (0, "aggregated_content", "", 0, None, 0),
+        ],
+        "import_log": [
+            (0, "id", "INTEGER", 0, None, 1),
+            (1, "file_path", "TEXT", 1, None, 0),
+            (2, "file_hash", "TEXT", 0, None, 0),
+            (3, "imported_at", "DATETIME", 0, "CURRENT_TIMESTAMP", 0),
+            (4, "messages_imported", "INTEGER", 0, "0", 0),
+        ],
+        "messages": [
+            (0, "id", "INTEGER", 0, None, 1),
+            (1, "session_id", "INTEGER", 1, None, 0),
+            (2, "uuid", "TEXT", 0, None, 0),
+            (3, "parent_uuid", "TEXT", 0, None, 0),
+            (4, "timestamp", "DATETIME", 0, None, 0),
+            (5, "role", "TEXT", 0, None, 0),
+            (6, "content", "TEXT", 1, None, 0),
+            (7, "tool_summary", "TEXT", 0, None, 0),
+            (8, "has_tool_use", "INTEGER", 0, "0", 0),
+            (9, "has_thinking", "INTEGER", 0, "0", 0),
+            (10, "is_notification", "INTEGER", 0, "0", 0),
+            (11, "origin", "TEXT", 0, None, 0),
+        ],
+        "messages_fts": [
+            (0, "content", "", 0, None, 0),
+        ],
+        "projects": [
+            (0, "id", "INTEGER", 0, None, 1),
+            (1, "path", "TEXT", 1, None, 0),
+            (2, "key", "TEXT", 1, None, 0),
+            (3, "name", "TEXT", 0, None, 0),
+            (4, "created_at", "DATETIME", 0, "CURRENT_TIMESTAMP", 0),
+        ],
+        "sessions": [
+            (0, "id", "INTEGER", 0, None, 1),
+            (1, "uuid", "TEXT", 1, None, 0),
+            (2, "project_id", "INTEGER", 0, None, 0),
+            (3, "parent_session_id", "INTEGER", 0, None, 0),
+            (4, "git_branch", "TEXT", 0, None, 0),
+            (5, "cwd", "TEXT", 0, None, 0),
+            (6, "imported_at", "DATETIME", 0, "CURRENT_TIMESTAMP", 0),
+        ],
+    }
+
+    EXPECTED_IDX_INDEXES: ClassVar[list[str]] = [
+        "idx_branch_messages_message",
+        "idx_branches_active",
+        "idx_branches_embedding_version",
+        "idx_branches_session",
+        "idx_branches_summary_version",
+        "idx_messages_session",
+        "idx_messages_session_uuid",
+        "idx_messages_timestamp",
+        "idx_projects_key",
+        "idx_sessions_project",
+    ]
+
+    def test_schema_snapshot_fts5(self, tmp_path):
+        """Pin: fresh conv DB schema matches the expected literal (FTS5 path).
+
+        Only runs when FTS5 is available — mirrors how other test_db.py tests
+        guard FTS-specific assertions via detect_fts_support.
+        """
+        conn = get_db_connection(settings={"db_path": str(tmp_path / "conv.db")})
+        fts = detect_fts_support(conn)
+        if fts != "fts5":
+            pytest.skip("FTS5 not available in this SQLite build")
+
+        cursor = conn.cursor()
+
+        # Tables: exclude token_snapshots, sqlite_* internals, and FTS shadow tables
+        # (shadow tables contain '_fts_' in their name, e.g. messages_fts_data).
+        # The FTS virtual tables (messages_fts, branches_fts) do NOT match '_fts_%'
+        # so they are correctly included.
+        cursor.execute("""
+            SELECT name FROM sqlite_master
+            WHERE type='table'
+            AND name NOT LIKE 'sqlite_%'
+            AND name != 'token_snapshots'
+            AND name NOT LIKE '%_fts_%'
+            ORDER BY name
+        """)
+        actual_tables = [row[0] for row in cursor.fetchall()]
+        assert actual_tables == self.EXPECTED_TABLES, (
+            f"Table set mismatch.\nExpected: {self.EXPECTED_TABLES}\nActual:   {actual_tables}"
+        )
+
+        # Per-table column info (preserves column order)
+        for tbl in actual_tables:
+            cursor.execute(f"PRAGMA table_info({tbl})")
+            actual_cols = [tuple(row) for row in cursor.fetchall()]
+            assert actual_cols == self.EXPECTED_COLUMNS[tbl], (
+                f"Column mismatch for table '{tbl}'.\nExpected: {self.EXPECTED_COLUMNS[tbl]}\nActual:   {actual_cols}"
+            )
+
+        # idx_* indexes only (skip sqlite auto-indexes and token_snapshots indexes)
+        cursor.execute("""
+            SELECT name FROM sqlite_master
+            WHERE type='index'
+            AND name LIKE 'idx_%'
+            AND name NOT LIKE 'idx_token_%'
+            ORDER BY name
+        """)
+        actual_indexes = [row[0] for row in cursor.fetchall()]
+        assert actual_indexes == self.EXPECTED_IDX_INDEXES, (
+            f"Index set mismatch.\nExpected: {self.EXPECTED_IDX_INDEXES}\nActual:   {actual_indexes}"
+        )
+
+        conn.close()
+
+
+class TestEmbeddingDDLInSchema:
+    """A fresh DB built from SCHEMA alone has the three embedding columns and index.
+
+    This verifies that SCHEMA_CORE (and therefore SCHEMA) is the complete schema
+    source — SCHEMA alone provides the embedding columns.
+    """
+
+    def test_embedding_columns_last_three_in_schema_only_db(self):
+        """SCHEMA-only fresh DB has embedding columns as last three PRAGMA table_info rows."""
+        conn = sqlite3.connect(":memory:")
+        conn.executescript(SCHEMA)
+        conn.commit()
+
+        cursor = conn.cursor()
+        cursor.execute("PRAGMA table_info(branches)")
+        rows = cursor.fetchall()
+        # Each row: (cid, name, type, notnull, dflt_value, pk)
+        # (name, type, dflt_value, pk) — dflt_value guards the DEFAULT 0 on embedding_version
+        last_three = [(row[1], row[2], row[4], row[5]) for row in rows[-3:]]
+        assert last_three == [
+            ("embedding_version", "INTEGER", "0", 0),
+            ("embedding_model", "TEXT", None, 0),
+            ("summary_version_at_embed", "INTEGER", None, 0),
+        ], f"Last three columns were: {last_three}"
+
+        conn.close()
+
+    def test_embedding_version_index_in_schema_only_db(self):
+        """SCHEMA-only fresh DB has idx_branches_embedding_version index."""
+        conn = sqlite3.connect(":memory:")
+        conn.executescript(SCHEMA)
+        conn.commit()
+
+        cursor = conn.cursor()
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_branches_embedding_version'")
+        assert cursor.fetchone() is not None, "idx_branches_embedding_version index not found"
+
+        conn.close()
+
+
+class TestNoTokenSnapshotsOnConversationDb:
+    """A fresh conversation DB has no token_snapshots; the token DB still gets it via ensure_schema."""
+
+    def test_fresh_conversation_db_has_no_token_snapshots(self, tmp_path, monkeypatch):
+        """get_db_connection on a fresh path must not create token_snapshots."""
+        db_file = tmp_path / "conversations.db"
+        monkeypatch.setattr(db_module, "DEFAULT_DB_PATH", db_file)
+
+        conn = get_db_connection(settings={"db_path": str(db_file)})
+        row = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='token_snapshots'").fetchone()
+        conn.close()
+        assert row is None, "fresh conversation DB must not have token_snapshots table"
+
+    def test_token_db_ensure_schema_still_creates_token_snapshots(self, tmp_path):
+        """token_schema.ensure_schema creates token_snapshots on the token-analytics DB."""
+        conn = sqlite3.connect(str(tmp_path / "tokens.db"))
+        token_ensure_schema(conn)
+        row = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='token_snapshots'").fetchone()
+        conn.close()
+        assert row is not None, "ensure_schema must create token_snapshots on the token-analytics DB"
+
+
+class TestExistingV6DbOpen:
+    """Opening a pre-populated v6-style DB succeeds and leaves all rows intact."""
+
+    def test_existing_v6_db_rows_intact_after_get_db_connection(self, tmp_path):
+        """Reopen an existing v6 DB: get_db_connection must not drop or overwrite any table or row."""
+        db_file = tmp_path / "existing_v6.db"
+
+        # Build a DB that looks like an existing v6 conversation DB
+        setup_conn = sqlite3.connect(str(db_file))
+        setup_conn.executescript(SCHEMA)
+        setup_conn.commit()
+
+        # Insert one row per FK-chain link: projects → sessions → branches, messages
+        setup_conn.execute(
+            "INSERT INTO projects (path, key, name) VALUES (?, ?, ?)",
+            ("/home/user/proj", "-home-user-proj", "proj"),
+        )
+        proj_id = setup_conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        setup_conn.execute(
+            "INSERT INTO sessions (uuid, project_id) VALUES (?, ?)",
+            ("sess-v6-ac4", proj_id),
+        )
+        sess_id = setup_conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        setup_conn.execute(
+            "INSERT INTO branches (session_id, leaf_uuid) VALUES (?, ?)",
+            (sess_id, "leaf-v6-ac4"),
+        )
+        setup_conn.execute(
+            "INSERT INTO messages (session_id, uuid, role, content) VALUES (?, ?, ?, ?)",
+            (sess_id, "msg-uuid-1", "user", "hello"),
+        )
+        setup_conn.commit()
+
+        # Manually create token_snapshots to simulate the inert legacy table that
+        # exists on pre-squash conversation DBs.  SCHEMA no longer creates it; the
+        # test adds it to verify get_db_connection never drops it.
+        setup_conn.execute("""
+            CREATE TABLE token_snapshots (
+                id INTEGER PRIMARY KEY,
+                session_uuid TEXT UNIQUE NOT NULL,
+                input_tokens INTEGER DEFAULT 0
+            )
+        """)
+        setup_conn.execute(
+            "INSERT INTO token_snapshots (session_uuid, input_tokens) VALUES (?, ?)",
+            ("sess-v6-ac4", 42),
+        )
+        setup_conn.execute("PRAGMA user_version = 6")
+        setup_conn.commit()
+        setup_conn.close()
+
+        # Reopen via get_db_connection
+        conn = get_db_connection(settings={"db_path": str(db_file)})
+
+        assert conn.execute("SELECT COUNT(*) FROM projects").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM branches").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 1
+
+        # token_snapshots must still exist and its row must be intact
+        snap_row = conn.execute(
+            "SELECT input_tokens FROM token_snapshots WHERE session_uuid = ?",
+            ("sess-v6-ac4",),
+        ).fetchone()
+        assert snap_row is not None, "token_snapshots table was dropped by get_db_connection"
+        assert snap_row[0] == 42, "token_snapshots row was modified by get_db_connection"
+
         conn.close()

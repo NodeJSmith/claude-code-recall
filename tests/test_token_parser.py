@@ -12,6 +12,7 @@ from ccrecall.token_parser import (
     JnlFile,
     get_pricing,
     parse_session,
+    row_cost,
     turn_cost,
 )
 
@@ -194,3 +195,62 @@ class TestTurnCost:
 
     def test_zero_everything(self):
         assert turn_cost(0, 0, 0, 0, 0, 0, get_pricing(None)) == 0.0
+
+
+# ── row_cost helper ───────────────────────────────────────────────────────────
+
+
+class TestRowCost:
+    """Covers all three real caller layouts; an off-by-one on any layout fails here."""
+
+    def test_layout_a_model_split_skip_think(self):
+        # Layout A: (model, inp, out, think, cr, cc, e5, e1), model_idx=0, token_indices=[1,2,4,5,6,7]
+        # thinking at index 3 is deliberately skipped.
+        opus_model = "claude-opus-4-6-20260101"
+        sonnet_model = "claude-sonnet-4-5"
+        big_think = 9_999_999  # should not affect cost at all
+
+        rows = [
+            (opus_model, 500_000, 100_000, big_think, 200_000, 50_000, 30_000, 20_000),
+            (sonnet_model, 300_000, 80_000, big_think, 100_000, 40_000, 25_000, 15_000),
+        ]
+        expected = sum(turn_cost(r[1], r[2], r[4], r[5], r[6], r[7], get_pricing(r[0])) for r in rows)
+        total = sum(row_cost(r, model_idx=0, token_indices=[1, 2, 4, 5, 6, 7]) for r in rows)
+        assert total == expected
+
+        # Prove thinking doesn't enter cost: change think only, total must not change.
+        rows_no_think = [
+            (opus_model, 500_000, 100_000, 0, 200_000, 50_000, 30_000, 20_000),
+            (sonnet_model, 300_000, 80_000, 0, 100_000, 40_000, 25_000, 15_000),
+        ]
+        total_no_think = sum(row_cost(r, model_idx=0, token_indices=[1, 2, 4, 5, 6, 7]) for r in rows_no_think)
+        assert total == total_no_think
+
+    def test_layout_b_cost_by_day_offset_model(self):
+        # Layout B: (group_key, model, inp, out, cr, cc, e5, e1), model_idx=1, token_indices=[2,3,4,5,6,7]
+        opus_model = "claude-opus-4-6-20260101"
+        sonnet_model = "claude-sonnet-4-5"
+
+        rows = [
+            ("2026-06-01", opus_model, 400_000, 90_000, 150_000, 60_000, 40_000, 20_000),
+            ("2026-06-01", sonnet_model, 200_000, 70_000, 80_000, 30_000, 20_000, 10_000),
+        ]
+        expected = sum(turn_cost(r[2], r[3], r[4], r[5], r[6], r[7], get_pricing(r[1])) for r in rows)
+        total = sum(row_cost(r, model_idx=1, token_indices=[2, 3, 4, 5, 6, 7]) for r in rows)
+        assert total == expected
+
+    def test_layout_c_window_kpis_contiguous_with_none_coalescing(self):
+        # Layout C: (model, inp, out, cr, cc, e5, e1), model_idx=0, token_indices=[1,2,3,4,5,6]
+        # One row has None token columns (SUM over empty group returns NULL).
+        opus_model = "claude-opus-4-6-20260101"
+        sonnet_model = "claude-sonnet-4-5"
+
+        rows = [
+            (opus_model, 600_000, 120_000, 300_000, 80_000, 50_000, 30_000),
+            (sonnet_model, None, None, None, None, None, None),  # all-NULL row
+        ]
+        expected = turn_cost(600_000, 120_000, 300_000, 80_000, 50_000, 30_000, get_pricing(opus_model)) + turn_cost(
+            0, 0, 0, 0, 0, 0, get_pricing(sonnet_model)
+        )
+        total = sum(row_cost(r, model_idx=0, token_indices=[1, 2, 3, 4, 5, 6]) for r in rows)
+        assert total == expected

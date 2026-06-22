@@ -12,17 +12,27 @@ from whenever import Instant
 from ccrecall.token_insights import build_insights_and_trends
 from ccrecall.token_parser import (
     _BASH_ANTIPATTERN_PREDICATE,
-    get_pricing,
     project_slug,
-    turn_cost,
+    row_cost,
 )
 
+# SQL join fragment used by edit_retries detail and total queries.
+_EDIT_RETRY_JOIN = """
+    FROM turn_tool_calls tc1
+    JOIN turns t1 ON tc1.turn_id = t1.id
+    JOIN turns t2 ON t1.session_id = t2.session_id AND t2.turn_index = t1.turn_index + 1
+    JOIN turn_tool_calls tc2 ON tc2.turn_id = t2.id
+        AND tc2.file_path = tc1.file_path
+        AND tc1.tool_name IN ('Edit', 'Write')
+        AND tc2.tool_name IN ('Edit', 'Write')
+        AND tc1.is_error = 1
+    JOIN session_metrics sm ON tc1.session_id = sm.session_id AND sm.is_sidechain = 0
+"""
 
-def build_output(conn: sqlite3.Connection) -> dict:
-    cur = conn.cursor()
 
-    # ── KPI totals (top-level sessions only) ──
-    kpis = cur.execute("""
+def query_session_totals(cur: sqlite3.Cursor) -> dict:
+    """Fetch and unpack the aggregate token/session totals row."""
+    row = cur.execute("""
         SELECT COUNT(*), SUM(turn_count), SUM(total_output_tokens),
                SUM(total_cache_read), SUM(total_cache_creation),
                SUM(cache_cliff_count), SUM(max_tokens_stops),
@@ -31,26 +41,36 @@ def build_output(conn: sqlite3.Connection) -> dict:
                SUM(total_ephem_5m), SUM(total_ephem_1h)
         FROM session_metrics WHERE is_sidechain = 0
     """).fetchone()
-    total_sessions = kpis[0] or 0
-    total_turns = kpis[1] or 0
-    total_output = kpis[2] or 0
-    total_cache_read = kpis[3] or 0
-    total_cache_creation = kpis[4] or 0
-    total_cache_cliffs = kpis[5] or 0
-    total_max_token_stops = kpis[6] or 0
-    total_tool_errors = kpis[7] or 0
-    total_input = kpis[8] or 0
-    total_thinking = kpis[9] or 0
-    total_ephem_5m = kpis[10] or 0
-    total_ephem_1h = kpis[11] or 0
+    return {
+        "total_sessions": row[0] or 0,
+        "total_turns": row[1] or 0,
+        "total_output": row[2] or 0,
+        "total_cache_read": row[3] or 0,
+        "total_cache_creation": row[4] or 0,
+        "total_cache_cliffs": row[5] or 0,
+        "total_max_token_stops": row[6] or 0,
+        "total_tool_errors": row[7] or 0,
+        "total_input": row[8] or 0,
+        "total_thinking": row[9] or 0,
+        "total_ephem_5m": row[10] or 0,
+        "total_ephem_1h": row[11] or 0,
+    }
 
-    if total_ephem_5m > 0 or total_ephem_1h > 0:
-        dominant_cache_tier = "5m" if total_ephem_5m > total_ephem_1h else "1h"
-    else:
-        dominant_cache_tier = "5m"
 
-    cache_denom = total_cache_read + total_cache_creation
-    global_cache_ratio = round(total_cache_read / cache_denom, 4) if cache_denom > 0 else 0.0
+def derive_cache_metrics(totals: dict) -> tuple[str, float]:
+    """Derive dominant_cache_tier and global_cache_ratio from session totals."""
+    e5, e1 = totals["total_ephem_5m"], totals["total_ephem_1h"]
+    no_ephem_data = e5 == 0 and e1 == 0
+    dominant_cache_tier = "5m" if (no_ephem_data or e5 > e1) else "1h"
+    cache_denom = totals["total_cache_read"] + totals["total_cache_creation"]
+    global_cache_ratio = round(totals["total_cache_read"] / cache_denom, 4) if cache_denom > 0 else 0.0
+    return dominant_cache_tier, global_cache_ratio
+
+
+def build_kpis(cur: sqlite3.Cursor) -> dict:
+    """Query top-level KPI totals and return them plus all intermediates."""
+    totals = query_session_totals(cur)
+    dominant_cache_tier, global_cache_ratio = derive_cache_metrics(totals)
 
     total_tool_calls = (
         cur.execute("""
@@ -60,14 +80,35 @@ def build_output(conn: sqlite3.Connection) -> dict:
         or 0
     )
 
-    # Date range
-    dr = cur.execute("""
+    date_row = cur.execute("""
         SELECT MIN(first_turn_ts), MAX(last_turn_ts)
         FROM session_metrics WHERE is_sidechain = 0
     """).fetchone()
 
-    # ── Chart 1: Sessions by day ──
-    sessions_by_day = [
+    return {
+        **totals,
+        "total_tool_calls": total_tool_calls,
+        "global_cache_ratio": global_cache_ratio,
+        "dominant_cache_tier": dominant_cache_tier,
+        "date_range": {
+            "earliest": date_row[0][:10] if date_row and date_row[0] else None,
+            "latest": date_row[1][:10] if date_row and date_row[1] else None,
+        },
+        # Partial kpis dict — total_cost_usd and bash_antipatterns added later
+        "kpis_partial": {
+            "total_sessions": totals["total_sessions"],
+            "total_turns": totals["total_turns"],
+            "total_output_tokens": totals["total_output"],
+            "global_cache_ratio": global_cache_ratio,
+            "cache_cliffs": totals["total_cache_cliffs"],
+            "max_token_stops": totals["total_max_token_stops"],
+        },
+    }
+
+
+def build_sessions_by_day(cur: sqlite3.Cursor) -> list[dict]:
+    """Sessions aggregated by calendar day."""
+    return [
         {
             "date": row[0],
             "session_count": row[1],
@@ -85,8 +126,10 @@ def build_output(conn: sqlite3.Connection) -> dict:
     """)
     ]
 
-    # ── Chart 3: Top 10 tools ──
-    top_tools = [
+
+def build_top_tools(cur: sqlite3.Cursor) -> list[dict]:
+    """Top 15 tool calls by frequency."""
+    return [
         {"tool": row[0], "count": row[1]}
         for row in cur.execute("""
         SELECT tool_name, COUNT(*) as cnt
@@ -96,7 +139,9 @@ def build_output(conn: sqlite3.Connection) -> dict:
     """)
     ]
 
-    # ── Chart 4: Model cost split (with dollar costs) ──
+
+def build_model_split(cur: sqlite3.Cursor) -> list[dict]:
+    """Cost and token totals broken down by model."""
     model_split = []
     for row in cur.execute("""
         SELECT model, SUM(input_tokens) as inp, SUM(output_tokens) as out,
@@ -108,8 +153,7 @@ def build_output(conn: sqlite3.Connection) -> dict:
         WHERE model IS NOT NULL
         GROUP BY model ORDER BY inp + out DESC
     """):
-        pricing = get_pricing(row[0])
-        cost = turn_cost(row[1], row[2], row[4], row[5], row[6], row[7], pricing)
+        cost = row_cost(row, model_idx=0, token_indices=[1, 2, 4, 5, 6, 7])
         model_split.append(
             {
                 "model": row[0],
@@ -119,10 +163,11 @@ def build_output(conn: sqlite3.Connection) -> dict:
                 "cost_usd": round(cost, 4),
             }
         )
+    return model_split
 
-    # ── Dollar cost: total, by day, by project ──
-    total_cost_usd = sum(m["cost_usd"] for m in model_split)
 
+def build_cost_by_day(cur: sqlite3.Cursor) -> list[dict]:
+    """Dollar cost per calendar day."""
     cost_by_day: dict[str, float] = {}
     for row in cur.execute("""
         SELECT DATE(t.timestamp) as day, t.model,
@@ -135,12 +180,13 @@ def build_output(conn: sqlite3.Connection) -> dict:
         GROUP BY day, t.model
     """):
         day = row[0]
-        pricing = get_pricing(row[1])
-        day_cost = turn_cost(row[2], row[3], row[4], row[5], row[6], row[7], pricing)
+        day_cost = row_cost(row, model_idx=1, token_indices=[2, 3, 4, 5, 6, 7])
         cost_by_day[day] = cost_by_day.get(day, 0.0) + day_cost
+    return [{"date": d, "cost_usd": round(c, 4)} for d, c in sorted(cost_by_day.items())]
 
-    cost_by_day_list = [{"date": d, "cost_usd": round(c, 4)} for d, c in sorted(cost_by_day.items())]
 
+def build_cost_by_project(cur: sqlite3.Cursor) -> list[dict]:
+    """Dollar cost per project (top 10), sorted descending."""
     cost_by_project: dict[str, float] = {}
     for row in cur.execute("""
         SELECT sm.project_path, t.model,
@@ -152,17 +198,17 @@ def build_output(conn: sqlite3.Connection) -> dict:
         GROUP BY sm.project_path, t.model
     """):
         slug = project_slug(row[0])
-        pricing = get_pricing(row[1])
-        proj_cost = turn_cost(row[2], row[3], row[4], row[5], row[6], row[7], pricing)
+        proj_cost = row_cost(row, model_idx=1, token_indices=[2, 3, 4, 5, 6, 7])
         cost_by_project[slug] = cost_by_project.get(slug, 0.0) + proj_cost
-
-    cost_by_project_list = sorted(
+    return sorted(
         [{"project": p, "cost_usd": round(c, 4)} for p, c in cost_by_project.items()],
         key=lambda x: x["cost_usd"],
         reverse=True,
     )[:10]
 
-    # ── Chart 5: Cache trajectory (5 sample sessions with most cache data) ──
+
+def build_cache_trajectory(cur: sqlite3.Cursor) -> list[dict]:
+    """Cache read/creation ratio per turn for the 5 most cache-heavy sessions."""
     cache_trajectory = []
     trajectory_sessions = cur.execute("""
         SELECT session_id FROM session_metrics
@@ -194,60 +240,102 @@ def build_output(conn: sqlite3.Connection) -> dict:
                 "turns": turns_data,
             }
         )
+    return cache_trajectory
 
-    # ── Chart 5b: Context Segmentation (aggregate across all sessions) ──
-    def _compute_seg_curve(session_ids: list[str], max_turns: int = 60, min_sessions: int = 3) -> list[dict]:
-        if not session_ids:
-            return []
-        placeholders = ",".join("?" * len(session_ids))
-        all_turns = cur.execute(
-            f"""
-            SELECT session_id, turn_index,
-                   input_tokens + cache_read_tokens + cache_creation_tokens as total_ctx,
-                   output_tokens
-            FROM turns
-            WHERE session_id IN ({placeholders})
-            ORDER BY session_id, turn_index
-        """,
-            session_ids,
-        ).fetchall()
 
-        buckets: dict[int, dict[str, list[float]]] = {}
-        for _sid, session_turns in groupby(all_turns, key=lambda r: r[0]):
-            rows = list(session_turns)
-            if not rows or rows[0][2] <= 0:
-                continue
-            base_ctx = rows[0][2]
-            cumul_output = 0
-            for _, turn_idx, total_ctx, out_tok in rows:
-                if total_ctx <= 0:
-                    cumul_output += out_tok
-                    continue
-                base = min(base_ctx, total_ctx)
-                history = min(cumul_output, total_ctx - base)
-                tool_user = max(0, total_ctx - base - history)
-                bucket = buckets.setdefault(turn_idx, {"base": [], "hist": [], "tool": []})
-                bucket["base"].append(base / total_ctx * 100)
-                bucket["hist"].append(history / total_ctx * 100)
-                bucket["tool"].append(tool_user / total_ctx * 100)
+def accumulate_seg_buckets(all_turns: list, buckets: dict[int, dict[str, list[float]]]) -> None:
+    """Accumulate per-turn base/history/tool percentages into buckets in-place."""
+    for _sid, session_turns in groupby(all_turns, key=lambda r: r[0]):
+        rows = list(session_turns)
+        if not rows or rows[0][2] <= 0:
+            continue
+        base_ctx = rows[0][2]
+        cumul_output = 0
+        for _, turn_idx, total_ctx, out_tok in rows:
+            if total_ctx <= 0:
                 cumul_output += out_tok
-        curve = []
-        for t_idx in sorted(buckets.keys())[:max_turns]:
-            b = buckets[t_idx]
-            n = len(b["base"])
-            if n < min_sessions:
                 continue
-            curve.append(
-                {
-                    "turn": t_idx,
-                    "sessions": n,
-                    "base_pct": round(sum(b["base"]) / n, 1),
-                    "history_pct": round(sum(b["hist"]) / n, 1),
-                    "tool_user_pct": round(sum(b["tool"]) / n, 1),
-                }
-            )
-        return curve
+            base = min(base_ctx, total_ctx)
+            history = min(cumul_output, total_ctx - base)
+            tool_user = max(0, total_ctx - base - history)
+            bucket = buckets.setdefault(turn_idx, {"base": [], "hist": [], "tool": []})
+            bucket["base"].append(base / total_ctx * 100)
+            bucket["hist"].append(history / total_ctx * 100)
+            bucket["tool"].append(tool_user / total_ctx * 100)
+            cumul_output += out_tok
 
+
+def compute_seg_curve(
+    cur: sqlite3.Cursor, session_ids: list[str], max_turns: int = 60, min_sessions: int = 3
+) -> list[dict]:
+    """Compute per-turn context segmentation curve for the given session IDs."""
+    if not session_ids:
+        return []
+    placeholders = ",".join("?" * len(session_ids))
+    all_turns = cur.execute(
+        f"""
+        SELECT session_id, turn_index,
+               input_tokens + cache_read_tokens + cache_creation_tokens as total_ctx,
+               output_tokens
+        FROM turns
+        WHERE session_id IN ({placeholders})
+        ORDER BY session_id, turn_index
+    """,
+        session_ids,
+    ).fetchall()
+
+    buckets: dict[int, dict[str, list[float]]] = {}
+    accumulate_seg_buckets(all_turns, buckets)
+
+    curve = []
+    for t_idx in sorted(buckets.keys())[:max_turns]:
+        b = buckets[t_idx]
+        n = len(b["base"])
+        if n < min_sessions:
+            continue
+        curve.append(
+            {
+                "turn": t_idx,
+                "sessions": n,
+                "base_pct": round(sum(b["base"]) / n, 1),
+                "history_pct": round(sum(b["hist"]) / n, 1),
+                "tool_user_pct": round(sum(b["tool"]) / n, 1),
+            }
+        )
+    return curve
+
+
+def query_seg_summary(cur: sqlite3.Cursor, recent_count: int) -> dict:
+    """Aggregate base-overhead stats across all long sessions (turn_count >= 8)."""
+    seg_agg = cur.execute("""
+        SELECT
+            SUM(t1_ctx * tc),
+            SUM(total_all_ctx),
+            COUNT(*),
+            AVG(t1_ctx)
+        FROM (
+            SELECT sm.session_id, sm.turn_count as tc,
+                   (SELECT input_tokens + cache_read_tokens + cache_creation_tokens
+                    FROM turns WHERE session_id = sm.session_id AND turn_index = 1) as t1_ctx,
+                   (SELECT SUM(input_tokens + cache_read_tokens + cache_creation_tokens)
+                    FROM turns WHERE session_id = sm.session_id) as total_all_ctx
+            FROM session_metrics sm
+            WHERE sm.is_sidechain = 0 AND sm.turn_count >= 8
+        )
+        WHERE t1_ctx > 0 AND total_all_ctx > 0
+    """).fetchone()
+    base_overhead_paid = seg_agg[0] or 0
+    total_ctx_paid = seg_agg[1] or 1
+    return {
+        "sessions_analyzed": seg_agg[2] or 0,
+        "avg_base_ctx": round(seg_agg[3] or 0),
+        "base_overhead_pct": round(base_overhead_paid / total_ctx_paid * 100, 1),
+        "recent_sessions_count": recent_count,
+    }
+
+
+def build_context_segments(cur: sqlite3.Cursor) -> dict:
+    """Context segmentation curves plus summary aggregation."""
     all_seg_sids = [
         r[0]
         for r in cur.execute("""
@@ -255,7 +343,7 @@ def build_output(conn: sqlite3.Connection) -> dict:
         WHERE is_sidechain = 0 AND turn_count >= 8
     """).fetchall()
     ]
-    context_segments = _compute_seg_curve(all_seg_sids)
+    context_segments = compute_seg_curve(cur, all_seg_sids)
 
     recent_seg_sids = [
         r[0]
@@ -265,10 +353,19 @@ def build_output(conn: sqlite3.Connection) -> dict:
               AND first_turn_ts >= datetime('now', '-7 days')
     """).fetchall()
     ]
-    context_segments_recent = _compute_seg_curve(recent_seg_sids, min_sessions=2)
+    context_segments_recent = compute_seg_curve(cur, recent_seg_sids, min_sessions=2)
+    context_seg_summary = query_seg_summary(cur, len(recent_seg_sids))
 
-    # ── Tool context footprint (avg tokens added per call by tool type) ──
-    tool_footprint = [
+    return {
+        "context_segments": context_segments,
+        "context_segments_recent": context_segments_recent,
+        "context_seg_summary": context_seg_summary,
+    }
+
+
+def build_tool_footprint(cur: sqlite3.Cursor) -> list[dict]:
+    """Average token footprint added per tool call (tools with >=10 calls)."""
+    return [
         {"tool": row[0], "calls": row[1], "avg_tokens": int(row[2])}
         for row in cur.execute("""
         WITH single_tool_turns AS (
@@ -293,34 +390,10 @@ def build_output(conn: sqlite3.Connection) -> dict:
     """)
     ]
 
-    seg_agg = cur.execute("""
-        SELECT
-            SUM(t1_ctx * tc),
-            SUM(total_all_ctx),
-            COUNT(*),
-            AVG(t1_ctx)
-        FROM (
-            SELECT sm.session_id, sm.turn_count as tc,
-                   (SELECT input_tokens + cache_read_tokens + cache_creation_tokens
-                    FROM turns WHERE session_id = sm.session_id AND turn_index = 1) as t1_ctx,
-                   (SELECT SUM(input_tokens + cache_read_tokens + cache_creation_tokens)
-                    FROM turns WHERE session_id = sm.session_id) as total_all_ctx
-            FROM session_metrics sm
-            WHERE sm.is_sidechain = 0 AND sm.turn_count >= 8
-        )
-        WHERE t1_ctx > 0 AND total_all_ctx > 0
-    """).fetchone()
-    base_overhead_paid = seg_agg[0] or 0
-    total_ctx_paid = seg_agg[1] or 1
-    context_seg_summary = {
-        "sessions_analyzed": seg_agg[2] or 0,
-        "avg_base_ctx": round(seg_agg[3] or 0),
-        "base_overhead_pct": round(base_overhead_paid / total_ctx_paid * 100, 1),
-        "recent_sessions_count": len(recent_seg_sids),
-    }
 
-    # ── Chart 6: Ephemeral cache tier split by project ──
-    ephem_split = [
+def build_ephem_split(cur: sqlite3.Cursor) -> list[dict]:
+    """Ephemeral cache tier split by project (top 8)."""
+    return [
         {"project": project_slug(row[0]), "ephem_5m": row[1], "ephem_1h": row[2]}
         for row in cur.execute("""
         SELECT sm.project_path, SUM(t.ephem_5m_tokens) as e5, SUM(t.ephem_1h_tokens) as e1
@@ -332,8 +405,10 @@ def build_output(conn: sqlite3.Connection) -> dict:
     """)
     ]
 
-    # ── Chart 7: Bash antipattern rate by project (computed at query time) ──
-    bash_antipatterns = [
+
+def build_bash_antipatterns(cur: sqlite3.Cursor) -> tuple[list[dict], int]:
+    """Bash antipatterns by project (top 10) and global total."""
+    detail = [
         {
             "project": project_slug(row[0]),
             "antipatterns": row[1],
@@ -350,7 +425,7 @@ def build_output(conn: sqlite3.Connection) -> dict:
         ORDER BY antipatterns DESC LIMIT 10
     """)
     ]
-    total_bash_antipatterns = (
+    total = (
         cur.execute(f"""
         SELECT SUM(CASE WHEN {_BASH_ANTIPATTERN_PREDICATE} THEN 1 ELSE 0 END)
         FROM turn_tool_calls tc
@@ -358,9 +433,12 @@ def build_output(conn: sqlite3.Connection) -> dict:
     """).fetchone()[0]
         or 0
     )
+    return detail, total
 
-    # ── Chart 8: Tool error rate by tool ──
-    tool_errors_by_tool = [
+
+def build_tool_errors_by_tool(cur: sqlite3.Cursor) -> list[dict]:
+    """Tool error rate per tool name (top 10 by error count)."""
+    return [
         {
             "tool": row[0],
             "errors": row[1],
@@ -377,8 +455,10 @@ def build_output(conn: sqlite3.Connection) -> dict:
     """)
     ]
 
-    # ── Chart 9: Redundant read hotspots (computed at query time) ──
-    redundant_reads = [
+
+def build_redundant_reads(cur: sqlite3.Cursor) -> tuple[list[dict], int]:
+    """Redundant Read hotspots (top 20) and total excess read count."""
+    detail = [
         {
             "session_id": row[0][:8],
             "file": row[1].rsplit("/", 1)[-1] if row[1] else "?",
@@ -394,7 +474,7 @@ def build_output(conn: sqlite3.Connection) -> dict:
         ORDER BY cnt DESC LIMIT 20
     """)
     ]
-    total_redundant_reads = (
+    total = (
         cur.execute("""
         SELECT SUM(cnt - 1) FROM (
             SELECT COUNT(*) as cnt
@@ -407,44 +487,34 @@ def build_output(conn: sqlite3.Connection) -> dict:
     """).fetchone()[0]
         or 0
     )
+    return detail, total
 
-    # ── Chart 10: Edit retry chains by project ──
-    edit_retries = [
+
+def build_edit_retries(cur: sqlite3.Cursor) -> tuple[list[dict], int]:
+    """Edit retry chains by project (top 10) and global total."""
+    detail = [
         {"project": project_slug(row[0]), "retries": row[1]}
-        for row in cur.execute("""
+        for row in cur.execute(f"""
         SELECT sm.project_path, COUNT(*) as retries
-        FROM turn_tool_calls tc1
-        JOIN turns t1 ON tc1.turn_id = t1.id
-        JOIN turns t2 ON t1.session_id = t2.session_id AND t2.turn_index = t1.turn_index + 1
-        JOIN turn_tool_calls tc2 ON tc2.turn_id = t2.id
-            AND tc2.file_path = tc1.file_path
-            AND tc1.tool_name IN ('Edit', 'Write')
-            AND tc2.tool_name IN ('Edit', 'Write')
-            AND tc1.is_error = 1
-        JOIN session_metrics sm ON tc1.session_id = sm.session_id AND sm.is_sidechain = 0
+        {_EDIT_RETRY_JOIN}
         GROUP BY sm.project_path
         HAVING retries > 0
         ORDER BY retries DESC LIMIT 10
     """)
     ]
-    total_edit_retries = (
-        cur.execute("""
+    total = (
+        cur.execute(f"""
         SELECT COUNT(*)
-        FROM turn_tool_calls tc1
-        JOIN turns t1 ON tc1.turn_id = t1.id
-        JOIN turns t2 ON t1.session_id = t2.session_id AND t2.turn_index = t1.turn_index + 1
-        JOIN turn_tool_calls tc2 ON tc2.turn_id = t2.id
-            AND tc2.file_path = tc1.file_path
-            AND tc1.tool_name IN ('Edit', 'Write')
-            AND tc2.tool_name IN ('Edit', 'Write')
-            AND tc1.is_error = 1
-        JOIN session_metrics sm ON tc1.session_id = sm.session_id AND sm.is_sidechain = 0
+        {_EDIT_RETRY_JOIN}
     """).fetchone()[0]
         or 0
     )
+    return detail, total
 
-    # ── Chart 11: Agent cost attribution ──
-    agent_cost = [
+
+def build_agent_cost(cur: sqlite3.Cursor) -> list[dict]:
+    """Agent vs parent cost attribution by project (top 10)."""
+    return [
         {
             "project": project_slug(row[0]),
             "parent_cost": row[1],
@@ -465,7 +535,9 @@ def build_output(conn: sqlite3.Connection) -> dict:
     """)
     ]
 
-    # ── Chart 12: Turn complexity distribution ──
+
+def build_turn_complexity(cur: sqlite3.Cursor) -> tuple[dict, dict]:
+    """Turn complexity buckets and average thinking tokens per bucket."""
     turn_complexity = {"minimal": 0, "light": 0, "medium": 0, "heavy": 0, "runaway": 0}
     thinking_sum_complexity = {
         "minimal": 0,
@@ -496,8 +568,11 @@ def build_output(conn: sqlite3.Connection) -> dict:
         k: round(thinking_sum_complexity[k] / turn_complexity[k]) if turn_complexity[k] > 0 else 0
         for k in turn_complexity
     }
+    return turn_complexity, thinking_in_complexity
 
-    # ── Chart 13: User response time distribution ──
+
+def build_response_time_dist(cur: sqlite3.Cursor) -> dict:
+    """User response time distribution bucketed by duration."""
     response_time_dist = {
         "under_30s": 0,
         "30s_2m": 0,
@@ -524,9 +599,12 @@ def build_output(conn: sqlite3.Connection) -> dict:
             response_time_dist["15m_1h"] += 1
         else:
             response_time_dist["over_1h"] += 1
+    return response_time_dist
 
-    # ── Chart 14: Hook overhead top 10 ──
-    hook_overhead = [
+
+def build_hook_overhead(cur: sqlite3.Cursor) -> list[dict]:
+    """Hook overhead per project (top 10 by total ms)."""
+    return [
         {
             "project": project_slug(row[0]),
             "hook_ms": row[1],
@@ -541,8 +619,10 @@ def build_output(conn: sqlite3.Connection) -> dict:
     """)
     ]
 
-    # ── Chart 15: Per-project token spend ──
-    project_spend = [
+
+def build_project_spend(cur: sqlite3.Cursor) -> list[dict]:
+    """Per-project token spend (top 10 by input+cache_creation)."""
+    return [
         {
             "project": project_slug(row[0]),
             "input_tokens": row[1],
@@ -564,35 +644,43 @@ def build_output(conn: sqlite3.Connection) -> dict:
     """)
     ]
 
-    # ── Chart 16: Per-project tool profile ──
+
+def build_project_tool_profile(cur: sqlite3.Cursor, project_spend: list[dict]) -> list[dict]:
+    """Per-tool call counts for the top 5 most expensive projects."""
     project_tool_profile = []
     top5_projects = [p["project"] for p in project_spend[:5]]
-    if top5_projects:
-        project_paths = {}
-        for row in cur.execute("""
-            SELECT project_path, SUM(total_input_tokens + total_cache_creation) as cost
-            FROM session_metrics WHERE is_sidechain = 0
-            GROUP BY project_path ORDER BY cost DESC LIMIT 5
-        """):
-            project_paths[project_slug(row[0])] = row[0]
+    if not top5_projects:
+        return project_tool_profile
 
-        for proj_slug, proj_path in project_paths.items():
-            tools = {}
-            for row in cur.execute(
-                """
-                SELECT tc.tool_name, COUNT(*)
-                FROM turn_tool_calls tc
-                JOIN session_metrics sm ON tc.session_id = sm.session_id
-                WHERE sm.project_path = ? AND sm.is_sidechain = 0
-                GROUP BY tc.tool_name
-                ORDER BY COUNT(*) DESC LIMIT 8
-            """,
-                (proj_path,),
-            ):
-                tools[row[0]] = row[1]
-            project_tool_profile.append({"project": proj_slug, "tools": tools})
+    project_paths = {}
+    for row in cur.execute("""
+        SELECT project_path, SUM(total_input_tokens + total_cache_creation) as cost
+        FROM session_metrics WHERE is_sidechain = 0
+        GROUP BY project_path ORDER BY cost DESC LIMIT 5
+    """):
+        project_paths[project_slug(row[0])] = row[0]
 
-    # ── Chart 17: Skill usage ──
+    for proj_slug, proj_path in project_paths.items():
+        tools = {}
+        for row in cur.execute(
+            """
+            SELECT tc.tool_name, COUNT(*)
+            FROM turn_tool_calls tc
+            JOIN session_metrics sm ON tc.session_id = sm.session_id
+            WHERE sm.project_path = ? AND sm.is_sidechain = 0
+            GROUP BY tc.tool_name
+            ORDER BY COUNT(*) DESC LIMIT 8
+        """,
+            (proj_path,),
+        ):
+            tools[row[0]] = row[1]
+        project_tool_profile.append({"project": proj_slug, "tools": tools})
+
+    return project_tool_profile
+
+
+def build_skill_usage(cur: sqlite3.Cursor) -> tuple[list[dict], list[dict]]:
+    """Skill usage totals and per-day breakdown."""
     skill_usage = [
         {"skill": row[0], "count": row[1], "errors": row[2]}
         for row in cur.execute("""
@@ -602,7 +690,6 @@ def build_output(conn: sqlite3.Connection) -> dict:
         GROUP BY skill_name ORDER BY cnt DESC
     """)
     ]
-
     skill_usage_by_day = [
         {"date": row[0], "skill": row[1], "count": row[2]}
         for row in cur.execute("""
@@ -613,8 +700,11 @@ def build_output(conn: sqlite3.Connection) -> dict:
         GROUP BY day, tc.skill_name ORDER BY day
     """)
     ]
+    return skill_usage, skill_usage_by_day
 
-    # ── Chart 18: Agent delegation ──
+
+def build_agent_delegation(cur: sqlite3.Cursor) -> tuple[list[dict], list[dict]]:
+    """Agent delegation counts by subagent type and model distribution."""
     agent_delegation = [
         {"subagent_type": row[0], "count": row[1], "errors": row[2]}
         for row in cur.execute("""
@@ -625,7 +715,6 @@ def build_output(conn: sqlite3.Connection) -> dict:
         GROUP BY tc.subagent_type ORDER BY cnt DESC
     """)
     ]
-
     agent_model_dist = [
         {"model": row[0], "count": row[1]}
         for row in cur.execute("""
@@ -636,9 +725,12 @@ def build_output(conn: sqlite3.Connection) -> dict:
         GROUP BY tc.agent_model ORDER BY cnt DESC
     """)
     ]
+    return agent_delegation, agent_model_dist
 
-    # ── Chart 19: Hook performance ──
-    hook_performance = [
+
+def build_hook_performance(cur: sqlite3.Cursor) -> list[dict]:
+    """Hook execution stats by command (all hooks, sorted by total ms)."""
+    return [
         {
             "hook_command": row[0],
             "runs": row[1],
@@ -657,7 +749,64 @@ def build_output(conn: sqlite3.Connection) -> dict:
     """)
     ]
 
-    # ── Insights, findings, recommendations, trends ──
+
+def build_output(conn: sqlite3.Connection) -> dict:
+    cur = conn.cursor()
+
+    kpi_data = build_kpis(cur)
+    total_sessions = kpi_data["total_sessions"]
+    total_output = kpi_data["total_output"]
+    total_input = kpi_data["total_input"]
+    total_cache_cliffs = kpi_data["total_cache_cliffs"]
+    total_max_token_stops = kpi_data["total_max_token_stops"]
+    total_thinking = kpi_data["total_thinking"]
+    total_tool_errors = kpi_data["total_tool_errors"]
+    total_tool_calls = kpi_data["total_tool_calls"]
+    global_cache_ratio = kpi_data["global_cache_ratio"]
+    dominant_cache_tier = kpi_data["dominant_cache_tier"]
+    date_range = kpi_data["date_range"]
+    kpis_partial = kpi_data["kpis_partial"]
+
+    sessions_by_day = build_sessions_by_day(cur)
+    top_tools = build_top_tools(cur)
+    model_split = build_model_split(cur)
+    total_cost_usd = sum(m["cost_usd"] for m in model_split)
+    cost_by_day = build_cost_by_day(cur)
+    cost_by_project = build_cost_by_project(cur)
+    cache_trajectory = build_cache_trajectory(cur)
+
+    ctx_seg = build_context_segments(cur)
+    context_segments = ctx_seg["context_segments"]
+    context_segments_recent = ctx_seg["context_segments_recent"]
+    context_seg_summary = ctx_seg["context_seg_summary"]
+
+    tool_footprint = build_tool_footprint(cur)
+    ephem_split = build_ephem_split(cur)
+
+    bash_antipatterns, total_bash_antipatterns = build_bash_antipatterns(cur)
+    tool_errors_by_tool = build_tool_errors_by_tool(cur)
+    redundant_reads, total_redundant_reads = build_redundant_reads(cur)
+    edit_retries, total_edit_retries = build_edit_retries(cur)
+
+    agent_cost = build_agent_cost(cur)
+    turn_complexity, thinking_in_complexity = build_turn_complexity(cur)
+    response_time_dist = build_response_time_dist(cur)
+    hook_overhead = build_hook_overhead(cur)
+
+    project_spend = build_project_spend(cur)
+    project_tool_profile = build_project_tool_profile(cur, project_spend)
+
+    skill_usage, skill_usage_by_day = build_skill_usage(cur)
+    agent_delegation, agent_model_dist = build_agent_delegation(cur)
+    hook_performance = build_hook_performance(cur)
+
+    kpis = {
+        **kpis_partial,
+        "bash_antipatterns": total_bash_antipatterns,
+        "tool_error_rate": round(total_tool_errors / total_tool_calls, 4) if total_tool_calls else 0,
+        "total_cost_usd": round(total_cost_usd, 2),
+    }
+
     insight_data = build_insights_and_trends(
         conn,
         total_output=total_output,
@@ -675,7 +824,7 @@ def build_output(conn: sqlite3.Connection) -> dict:
         bash_antipattern_projects=bash_antipatterns[:3],
         top_redundant_files=redundant_reads[:3],
         edit_retry_projects=edit_retries[:3],
-        cost_by_project=cost_by_project_list,
+        cost_by_project=cost_by_project,
         total_cost_usd=total_cost_usd,
         context_seg_summary=context_seg_summary,
         dominant_cache_tier=dominant_cache_tier,
@@ -685,26 +834,13 @@ def build_output(conn: sqlite3.Connection) -> dict:
     return {
         "generated_at": Instant.now().format_iso(),
         "total_sessions": total_sessions,
-        "date_range": {
-            "earliest": dr[0][:10] if dr and dr[0] else None,
-            "latest": dr[1][:10] if dr and dr[1] else None,
-        },
-        "kpis": {
-            "total_sessions": total_sessions,
-            "total_turns": total_turns,
-            "total_output_tokens": total_output,
-            "global_cache_ratio": global_cache_ratio,
-            "cache_cliffs": total_cache_cliffs,
-            "max_token_stops": total_max_token_stops,
-            "bash_antipatterns": total_bash_antipatterns,
-            "tool_error_rate": round(total_tool_errors / total_tool_calls, 4) if total_tool_calls else 0,
-            "total_cost_usd": round(total_cost_usd, 2),
-        },
+        "date_range": date_range,
+        "kpis": kpis,
         "sessions_by_day": sessions_by_day,
         "top_tools": top_tools,
         "model_split": model_split,
-        "cost_by_day": cost_by_day_list,
-        "cost_by_project": cost_by_project_list,
+        "cost_by_day": cost_by_day,
+        "cost_by_project": cost_by_project,
         "cache_trajectory": cache_trajectory,
         "context_segments": context_segments,
         "context_segments_recent": context_segments_recent,

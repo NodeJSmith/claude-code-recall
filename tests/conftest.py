@@ -8,7 +8,6 @@ import sqlite_vec
 from token_helpers import TOKEN_JNL, token_session, token_turn
 
 from ccrecall.db import _ensure_vec_schema
-from ccrecall.migrations import migrate_columns
 from ccrecall.schema import SCHEMA
 from ccrecall.token_analytics import import_session
 from ccrecall.token_parser import ToolCall
@@ -20,14 +19,13 @@ FIXTURE_DIR = Path(__file__).parent / "fixtures"
 def make_vec_conn(db_path: str = ":memory:") -> sqlite3.Connection:
     """Return a connection with schema + sqlite-vec extension loaded.
 
-    Steps: connect, executescript SCHEMA, migrate_columns, enable_load_extension,
+    Steps: connect, executescript SCHEMA, enable_load_extension,
     sqlite_vec.load, disable_load_extension, _ensure_vec_schema, commit.
     Raises if sqlite-vec is not available in this environment.
     """
     conn = sqlite3.connect(db_path)
     conn.executescript(SCHEMA)
     conn.commit()
-    migrate_columns(conn)
     conn.enable_load_extension(True)
     sqlite_vec.load(conn)
     conn.enable_load_extension(False)
@@ -46,7 +44,6 @@ def memory_db():
     conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(SCHEMA)
     conn.commit()
-    migrate_columns(conn)
     yield conn
     conn.close()
 

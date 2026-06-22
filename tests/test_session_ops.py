@@ -1,6 +1,5 @@
 """Tests for the shared session_ops module."""
 
-import hashlib
 import json
 import logging
 import sqlite3
@@ -12,7 +11,8 @@ import pytest
 
 from ccrecall.db import _ensure_vec_schema, vec_available
 from ccrecall.embeddings import EMBEDDING_DIM, EMBEDDING_MODEL, EMBEDDING_VERSION
-from ccrecall.migrations import migrate_columns
+from ccrecall.hooks.import_conversations import get_file_hash
+from ccrecall.parsing import extract_session_uuid
 from ccrecall.schema import SCHEMA
 from ccrecall.session_ops import sync_session
 from ccrecall.summarizer import SUMMARY_VERSION
@@ -153,11 +153,7 @@ class TestImportSessionWritesRealHashImportLog:
         """When write_import_log=True with a real hash, import_log stores that hash."""
 
         fixture_path = FIXTURE_DIR / "linear_3_exchange.jsonl"
-        h = hashlib.md5(usedforsecurity=False)
-        with open(fixture_path, "rb") as fh:
-            for chunk in iter(lambda: fh.read(8192), b""):
-                h.update(chunk)
-        file_hash = h.hexdigest()
+        file_hash = get_file_hash(fixture_path)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             project_dir = Path(tmpdir)
@@ -204,20 +200,18 @@ class TestImportSkipsNullHashEntry:
             )
             memory_db.commit()
 
-        # Verify NULL hash was written
+        # Verify NULL hash was written; capture the row id to prove UPDATE (not INSERT) later
         cursor = memory_db.cursor()
         cursor.execute(
-            "SELECT file_hash FROM import_log WHERE file_path = ?",
+            "SELECT id, file_hash FROM import_log WHERE file_path = ?",
             (str(fixture_path),),
         )
-        assert cursor.fetchone()[0] is None, "Setup: hash should be NULL"
+        pre_row = cursor.fetchone()
+        assert pre_row[1] is None, "Setup: hash should be NULL"
+        log_row_id = pre_row[0]
 
         # Now simulate import path: compute real hash and call sync_session again
-        h = hashlib.md5(usedforsecurity=False)
-        with open(fixture_path, "rb") as fh:
-            for chunk in iter(lambda: fh.read(8192), b""):
-                h.update(chunk)
-        real_hash = h.hexdigest()
+        real_hash = get_file_hash(fixture_path)
 
         with tempfile.TemporaryDirectory() as tmpdir2:
             project_dir2 = Path(tmpdir2)
@@ -234,13 +228,124 @@ class TestImportSkipsNullHashEntry:
         # The return value >= 0 (0 is acceptable if no NEW messages inserted)
         assert result >= 0, "Should not return -1 (skipped); NULL hash must trigger reimport"
 
-        # Hash should now be updated to the real value
+        # Golden pin: the NULL-hash row must be UPDATED in place (same id) with the
+        # exact resulting column values — not skipped, and not re-inserted as a new row.
         cursor.execute(
-            "SELECT file_hash FROM import_log WHERE file_path = ?",
+            "SELECT id, file_path, file_hash, imported_at, messages_imported FROM import_log WHERE file_path = ?",
             (str(fixture_path),),
         )
-        row = cursor.fetchone()
-        assert row[0] == real_hash, "import_log hash should be updated to real hash"
+        rows = cursor.fetchall()
+        assert len(rows) == 1, "Exactly one import_log row must exist (UPDATE, not new INSERT)"
+        row_id, row_path, row_hash, row_imported_at, row_messages = rows[0]
+        assert row_id == log_row_id, f"Row id must be unchanged (UPDATE path): expected {log_row_id}, got {row_id}"
+        assert row_path == str(fixture_path), "file_path must be unchanged"
+        assert row_hash == real_hash, "import_log hash should be updated to real hash"
+        assert isinstance(row_imported_at, str), "imported_at must be a string after UPDATE"
+        assert len(row_imported_at) >= 10, "imported_at must be a plausible non-empty timestamp after UPDATE"
+        # messages_imported is written session-scoped (session_ops.py: COUNT WHERE session_id=?),
+        # so pin it against the same session-scoped count, not a global count.
+        session_uuid = extract_session_uuid(fixture_path)
+        cursor.execute("SELECT id FROM sessions WHERE uuid = ?", (session_uuid,))
+        session_id = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM messages WHERE session_id = ?", (session_id,))
+        expected_msg_count = cursor.fetchone()[0]
+        assert expected_msg_count > 0, "messages must have been written"
+        assert row_messages == expected_msg_count, (
+            f"messages_imported must equal total messages in session: expected {expected_msg_count}, got {row_messages}"
+        )
+
+
+class TestImportLogExactHashSkip:
+    """DB-state golden pin for the exact-hash -1 skip path.
+
+    When a prior import_log row has a non-NULL file_hash matching the provided
+    file_hash, sync_session must return -1 immediately and write nothing new.
+    This pin asserts the -1 return and that message/branch counts are unchanged.
+    """
+
+    def test_exact_hash_match_returns_minus_one_and_writes_nothing(self, memory_db):
+        """Exact non-NULL hash match causes sync_session to return -1 without writing.
+
+        Pre-seeds the import_log with a real file_hash row (mimicking a completed
+        import), then calls sync_session again with the same hash. Asserts:
+          - return value is exactly -1
+          - message count is unchanged
+          - branch count is unchanged
+        """
+        fixture_path = FIXTURE_DIR / "linear_3_exchange.jsonl"
+        real_hash = get_file_hash(fixture_path)
+
+        # Step 1: initial import — writes import_log with real hash
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project_dir = Path(tmpdir)
+            first_result = sync_session(
+                memory_db,
+                fixture_path,
+                project_dir,
+                write_import_log=True,
+                file_hash=real_hash,
+            )
+            memory_db.commit()
+
+        assert first_result >= 0, "First import must succeed (return >= 0)"
+
+        cursor = memory_db.cursor()
+        cursor.execute("SELECT COUNT(*) FROM messages")
+        msg_count_before = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM branches")
+        branch_count_before = cursor.fetchone()[0]
+
+        assert msg_count_before > 0, "Setup: messages must exist after first import"
+
+        # Verify the import_log has the real hash, and capture the full row so we can
+        # prove the -1 skip writes nothing (not even a touched imported_at).
+        cursor.execute(
+            "SELECT id, file_hash, imported_at, messages_imported FROM import_log WHERE file_path = ?",
+            (str(fixture_path),),
+        )
+        import_log_row_before = cursor.fetchone()
+        assert import_log_row_before is not None, "Setup: import_log row must exist before second call"
+        assert import_log_row_before[1] == real_hash, "Setup: import_log must have real hash before second call"
+
+        # Step 2: second call with same hash — must return -1 and write nothing
+        with tempfile.TemporaryDirectory() as tmpdir2:
+            project_dir2 = Path(tmpdir2)
+            skip_result = sync_session(
+                memory_db,
+                fixture_path,
+                project_dir2,
+                write_import_log=True,
+                file_hash=real_hash,
+            )
+            memory_db.commit()
+
+        # Must return exactly -1
+        assert skip_result == -1, f"Exact hash match must return -1 (skip), got {skip_result}"
+
+        # Message count must be unchanged
+        cursor.execute("SELECT COUNT(*) FROM messages")
+        msg_count_after = cursor.fetchone()[0]
+        assert msg_count_after == msg_count_before, (
+            f"Message count must be unchanged after -1 skip: before={msg_count_before}, after={msg_count_after}"
+        )
+
+        # Branch count must be unchanged
+        cursor.execute("SELECT COUNT(*) FROM branches")
+        branch_count_after = cursor.fetchone()[0]
+        assert branch_count_after == branch_count_before, (
+            f"Branch count must be unchanged after -1 skip: before={branch_count_before}, after={branch_count_after}"
+        )
+
+        # The import_log row itself must be untouched — a -1 skip writes nothing,
+        # not even a refreshed imported_at or messages_imported.
+        cursor.execute(
+            "SELECT id, file_hash, imported_at, messages_imported FROM import_log WHERE file_path = ?",
+            (str(fixture_path),),
+        )
+        import_log_row_after = cursor.fetchone()
+        assert import_log_row_after == import_log_row_before, (
+            f"import_log row must be unchanged after -1 skip: before={import_log_row_before}, after={import_log_row_after}"
+        )
 
 
 class TestSyncThenImportDedupIntegration:
@@ -276,11 +381,7 @@ class TestSyncThenImportDedupIntegration:
         assert messages_after_sync > 0
 
         # Step 2: import path computes hash and re-syncs
-        h = hashlib.md5(usedforsecurity=False)
-        with open(fixture_path, "rb") as fh:
-            for chunk in iter(lambda: fh.read(8192), b""):
-                h.update(chunk)
-        real_hash = h.hexdigest()
+        real_hash = get_file_hash(fixture_path)
 
         with tempfile.TemporaryDirectory() as tmpdir2:
             project_dir2 = Path(tmpdir2)
@@ -399,7 +500,6 @@ def _make_vec_conn(tmp_path: Path) -> sqlite3.Connection | None:
     conn = sqlite3.connect(str(tmp_path / "t.db"))
     conn.executescript(SCHEMA)
     conn.commit()
-    migrate_columns(conn)
     if not vec_available(conn):
         conn.close()
         return None
@@ -418,7 +518,6 @@ class TestEmbedOnWriteModelUnavailable:
         conn = sqlite3.connect(":memory:")
         conn.executescript(SCHEMA)
         conn.commit()
-        migrate_columns(conn)
 
         with (
             patch("ccrecall.session_ops.embed_text", side_effect=RuntimeError("no model")),
@@ -455,7 +554,6 @@ class TestEmbedOnWriteOrderingInvariant:
         conn = sqlite3.connect(":memory:")
         conn.executescript(SCHEMA)
         conn.commit()
-        migrate_columns(conn)
 
         # Precondition: branch_vec must not exist before sync so the upsert raises
         assert (

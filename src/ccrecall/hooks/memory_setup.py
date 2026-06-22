@@ -25,6 +25,9 @@ from ccrecall.summarizer import SUMMARY_VERSION
 # Stale sync temp files older than this (seconds) are reaped on SessionStart.
 STALE_TEMP_FILE_MAX_AGE_SECONDS = 3600
 
+# PID-file permissions: owner read/write only.
+PID_FILE_MODE = 0o600
+
 
 def _spawn_background(argv: list[str], pid_key: str) -> None:
     """Spawn an installed entry point as a detached background process.
@@ -42,7 +45,7 @@ def _spawn_background(argv: list[str], pid_key: str) -> None:
     while True:
         try:
             # Atomic create — fails with FileExistsError if file already exists
-            fd = os.open(str(pid_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            fd = os.open(str(pid_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, PID_FILE_MODE)
         except FileExistsError:  # noqa: PERF203 — the try/except IS the retry mechanism for atomic PID-file creation
             # File exists — check if the owning process is alive
             try:
@@ -72,15 +75,11 @@ def _spawn_background(argv: list[str], pid_key: str) -> None:
         os.close(fd)
 
 
-def _ensure_schema(settings: dict | None = None) -> None:
-    """Open DB connection to trigger migrate_columns (creates token_snapshots if missing)."""
-    with contextlib.suppress(sqlite3.Error, OSError):
-        conn = get_db_connection(settings)
-        conn.close()
-
-
 def _needs_reimport(settings: dict | None = None) -> bool:
-    """Check if any import_log entries have NULL file_hash (set by v3 migration for channel sessions)."""
+    """Check if any import_log entries have NULL file_hash.
+
+    NULL file_hash is written by the normal sync path when file_hash is unavailable.
+    """
     try:
         conn = get_db_connection(settings)
         cursor = conn.cursor()
@@ -141,7 +140,6 @@ def main():
         if not DEFAULT_DB_PATH.exists():
             _spawn_background(["ccrecall", "import"], import_conversations.PID_KEY)
         else:
-            _ensure_schema(settings)
             if _needs_reimport(settings):
                 _spawn_background(["ccrecall", "import"], import_conversations.PID_KEY)
 

@@ -9,7 +9,6 @@ from ccrecall.content import (
     is_teammate_message,
     is_tool_result,
 )
-from ccrecall.migrations import migrate_columns
 from ccrecall.parsing import (
     aggregate_branch_content,
     compute_branch_metadata,
@@ -28,7 +27,6 @@ def _setup_db_and_import(filepath: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     conn.executescript(SCHEMA)
     conn.commit()
-    migrate_columns(conn)
     cursor = conn.cursor()
 
     # Create project and session
