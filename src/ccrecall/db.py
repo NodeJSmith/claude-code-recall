@@ -38,20 +38,17 @@ EMBEDDABLE_BRANCH_FILTER = "is_active = 1 AND context_summary IS NOT NULL AND co
 # "errored".
 CONTENT_ERROR_VERSION = -1
 
-# Default settings
+# Default settings. Every key here is user-overridable from config.json —
+# load_settings() merges any of these present in the file over the defaults.
+# (db_path is deliberately absent: it is not a config key. The CLI --db flag
+# injects it into the settings dict, which get_db_path reads; without it,
+# get_db_path falls back to DEFAULT_DB_PATH. The settings dict thus doubles as
+# the transport for that programmatic override.)
 DEFAULT_SETTINGS = {
-    "db_path": str(DEFAULT_DB_PATH),
     "auto_inject_context": True,
     "max_context_sessions": 2,
     "exclude_projects": [],
     "logging_enabled": False,
-    "sync_on_stop": True,
-}
-
-# Keys in config.json that override DEFAULT_SETTINGS
-_CONFIG_KEYS = {
-    "auto_inject_context",
-    "max_context_sessions",
 }
 
 CURRENT_ONBOARDING_VERSION = 1
@@ -224,7 +221,7 @@ def load_settings() -> dict:
     """Return settings with config.json overrides merged on top of defaults."""
     settings = DEFAULT_SETTINGS.copy()
     config = load_config()
-    for key in _CONFIG_KEYS:
+    for key in DEFAULT_SETTINGS:
         if key in config:
             settings[key] = config[key]
     return settings

@@ -85,7 +85,6 @@ class TestLoadSettings:
         assert DEFAULT_SETTINGS["auto_inject_context"] is True
         assert DEFAULT_SETTINGS["max_context_sessions"] == 2
         assert DEFAULT_SETTINGS["logging_enabled"] is False
-        assert DEFAULT_SETTINGS["sync_on_stop"] is True
         assert isinstance(DEFAULT_SETTINGS["exclude_projects"], list)
 
 
@@ -190,6 +189,16 @@ class TestLoadSettingsWithConfig:
         assert result["auto_inject_context"] is False
         assert result["max_context_sessions"] == 5
         assert result["logging_enabled"] is False  # unchanged default
+
+    def test_logging_enabled_and_exclude_projects_honored(self, tmp_path, monkeypatch):
+        """logging_enabled and exclude_projects are user-overridable from config.json."""
+        cfg = tmp_path / "config.json"
+        cfg.write_text(json.dumps({"logging_enabled": True, "exclude_projects": ["work-secret"]}))
+        monkeypatch.setattr("ccrecall.db.CONFIG_PATH", cfg)
+
+        result = load_settings()
+        assert result["logging_enabled"] is True
+        assert result["exclude_projects"] == ["work-secret"]
 
     def test_missing_config_returns_defaults(self, tmp_path, monkeypatch):
         """load_settings() returns DEFAULT_SETTINGS when config.json does not exist."""
