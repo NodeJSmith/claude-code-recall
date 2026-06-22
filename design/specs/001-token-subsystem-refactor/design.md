@@ -1,7 +1,7 @@
 # Design: Token Subsystem Refactor (Part 1 of Issue #20)
 
 **Date:** 2026-06-21
-**Status:** approved
+**Status:** archived
 **Scope-mode:** hold
 
 ## Problem

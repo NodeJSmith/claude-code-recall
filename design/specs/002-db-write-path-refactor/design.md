@@ -1,7 +1,7 @@
 # Design: sync_session Split (Part 2 of Issue #20)
 
 **Date:** 2026-06-21
-**Status:** approved
+**Status:** archived
 **Scope-mode:** hold
 
 > **Scope note (2026-06-21):** This spec originally covered both `migrations.py` and `session_ops.py`. After investigation, the `migrations.py` versioned-DML code was found to be effectively dead for the maintainer's workflow (it only transforms a populated DB opened in-place at `user_version < 6`; this never happens here). Rather than split that code for readability, the decision was to **squash** it to a v6 baseline in a separate follow-up spec (subtract-first). This spec is therefore narrowed to the **`session_ops.py` `sync_session` split only** — the genuinely hot path (runs on every sync and import). The migrations squash is tracked separately.

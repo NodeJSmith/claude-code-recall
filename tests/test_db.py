@@ -686,7 +686,7 @@ class TestSchemaEquivalencePin:
 
 
 class TestEmbeddingDDLInSchema:
-    """AC#2: fresh DB built from SCHEMA alone has the three embedding columns and index.
+    """A fresh DB built from SCHEMA alone has the three embedding columns and index.
 
     This verifies that SCHEMA_CORE (and therefore SCHEMA) is the complete schema
     source — SCHEMA alone provides the embedding columns.
@@ -726,7 +726,7 @@ class TestEmbeddingDDLInSchema:
 
 
 class TestNoTokenSnapshotsOnConversationDb:
-    """AC#3: fresh conversation DB has no token_snapshots; token DB still gets it via ensure_schema."""
+    """A fresh conversation DB has no token_snapshots; the token DB still gets it via ensure_schema."""
 
     def test_fresh_conversation_db_has_no_token_snapshots(self, tmp_path, monkeypatch):
         """get_db_connection on a fresh path must not create token_snapshots."""
@@ -739,7 +739,7 @@ class TestNoTokenSnapshotsOnConversationDb:
         assert row is None, "fresh conversation DB must not have token_snapshots table"
 
     def test_token_db_ensure_schema_still_creates_token_snapshots(self, tmp_path):
-        """token_schema.ensure_schema creates token_snapshots on the token-analytics DB (FR#4)."""
+        """token_schema.ensure_schema creates token_snapshots on the token-analytics DB."""
         conn = sqlite3.connect(str(tmp_path / "tokens.db"))
         token_ensure_schema(conn)
         row = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='token_snapshots'").fetchone()
@@ -748,13 +748,13 @@ class TestNoTokenSnapshotsOnConversationDb:
 
 
 class TestExistingV6DbOpen:
-    """AC#4: opening a pre-populated v6-style DB succeeds and leaves all rows intact."""
+    """Opening a pre-populated v6-style DB succeeds and leaves all rows intact."""
 
     def test_existing_v6_db_rows_intact_after_get_db_connection(self, tmp_path):
         """Reopen an existing v6 DB: get_db_connection must not drop or overwrite any table or row."""
         db_file = tmp_path / "existing_v6.db"
 
-        # --- Build a DB that looks like an existing v6 conversation DB ---
+        # Build a DB that looks like an existing v6 conversation DB
         setup_conn = sqlite3.connect(str(db_file))
         setup_conn.executescript(SCHEMA)
         setup_conn.commit()
@@ -798,7 +798,7 @@ class TestExistingV6DbOpen:
         setup_conn.commit()
         setup_conn.close()
 
-        # --- Reopen via get_db_connection ---
+        # Reopen via get_db_connection
         conn = get_db_connection(settings={"db_path": str(db_file)})
 
         assert conn.execute("SELECT COUNT(*) FROM projects").fetchone()[0] == 1

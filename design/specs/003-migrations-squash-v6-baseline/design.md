@@ -1,7 +1,7 @@
 # Design: Migrations Squash to v6 Baseline (Follow-up to Issue #20)
 
 **Date:** 2026-06-21
-**Status:** approved
+**Status:** archived
 **Scope-mode:** reduce
 
 > **Origin:** Split out of spec 002 (`sync_session` split, PR for part 2a of #20). During that investigation the conversation-DB migration machinery was found effectively dead for the maintainer's solo workflow. Rather than refactor it for readability, the decision was to **subtract it** — squash to a v6 baseline. This spec is deletion-only with a schema-equivalence guarantee.
