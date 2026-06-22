@@ -1,0 +1,13 @@
+{
+  "name": "claude-code-recall",
+  "owner": {
+    "name": "Jessica Smith"
+  },
+  "plugins": [
+    {
+      "name": "ccrecall",
+      "source": "./",
+      "description": "Conversation history and semantic search for Claude Code"
+    }
+  ]
+}

@@ -15,7 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 # and hook exceptions reach the same rotating file as the rest of the app; a module
 # logger would propagate to an unconfigured root and silently drop them. Defined here
 # (the lowest-level module) so db/session_ops/hooks can import it without a cycle.
-LOGGER_NAME = "claude-memory"
+LOGGER_NAME = "ccrecall"
 
 # Base SQLite busy_timeout (ms) for this app's connections. Lives here, the lowest
 # module, so db.py and token_schema.py share one value without an import cycle.

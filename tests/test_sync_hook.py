@@ -2,6 +2,7 @@
 
 import contextlib
 import io
+import json
 import os
 import sqlite3
 import subprocess
@@ -13,7 +14,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from ccrecall.hooks import memory_setup, memory_sync
+from ccrecall.hooks import memory_setup, memory_sync, sync_current
 from ccrecall.hooks.sync_current import sync_session, validate_session_id
 from ccrecall.recent_chats import run as recent_chats_run
 from ccrecall.schema import SCHEMA
@@ -113,7 +114,7 @@ class TestSyncSessionCreatesBranches:
             assert summary, "Active branch should have context_summary"
             assert version == 3, "summary_version should be 3 after sync"
             assert "### Session:" in summary
-            assert "/cm-recall-conversations" in summary
+            assert "/ccrecall:ccr-recall" in summary
 
 
 class TestSyncSessionUpdatesExisting:
@@ -432,7 +433,7 @@ class TestMemorySyncTempCleanup:
         """When Popen raises, the temp file is unlinked."""
 
         # Create a fake temp file
-        tmp_file = tmp_path / "claude-memory-sync-test.json"
+        tmp_file = tmp_path / "ccrecall-sync-test.json"
         tmp_file.write_text('{"test": true}')
         tmp_path_str = str(tmp_file)
 
@@ -461,14 +462,14 @@ class TestReapStaleTempFiles:
         """Files older than 1 hour matching the pattern are deleted."""
 
         # Create a stale file matching the pattern
-        stale_file = tmp_path / "claude-memory-sync-old.json"
+        stale_file = tmp_path / "ccrecall-sync-old.json"
         stale_file.write_text('{"old": true}')
         # Set mtime to 2 hours ago
         old_time = time.time() - 7200
         os.utime(str(stale_file), (old_time, old_time))
 
         # Create a fresh file (should NOT be deleted)
-        fresh_file = tmp_path / "claude-memory-sync-new.json"
+        fresh_file = tmp_path / "ccrecall-sync-new.json"
         fresh_file.write_text('{"new": true}')
 
         monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
@@ -597,3 +598,44 @@ class TestSearchConversationsDbFlag:
 
         output = captured.getvalue()
         assert "Error" not in output
+
+
+class TestSyncCurrentExcludeProjects:
+    """sync_current.run honors exclude_projects for the live session (matches import)."""
+
+    VALID_UUID = "12345678-1234-1234-1234-123456789abc"
+
+    def _run(self, tmp_path, monkeypatch, *, settings, cwd):
+        monkeypatch.setattr(sync_current, "load_settings", lambda: settings)
+        synced = []
+        monkeypatch.setattr(sync_current, "sync_session", lambda *a, **k: synced.append(1) or 0)
+        # If the guard fails to short-circuit, get_session_file finding nothing keeps the
+        # test from touching a real DB — but sync_session would still register if reached.
+        monkeypatch.setattr(sync_current, "get_session_file", lambda *a, **k: synced.append("reached") or None)
+
+        input_file = tmp_path / "hook.json"
+        input_file.write_text(json.dumps({"session_id": self.VALID_UUID, "cwd": cwd}))
+        captured = io.StringIO()
+        with patch("sys.stdout", captured):
+            sync_current.run(input_file=input_file)
+        return synced, json.loads(captured.getvalue())
+
+    def test_excluded_project_skips_before_sync(self, tmp_path, monkeypatch):
+        synced, out = self._run(
+            tmp_path,
+            monkeypatch,
+            settings={"exclude_projects": ["secret-repo"], "logging_enabled": False},
+            cwd="/home/u/secret-repo",
+        )
+        assert out == {"continue": True}
+        assert synced == []  # neither get_session_file nor sync_session reached
+
+    def test_non_excluded_project_proceeds_past_guard(self, tmp_path, monkeypatch):
+        synced, out = self._run(
+            tmp_path,
+            monkeypatch,
+            settings={"exclude_projects": ["secret-repo"], "logging_enabled": False},
+            cwd="/home/u/public-repo",
+        )
+        assert out == {"continue": True}
+        assert synced == ["reached"]  # guard let it through to session-file lookup

@@ -5,17 +5,17 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash -c 'command -v cm-memory-setup >/dev/null 2>&1 && cm-memory-setup || true'",
+            "command": "bash -c 'command -v ccrecall-setup >/dev/null 2>&1 && ccrecall-setup || true'",
             "timeout": 10000
           },
           {
             "type": "command",
-            "command": "bash -c 'command -v cm-onboarding >/dev/null 2>&1 && cm-onboarding || true'",
+            "command": "bash -c 'command -v ccrecall-onboarding >/dev/null 2>&1 && ccrecall-onboarding || true'",
             "timeout": 10000
           },
           {
             "type": "command",
-            "command": "bash -c 'command -v cm-memory-context >/dev/null 2>&1 && cm-memory-context || true'",
+            "command": "bash -c 'command -v ccrecall-context >/dev/null 2>&1 && ccrecall-context || true'",
             "timeout": 10000
           }
         ]
@@ -26,7 +26,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash -c 'command -v cm-clear-handoff >/dev/null 2>&1 && cm-clear-handoff || true'",
+            "command": "bash -c 'command -v ccrecall-clear-handoff >/dev/null 2>&1 && ccrecall-clear-handoff || true'",
             "timeout": 10000
           }
         ]
@@ -37,7 +37,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash -c 'command -v cm-memory-sync >/dev/null 2>&1 && cm-memory-sync || true'",
+            "command": "bash -c 'command -v ccrecall-sync >/dev/null 2>&1 && ccrecall-sync || true'",
             "timeout": 30000
           }
         ]

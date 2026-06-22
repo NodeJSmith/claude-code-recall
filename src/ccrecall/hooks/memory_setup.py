@@ -114,7 +114,7 @@ def _needs_backfill(settings: dict | None = None) -> bool:
 
 
 def _reap_stale_temp_files() -> None:
-    """Delete claude-memory-sync-*.json temp files older than 1 hour.
+    """Delete ccrecall-sync-*.json temp files older than 1 hour.
 
     These are left behind when `ccrecall sync-current` crashes or is killed
     before it can clean up its own input file.

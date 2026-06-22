@@ -11,6 +11,7 @@ from ccrecall.token_parser import (
     DEFAULT_PRICING,
     JnlFile,
     get_pricing,
+    normalize_skill_name,
     parse_session,
     row_cost,
     turn_cost,
@@ -254,3 +255,26 @@ class TestRowCost:
         )
         total = sum(row_cost(r, model_idx=0, token_indices=[1, 2, 3, 4, 5, 6]) for r in rows)
         assert total == expected
+
+
+# ── Skill-name prefix normalization ──────────────────────────────────────────
+
+
+class TestNormalizeSkillName:
+    """Strip our own plugin namespace so plugin and vendored invocations aggregate."""
+
+    def test_current_plugin_prefix_stripped(self):
+        assert normalize_skill_name("ccrecall:ccr-recall") == "ccr-recall"
+
+    def test_third_party_namespace_preserved(self):
+        assert normalize_skill_name("visual-explainer:generate-web-diagram") == "visual-explainer:generate-web-diagram"
+
+    def test_other_claude_prefix_preserved(self):
+        # Only "ccrecall:" is stripped — a third-party "claude-*" plugin is left intact.
+        assert normalize_skill_name("claude-tools:do-thing") == "claude-tools:do-thing"
+
+    def test_bare_skill_unchanged(self):
+        assert normalize_skill_name("ccr-recall") == "ccr-recall"
+
+    def test_none_unchanged(self):
+        assert normalize_skill_name(None) is None

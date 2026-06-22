@@ -675,7 +675,7 @@ class TestSummaryWriteExceptionHandling:
         This pins the regression fix: a summary-write DB failure must not propagate
         and abort the whole import; it skips the branch and surfaces in the log.
         """
-        with caplog.at_level(logging.ERROR, logger="claude-memory"):
+        with caplog.at_level(logging.ERROR, logger="ccrecall"):
             result = self.run_with_summary_error(memory_db, sqlite3.OperationalError("database is locked"))
 
         assert result >= 0, "sync must complete (per-branch skip, not import abort)"

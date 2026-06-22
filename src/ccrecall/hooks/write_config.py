@@ -1,4 +1,4 @@
-"""Write or update ~/.claude-memory/config.json.
+"""Write or update ~/.ccrecall/config.json.
 
 Called by Claude during onboarding to persist user configuration choices.
 Atomic write via tmp+replace to prevent partial writes.
@@ -14,7 +14,7 @@ from ccrecall.db import CONFIG_PATH, CURRENT_ONBOARDING_VERSION, DEFAULT_SETTING
 
 
 def run(*, defaults: bool = False, auto_inject_context: bool | None = None) -> None:
-    """Write or update ~/.claude-memory/config.json from onboarding choices."""
+    """Write or update ~/.ccrecall/config.json from onboarding choices."""
     # Build initial config from DEFAULT_SETTINGS (plus write_config-specific keys).
     # Skip merge when --defaults is set so it always writes fresh defaults.
     initial_config = {
