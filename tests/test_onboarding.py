@@ -25,8 +25,14 @@ def _patch_config_path(monkeypatch, path: Path) -> None:
 
 
 def _run_main_captured(monkeypatch, cfg_path: Path) -> dict:
-    """Run onboarding.main() and return parsed JSON output."""
+    """Run onboarding.main() and return parsed JSON output.
+
+    Neutralizes legacy-DB detection by default so these tests exercise the
+    onboarding-notice behavior in isolation; the migration-defer path has its
+    own coverage in test_legacy_migration.
+    """
     _patch_config_path(monkeypatch, cfg_path)
+    monkeypatch.setattr(onboarding, "find_legacy_db", lambda: None)
     buf = io.StringIO()
     monkeypatch.setattr(sys, "stdout", buf)
     onboarding.main()
