@@ -298,14 +298,15 @@ def _extract_usage(msg: dict) -> dict:
 
 
 def normalize_skill_name(raw_skill: str | None) -> str | None:
-    """Strip a "claude-<plugin>:" prefix so plugin and bare skill names unify.
+    """Strip the "ccrecall:" plugin prefix so plugin and bare skill names unify.
 
-    Only strips when the prefix matches "claude-*:" — preserves third-party
-    namespaces like "visual-explainer:generate-web-diagram".
+    A plugin-install invocation ("ccrecall:ccr-recall") counts the same as the bare
+    vendored form ("ccr-recall"). Third-party namespaces like
+    "visual-explainer:generate-web-diagram" are preserved.
     """
     if raw_skill and ":" in raw_skill:
         prefix, _, bare = raw_skill.partition(":")
-        if prefix.startswith("claude-"):
+        if prefix == "ccrecall":
             return bare
     return raw_skill
 

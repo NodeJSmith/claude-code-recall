@@ -1,4 +1,4 @@
-"""Shared fixtures for claude-memory tests."""
+"""Shared fixtures for ccrecall tests."""
 
 import sqlite3
 from pathlib import Path

@@ -17,14 +17,14 @@ from ccrecall.models import BUSY_TIMEOUT_MS, LOGGER_NAME
 from ccrecall.schema import SCHEMA_CORE, SCHEMA_FTS4, SCHEMA_FTS5, detect_fts_support
 
 # Default paths
-DEFAULT_DB_PATH = Path.home() / ".claude-memory" / "conversations.db"
+DEFAULT_DB_PATH = Path.home() / ".ccrecall" / "conversations.db"
 DEFAULT_PROJECTS_DIR = Path.home() / ".claude" / "projects"
-DEFAULT_LOG_PATH = Path.home() / ".claude-memory" / "memory.log"
-CONFIG_PATH = Path.home() / ".claude-memory" / "config.json"
+DEFAULT_LOG_PATH = Path.home() / ".ccrecall" / "ccrecall.log"
+CONFIG_PATH = Path.home() / ".ccrecall" / "config.json"
 
 # Hook filenames/prefixes — writer and reader live in different modules and must agree.
 CLEAR_HANDOFF_FILENAME = "clear-handoff.json"
-SYNC_TEMP_PREFIX = "claude-memory-sync-"
+SYNC_TEMP_PREFIX = "ccrecall-sync-"
 
 # Shared SQL predicate for "branches that are candidates to embed": active
 # leaves (the query path only returns is_active=1) with a usable summary. This
@@ -208,7 +208,7 @@ def _ensure_vec_schema(conn: sqlite3.Connection) -> None:
 
 
 def load_config() -> dict:
-    """Read ~/.claude-memory/config.json. Returns empty dict on missing/malformed config."""
+    """Read ~/.ccrecall/config.json. Returns empty dict on missing/malformed config."""
     if not CONFIG_PATH.exists():
         return {}
     try:

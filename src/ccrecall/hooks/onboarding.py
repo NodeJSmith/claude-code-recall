@@ -1,4 +1,4 @@
-"""SessionStart hook: first-run onboarding for claude-memory.
+"""SessionStart hook: first-run onboarding for ccrecall.
 
 Injects onboarding instructions into Claude's context when config.json
 is missing or onboarding hasn't been completed. Once onboarding completes
@@ -13,18 +13,18 @@ from ccrecall.db import CURRENT_ONBOARDING_VERSION, load_config, log_hook_except
 
 def _build_onboarding_context() -> str:
     return """\
-## Claude Memory: Onboarding Pending
+## ccrecall: Onboarding Pending
 
-claude-memory is installed but unconfigured. Its features (session context \
+ccrecall is installed but unconfigured. Its features (session context \
 injection) are paused until setup completes.
 
 Address the user's message first — complete their task normally. At the end \
 of your response, append a one-time notice in natural prose (not AskUserQuestion) \
-mentioning that claude-memory is installed and offering setup. Mention two \
-capabilities briefly: session context recall and /cm-recall-conversations for searching \
+mentioning that ccrecall is installed and offering setup. Mention two \
+capabilities briefly: session context recall and /ccrecall:ccr-recall for searching \
 past work. Offer two choices: (1) walk through \
 settings, or (2) enable recommended defaults. Note they can change settings later \
-in ~/.claude-memory/config.json.
+in ~/.ccrecall/config.json.
 
 ## User Response Handling
 

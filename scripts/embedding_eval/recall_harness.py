@@ -31,7 +31,7 @@ from fastembed import TextEmbedding
 
 from ccrecall import embeddings
 
-DB_PATH = Path.home() / ".claude-memory" / "conversations.db"
+DB_PATH = Path.home() / ".ccrecall" / "conversations.db"
 OUT_DIR = Path(__file__).resolve().parent
 FIXTURE_PATH = OUT_DIR / "fixture.json"
 RESULTS_JSON = OUT_DIR / "results.json"

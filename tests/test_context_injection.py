@@ -382,7 +382,7 @@ class TestBuildContext:
         assert "Run pytest from the project root." in result
         assert "User:**" in result
         assert "Assistant:**" in result
-        assert "/cm-recall-conversations" in result
+        assert "/ccrecall:ccr-recall" in result
 
     def test_multi_session_separator(self):
         sessions = [
@@ -650,7 +650,7 @@ class TestBuildFallbackContext:
             ],
         }
         result = _build_fallback_context(session)
-        assert "/cm-recall-conversations" in result
+        assert "/ccrecall:ccr-recall" in result
 
     def test_fallback_context_matches_render(self):
         """_build_fallback_context() output is consistent with render_context_summary()."""
@@ -730,7 +730,7 @@ class TestBuildFallbackContext:
         assert "/src/main.py" in fallback_result or "`/src/main.py`" in fallback_result
         assert "Commits:" in fallback_result
         assert "fix: resolve bug" in fallback_result
-        assert "/cm-recall-conversations" in fallback_result
+        assert "/ccrecall:ccr-recall" in fallback_result
 
         # The fallback now delegates to render_context_summary — output should match
         assert fallback_result == render_result, (

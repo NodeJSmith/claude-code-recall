@@ -7,10 +7,12 @@ on:
 
 # release-please opens/updates the release PR and, when that PR merges, creates
 # the GitHub release + tag and bumps the version in pyproject.toml. It uses the
-# default GITHUB_TOKEN. No package is published yet — when this repo starts
-# publishing to PyPI, add a `build-pypi` / `publish-pypi` job gated on
-# `steps.release.outputs.release_created` and switch to a GitHub App token so the
-# release PR also triggers CI.
+# default GITHUB_TOKEN. When a release is created, the publish-pypi job builds the
+# bumped version and uploads it to PyPI via Trusted Publishing (OIDC) — no API
+# token stored in the repo. PyPI must have a publisher configured for this repo +
+# workflow + the `pypi` environment (a "pending publisher" before the first
+# release exists). Publisher config: PyPI project `ccrecall`, owner `NodeJSmith`,
+# repo `claude-code-recall`, workflow `release-please.yml`, environment `pypi`.
 permissions:
     contents: write
     pull-requests: write
@@ -33,3 +35,34 @@ jobs:
                   token: ${{ secrets.GITHUB_TOKEN }}
                   config-file: release-please-config.json
                   manifest-file: .release-please-manifest.json
+
+    publish-pypi:
+        needs: release-please
+        if: needs.release-please.outputs.release_created == 'true'
+        runs-on: ubuntu-latest
+        timeout-minutes: 15
+        # Trusted Publishing exchanges this OIDC token for a short-lived PyPI
+        # credential — no stored API token. PyPI scopes the publisher to this
+        # environment, so the name must match the publisher config on PyPI.
+        environment:
+            name: pypi
+            url: https://pypi.org/p/ccrecall
+        permissions:
+            id-token: write
+            contents: read
+        steps:
+            - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+              with:
+                  persist-credentials: false
+                  ref: ${{ needs.release-please.outputs.tag_name }}
+
+            - name: Install uv
+              uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+              with:
+                  python-version: "3.13"
+
+            - name: Build sdist + wheel
+              run: uv build
+
+            - name: Publish to PyPI (Trusted Publishing)
+              run: uv publish --trusted-publishing always

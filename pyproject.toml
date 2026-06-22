@@ -6,10 +6,36 @@ build-backend = "setuptools.build_meta"
 name = "ccrecall"
 version = "0.9.0"
 description = "Conversation history and semantic search for Claude Code"
+readme = "README.md"
 requires-python = ">=3.10"
-# Pinned to the versions in uv.lock: `uv tool install -e` (how install.py
-# installs this package) ignores uv.lock and resolves fresh, so an unbounded
-# range would pull newer ABI/runtime-breaking releases of these native wheels.
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Jessica Smith", email = "12jessicasmith34@gmail.com" }]
+keywords = [
+    "claude-code",
+    "conversation-history",
+    "search",
+    "recall",
+    "transcripts",
+    "semantic-search",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Utilities",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+# Pinned to the versions in uv.lock: `uv tool install` without a lockfile
+# ignores uv.lock and resolves fresh, so an unbounded range would pull newer
+# ABI/runtime-breaking releases of these native wheels.
 # fastembed is the embedding engine — it owns the ONNX runtime + tokenizers and
 # the model download, so onnxruntime is left to fastembed's own constraint (an
 # explicit pin here fights its resolver) and reproducibility comes from uv.lock.
@@ -27,17 +53,26 @@ dependencies = [
     "cyclopts>=4.16",
 ]
 
+[project.urls]
+Homepage = "https://github.com/NodeJSmith/claude-code-recall"
+Issues = "https://github.com/NodeJSmith/claude-code-recall/issues"
+Changelog = "https://github.com/NodeJSmith/claude-code-recall/blob/main/CHANGELOG.md"
+
 [project.scripts]
 # Unified CLI — single entry point. Subcommands replace the former skill-facing
-# and helper cm-* tools. The hook entry points below keep their cm-* names for
-# now (folded into `ccrecall hook ...` in a later phase).
+# and helper cm-* tools.
 ccrecall                 = "ccrecall.cli:main"
-# Hook entry points (wired in settings.json)
-cm-memory-setup          = "ccrecall.hooks.memory_setup:main"
-cm-memory-sync           = "ccrecall.hooks.memory_sync:main"
-cm-memory-context        = "ccrecall.hooks.memory_context:main"
-cm-onboarding            = "ccrecall.hooks.onboarding:main"
-cm-clear-handoff         = "ccrecall.hooks.clear_handoff:main"
+# Hook entry points (wired by the plugin's hooks/hooks.json). Kept as separate
+# console scripts rather than `ccrecall hook ...` subcommands on purpose: hooks
+# fire on every SessionStart/Stop, and routing through the full cyclopts app
+# eager-imports the whole command surface (fastembed/numpy/onnxruntime, ~1800ms)
+# vs ~440ms for a direct hook import. The no-lazy-imports rule rules out dodging
+# that, so a direct entry point per hook stays the fast path.
+ccrecall-setup           = "ccrecall.hooks.memory_setup:main"
+ccrecall-sync            = "ccrecall.hooks.memory_sync:main"
+ccrecall-context         = "ccrecall.hooks.memory_context:main"
+ccrecall-onboarding      = "ccrecall.hooks.onboarding:main"
+ccrecall-clear-handoff   = "ccrecall.hooks.clear_handoff:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

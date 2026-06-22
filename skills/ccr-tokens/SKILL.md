@@ -17,7 +17,7 @@ Parse JSONL conversation files from `~/.claude/projects/*/` into per-turn analyt
 ccrecall tokens
 ```
 
-First run processes all files (~100s for ~2500 files) — warn the user about the wait before running. Incremental runs complete in under 5s. The script populates analytics tables, deploys an interactive dashboard to `~/.claude-memory/dashboard.html` (built from `templates/dashboard.html`), and prints a slim JSON blob to stdout (full data goes to dashboard only).
+First run processes all files (~100s for ~2500 files) — warn the user about the wait before running. Incremental runs complete in under 5s. The script populates analytics tables, deploys an interactive dashboard to `~/.ccrecall/dashboard.html` (built from `templates/dashboard.html`), and prints a slim JSON blob to stdout (full data goes to dashboard only).
 
 If the script exits non-zero, report the error and stop.
 
@@ -41,7 +41,7 @@ Structure the analysis naturally based on what the data shows — don't force em
 ## Step 3: Open Dashboard
 
 ```bash
-python3 -c "import webbrowser, pathlib; webbrowser.open((pathlib.Path.home() / '.claude-memory' / 'dashboard.html').as_uri())"
+python3 -c "import webbrowser, pathlib; webbrowser.open((pathlib.Path.home() / '.ccrecall' / 'dashboard.html').as_uri())"
 ```
 
 Note the dashboard is available for deeper exploration — Section 6 (Claude Code Ecosystem) has the new skill, agent, and hook charts.

@@ -152,7 +152,7 @@ class TestWriteConfigParentDirCreation:
     def test_parent_dir_auto_created(self, tmp_path, monkeypatch):
         """write_config must create the parent directory if it doesn't exist.
 
-        Ensures first-run installs (no ~/.claude-memory/ yet) complete successfully.
+        Ensures first-run installs (no ~/.ccrecall/ yet) complete successfully.
         """
         cfg = tmp_path / "subdir" / "nested" / "config.json"
         _patch_config_path(monkeypatch, cfg)

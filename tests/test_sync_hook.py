@@ -113,7 +113,7 @@ class TestSyncSessionCreatesBranches:
             assert summary, "Active branch should have context_summary"
             assert version == 3, "summary_version should be 3 after sync"
             assert "### Session:" in summary
-            assert "/cm-recall-conversations" in summary
+            assert "/ccrecall:ccr-recall" in summary
 
 
 class TestSyncSessionUpdatesExisting:
@@ -432,7 +432,7 @@ class TestMemorySyncTempCleanup:
         """When Popen raises, the temp file is unlinked."""
 
         # Create a fake temp file
-        tmp_file = tmp_path / "claude-memory-sync-test.json"
+        tmp_file = tmp_path / "ccrecall-sync-test.json"
         tmp_file.write_text('{"test": true}')
         tmp_path_str = str(tmp_file)
 
@@ -461,14 +461,14 @@ class TestReapStaleTempFiles:
         """Files older than 1 hour matching the pattern are deleted."""
 
         # Create a stale file matching the pattern
-        stale_file = tmp_path / "claude-memory-sync-old.json"
+        stale_file = tmp_path / "ccrecall-sync-old.json"
         stale_file.write_text('{"old": true}')
         # Set mtime to 2 hours ago
         old_time = time.time() - 7200
         os.utime(str(stale_file), (old_time, old_time))
 
         # Create a fresh file (should NOT be deleted)
-        fresh_file = tmp_path / "claude-memory-sync-new.json"
+        fresh_file = tmp_path / "ccrecall-sync-new.json"
         fresh_file.write_text('{"new": true}')
 
         monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
