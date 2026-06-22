@@ -9,6 +9,7 @@ a silent no-op.
 import json
 
 from ccrecall.db import CURRENT_ONBOARDING_VERSION, load_config, log_hook_exception
+from ccrecall.legacy import find_legacy_db
 
 
 def _build_onboarding_context() -> str:
@@ -60,6 +61,14 @@ def main():
 
     # Already onboarded — exit silently
     if config.get("onboarding_completed") is True and config.get("onboarding_version", 0) >= CURRENT_ONBOARDING_VERSION:
+        print(json.dumps({}))
+        return
+
+    # A pre-rename install is about to be migrated (memory_setup auto-spawns it
+    # and shows its own notice). Stay silent so the user doesn't get both a
+    # migration notice and a from-scratch onboarding prompt — migration copies
+    # the legacy config, which already carries onboarding_completed.
+    if find_legacy_db() is not None:
         print(json.dumps({}))
         return
 

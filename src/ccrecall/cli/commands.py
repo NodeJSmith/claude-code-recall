@@ -12,6 +12,7 @@ from typing import Annotated, Literal
 from cyclopts import ArgumentCollection, Group, Parameter
 from cyclopts.validators import Number
 
+from ccrecall import legacy as legacy_mod
 from ccrecall import recent_chats as recent_chats_mod
 from ccrecall import search_conversations as search_mod
 from ccrecall import session_tail as session_tail_mod
@@ -85,6 +86,18 @@ def cmd_import(
 ) -> None:
     """Import Claude Code conversations into the memory DB."""
     import_mod.run(db=db, projects_dir=projects_dir, project=project)
+
+
+@app.command(name="migrate", show=False)
+def cmd_migrate() -> None:
+    """Carry a pre-rename install (~/.claude-memory) forward into ~/.ccrecall.
+
+    Undocumented one-time helper: copies the legacy DB and portable config keys,
+    leaving the original as a backup. Normally auto-spawned by the SessionStart
+    hook when a legacy DB is detected; safe to run by hand and idempotent.
+    """
+    code = legacy_mod.run_migration()
+    raise SystemExit(code)
 
 
 @app.command(name="stats")
