@@ -47,7 +47,7 @@ Enforced by `prek` (pre-commit) hooks + custom checks in `tools/`:
 - **No `from __future__ import annotations`** and **no lazy imports** (imports inside functions) — both have dedicated checks. Use `X | None`, not `Optional[X]`.
 - **`whenever`** for all date/time, not stdlib `datetime` (convert only at library boundaries).
 - **setuptools** build backend (never hatchling). License is declared as an SPDX expression (`license = "MIT"` + `license-files`).
-- **Conventional Commits.** Releases are automated by **release-please**; the version lives in `pyproject.toml` and is mirrored into `.claude-plugin/plugin.json`. `feat`/`fix`/`perf`/`refactor`/`docs` land in the changelog.
+- **Conventional Commits.** Releases are automated by **release-please**; the version lives in `pyproject.toml`, is mirrored into `.claude-plugin/plugin.json` (release-please `extra-files`), and `uv.lock` is re-locked on the release PR by a `sync-lockfile` CI job so its self-version never drifts. `feat`/`fix`/`perf`/`refactor`/`docs` land in the changelog.
 
 ## Commands
 

@@ -7,7 +7,7 @@ disable-model-invocation: true
 
 # Resume
 
-Pick up work in a fresh session after the previous one ended — via `/clear` (to avoid resending a large uncached context), after being stopped, or after sitting at an unanswered `AskUserQuestion`. `/clear` starts a **new session with a new transcript file**; the prior session's transcript stays on disk. This skill reads its **tail** to recover what the disk can't tell you: the user's last instruction and any decision that was never resolved.
+Pick up work in a fresh session after the previous one ended — via `/clear` (to avoid resending a large uncached context), after being stopped, or after a question the prior session left open (a rejected `AskUserQuestion` *or* one asked in prose). `/clear` starts a **new session with a new transcript file**; the prior session's transcript stays on disk. This skill reads its **tail** to recover what the disk can't tell you: the user's last instruction and any decision that was never resolved.
 
 ## Why this exists — the failure mode it prevents
 
@@ -20,17 +20,21 @@ On pickup, the instinct is to read on-disk artifacts (git state, task files, des
 
 ## Arguments
 
-$ARGUMENTS — optional. A session-id substring to target a specific prior session. Omit to auto-pick the most recent prior session in this directory's project.
+$ARGUMENTS — optional. A natural-language directive for how to follow up on the prior session — e.g. "keep going with the refactor but skip the test rewrite", "just summarize where we left off", "did the migration finish?". This is *intent*, not a session selector: it does not get passed to `ccrecall tail`; it shapes how you proceed in Phase 3. Omit it to get a plain orientation and a "how do you want to proceed?" prompt.
+
+To target a session other than the auto-picked prior one (rare), run `ccrecall tail --list`, then `ccrecall tail <id-substring>` directly.
 
 ---
 
 ## Phase 1: Recover the transcript tail (do this first, always)
 
-Run the lever — it locates the prior session's JSONL and prints the tail, the last typed instruction, and any **unanswered** `AskUserQuestion`:
+Run the lever — it auto-picks the prior session, locates its JSONL, and prints the tail, the last typed instruction, the last assistant message, and any **unanswered** `AskUserQuestion`:
 
 ```bash
-ccrecall tail $ARGUMENTS
+ccrecall tail
 ```
+
+Do **not** pass $ARGUMENTS here — it's a follow-up directive, not a session id (see Arguments).
 
 - Auto-detect picks the second-newest session (the newest is *this* one, live). If the wrong session comes up or you need to choose, run `ccrecall tail --list` and re-run with the right id substring.
 - If `ccrecall tail` finds nothing (no project dir, only the current session, or a moved cwd), fall back to `/ccr-recall` to retrieve the tail — never substitute disk artifacts for the transcript.
@@ -49,10 +53,24 @@ Name any mismatch between "what the transcript wanted" and "what the disk shows.
 
 ## Phase 3: Surface — never auto-resolve
 
-**If `ccrecall tail` reported a PENDING QUESTION:** the prior session stopped on a decision the user never made. Re-present it with `AskUserQuestion`, reusing the exact option labels and descriptions from the tail output (the picker appends "Other" automatically). Then **stop** — do not pick an option, and do not act on the work the question gates.
+The prior session may have ended on an **open decision** it was waiting on the user for. It takes two forms — treat them identically:
 
-**If there is no pending question:** give a 3–5 line orientation — where things stand, what the last instruction was, what's reconciled vs. mismatched — and ask how the user wants to proceed before taking any action.
+1. **Structured** — `ccrecall tail` printed a PENDING QUESTION block (an `AskUserQuestion` the user never answered). The lever detects this for you.
+2. **Prose** — no PENDING QUESTION block, but the LAST ASSISTANT MESSAGE excerpt ends by asking the user something or offering a choice ("Want me to also update the tests?", "Should I do X or Y?"). The harness records this as ordinary text, so the lever *cannot* flag it — you have to read the excerpt and judge whether it left a question hanging.
+
+**If either form is present, surface it — do not resolve it:**
+- Structured: re-present with `AskUserQuestion`, reusing the exact option labels and descriptions from the tail block (the picker appends "Other" automatically).
+- Prose: pose the question the assistant left open — as `AskUserQuestion` if it maps to clear choices, otherwise as a plain question.
+
+Then **stop** — do not pick an option, and do not act on the work the decision gates.
+
+**If there is no open decision:** give a 3–5 line orientation — where things stand, the last instruction, what's reconciled vs. mismatched.
+
+**Folding in the $ARGUMENTS directive (if given):** it is the user's answer to "how do we proceed" — but it does *not* override an open decision the prior session was waiting on *from them*. So:
+- Open decision present, and the directive plainly answers it → confirm that reading with the user, then proceed. Otherwise surface the decision first; the directive resolves what comes after.
+- No open decision → act on the directive directly instead of asking how to proceed.
+- No directive → ask how the user wants to proceed before taking any action.
 
 ## The one rule
 
-An unanswered or rejected `AskUserQuestion` is an open decision, not an invitation to choose. Surface it; let the user decide.
+An unanswered, rejected, or interrupted question — structured (`AskUserQuestion`) *or* prose left hanging in the last assistant message — is an open decision, not an invitation to choose. Surface it; let the user decide. A $ARGUMENTS directive answers "how do we proceed," never a decision the prior session was still waiting on.
