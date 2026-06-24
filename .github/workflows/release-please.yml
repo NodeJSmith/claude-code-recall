@@ -6,8 +6,11 @@ on:
     workflow_dispatch:
 
 # release-please opens/updates the release PR and, when that PR merges, creates
-# the GitHub release + tag and bumps the version in pyproject.toml. It uses the
-# default GITHUB_TOKEN. When a release is created, the publish-pypi job builds the
+# the GitHub release + tag and bumps the version in pyproject.toml. It authenticates
+# with a GitHub App token (secrets RELEASE_PLEASE_APP_ID / RELEASE_PLEASE_APP_PRIVATE_KEY)
+# rather than the default GITHUB_TOKEN, because GitHub suppresses workflow runs for
+# events made with GITHUB_TOKEN — release PRs opened with it never trigger the
+# required prek / tests-complete checks. When a release is created, the publish-pypi job builds the
 # bumped version and uploads it to PyPI via Trusted Publishing (OIDC) — no API
 # token stored in the repo. PyPI must have a publisher configured for this repo +
 # workflow + the `pypi` environment (a "pending publisher" before the first
@@ -36,10 +39,22 @@ jobs:
             tag_name: ${{ steps.release.outputs.tag_name }}
             pr: ${{ steps.release.outputs.pr }}
         steps:
+            # A GitHub App token (not the default GITHUB_TOKEN) so the release PR
+            # and the sync-lockfile commit trigger required checks. GitHub
+            # suppresses workflow runs for events made with GITHUB_TOKEN, which
+            # would otherwise leave release PRs with no prek/tests-complete checks.
+            - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+              id: app-token
+              with:
+                  app-id: ${{ secrets.RELEASE_PLEASE_APP_ID }}
+                  private-key: ${{ secrets.RELEASE_PLEASE_APP_PRIVATE_KEY }}
+                  permission-contents: write
+                  permission-pull-requests: write
+
             - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5
               id: release
               with:
-                  token: ${{ secrets.GITHUB_TOKEN }}
+                  token: ${{ steps.app-token.outputs.token }}
                   config-file: release-please-config.json
                   manifest-file: .release-please-manifest.json
 
@@ -54,6 +69,16 @@ jobs:
         permissions:
             contents: write
         steps:
+            # Re-mint the App token here — tokens are short-lived and don't pass
+            # across jobs — so the lockfile commit is pushed as the App and
+            # therefore triggers the release PR's required checks.
+            - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+              id: app-token
+              with:
+                  app-id: ${{ secrets.RELEASE_PLEASE_APP_ID }}
+                  private-key: ${{ secrets.RELEASE_PLEASE_APP_PRIVATE_KEY }}
+                  permission-contents: write
+
             # Check out the release PR branch (not main) so the re-lock commit
             # lands in that PR and merges together with the version bump.
             # persist-credentials: false avoids leaving the token in the local
@@ -61,6 +86,7 @@ jobs:
             - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
               with:
                   ref: ${{ fromJSON(needs.release-please.outputs.pr).headBranchName }}
+                  token: ${{ steps.app-token.outputs.token }}
                   persist-credentials: false
 
             # uv lock resolves from metadata, so no interpreter pin is needed.
@@ -76,7 +102,7 @@ jobs:
             # untrusted is interpolated into the shell.
             - name: Commit and push if uv.lock changed
               env:
-                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                  GH_TOKEN: ${{ steps.app-token.outputs.token }}
                   PR_BRANCH: ${{ fromJSON(needs.release-please.outputs.pr).headBranchName }}
                   REPO: ${{ github.repository }}
               run: |
