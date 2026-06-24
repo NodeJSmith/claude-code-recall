@@ -13,6 +13,12 @@ on:
 # workflow + the `pypi` environment (a "pending publisher" before the first
 # release exists). Publisher config: PyPI project `ccrecall`, owner `NodeJSmith`,
 # repo `claude-code-recall`, workflow `release-please.yml`, environment `pypi`.
+#
+# release-please bumps the version in pyproject.toml and (via extra-files)
+# plugin.json, but does NOT know about uv.lock — whose self-referenced ccrecall
+# version would otherwise stay stale until a contributor's next `uv sync`, surfacing
+# as a spurious lockfile diff. The sync-lockfile job below closes that gap by
+# re-locking on the release PR branch so the bump lands in the same PR.
 permissions:
     contents: write
     pull-requests: write
@@ -28,6 +34,8 @@ jobs:
         outputs:
             release_created: ${{ steps.release.outputs.release_created }}
             tag_name: ${{ steps.release.outputs.tag_name }}
+            prs_created: ${{ steps.release.outputs.prs_created }}
+            pr: ${{ steps.release.outputs.pr }}
         steps:
             - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5
               id: release
@@ -35,6 +43,49 @@ jobs:
                   token: ${{ secrets.GITHUB_TOKEN }}
                   config-file: release-please-config.json
                   manifest-file: .release-please-manifest.json
+
+    sync-lockfile:
+        needs: release-please
+        if: needs.release-please.outputs.prs_created == 'true'
+        runs-on: ubuntu-latest
+        timeout-minutes: 15
+        permissions:
+            contents: write
+        steps:
+            # Check out the release PR branch (not main) so the re-lock commit
+            # lands in that PR and merges together with the version bump.
+            # persist-credentials: false avoids leaving the token in the local
+            # git config; the push step below authenticates explicitly instead.
+            - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+              with:
+                  ref: ${{ fromJSON(needs.release-please.outputs.pr).headBranchName }}
+                  persist-credentials: false
+
+            - name: Install uv
+              uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+              with:
+                  python-version: "3.13"
+
+            - name: Re-lock to pick up the bumped version
+              run: uv lock
+
+            # Branch/repo/token go through env, not inline ${{ }}, so nothing
+            # untrusted is interpolated into the shell.
+            - name: Commit and push if uv.lock changed
+              env:
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                  PR_BRANCH: ${{ fromJSON(needs.release-please.outputs.pr).headBranchName }}
+                  REPO: ${{ github.repository }}
+              run: |
+                  if git diff --quiet -- uv.lock; then
+                      echo "uv.lock already in sync."
+                      exit 0
+                  fi
+                  git config user.name "github-actions[bot]"
+                  git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+                  git add uv.lock
+                  git commit -m "chore: sync uv.lock to release version"
+                  git push "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" "HEAD:${PR_BRANCH}"
 
     publish-pypi:
         needs: release-please
