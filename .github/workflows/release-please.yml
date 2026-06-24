@@ -34,7 +34,6 @@ jobs:
         outputs:
             release_created: ${{ steps.release.outputs.release_created }}
             tag_name: ${{ steps.release.outputs.tag_name }}
-            prs_created: ${{ steps.release.outputs.prs_created }}
             pr: ${{ steps.release.outputs.pr }}
         steps:
             - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5
@@ -44,9 +43,12 @@ jobs:
                   config-file: release-please-config.json
                   manifest-file: .release-please-manifest.json
 
+    # Runs only when release-please has an open PR (not on the push that creates
+    # the release itself). Guarding on `pr` truthiness also keeps the fromJSON
+    # below from erroring on an empty value.
     sync-lockfile:
         needs: release-please
-        if: needs.release-please.outputs.prs_created == 'true'
+        if: needs.release-please.outputs.pr && needs.release-please.outputs.release_created != 'true'
         runs-on: ubuntu-latest
         timeout-minutes: 15
         permissions:
@@ -61,10 +63,11 @@ jobs:
                   ref: ${{ fromJSON(needs.release-please.outputs.pr).headBranchName }}
                   persist-credentials: false
 
+            # uv lock resolves from metadata, so no interpreter pin is needed.
             - name: Install uv
               uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
               with:
-                  python-version: "3.13"
+                  enable-cache: true
 
             - name: Re-lock to pick up the bumped version
               run: uv lock
@@ -77,6 +80,7 @@ jobs:
                   PR_BRANCH: ${{ fromJSON(needs.release-please.outputs.pr).headBranchName }}
                   REPO: ${{ github.repository }}
               run: |
+                  set -euo pipefail
                   if git diff --quiet -- uv.lock; then
                       echo "uv.lock already in sync."
                       exit 0
