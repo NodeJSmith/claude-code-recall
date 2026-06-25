@@ -1,7 +1,7 @@
 ---
 task_id: "T05"
 title: "Add score-returning fusion and contract card/snippet/envelope renderers"
-status: "planned"
+status: "done"
 depends_on: []
 implements: ["FR#11", "AC#10"]
 ---
