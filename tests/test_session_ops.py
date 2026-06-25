@@ -1,5 +1,6 @@
 """Tests for the shared session_ops module."""
 
+import contextlib
 import json
 import logging
 import sqlite3
@@ -14,8 +15,7 @@ from ccrecall.embeddings import EMBEDDING_DIM, EMBEDDING_MODEL, EMBEDDING_VERSIO
 from ccrecall.hooks.import_conversations import get_file_hash
 from ccrecall.parsing import extract_session_uuid
 from ccrecall.schema import SCHEMA
-from ccrecall.session_ops import sync_session
-from ccrecall.summarizer import SUMMARY_VERSION
+from ccrecall.session_ops import MAX_WRITE_PATH_EMBEDS_PER_SYNC, embed_branch_chunks, sync_session
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures"
 
@@ -508,6 +508,209 @@ def _make_vec_conn(tmp_path: Path) -> sqlite3.Connection | None:
     return conn
 
 
+def _seed_branch(cursor: sqlite3.Cursor, is_active: int = 1, embedding_version: int = 0) -> int:
+    """Seed a minimal project/session/branch row; return the branch id."""
+    cursor.execute("INSERT INTO projects (path, key) VALUES (?, ?)", ("/test/proj", "test-proj"))
+    project_id = cursor.lastrowid
+    cursor.execute("INSERT INTO sessions (uuid, project_id) VALUES (?, ?)", ("test-session-uuid", project_id))
+    session_id = cursor.lastrowid
+    cursor.execute(
+        "INSERT INTO branches (session_id, leaf_uuid, is_active, embedding_version) VALUES (?, ?, ?, ?)",
+        (session_id, "test-leaf-uuid", is_active, embedding_version),
+    )
+    return cursor.lastrowid
+
+
+def _make_msgs(*exchange_pairs: tuple[str, str]) -> list[dict]:
+    """Return user/assistant message dicts for the given exchange-content tuples.
+
+    Usage: _make_msgs(("user q1", "asst a1"), ("user q2", "asst a2"))
+    Each pair is (user_content, assistant_content). Pass empty string to omit assistant.
+    """
+    msgs = []
+    for i, (user_content, asst_content) in enumerate(exchange_pairs):
+        msgs.append(
+            {
+                "role": "user",
+                "content": user_content,
+                "timestamp": f"2024-01-01T00:{i:02d}:00",
+                "uuid": f"user-uuid-{i}",
+            }
+        )
+        if asst_content:
+            msgs.append(
+                {
+                    "role": "assistant",
+                    "content": asst_content,
+                    "timestamp": f"2024-01-01T00:{i:02d}:30",
+                    "uuid": None,
+                }
+            )
+    return msgs
+
+
+class TestEmbedBranchChunks:
+    """Tests for embed_branch_chunks: incremental write path per design.md §(2)."""
+
+    def test_incremental_diff_embeds_only_new_exchange(self, tmp_path):
+        """After embedding 2 exchanges, adding 1 more re-syncs only the new one (AC#4)."""
+        conn = _make_vec_conn(tmp_path)
+        if conn is None:
+            pytest.skip("sqlite-vec not available")
+
+        cursor = conn.cursor()
+        branch_id = _seed_branch(cursor)
+        conn.commit()
+
+        msgs_2 = _make_msgs(("Hello", "Hi there"), ("How are you?", "Fine thanks"))
+        fake_vec = [0.1] * EMBEDDING_DIM
+
+        with patch("ccrecall.session_ops.embed_text", return_value=fake_vec) as mock_embed:
+            embed_branch_chunks(cursor, branch_id, msgs_2, is_active=True, vec_writable=True)
+
+        assert mock_embed.call_count == 2, "first sync should embed 2 exchanges"
+
+        cursor.execute("SELECT COUNT(*) FROM chunks WHERE branch_id = ?", (branch_id,))
+        assert cursor.fetchone()[0] == 2
+
+        # Now add a 3rd exchange
+        msgs_3 = _make_msgs(("Hello", "Hi there"), ("How are you?", "Fine thanks"), ("New q?", "New a"))
+
+        with patch("ccrecall.session_ops.embed_text", return_value=fake_vec) as mock_embed2:
+            embed_branch_chunks(cursor, branch_id, msgs_3, is_active=True, vec_writable=True)
+
+        assert mock_embed2.call_count == 1, "re-sync should embed only the 1 new exchange"
+
+        cursor.execute("SELECT COUNT(*) FROM chunks WHERE branch_id = ?", (branch_id,))
+        assert cursor.fetchone()[0] == 3
+
+        cursor.execute("SELECT COUNT(*) FROM chunk_vec")
+        assert cursor.fetchone()[0] == 3
+
+        conn.close()
+
+    def test_no_embed_on_unchanged_content(self, tmp_path):
+        """Re-syncing with no content change calls embed_text zero times (FR#5)."""
+        conn = _make_vec_conn(tmp_path)
+        if conn is None:
+            pytest.skip("sqlite-vec not available")
+
+        cursor = conn.cursor()
+        branch_id = _seed_branch(cursor)
+        conn.commit()
+
+        msgs = _make_msgs(("Hello", "Hi"), ("What's up?", "Nothing much"))
+        fake_vec = [0.1] * EMBEDDING_DIM
+
+        with patch("ccrecall.session_ops.embed_text", return_value=fake_vec):
+            embed_branch_chunks(cursor, branch_id, msgs, is_active=True, vec_writable=True)
+
+        # Re-sync with exactly the same messages
+        with patch("ccrecall.session_ops.embed_text", return_value=fake_vec) as mock_embed:
+            embed_branch_chunks(cursor, branch_id, msgs, is_active=True, vec_writable=True)
+
+        assert mock_embed.call_count == 0, "unchanged content must not trigger re-embedding"
+
+        conn.close()
+
+    def test_prune_on_exchange_shrink(self, tmp_path):
+        """Removing an exchange deletes its chunks and chunk_vec rows (cascade)."""
+        conn = _make_vec_conn(tmp_path)
+        if conn is None:
+            pytest.skip("sqlite-vec not available")
+
+        cursor = conn.cursor()
+        branch_id = _seed_branch(cursor)
+        conn.commit()
+
+        msgs_3 = _make_msgs(("q1", "a1"), ("q2", "a2"), ("q3", "a3"))
+        fake_vec = [0.1] * EMBEDDING_DIM
+
+        with patch("ccrecall.session_ops.embed_text", return_value=fake_vec):
+            embed_branch_chunks(cursor, branch_id, msgs_3, is_active=True, vec_writable=True)
+
+        cursor.execute("SELECT COUNT(*) FROM chunks WHERE branch_id = ?", (branch_id,))
+        assert cursor.fetchone()[0] == 3
+
+        # Shrink: remove the 3rd exchange
+        msgs_2 = _make_msgs(("q1", "a1"), ("q2", "a2"))
+
+        with patch("ccrecall.session_ops.embed_text", return_value=fake_vec):
+            embed_branch_chunks(cursor, branch_id, msgs_2, is_active=True, vec_writable=True)
+
+        cursor.execute("SELECT COUNT(*) FROM chunks WHERE branch_id = ?", (branch_id,))
+        assert cursor.fetchone()[0] == 2, "pruned chunk row must be deleted"
+
+        cursor.execute("SELECT COUNT(*) FROM chunk_vec")
+        assert cursor.fetchone()[0] == 2, "cascade trigger must delete chunk_vec row"
+
+        conn.close()
+
+    def test_embed_error_leaves_watermark_cleared(self, memory_db):
+        """embed_text raising leaves watermark cleared (< EMBEDDING_VERSION), not stale-but-true.
+
+        Validates the clear-first protocol (step 5a): watermark is set to 0 before
+        the embed loop, so a suppressed exception inside the loop never leaves the branch
+        with a false EMBEDDING_VERSION watermark.
+        """
+        cursor = memory_db.cursor()
+        branch_id = _seed_branch(cursor)
+        memory_db.commit()
+
+        msgs = _make_msgs(("Hello", "Hi"), ("Question?", "Answer"))
+
+        # Simulate sync_branch's contextlib.suppress wrapper
+        with (
+            patch("ccrecall.session_ops.embed_text", side_effect=RuntimeError("embed failed")),
+            contextlib.suppress(Exception),
+        ):
+            embed_branch_chunks(cursor, branch_id, msgs, is_active=True, vec_writable=True)
+
+        cursor.execute("SELECT embedding_version FROM branches WHERE id = ?", (branch_id,))
+        ev = cursor.fetchone()[0]
+        assert ev < EMBEDDING_VERSION, (
+            f"watermark must be cleared (< {EMBEDDING_VERSION}) after suppressed embed error, got {ev}"
+        )
+
+    def test_version_bump_cap_embeds_at_most_max(self, tmp_path):
+        """After simulating many needing-embed exchanges, at most MAX_WRITE_PATH_EMBEDS_PER_SYNC
+        chunk vectors are written per sync; the rest are left for backfill (AC#11)."""
+        conn = _make_vec_conn(tmp_path)
+        if conn is None:
+            pytest.skip("sqlite-vec not available")
+
+        cursor = conn.cursor()
+        branch_id = _seed_branch(cursor)
+        conn.commit()
+
+        # Create 2*MAX new exchanges — all need embedding (no existing chunks)
+        n_exchanges = MAX_WRITE_PATH_EMBEDS_PER_SYNC * 2
+        msgs = _make_msgs(*[(f"question {i}", f"answer {i}") for i in range(n_exchanges)])
+        fake_vec = [0.1] * EMBEDDING_DIM
+
+        with patch("ccrecall.session_ops.embed_text", return_value=fake_vec) as mock_embed:
+            embed_branch_chunks(cursor, branch_id, msgs, is_active=True, vec_writable=True)
+
+        assert mock_embed.call_count <= MAX_WRITE_PATH_EMBEDS_PER_SYNC, (
+            f"write path must embed at most {MAX_WRITE_PATH_EMBEDS_PER_SYNC} per sync, got {mock_embed.call_count}"
+        )
+
+        cursor.execute("SELECT COUNT(*) FROM chunk_vec")
+        vec_count = cursor.fetchone()[0]
+        assert vec_count <= MAX_WRITE_PATH_EMBEDS_PER_SYNC, (
+            f"at most {MAX_WRITE_PATH_EMBEDS_PER_SYNC} chunk_vec rows expected, got {vec_count}"
+        )
+
+        # Watermark must NOT be EMBEDDING_VERSION — not all exchanges have been embedded
+        cursor.execute("SELECT embedding_version FROM branches WHERE id = ?", (branch_id,))
+        ev = cursor.fetchone()[0]
+        assert ev < EMBEDDING_VERSION, (
+            f"watermark must stay stale (< {EMBEDDING_VERSION}) when exchanges remain unembedded, got {ev}"
+        )
+
+        conn.close()
+
+
 class TestEmbedOnWriteModelUnavailable:
     """Embedding failure must not fail sync; embedding_version stays 0."""
 
@@ -542,42 +745,48 @@ class TestEmbedOnWriteOrderingInvariant:
     """Write order is load-bearing: vec upsert BEFORE version column update."""
 
     def test_vec_upsert_raises_leaves_embedding_version_zero(self, tmp_path):
-        """When the vec upsert raises (after embed succeeds), embedding_version stays 0.
+        """When the vec upsert raises (after embed succeeds), version columns stay 0.
 
-        This validates the ordering invariant: if the upsert fails, the version
-        columns must not advance (branch stays at 0, eligible for backfill).
+        Validates the ordering invariant directly: the chunk row is inserted with
+        embedding_version=0, then write_chunk_embedding writes the vector FIRST and
+        the bookkeeping LAST. If the vector write raises, the bookkeeping UPDATE never
+        runs, so the chunk row stays at version 0 (eligible for backfill) — never
+        marked done-without-vector. Exercised on a real vec-loaded connection with
+        embed_branch_chunks called directly (vec_writable=True), so the path is
+        genuinely reached rather than skipped by the vec-availability guard.
         """
-        fixture_path = FIXTURE_DIR / "single_rewind.jsonl"
-
-        # Use an in-memory DB (no vec extension) — the upsert will raise naturally
-        # because branch_vec doesn't exist. The embed is stubbed to succeed.
-        conn = sqlite3.connect(":memory:")
-        conn.executescript(SCHEMA)
-        conn.commit()
-
-        # Precondition: branch_vec must not exist before sync so the upsert raises
-        assert (
-            conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='branch_vec'").fetchone() is None
-        )
-
-        fake_vec = [0.1] * EMBEDDING_DIM
-
-        with (
-            patch("ccrecall.session_ops.embed_text", return_value=fake_vec),
-            tempfile.TemporaryDirectory() as tmpdir,
-        ):
-            result = sync_session(conn, fixture_path, Path(tmpdir))
-            conn.commit()
-
-        # sync must succeed
-        assert result >= 0
+        conn = _make_vec_conn(tmp_path)
+        if conn is None:
+            pytest.skip("sqlite-vec not available")
 
         cursor = conn.cursor()
-        cursor.execute("SELECT embedding_version FROM branches")
-        rows = cursor.fetchall()
-        assert rows
-        for (ev,) in rows:
-            assert ev == 0 or ev is None, f"embedding_version must stay 0 when vec upsert fails, got {ev}"
+        branch_id = _seed_branch(cursor)
+        conn.commit()
+
+        msgs = _make_msgs(("Hello", "Hi"), ("Question?", "Answer"))
+        fake_vec = [0.1] * EMBEDDING_DIM
+
+        # embed_text succeeds, but the vec upsert (called first by write_chunk_embedding)
+        # raises — simulating a vec-write failure after a successful embed.
+        with (
+            patch("ccrecall.session_ops.embed_text", return_value=fake_vec),
+            patch("ccrecall.db.upsert_chunk_vec", side_effect=RuntimeError("vec write failed")),
+            contextlib.suppress(Exception),
+        ):
+            embed_branch_chunks(cursor, branch_id, msgs, is_active=True, vec_writable=True)
+
+        # The chunk row was inserted at version 0; the vector write raised before the
+        # bookkeeping UPDATE, so it must remain 0 (not advanced to EMBEDDING_VERSION).
+        cursor.execute("SELECT embedding_version FROM chunks WHERE branch_id = ?", (branch_id,))
+        chunk_rows = cursor.fetchall()
+        assert chunk_rows, "the chunk row must have been inserted before the vec write raised"
+        for (ev,) in chunk_rows:
+            assert ev == 0, f"chunk embedding_version must stay 0 when the vec upsert raises, got {ev}"
+
+        # No vector persisted, and the branch watermark stays cleared (set at step 5a).
+        assert cursor.execute("SELECT COUNT(*) FROM chunk_vec").fetchone()[0] == 0
+        bev = cursor.execute("SELECT embedding_version FROM branches WHERE id = ?", (branch_id,)).fetchone()[0]
+        assert bev < EMBEDDING_VERSION, f"branch watermark must stay cleared, got {bev}"
         conn.close()
 
 
@@ -591,11 +800,11 @@ except Exception:
 
 
 class TestEmbedOnWriteSuccess:
-    """A sync on a vec-enabled connection produces a branch_vec row."""
+    """A sync on a vec-enabled connection produces chunk_vec rows for active branches."""
 
     @pytest.mark.skipif(not _VEC_OK, reason="sqlite-vec not available")
-    def test_sync_writes_branch_vec_row(self, tmp_path):
-        """After sync on a vec-enabled connection, branch has a branch_vec row and
+    def test_sync_writes_chunk_vec_rows(self, tmp_path):
+        """After sync on a vec-enabled connection, the active branch has chunk_vec rows and
         embedding_version == EMBEDDING_VERSION."""
         fixture_path = FIXTURE_DIR / "single_rewind.jsonl"
 
@@ -614,11 +823,9 @@ class TestEmbedOnWriteSuccess:
         assert result >= 0
 
         cursor = conn.cursor()
-        # Only active leaves are embedded — the query path filters is_active=1,
-        # so an inactive fork's vector could never be returned.
+        # Active leaf with a successful context_summary gets chunk-embedded
         cursor.execute(
-            "SELECT b.id, b.embedding_version, b.embedding_model,"
-            " b.summary_version_at_embed, b.is_active"
+            "SELECT b.id, b.embedding_version, b.embedding_model, b.is_active"
             " FROM branches b"
             " WHERE b.context_summary IS NOT NULL AND b.context_summary != ''"
         )
@@ -626,19 +833,24 @@ class TestEmbedOnWriteSuccess:
         assert rows, "should have at least one summarized branch"
 
         active_embedded = False
-        for branch_id, ev, em, svae, is_active in rows:
-            cursor.execute("SELECT COUNT(*) FROM branch_vec WHERE branch_id = ?", (branch_id,))
+        for branch_id, ev, em, is_active in rows:
+            cursor.execute("SELECT COUNT(*) FROM chunks WHERE branch_id = ?", (branch_id,))
+            chunk_count = cursor.fetchone()[0]
+            cursor.execute(
+                "SELECT COUNT(*) FROM chunk_vec cv JOIN chunks c ON cv.chunk_id = c.id WHERE c.branch_id = ?",
+                (branch_id,),
+            )
             vec_count = cursor.fetchone()[0]
             if is_active:
                 active_embedded = True
                 assert ev == EMBEDDING_VERSION, f"branch {branch_id}: embedding_version={ev}, want {EMBEDDING_VERSION}"
                 assert em == EMBEDDING_MODEL, f"branch {branch_id}: embedding_model={em!r}, want {EMBEDDING_MODEL!r}"
-                assert svae == SUMMARY_VERSION, (
-                    f"branch {branch_id}: summary_version_at_embed={svae}, want {SUMMARY_VERSION}"
+                assert chunk_count > 0, f"active branch {branch_id}: expected chunk rows, got 0"
+                assert vec_count == chunk_count, (
+                    f"active branch {branch_id}: chunk_vec count {vec_count} != chunk count {chunk_count}"
                 )
-                assert vec_count == 1, f"active branch {branch_id}: expected 1 branch_vec row, got {vec_count}"
             else:
-                assert vec_count == 0, f"inactive branch {branch_id}: should have no vector, got {vec_count}"
+                assert vec_count == 0, f"inactive branch {branch_id}: should have no vectors, got {vec_count}"
 
         assert active_embedded, "expected at least one embedded active leaf"
         conn.close()

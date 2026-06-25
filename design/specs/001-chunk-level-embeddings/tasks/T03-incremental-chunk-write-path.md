@@ -1,7 +1,7 @@
 ---
 task_id: "T03"
 title: "Replace embed_branch with incremental embed_branch_chunks"
-status: "planned"
+status: "done"
 depends_on: ["T01", "T02"]
 implements: ["FR#1", "FR#5", "FR#14", "AC#4", "AC#11"]
 ---

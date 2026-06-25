@@ -17,6 +17,7 @@ the file and updates the row.
 """
 
 import contextlib
+import hashlib
 import json
 import logging
 import sqlite3
@@ -29,8 +30,8 @@ from ccrecall.content import (
     is_tool_result,
     parse_origin,
 )
-from ccrecall.db import branch_vec_queryable, write_branch_embedding
-from ccrecall.embeddings import embed_text
+from ccrecall.db import branch_vec_queryable, fetch_branch_messages, write_chunk_embedding
+from ccrecall.embeddings import EMBEDDING_MODEL, EMBEDDING_VERSION, cap_for_embedding, embed_text
 from ccrecall.formatting import normalize_project_key
 from ccrecall.models import LOGGER_NAME
 from ccrecall.parsing import (
@@ -43,7 +44,7 @@ from ccrecall.parsing import (
     parse_jsonl_file,
 )
 from ccrecall.project_ops import upsert_project
-from ccrecall.summarizer import SUMMARY_VERSION, compute_context_summary
+from ccrecall.summarizer import SUMMARY_VERSION, build_exchange_pairs, compute_context_summary
 
 
 def import_log_skip_check(
@@ -368,28 +369,181 @@ def write_branch_summary(cursor: sqlite3.Cursor, branch_db_id: int) -> str | Non
     return summary_md
 
 
-def embed_branch(
+# Maximum number of exchanges embedded per sync on the write path. Version-stale
+# chunks (those only needing an EMBEDDING_VERSION bump) are deliberately left to
+# the background backfill — only new or content-changed exchanges are eligible
+# here. This cap bounds the detached sync-current process's worst case even for a
+# first-sync of a long imported session or a rewind with many fresh exchanges.
+MAX_WRITE_PATH_EMBEDS_PER_SYNC = 8
+
+
+def embed_branch_chunks(
     cursor: sqlite3.Cursor,
     branch_db_id: int,
-    summary_md: str | None,
+    branch_msgs: list[dict],
     is_active: bool,
     vec_writable: bool,
 ) -> None:
-    """Embed-on-write for an active leaf with a successful summary and queryable vec table.
+    """Embed per-exchange chunks for an active-leaf branch (incremental write path).
 
-    Order is load-bearing: vec0 upsert FIRST, version columns LAST.
-    If the upsert raises and is swallowed, version columns stay at 0
-    so the branch remains eligible for backfill (no "version done, no vector").
+    Implements the clear-first/set-last watermark protocol:
+    - If any exchanges need embedding (new or content-changed), the branch
+      watermark is cleared to 0 BEFORE the embed loop (step 5a), then set to
+      EMBEDDING_VERSION only after every exchange has a current-version chunk
+      (step 8).
+    - Version-stale chunks are deliberately left to the background backfill;
+      this path embeds only new or content-changed exchanges, capped at
+      MAX_WRITE_PATH_EMBEDS_PER_SYNC per sync so the detached process stays
+      bounded even immediately after an EMBEDDING_VERSION bump.
+
+    Raises on failure — callers (sync_branch) must wrap in
+    contextlib.suppress(Exception). Does not commit; the single commit at
+    sync_current.py:137 owns the transaction.
     """
-    if not (summary_md and is_active and vec_writable):
+    # Step 1 — guard: nothing to do unless active, vec writable, and messages exist
+    if not (is_active and vec_writable and branch_msgs):
         return
-    # Deliberately broad: embed_text wraps a third-party model stack
-    # (fastembed/onnxruntime) whose failure modes aren't a fixed type, and
-    # embedding is non-essential here — a failure just leaves the branch
-    # eligible for backfill rather than failing the sync/import.
-    with contextlib.suppress(Exception):
-        vec = embed_text(summary_md)
-        write_branch_embedding(cursor, branch_db_id, vec, SUMMARY_VERSION)
+
+    # Step 2 — build per-exchange pairs from the branch messages
+    exchanges = build_exchange_pairs(branch_msgs)
+    if not exchanges:
+        return
+
+    # Step 3 — compute embedded text, content hash, and bounded display text per exchange.
+    # Display columns use the same head+tail cap per turn so the shown excerpt aligns
+    # with the embedded region (design.md challenge M14).
+    exchange_data = []
+    for ex in exchanges:
+        user = ex.get("user") or ""
+        assistant = ex.get("assistant") or ""
+        combined = f"{user}\n\n{assistant}"
+        text, was_capped = cap_for_embedding(combined)
+        content_hash = hashlib.sha256(text.encode()).hexdigest()
+        user_text, _ = cap_for_embedding(user)
+        assistant_text, _ = cap_for_embedding(assistant)
+        exchange_data.append(
+            {
+                "index": ex["index"],
+                "text": text,
+                "was_capped": was_capped,
+                "content_hash": content_hash,
+                "timestamp": ex.get("timestamp"),
+                "first_message_uuid": ex.get("first_message_uuid"),
+                "user_text": user_text,
+                "assistant_text": assistant_text,
+            }
+        )
+
+    # Step 4 — load existing chunks rows for this branch
+    cursor.execute(
+        "SELECT exchange_index, content_hash, embedding_version, embedding_model FROM chunks WHERE branch_id = ?",
+        (branch_db_id,),
+    )
+    existing_chunks: dict[int, dict] = {
+        row[0]: {"content_hash": row[1], "embedding_version": row[2], "embedding_model": row[3]}
+        for row in cursor.fetchall()
+    }
+
+    # Step 5 — diff: eligible = no chunk row OR content_hash changed.
+    # Version-stale (embedding_version < EMBEDDING_VERSION) but content-unchanged
+    # chunks are deliberately excluded — those are backfill's job (design H6).
+    current_indices = {ed["index"] for ed in exchange_data}
+    needing_embed_full = [
+        ed
+        for ed in exchange_data
+        if ed["index"] not in existing_chunks or existing_chunks[ed["index"]]["content_hash"] != ed["content_hash"]
+    ]
+    indices_to_prune = set(existing_chunks) - current_indices
+
+    # Early return: nothing to embed and nothing to prune
+    if not needing_embed_full and not indices_to_prune:
+        # Idempotent watermark repair: set to EMBEDDING_VERSION iff every existing
+        # chunk is already version-current (repairs a prior failed step 8).
+        if exchange_data and all(
+            existing_chunks.get(ed["index"], {}).get("embedding_version") == EMBEDDING_VERSION for ed in exchange_data
+        ):
+            cursor.execute(
+                "UPDATE branches SET embedding_version = ?, embedding_model = ? WHERE id = ?",
+                (EMBEDDING_VERSION, EMBEDDING_MODEL, branch_db_id),
+            )
+        return
+
+    # Step 5a — clear-first: if any exchange needs embedding, clear the watermark
+    # BEFORE the loop so a mid-loop exception leaves the branch stale, never
+    # stale-but-true (single commit — sync_current.py:137 — persists this state).
+    if needing_embed_full:
+        cursor.execute("UPDATE branches SET embedding_version = 0 WHERE id = ?", (branch_db_id,))
+
+    # Cap the embed loop to bound per-sync inference cost
+    needing_embed = needing_embed_full[:MAX_WRITE_PATH_EMBEDS_PER_SYNC]
+
+    # Step 6 — embed loop: for each needing-embed exchange, upsert the chunks row,
+    # embed the text, then write the vector (order invariant: vector FIRST,
+    # bookkeeping LAST — so a mid-loop exception leaves the chunk eligible for
+    # backfill rather than marked done-without-vector).
+    for ed in needing_embed:
+        # Upsert chunks row via DELETE+INSERT (vec0 rejects INSERT OR REPLACE)
+        cursor.execute(
+            "DELETE FROM chunks WHERE branch_id = ? AND exchange_index = ?",
+            (branch_db_id, ed["index"]),
+        )
+        cursor.execute(
+            """
+            INSERT INTO chunks (
+                branch_id, exchange_index, content_hash, first_message_uuid,
+                timestamp, user_text, assistant_text, was_capped,
+                embedding_version, embedding_model
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, NULL)
+            """,
+            (
+                branch_db_id,
+                ed["index"],
+                ed["content_hash"],
+                ed["first_message_uuid"],
+                ed["timestamp"],
+                ed["user_text"],
+                ed["assistant_text"],
+                int(ed["was_capped"]),
+            ),
+        )
+        chunk_id = cursor.lastrowid
+        assert chunk_id is not None  # noqa: S101 — lastrowid is non-None after a successful INSERT
+        # Vector FIRST (order invariant), bookkeeping LAST
+        vec = embed_text(ed["text"])
+        write_chunk_embedding(cursor, chunk_id, vec, EMBEDDING_VERSION, EMBEDDING_MODEL)
+
+    # Step 7 — prune: delete chunks whose exchange_index no longer exists.
+    # The chunks_vec_ad cascade trigger removes their chunk_vec rows automatically.
+    if indices_to_prune:
+        ph = ",".join("?" * len(indices_to_prune))
+        cursor.execute(
+            f"DELETE FROM chunks WHERE branch_id = ? AND exchange_index IN ({ph})",
+            (branch_db_id, *indices_to_prune),
+        )
+
+    # Step 8 — set watermark iff every exchange now has a current-version chunk
+    # with the correct content_hash. Checks both version AND content_hash so that
+    # content-changed exchanges beyond the cap (left for backfill) don't falsely
+    # satisfy the predicate.
+    embedded_indices = {ed["index"] for ed in needing_embed}
+    all_current = True
+    for ed in exchange_data:
+        idx = ed["index"]
+        if idx in embedded_indices:
+            continue  # just embedded at EMBEDDING_VERSION with correct content_hash
+        existing = existing_chunks.get(idx)
+        if (
+            existing is None
+            or existing["embedding_version"] != EMBEDDING_VERSION
+            or existing["content_hash"] != ed["content_hash"]
+        ):
+            all_current = False
+            break
+    if all_current:
+        cursor.execute(
+            "UPDATE branches SET embedding_version = ?, embedding_model = ? WHERE id = ?",
+            (EMBEDDING_VERSION, EMBEDDING_MODEL, branch_db_id),
+        )
 
 
 def sync_branch(
@@ -437,8 +591,13 @@ def sync_branch(
         (agg_content, branch_db_id),
     )
 
-    summary_md = write_branch_summary(cursor, branch_db_id)
-    embed_branch(cursor, branch_db_id, summary_md, is_active, vec_writable)
+    write_branch_summary(cursor, branch_db_id)
+    # fetch_branch_messages returns flat {role, content, timestamp, uuid} dicts — the
+    # format build_exchange_pairs expects. branch_msgs (raw JSONL) is the right input
+    # for metadata computation above but not for embedding.
+    with contextlib.suppress(Exception):
+        embed_msgs = fetch_branch_messages(cursor, branch_db_id, include_notifications=False)
+        embed_branch_chunks(cursor, branch_db_id, embed_msgs, is_active, vec_writable)
 
 
 def upsert_import_log(
