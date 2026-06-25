@@ -3,7 +3,7 @@ task_id: "T04"
 title: "Re-target backfill to chunk-grain eligibility and embedding"
 status: "planned"
 depends_on: ["T01", "T02", "T03"]
-implements: ["FR#6", "FR#15", "AC#7"]
+implements: ["FR#6", "FR#15", "AC#5", "AC#7", "AC#12", "AC#15"]
 ---
 
 ## Summary

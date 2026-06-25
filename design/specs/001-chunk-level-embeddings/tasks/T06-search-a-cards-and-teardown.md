@@ -3,7 +3,7 @@ task_id: "T06"
 title: "Wire Entrypoint A to chunk-KNN cards and tear down branch_vec"
 status: "planned"
 depends_on: ["T01", "T02", "T03", "T04", "T05"]
-implements: ["FR#2", "FR#3", "FR#9", "FR#11", "FR#12", "FR#8"]
+implements: ["FR#2", "FR#3", "FR#9", "FR#11", "FR#12", "FR#8", "AC#1", "AC#2", "AC#8", "AC#9"]
 ---
 
 ## Summary
@@ -19,6 +19,7 @@ are removed here.
 
 - modify: `src/ccrecall/search_conversations.py`
 - modify: `src/ccrecall/db.py`
+- modify: `src/ccrecall/session_ops.py`
 - modify: `src/ccrecall/legacy.py`
 - modify: `src/ccrecall/hooks/import_conversations.py`
 - modify: `tests/test_search.py`
@@ -88,9 +89,18 @@ Schema` (unconditional drop).
      `DROP TRIGGER IF EXISTS branches_vec_ad; DROP TABLE IF EXISTS branch_vec;` — **NOT** routed
      through the dimension self-heal (which never fires at the unchanged `float[512]`, challenge H5).
      Keep the `chunk_vec` creation + watermark-reset-on-chunk_vec-drop from T01.
-   - Delete `upsert_branch_vec` and `write_branch_embedding` from `db.py` (no callers remain — verify
-     with grep). Rename/replace the `branch_vec_queryable` guard usages in `search_conversations.py`
-     with `chunk_vec_queryable` (the A path now needs the chunk table queryable).
+   - Delete `upsert_branch_vec`, `write_branch_embedding`, **and `branch_vec_queryable`** from `db.py`
+     (no callers remain after this task — verify with grep).
+   - **Rename every `branch_vec_queryable` caller to `chunk_vec_queryable`** — there are TWO:
+     `search_conversations.py` (the A query/`print_status` guards) **and**
+     `src/ccrecall/session_ops.py::sync_session` (`session_ops.py:555`, the `vec_writable` probe that
+     gates the write path). **This rename in `session_ops.py` is mandatory and load-bearing:** after
+     `branch_vec` is dropped, a lingering `branch_vec_queryable(conn)` probe hits the dropped table,
+     catches `sqlite3.Error`, returns `False`, and `embed_branch_chunks`'s step-1 guard then silently
+     skips ALL write-path chunk embedding while the sync still returns `{"continue": true}`. T03
+     deliberately left this probe named `branch_vec_queryable` for this task to finish — do not skip
+     it. (`branch_vec` and `chunk_vec` are created together in `_ensure_vec_schema`, so the rename is
+     behaviour-equivalent before teardown and correct after.)
    - Remove the now-dead `_get_vec_branch_ids`/`_hydrate_branches` A-path message loading per
      `## Replacement Targets` (note `_hydrate_branches` is only on the A path; if no other caller
      remains, remove it; `format_markdown_session`/`format_json_sessions` stay in `formatting.py`).
@@ -115,6 +125,13 @@ Schema` (unconditional drop).
      `branch_vec` is dropped and `chunk_vec` exists with watermarks reset (`embedding_version = 0`).
      Adapt the assertions accordingly.
    - Add an `AC#8`/no-full-transcript guard: no A result list contains a full transcript.
+   - **Post-teardown write-path regression** (guards the blocking comb finding): after teardown, a
+     `sync_branch`/`sync_session` run still writes `chunk_vec` rows — i.e. the `vec_writable` probe in
+     `session_ops.py` now reads `chunk_vec_queryable` and returns True, so `embed_branch_chunks` is
+     not silently skipped. Assert chunk vectors exist after a post-teardown sync.
+   - **AC#9 retrieval half:** seed a chunk embedded from a head+tail-capped exchange, run the chunk-KNN
+     search, and assert the chunk's session is returned for a query matching its head or tail (the
+     end-to-end complement to T02's cap-produces-a-vector unit test).
 
 ## Focus
 
@@ -145,8 +162,14 @@ Schema` (unconditional drop).
 - [ ] FR#12: Entrypoint A emits one scored card per session (deduped to best-ranked branch) with no
       full transcript in the list (AC#2).
 - [ ] FR#8: `branch_vec` is dropped losslessly (derived data) and `upsert_branch_vec`/
-      `write_branch_embedding` removed; `messages`/`branches`/`branch_messages` are untouched;
-      `test_legacy_migration.py` confirms migration preserves history while dropping `branch_vec`.
+      `write_branch_embedding`/`branch_vec_queryable` removed (no callers remain — `grep -rn
+      branch_vec src/` finds only intentional comments); the `vec_writable` probe in
+      `session_ops.py::sync_session` reads `chunk_vec_queryable`; `messages`/`branches`/
+      `branch_messages` are untouched; `test_legacy_migration.py` confirms migration preserves history
+      while dropping `branch_vec`. A post-teardown sync still writes `chunk_vec` (write-path regression
+      guard for the probe rename).
+- [ ] AC#9: The chunk-KNN search returns a chunk embedded from a head+tail-capped exchange for a
+      query matching its head or tail (the retrieval complement to T02's cap unit test).
 - [ ] AC#1: A query whose only match is a middle exchange of a >8-exchange session returns that
       session in Entrypoint A results.
 - [ ] AC#2: Entrypoint A returns one scored card per session, ranked by best-chunk fusion, with no

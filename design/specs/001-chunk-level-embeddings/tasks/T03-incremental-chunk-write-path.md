@@ -3,7 +3,7 @@ task_id: "T03"
 title: "Replace embed_branch with incremental embed_branch_chunks"
 status: "planned"
 depends_on: ["T01", "T02"]
-implements: ["FR#1", "FR#5", "FR#14"]
+implements: ["FR#1", "FR#5", "FR#14", "AC#4", "AC#11"]
 ---
 
 ## Summary
@@ -93,12 +93,13 @@ kept alongside; its sole caller (`sync_branch`) migrates in this same change.
 ## Focus
 
 - `sync_branch` and `sync_session` are in `session_ops.py`; `vec_writable` is probed once in
-  `sync_session` (`session_ops.py:555`) via `branch_vec_queryable(conn)`. **Keep using the existing
-  probe name** for the write path's guard — do NOT switch to `chunk_vec_queryable` here, because
-  `branch_vec` and `chunk_vec` are created together in `_ensure_vec_schema` (both present or both
-  absent), and T06 owns the queryable-guard rename. (If you prefer the chunk-accurate name, it is
-  acceptable to thread `chunk_vec_queryable` instead — both are equivalent post-T01 — but do not
-  leave a half-renamed state.)
+  `sync_session` (`session_ops.py:555`) via `branch_vec_queryable(conn)`. **Keep the existing probe
+  name `branch_vec_queryable` for the write path's guard in this task** — do NOT switch to
+  `chunk_vec_queryable` here. `branch_vec` and `chunk_vec` are created together in
+  `_ensure_vec_schema` (both present or both absent post-T01), so the existing probe is correct while
+  `branch_vec` still exists. **T06 owns the rename of this exact probe to `chunk_vec_queryable`** (as
+  a load-bearing step of the `branch_vec` teardown — once `branch_vec` is dropped, this probe MUST
+  read `chunk_vec_queryable` or the write path silently stops embedding). Do not anticipate it here.
 - `build_exchange_pairs` (T02) and `cap_for_embedding` (T02) and `upsert_chunk_vec` /
   `write_chunk_embedding` (T01) are your dependencies — import them at module top (no lazy imports).
 - Use `hashlib.sha256(text.encode()).hexdigest()` for `content_hash`; import `hashlib` at top.

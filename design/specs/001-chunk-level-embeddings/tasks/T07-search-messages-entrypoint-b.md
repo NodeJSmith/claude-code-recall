@@ -3,7 +3,7 @@ task_id: "T07"
 title: "Add search-messages command for Entrypoint B matched exchanges"
 status: "planned"
 depends_on: ["T05", "T06"]
-implements: ["FR#4", "FR#13", "FR#17", "FR#11"]
+implements: ["FR#4", "FR#13", "FR#17", "FR#11", "AC#3", "AC#14"]
 ---
 
 ## Summary
@@ -55,8 +55,11 @@ flag on `search` (challenge C3).
    group: `--max-results` (same `MAX_SEARCH_RESULTS` bound family), `--project`, `--session`,
    `--path`, `--include-notifications` (reuse `_NOTIFS`), `--db`, and the global `--json` via
    `ctx.output_format` — no per-command `--json`. The positional/`-q` query is required (B has no
-   `--status` mode). Reuse the shared `Annotated` flag types (`_VERBOSE`, `_NOTIFS`, `_DB`) and the
-   `CLIContextParam`. Call the B run function in `search_conversations`.
+   `--status` mode). Reuse the shared `Annotated` flag types `_NOTIFS` and `_DB` and the
+   `CLIContextParam`. **Do NOT add `--verbose` to `search-messages`:** `--verbose` is a Track A card
+   affordance (it expands the card's `files_modified`/`commits`/`tool_counts` lists); a B snippet has
+   no analogous collapsible metadata — its excerpt is already bounded — so `--verbose` would be a
+   no-op surface. Omit it. Call the B run function in `search_conversations`.
 
 3. **Tests (`tests/test_search.py`)** — add B coverage:
    - **Matched-exchange shape (AC#3):** B returns matched exchanges with a `(handle,
@@ -76,8 +79,9 @@ flag on `search` (challenge C3).
 - The snippet renderer + envelope + score normalization land in T05 — reuse them; B only computes
   `score_raw = 1.0 - distance` and assembles snippet dicts.
 - `cli/commands.py` patterns: `cmd_search` (`:193-228`) is the closest template; `_SEARCH_MODE`
-  group is search-specific (B has no status mode, so don't reuse that group). `_NOTIFS`/`_VERBOSE`/
+  group is search-specific (B has no status mode, so don't reuse that group). `_NOTIFS`/
   `_DB`/`CLIContextParam`/`ctx.output_format` are at `:58-65` and used throughout — follow them.
+  (`_VERBOSE` exists there too but is **not** used by `search-messages` — see the Prompt prohibition.)
 - `--include-notifications` already threads to `fetch_branch_messages`; for B it is mostly moot
   (chunks store the exchange text directly), but accept the flag for surface symmetry.
 - Document the exact command name `search-messages` (the skill + tool-reference doc updates are

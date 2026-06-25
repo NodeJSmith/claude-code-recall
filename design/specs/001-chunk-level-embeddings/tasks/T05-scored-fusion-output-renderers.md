@@ -72,7 +72,10 @@ This task adds renderers **alongside** the retained `format_markdown_session` /
    - `tests/test_fusion.py` — add `rrf_scored` coverage (returns `(id, score)` in descending order;
      handles empty/disjoint lists) alongside the existing ids-only `rrf` tests (which stay).
    - `tests/test_formatting.py` — card shape (markdown + JSON superset, no body text, flat size
-     across session lengths, `--verbose` expansion), snippet shape (markdown + JSON, bounded turns,
+     across session lengths, `--verbose` expansion, **uncached-branch degrade card** — renders with a
+     fallback topic + counts, never errors, per the contract's own uncached-branch criterion;
+     referenced here without a bare "AC#7" to avoid colliding with design AC#7 = history
+     preservation), snippet shape (markdown + JSON, bounded turns,
      `matched_role:null`/`match_terms:[]` accepted), envelope (count/ranked), score normalization
      (multi-result min-max two decimals; **single-result → `score: null`, `score_raw` present**;
      unranked → all null + marker line). Map assertions to `output-format-contract.md` shapes

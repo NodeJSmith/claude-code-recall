@@ -3,7 +3,7 @@ task_id: "T08"
 title: "Guard sync-current concurrency and warm the model cache on setup"
 status: "planned"
 depends_on: []
-implements: ["FR#16"]
+implements: ["FR#16", "AC#13"]
 ---
 
 ## Summary
@@ -18,7 +18,7 @@ land any time.
 ## Target Files
 
 - modify: `src/ccrecall/hooks/sync_current.py`
-- modify: `src/ccrecall/hooks/memory_sync.py`
+- read: `src/ccrecall/hooks/memory_sync.py`
 - modify: `src/ccrecall/hooks/memory_setup.py`
 - modify: `src/ccrecall/hooks/onboarding.py`
 - modify: `tests/test_sync_hook.py`
