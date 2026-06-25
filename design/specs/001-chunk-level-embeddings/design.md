@@ -1,7 +1,7 @@
 # Design: Chunk-Level Conversation Embeddings (Issue #31)
 
 **Date:** 2026-06-25
-**Status:** draft
+**Status:** approved
 **Scope-mode:** hold
 **Research:** design/research/2026-06-25-chunk-level-embeddings/research.md
 **Output contract:** design/specs/001-chunk-level-embeddings/output-format-contract.md (absorbed from draft PR #33)
@@ -128,6 +128,14 @@ builds the **retrieval substrate** that feeds it and lands both result shapes en
   best-ranked branch), with no full transcript in the result list.
 - **FR#13** Each entrypoint B result carries a `(handle, exchange_index, timestamp)`
   locator and a per-message-bounded excerpt (separate user and assistant fields).
+- **FR#14** The write path embeds only new or content-changed exchanges and is bounded per
+  sync; version-stale chunks are re-embedded by the background backfill, not on the write path.
+- **FR#15** The backfill re-selects any branch that has a chunk row without a current vector
+  (crash victims, post-vector-drop orphans), independent of the branch watermark.
+- **FR#16** Concurrent `sync-current` invocations are serialized: a second invocation while one
+  is running skips rather than running a parallel embed.
+- **FR#17** Entrypoint B returns a well-formed empty `ranked:false` result (never an error)
+  when the vector index is unavailable.
 
 ## Edge Cases
 
@@ -138,14 +146,31 @@ builds the **retrieval substrate** that feeds it and lands both result shapes en
 - **Rewind creating a new active leaf:** the old leaf becomes inactive; its chunks remain
   but are excluded from query (query filters `branches.is_active = 1`, unchanged). The new
   leaf's chunks are embedded on its next sync.
-- **Over-long exchange (huge pasted file / tool dump):** head+tail cap before embedding
-  (FR#10); the chunk row's stored `user_text`/`assistant_text` are independently bounded for
-  display.
+- **Over-long exchange (huge pasted file / tool dump):** token-aware head+tail cap before
+  embedding (FR#10); display `user_text`/`assistant_text` use the same head+tail logic so the
+  shown excerpt aligns with the embedded region.
+- **Dense content (base64/minified) under the char budget but over the token limit:** the
+  cap's post-check tightens until it fits the 8192-token model limit, so it does not trip the
+  `CONTENT_ERROR` sentinel on routine density (challenge Finding M12).
+- **Suppressed write-path content error (chunks row committed, vector missing):** an embed
+  error inside the loop (after step 6 inserts the `chunks` row to allocate its rowid, before the
+  `chunk_vec` write) is swallowed by `sync_branch`'s `contextlib.suppress(Exception)`, and the
+  sync still commits the orphan `chunks` row. The backfill's chunk-grain heal clause
+  (`chunks` row with no `chunk_vec`) re-selects this branch (challenge C1).
+- **Process crash mid-embed (SIGKILL / OOM):** a `MemoryError` is `BaseException`, so it is
+  **not** caught by `suppress(Exception)` — like SIGKILL, the sync dies before its single commit
+  and the WAL rolls back the *entire* transaction (cleared watermark **and** the new `chunks`
+  row). State: watermark reverts to its prior value, no orphan row exists. The branch self-heals
+  on its **next Stop sync** (the diff finds the missing exchange and embeds it). **Residual gap
+  (named, accepted under hold scope):** if such a session is *never resumed*, its final exchange
+  stays unembedded — invisible to both backfill predicates. Narrow and bounded; closing it would
+  require a periodic full re-scan, deferred.
 - **Partial re-embed interrupted** (backfill killed mid-branch): chunk-grain version
   filtering (FR#9) means already-embedded chunks still serve; the rest stay eligible.
-- **vec0 unavailable** (extension won't load): no chunk vectors are created; search
-  degrades to the keyword path exactly as today (`branch_vec_queryable` guard generalizes
-  to `chunk_vec`).
+- **vec0 unavailable** (extension won't load): no chunk vectors are created. **Track A** search
+  degrades to the keyword path exactly as today (`branch_vec_queryable` guard generalizes to
+  `chunk_vec_queryable`). **Track B** (`search-messages`) returns an empty `ranked:false`
+  envelope — it has no keyword fallback in this landing (deferred, issue #34).
 - **Many chunks collapsing to few branches in A:** the KNN `top_k` must overfetch enough
   chunks that, after best-chunk-per-branch rollup, at least `max_results` distinct
   sessions remain (see Architecture → Overfetch).
@@ -175,6 +200,17 @@ builds the **retrieval substrate** that feeds it and lands both result shapes en
   (FR#10)
 - **AC#10** Card, snippet, and envelope JSON/markdown match `output-format-contract.md`'s
   shapes field-for-field. (FR#11)
+- **AC#11** After an `EMBEDDING_VERSION` bump, the next sync of a long existing session embeds
+  at most `MAX_WRITE_PATH_EMBEDS_PER_SYNC` chunks (not all N); backfill upgrades the rest.
+  (FR#14)
+- **AC#12** A branch with a `chunks` row whose `chunk_vec` row is missing (simulated crash) is
+  re-selected by backfill even when its watermark reads `EMBEDDING_VERSION`. (FR#15)
+- **AC#13** A second `sync-current` started while one is running exits without embedding; the
+  first completes normally. (FR#16)
+- **AC#14** With the vector index unavailable, `search-messages` exits 0 with an empty
+  `ranked:false` envelope. (FR#17)
+- **AC#15** A branch whose summary failed (`context_summary = NULL`) still gets its exchanges
+  chunk-embedded and is searchable. (FR#1, via the widened chunk universe)
 
 ## Key Constraints
 
@@ -190,9 +226,19 @@ builds the **retrieval substrate** that feeds it and lands both result shapes en
   (`memory_sync.py`) spawns a **detached** `ccrecall sync-current` process and returns
   `{"continue": true}` immediately — embedding never blocks session-stop. But the detached
   process runs on the user's machine (incl. the resource-constrained laptop/VPS), so
-  embedding N chunks per sync would thrash it. The incremental write path (FR#5) is what
-  keeps that detached process at ~1 inference/sync. **This is a requirement, not an
-  optimization.**
+  embedding work per sync must stay bounded. The write-path diff (only new/content-changed
+  exchanges, version-stale left to backfill) plus the `MAX_WRITE_PATH_EMBEDS_PER_SYNC` cap
+  (write-path step 5) keep the steady state at **~1 inference/sync and the worst case bounded**
+  — even right after the `EMBEDDING_VERSION` bump, on a rewind, or on a long imported session's
+  first sync (challenge Finding H6). **This is a requirement, not an optimization.**
+- **`sync-current` needs a concurrency guard** (challenge Finding C2). `memory_sync.py:39`
+  spawns a detached `sync-current` on **every** Stop, with no PID/lock guard (the backfill has
+  `PID_KEY`; `sync-current` has nothing). Two rapid Stops — a rewind then a new message, or
+  overlapping sessions — produce two concurrent CPU-bound inference processes: the exact
+  orphan-swarm the machines' reaper units fight, now amplified because each can do several
+  inferences. `sync-current` gains a lock-file guard at startup: if a prior `sync-current` is
+  running, exit 0 immediately and skip this sync (recovered on the next Stop). Skip-not-queue,
+  so guards never themselves accumulate processes.
 - **No full-transcript inlining in any result list** (inherited from the absorbed
   contract): A renders cards; B renders bounded excerpts; `ccrecall tail` is the only
   full-fetch path.
@@ -212,7 +258,14 @@ builds the **retrieval substrate** that feeds it and lands both result shapes en
 - **`context_summary_json`** exists on synced branches and carries `topic`/`disposition`
   for the Track A card; predating branches are covered by the contract's degrade path.
 - No external services, auth, or network beyond the existing local model. Read/write only
-  over `~/.ccrecall/conversations.db`.
+  over `~/.ccrecall/conversations.db`. **Caveat (challenge Finding M22):** the "local model"
+  assumption is false on *first install* — `get_model()` (`embeddings.py:56-66`) triggers a
+  ~120 MB fastembed download synchronously. Inside the detached `sync-current` this is an
+  invisible multi-minute hang (logging is off by default). Mitigate by **warming the model
+  cache during `ccrecall setup`/onboarding** so the detached path never downloads, and emit a
+  logged warning (regardless of `logging_enabled`) if a download is ever triggered from a
+  detached context. This is pre-existing behavior the chunk change inherits, not creates, but
+  it is worth closing alongside.
 
 ## Architecture
 
@@ -255,6 +308,7 @@ CREATE TABLE IF NOT EXISTS chunks (
   timestamp         TEXT,                      -- exchange timestamp (locator)
   user_text         TEXT,                      -- per-message-bounded user turn (Track B "user" field)
   assistant_text    TEXT,                      -- per-message-bounded assistant turn (Track B "assistant" field)
+  was_capped        INTEGER NOT NULL DEFAULT 0, -- 1 if the embedded text was head+tail-capped (diagnostics)
   embedding_version INTEGER NOT NULL DEFAULT 0,
   embedding_model   TEXT,
   UNIQUE(branch_id, exchange_index)
@@ -284,10 +338,21 @@ CREATE TRIGGER IF NOT EXISTS chunks_vec_ad
 ```
 
 `_ensure_vec_schema` (`db.py:173-204`) is extended to create `chunk_vec` + the two
-triggers and to **drop the obsolete `branch_vec`** (and its `branches_vec_ad` trigger) the
-same way it already self-heals a stale embedding dimension (`db.py:189-195`) — a lossless
-drop of derived data. `branch_vec_queryable` gains a `chunk_vec` sibling
+triggers and to **drop the obsolete `branch_vec`**. The drop must be an **explicit,
+unconditional** `DROP TRIGGER IF EXISTS branches_vec_ad; DROP TABLE IF EXISTS branch_vec;` —
+**not** routed through the existing dimension self-heal (`db.py:189-195`). That self-heal only
+fires when the stored DDL's `float[N]` ≠ the current `EMBEDDING_DIM`; since this design keeps
+`EMBEDDING_DIM = 512`, an existing `branch_vec(float[512])` satisfies the check and would
+**never** be dropped (challenge Finding H5). The unconditional drop runs once at schema-ensure
+and is lossless (derived data). `branch_vec_queryable` gains a `chunk_vec` sibling
 (`chunk_vec_queryable`) used by the query/write/backfill guards.
+
+**`chunk_vec` drop resets watermarks.** If `chunk_vec` is ever dropped and recreated — the
+dimension self-heal on a future model swap, or operator incident response — every branch
+watermark would still read `EMBEDDING_VERSION` while its vectors are gone (a stale-but-true
+state the backfill predicate can't see). So whenever `_ensure_vec_schema` drops `chunk_vec`,
+it must also `UPDATE branches SET embedding_version = 0` (reset all watermarks), forcing
+backfill to repopulate. This pairs with the per-chunk heal clause below.
 
 **Embedding bookkeeping moves to the chunk grain.** `chunks.embedding_version` /
 `embedding_model` are the source of truth for staleness (FR#9). The existing
@@ -305,16 +370,37 @@ exchange of this branch has a current-version chunk vector." For the watermark t
 > of the sync (`sync_current.py:137`) persists the cleared watermark together with whatever
 > chunks did succeed — leaving the branch stale, never stale-but-true.
 
-This is what makes the suppressed-embed-failure case the comb flagged safe: a half-embedded
-branch always commits with `embedding_version < EMBEDDING_VERSION`, so the backfill's watermark
-predicate catches it. (An earlier draft instead compared a current-chunk *count* to
-`branches.exchange_count`. That comparison is unsafe because the two counts are computed over
-different inputs: `compute_branch_metadata` (`parsing.py:224`) counts user turns over **raw
-JSONL entries** with its own exclusions (`is_tool_result`, `is_task_notification`,
-`is_teammate_message`), while `build_exchange_pairs` (`summarizer.py:124`) counts over the
-**fetched message rows** (`role`/`content`). They are not guaranteed equal, so an equality/`<`
-test between them can misclassify a branch. The clear-first protocol removes the need for any
-count comparison.)
+This makes the *caught-exception* failure safe: a half-embedded branch commits with
+`embedding_version < EMBEDDING_VERSION`, so the watermark predicate catches it.
+
+**But the watermark alone is NOT sufficient** (challenge Finding C1). Two failure modes escape
+the watermark predicate, so the backfill **also carries an explicit chunk-grain heal clause**
+(the generalization of today's `OR NOT EXISTS (… branch_vec …)` at `backfill_embeddings.py:84-85`,
+which an earlier draft wrongly dropped):
+
+```sql
+OR EXISTS (
+  SELECT 1 FROM chunks c
+  WHERE c.branch_id = branches.id
+    AND NOT EXISTS (SELECT 1 FROM chunk_vec WHERE chunk_id = c.id)
+)
+```
+
+It catches a **committed orphan `chunks` row with no `chunk_vec`**, which arises two ways:
+(a) a *suppressed write-path content error* — step 6 inserts the `chunks` row to allocate its
+rowid, then `embed_text` raises and is swallowed, committing the row without its vector; and
+(b) a *`chunk_vec` drop* without the watermark reset (defended separately by the reset-on-drop
+above). What the heal clause does **not** cover is a full-transaction rollback (SIGKILL / OOM /
+power-loss before the single commit): there the cleared watermark *and* the new `chunks` row both
+roll back, leaving no orphan — that branch self-heals on its next Stop sync (the diff finds the
+missing exchange), with the narrow never-resumed residual named in Edge Cases.
+
+The discarded alternative was comparing a current-chunk *count* to `branches.exchange_count`;
+that is unsafe because the two are computed over different inputs (`compute_branch_metadata`,
+`parsing.py:224`, counts user turns over **raw JSONL entries** with `is_tool_result` /
+`is_task_notification` / `is_teammate_message` exclusions, while `build_exchange_pairs`,
+`summarizer.py:124`, counts over **fetched message rows**) — not guaranteed equal, so a
+`count < exchange_count` test can misclassify. The `NOT EXISTS` heal clause needs no count.
 
 `summary_version_at_embed` is **vestigial** for the chunk path (chunk staleness is driven by
 `content_hash` + `EMBEDDING_VERSION`, not the summary version) — retained but unused by chunk
@@ -329,24 +415,44 @@ is_active, vec_writable)`:
 1. Guard: return unless `is_active and vec_writable and branch_msgs`.
 2. Build exchanges via `build_exchange_pairs(branch_msgs)` (extended to carry
    `first_message_uuid`).
-3. For each exchange compute `text = head_tail_cap(f"{user}\n\n{assistant}")` and
-   `content_hash = sha256(text)`.
+3. For each exchange compute `text = cap_for_embedding(f"{user}\n\n{assistant}")` and
+   `content_hash = sha256(text)`, plus a `was_capped` flag. `cap_for_embedding` is
+   **token-aware, not character-count** (challenge Finding M12): it head+tail-caps to a
+   character budget, then verifies `len(tokenize(text)) <= MODEL_TOKEN_LIMIT` and tightens the
+   cap until it fits — so dense content (minified JSON, base64) that is under the char budget
+   but over the 8192-token limit cannot reach `embed_text` and trip the `CONTENT_ERROR`
+   sentinel. The fastembed tokenizer is reachable via the already-loaded model. (Worst case:
+   a single exchange that cannot fit even when fully capped still raises and is marked
+   `CONTENT_ERROR` — but the token check makes that the genuine pathological exception, not a
+   routine density miss.)
 4. Load existing `chunks` rows for the branch (`exchange_index → (content_hash,
    embedding_version, model)`).
-5. **Diff:** an exchange needs embedding iff no row exists, `content_hash` changed,
-   `embedding_version < EMBEDDING_VERSION`, or `embedding_model` mismatches. Normally only
-   the newly-appended last exchange qualifies → **one inference** (FR#5). If the diff finds
-   nothing to embed and no prune is needed, every exchange already has a current chunk, so
-   set the watermark to `EMBEDDING_VERSION` if it isn't already (idempotent repair — this
-   heals the rare case where a prior run's step-8 update failed after a successful embed
-   loop) and return.
+5. **Diff (write-path eligibility):** the write path embeds an exchange iff **no chunk row
+   exists** or its **`content_hash` changed**. It deliberately does **not** re-embed merely
+   *version-stale* or *model-mismatched* chunks — those are left to the background backfill
+   (challenge Finding H6). This keeps steady-state at ~1 inference/sync **even immediately
+   after an `EMBEDDING_VERSION` bump**: the next sync of a long existing session embeds only
+   its genuinely-new exchange (1 inference), not all N stale ones (which would spike the
+   detached process). The version-stale chunks stay queryable-excluded (FR#9) until backfill
+   upgrades them — an accepted migration-window degradation. Backfill eligibility (below) is
+   the broader predicate that *does* include version-stale.
+   - As a guardrail against pathological cases (e.g. a brand-new active leaf from a rewind
+     with many fresh exchanges, or a first sync of a long imported session), the write-path
+     embed loop is **capped at `MAX_WRITE_PATH_EMBEDS_PER_SYNC`** (a small constant, e.g. 8);
+     any remainder is left to backfill. This bounds the detached process's worst case.
+   - If the diff finds nothing to embed and no prune is needed, every exchange already has a
+     *content-current* chunk, so set the watermark to `EMBEDDING_VERSION` **iff every chunk is
+     also version-current** (idempotent repair of a prior failed step-8) and return.
 5a. **Clear-first:** if step 5 found any needing-embed exchange, set the branch watermark to
    `0` now (same transaction, before the embed loop) — see the watermark protocol above.
 6. For each needing-embed exchange: upsert the `chunks` row (DELETE+INSERT on
-   `(branch_id, exchange_index)`, storing `content_hash` + bounded `user_text`/`assistant_text`
-   + locator fields), `embed_text(text)`, then DELETE+INSERT the `chunk_vec` row keyed by the
-   chunk's `id`, then set the chunk's `embedding_version`/`model` (**order invariant**: vector
-   first, bookkeeping last).
+   `(branch_id, exchange_index)`, storing `content_hash`, `was_capped`, locator fields, and
+   the bounded `user_text`/`assistant_text`), `embed_text(text)`, then DELETE+INSERT the
+   `chunk_vec` row keyed by the chunk's `id`, then set the chunk's `embedding_version`/`model`
+   (**order invariant**: vector first, bookkeeping last). `user_text`/`assistant_text` are
+   bounded with the **same head+tail logic** used for the embedding text (per turn), so the
+   displayed excerpt is aligned with the region that produced the vector — a Track B snippet
+   never shows only the head while the match lived in the tail (challenge Finding M14).
 7. **Prune:** delete `chunks` rows whose `exchange_index` no longer exists (the cascade
    trigger removes their vectors).
 8. After the loop, if every exchange now has a current-version chunk, set the branch
@@ -355,7 +461,7 @@ is_active, vec_writable)`:
 **`embed_branch_chunks` raises** on failure — it does **not** swallow exceptions internally.
 This mirrors today's split, where `embed_branch` is a *suppressing wrapper* around the raising
 `embed_text`/`write_branch_embedding`. The two callers handle failure differently and must
-both retain a safety net (this is the crux of comb-blocking-3):
+both retain a safety net:
 
 - **Write path:** `sync_branch` (`session_ops.py:395-441`, which already has `branch_msgs` in
   scope at line 408) calls `embed_branch_chunks` inside `contextlib.suppress(Exception)` — a
@@ -370,28 +476,42 @@ both retain a safety net (this is the crux of comb-blocking-3):
 
 ### (3) Backfill — `hooks/backfill_embeddings.py`
 
-The batch loop, two-level failure model, `--threads`/`--days`/`--limit`, status counters,
-nice-level, and content-error sentinel are **preserved**. What changes:
+The batch loop, two-level failure model, `--threads`/`--days`/`--limit`, nice-level, and
+content-error sentinel are **preserved**. What changes:
 
-- `EMBEDDABLE_BRANCH_FILTER` stays (active leaf with a non-empty summary as the universe).
-- `build_selection` eligibility is the **watermark-stale** predicate
-  (`branches.embedding_version < EMBEDDING_VERSION` OR `embedding_model` mismatch OR NULL),
-  excluding the content-error sentinel — structurally the same shape as today's
-  `backfill_embeddings.py:77-88`, just reading the watermark instead of a `branch_vec` probe.
-  This is sound **because** the clear-first/set-last protocol (Architecture → Schema) keeps the
-  watermark from ever being stale-but-true: any branch with a missing/failed chunk reads as
-  `embedding_version < EMBEDDING_VERSION`. No `exchange_count` comparison is used (it is
-  off-by-one against the chunk count — see Schema).
-- Per-branch work calls the **same** `embed_branch_chunks` as the write path (one code path
-  for chunk embedding). Because `embed_branch_chunks` **raises** (the suppress lives at the
-  write-path call site, not inside it), the backfill's per-branch SAVEPOINT handler catches
-  `(ValueError, OverflowError, UnicodeError)` content errors and marks the sentinel — so a
-  persistently-failing branch is marked once and skipped, never looped to the no-progress
-  abort.
-- The content-error sentinel (`CONTENT_ERROR_VERSION = -1`) stays on the **branch**
-  watermark; FR#10's head+tail cap means tokenizer-overflow content errors are now rare.
-  (A branch is marked errored only when its embed step *raises* a content error — the cap
-  makes that the exception, not the rule.)
+- **Universe widens to drop the summary requirement** (challenge Finding M11). Chunk embedding
+  reads raw exchange text, not the summary, so a branch whose summary computation failed
+  (`context_summary = NULL`, swallowed at `session_ops.py:355-368`) still has embeddable
+  content. The chunk-path universe is therefore **active leaf with at least one message**
+  (`is_active = 1 AND EXISTS(branch_messages)`), *not* the inherited `EMBEDDABLE_BRANCH_FILTER`
+  (which requires a non-empty `context_summary`). Define a `CHUNK_EMBEDDABLE_BRANCH_FILTER`
+  for this; the old filter stays for any summary-dependent caller.
+- `build_selection` eligibility = **watermark-stale OR the per-chunk heal clause**, excluding
+  the content-error sentinel:
+  - watermark-stale: `branches.embedding_version < EMBEDDING_VERSION` OR `embedding_model`
+    mismatch OR NULL — this is what makes the whole corpus eligible after the version bump, and
+    it includes the **version-stale chunks the write path deliberately skips** (Finding H6, so
+    backfill owns the migration re-embed).
+  - heal clause: `OR EXISTS (chunks row for this branch with no chunk_vec)` — catches crash
+    victims and post-drop orphans the watermark can't see (Finding C1, see Schema).
+- **Per-branch message fetch** (was implicit; challenge Finding T1 + M10). The current loop
+  selects `(id, context_summary)` and embeds the summary directly. The new loop must fetch the
+  branch's messages to supply `branch_msgs` to `embed_branch_chunks`: call
+  `fetch_branch_messages(cursor, branch_id, include_notifications=False)` — **extended to
+  `SELECT m.uuid`** so backfilled chunks get a real `first_message_uuid` instead of NULL across
+  the whole historical corpus (M10). A `sqlite3.Error` during this fetch is a **batch-abort**
+  failure (re-raise to the batch handler), **not** a content-error sentinel — the two must not
+  be conflated (T1).
+- Per-branch embed calls the **same** `embed_branch_chunks` as the write path (one code path).
+  Because it **raises**, the per-branch SAVEPOINT handler catches `(ValueError, OverflowError,
+  UnicodeError)` content errors and marks the `CONTENT_ERROR_VERSION = -1` sentinel on the
+  branch watermark — marked once, skipped thereafter, never looped to the no-progress abort.
+  The token-aware cap (write-path step 3) makes content errors the genuine exception.
+- **Status/ETA counts inferences, not branches** (challenge Finding M21). Each branch now
+  contributes N inferences (one per exchange); a per-*branch* ETA on a 15-exchange corpus
+  under-reports the run length ~15×, so a 70-minute run looks hung. Add a `total_inferences`
+  counter alongside `total_updated` (branches) and report both: "N exchanges embedded across
+  M/total branches." `count_status` likewise reports chunk coverage, not branch coverage.
 
 ### (4) Search + output — `search_conversations.py`, `fusion.py`, `formatting.py`
 
@@ -421,11 +541,38 @@ normalization window is the displayed results, not the full fused list. Track B 
 its `1.0 - distance` values the same way at render time. (This applies to both entrypoints.)
 
 The terminal step changes from `_hydrate_branches` → `format_markdown_session` (dump) to a
-**card renderer** that reads `context_summary_json` (topic/disposition/counts) joined with
-the branch/session/project columns and the fused score — no `fetch_branch_messages` call on
-the A path. This is exactly the absorbed contract's Track A.
+**card renderer** that reads `context_summary_json` (topic/disposition) plus the branch row's
+`files_modified`/`commits`/`tool_counts` columns and the branch/session/project join columns
+and the fused score — **no full `fetch_branch_messages` hydration** on the A path. This is
+exactly the absorbed contract's Track A.
 
-**Entrypoint B (matched exchanges).** A parallel select path: chunk-KNN (same query),
+Two precise points the contract requires (challenge Findings C4, M19):
+- **Graceful-degrade path (contract FR#11 / AC#7).** When a branch has no
+  `context_summary_json` (older/uncached), the card still renders: `topic` comes from the
+  **first user message** via a *targeted single-row* query —
+  `SELECT m.content FROM branch_messages bm JOIN messages m ON bm.message_id = m.id
+  WHERE bm.branch_id = ? AND m.role = 'user' ORDER BY m.timestamp ASC LIMIT 1` — and counts
+  from the branch row. This `LIMIT 1` is **not** a `fetch_branch_messages` call and does not
+  violate the no-full-hydration constraint; the constraint forbids loading the *whole*
+  transcript, not a one-row topic probe. Without this, an implementer reading "no fetch"
+  literally leaves `topic: null` and silently fails AC#7.
+- **`tool_counts` column guard.** `tool_counts` was added to `branches` after the initial
+  schema; `recent_chats.py:37-41` already guards its read with a `PRAGMA table_info(branches)`
+  check. The card hydrator reads `tool_counts` and must apply the **same guard** (or a cached
+  one-time schema-introspection in `db.py`), or it raises `OperationalError: no column
+  tool_counts` on a pre-column DB.
+
+**Entrypoint B (matched exchanges).** Surfaced as a **separate CLI command,
+`ccrecall search-messages QUERY`** (challenge Finding C3), *not* a `--chunks` flag on `search`.
+Rationale: B returns a fundamentally different result type (exchange snippets vs session cards),
+and a flag that flips output type is a mode-flag that collides with `--keyword-only` (what is
+`search --chunks --keyword-only`?); two distinct jobs (the contract's "find sessions" vs "find
+messages") deserve two verbs, and a named command is discoverable in `ccrecall --help` and can
+grow its own defaults (a future `--context N`). It shares `--project`/`--session`/`--path`/
+`--json` via a cyclopts option group, so the separate command costs no plumbing. The skill and
+`tool-reference.md` document this exact name.
+
+A parallel select path: chunk-KNN (same query),
 filter to current version + user filters, **do not roll up** — return the top chunk rows
 hydrated into the contract's snippet shape directly from the `chunks` row: `exchange_index`,
 `timestamp`, `first_message_uuid` (locator), and the contract's `user`/`assistant` fields
@@ -447,13 +594,34 @@ vec0 distance is bounded and lower-is-better. To satisfy the contract's higher-i
 similarity; larger = better). The presented `score` is then min-max normalized over the
 result set per the contract (see below).
 
+**Carrying the `ranked` signal to the renderer** (challenge Finding M17). The contract's
+envelope needs `ranked: false` on the LIKE-only rung. `rrf_scored` is never called on that
+rung, so the search entry point returns a `(results, ranked: bool)` pair (a small wrapper
+struct), and the card/snippet renderer uses `ranked == False` to emit `score: null`/
+`score_raw: null` per result and `ranked: false` in the envelope — wiring the existing
+FTS5→FTS4→LIKE cascade's bottom rung to the contract's unranked shape.
+
+**Track B on vec0-unavailable machines** (challenge Finding H7, decided: defer + document,
+tracked by **issue #34**). Track B's *only* ranking source in this landing is the chunk-KNN;
+the keyword-path Track B (FTS `snippet()` → snippet shape) is a named non-goal. So on a machine
+where `vec0` won't load (e.g. the resource-constrained laptop), `ccrecall search-messages`
+returns an **empty `ranked: false` envelope** — it does not error, but it cannot degrade to
+keyword results the way Track A does. This is a deliberate, documented gap for this release;
+issue #34 tracks adding the FTS Track B rung so the contract's "either track" LIKE fallback is
+honored everywhere. (Track A is unaffected — it already degrades to the keyword path.)
+
 **Overfetch.** `top_k = max(max_results * OVERFETCH_MULTIPLIER, OVERFETCH_FLOOR)`
 (`search_conversations.py:315`) assumes one vector ≈ one branch. With many chunks per
-branch, the top-k chunks may collapse to far fewer branches. Raise the chunk-KNN `k` by a
-chunks-per-branch factor (a generous constant multiplier with a floor) so A still fills
-`max_results` distinct sessions after rollup. B uses the plain `max_results`-family bound
-(no rollup). Exact constants are tunable; the requirement is "A never under-fills due to
-collapse" (Edge Cases).
+branch, the top-k chunks may collapse to far fewer branches. For A, raise the chunk-KNN `k`
+to `max_results * OVERFETCH_MULTIPLIER * CHUNK_COLLAPSE_FACTOR` (a new constant, start at ~8 —
+a generous chunks-per-session estimate) with the existing floor, so the post-rollup distinct
+session count still fills `max_results`. B uses the plain `max_results`-family bound (no
+rollup). Because a static multiplier cannot *guarantee* fill on an adversarial corpus (one
+giant session dominating the top-k), add an **observability** step (challenge Finding M13): when
+the post-rollup session count is `< max_results`, **emit a diagnostic log line** (pre-rollup
+chunk count, post-rollup session count, collapse ratio) so a chronic under-fill is visible
+rather than silently indistinguishable from genuine sparsity. An optional one-shot adaptive
+retry (double `k`, re-fetch once) is a tunable follow-up, not required for the first landing.
 
 ### Where the absorbed contract plugs in
 
@@ -480,8 +648,12 @@ conflict.
   chunk-KNN + best-chunk rollup. `_hydrate_branches`'s message-loading is **removed from
   the A path** (A renders from `context_summary_json`, per the absorbed contract).
 - **`formatting.py::format_markdown_session` / `format_json_sessions` (full-transcript
-  dump) — replaced** for the search path by the contract's card + snippet + envelope
-  renderers. (Same replacement the absorbed contract names; this design lands it.)
+  dump) — replaced *for the search path only*** by the contract's card + snippet + envelope
+  renderers. **These two functions are RETAINED in `formatting.py`** — `recent_chats.py:13`
+  imports and calls both, and `recent` is out of scope for this change (the contract names
+  "unify `recent` onto the card renderer" a deferred non-goal). The search path stops calling
+  them; they are **not** removed (challenge Finding H8 — removing them breaks `recent` at
+  import time with no test catching it).
 - **`fusion.py::rrf` score discard — superseded** by the `rrf_scored` sibling for the card
   `score_raw`; `rrf` itself stays for the ids-only dedup pipeline.
 - **`backfill_embeddings.py::build_selection` (branch-summary eligibility) — replaced** by
@@ -494,8 +666,12 @@ different consumer and the context-injection path is untouched.
 
 - **Additive schema** in `SCHEMA_CORE` / `_ensure_vec_schema`: `chunks` + indexes +
   `chunk_vec` + the two cascade triggers, all `IF NOT EXISTS`. `branch_vec` and
-  `branches_vec_ad` are dropped in `_ensure_vec_schema`'s self-heal block (the precedent is
-  the existing dimension-drift drop at `db.py:189-195`).
+  `branches_vec_ad` are dropped by an **explicit unconditional** `DROP TRIGGER IF EXISTS` /
+  `DROP TABLE IF EXISTS` in `_ensure_vec_schema` — **not** via the dimension self-heal, which
+  never fires at the unchanged `float[512]` (challenge Finding H5; see Architecture → Schema).
+  Whenever `_ensure_vec_schema` drops `chunk_vec` (future model swap / incident), it also
+  resets all branch watermarks (`UPDATE branches SET embedding_version = 0`) so the dropped
+  vectors are repopulated (challenge Finding C1).
 - **Bump `EMBEDDING_VERSION` 2 → 3** in `embeddings.py`. The watermark filter then makes
   every active-leaf branch eligible; backfill re-embeds the corpus at chunk grain, and
   embed-on-write covers forward sessions.
@@ -637,16 +813,36 @@ only true external boundaries.
   (AC#4). **Unit.**
 - Chunk-grain staleness: mixed current/stale chunks → only current returned (AC#8). **Unit.**
 - Cascade delete: branch delete removes chunks + vectors (AC#6). **Unit.**
-- Watermark heal: simulate a suppressed embed-on-write failure (one chunk fails) → the
-  branch watermark is cleared (not stale-but-true) → backfill re-selects the branch and
-  completes it. Guards the clear-first/set-last protocol (comb-blocking-3). **Unit.**
+- Watermark heal — caught exception: a suppressed embed-on-write failure clears the watermark
+  (not stale-but-true) → backfill re-selects the branch. **Unit.**
+- Watermark heal — crash / missing vector (AC#12): seed a `chunks` row with **no** `chunk_vec`
+  while the watermark reads `EMBEDDING_VERSION` (simulating a WAL-rolled-back crash) → the
+  backfill heal clause re-selects it. Guards challenge Finding C1. **Unit.**
+- Version-bump bound (AC#11): after bumping `EMBEDDING_VERSION`, the next write-path sync of a
+  long session embeds ≤ `MAX_WRITE_PATH_EMBEDS_PER_SYNC` chunks and leaves the rest version-
+  stale for backfill. **Unit.**
+- Concurrency guard (AC#13): a second `sync-current` while one holds the lock exits without
+  embedding. **Unit**, with a fake/held lock file.
+- Summary-failed branch (AC#15): a branch with `context_summary = NULL` is chunk-embedded and
+  searchable (the widened `CHUNK_EMBEDDABLE_BRANCH_FILTER`). **Unit.**
+- vec0-less Track B (AC#14): with the vector index unavailable, `search-messages` returns an
+  empty `ranked:false` envelope and exits 0. **Unit.**
 - Backfill content-error sentinel: a branch whose embed raises a content error is marked
-  `CONTENT_ERROR_VERSION` once and skipped on the next pass (not looped). **Unit.**
+  `CONTENT_ERROR_VERSION` once and skipped on the next pass (not looped). A `sqlite3.Error`
+  during the per-branch message fetch aborts the batch instead (not the sentinel) — challenge
+  T1. **Unit.**
+- Backfill locator: backfilled chunks get a non-NULL `first_message_uuid` (the `m.uuid` fetch
+  addition, challenge M10). **Unit.**
 - History preservation: row counts of `messages`/`branches`/`branch_messages` unchanged
   across a version bump + backfill (AC#7). **Integration.**
-- Head+tail cap: over-long exchange still embeds and is retrievable (AC#9, AC#10). **Unit.**
-- Entrypoint A card shape + B snippet shape + envelope parity vs. the contract (AC#2, AC#3,
-  AC#10). **Unit**, mapped to `output-format-contract.md`.
+- Token-aware cap: a dense over-token exchange embeds (not `CONTENT_ERROR`) and is retrievable
+  (AC#9, AC#10, challenge M12). **Unit.**
+- `recent` unaffected: `recent_chats` still renders via the retained
+  `format_markdown_session`/`format_json_sessions` after the search path migrates (challenge
+  H8) — a regression guard. **Unit.**
+- Entrypoint A card shape + B snippet shape + envelope parity vs. the contract, including the
+  `ranked:false` LIKE-path envelope and the uncached-branch degrade card (AC#2, AC#3, AC#10).
+  **Unit**, mapped to `output-format-contract.md`.
 
 ### Tests to Remove
 - Assertions that the search path returns full per-session message bodies (once A is
@@ -661,12 +857,17 @@ only true external boundaries.
   `branch_vec`, 1:1 with branches) updates to the `chunks`/`chunk_vec` two-table layout;
   note the hot-path framing is unaffected (embedding was already off the hook).
 - **`skills/ccr-recall/references/tool-reference.md`** and **`skills/ccr-recall/SKILL.md`**
-  — update the `search` output description to cards (A) + matched exchanges (B); document
-  `score`/`ranked` and `tail` as the drill-in. (These overlap exactly with the absorbed
-  contract's Documentation Updates — land once, here.)
-- **GitHub #31 / #32 / PR #33** — comment cross-linking that #31 absorbs the PR #33 contract
-  and lands it; PR #33 is then closed and its branch deleted (the docs survive on this
-  branch).
+  — update `search` output to scored cards (A); add the **`search-messages`** command for
+  matched exchanges (B); document `score`/`ranked` and `tail` as the drill-in. Specify the new
+  flag semantics (challenge Findings M16, M18): **`--verbose`** on the card path expands the
+  markdown card to full `files_modified`/`commits` lists + the `tool_counts` dict (JSON always
+  carries the full lists per contract FR#10 regardless of `--verbose`); **`--status`** now
+  reports chunk coverage (current-version chunks / total) and branch-watermark coverage, not
+  the old "embedded branches N/M". (These overlap the absorbed contract's Documentation
+  Updates — land once, here.)
+- **GitHub #31 / #32 / PR #33 / #34** — PR #33 is closed and its branch deleted (the contract
+  survives as `output-format-contract.md` on this branch); #34 tracks the deferred keyword-path
+  Track B fallback; cross-link #32 (richer summaries) as the enricher of the Track A card.
 - **CHANGELOG** — handled by release-please from Conventional Commits at implementation
   time; no manual entry.
 
@@ -674,9 +875,10 @@ only true external boundaries.
 
 ### Changed Files
 - `src/ccrecall/schema.py` — modify: add `chunks` table + indexes to `SCHEMA_CORE`.
-- `src/ccrecall/db.py` — modify: `_ensure_vec_schema` creates `chunk_vec` + two triggers and
-  drops `branch_vec`; add `upsert_chunk_vec`, `write_chunk_embedding`, `chunk_vec_queryable`;
-  retire `branch_vec` helpers.
+- `src/ccrecall/db.py` — modify: `_ensure_vec_schema` creates `chunk_vec` + two triggers,
+  **explicitly drops `branch_vec`** + its trigger, and resets watermarks on a `chunk_vec` drop;
+  add `upsert_chunk_vec`, `write_chunk_embedding`, `chunk_vec_queryable`; retire `branch_vec`
+  helpers; `fetch_branch_messages` SELECT gains `m.uuid` for the Track B locator.
 - `src/ccrecall/embeddings.py` — modify: bump `EMBEDDING_VERSION` 2 → 3; add the head+tail
   cap helper here (it is about the model's token limit, so it lives beside `embed_text`;
   `session_ops.embed_branch_chunks` calls it when building each chunk's embed text).
@@ -687,17 +889,34 @@ only true external boundaries.
 - `src/ccrecall/hooks/backfill_embeddings.py` — modify: `build_selection` chunk eligibility;
   per-branch work calls `embed_branch_chunks`; status counters over chunk readiness.
 - `src/ccrecall/search_conversations.py` — modify: chunk-KNN + best-chunk rollup for A;
-  parallel chunk-retrieval path for B; thread the fused score; drop A's message hydration.
+  parallel chunk-retrieval path for B; thread the fused score + `ranked` signal; drop A's
+  message hydration; first-message `LIMIT 1` degrade path + `tool_counts` PRAGMA guard;
+  `print_status()` reports chunk coverage (not branch summary count).
 - `src/ccrecall/fusion.py` — modify: add `rrf_scored` (keep `rrf` ids-only).
-- `src/ccrecall/formatting.py` — modify: card + snippet + envelope renderers; retire the
-  full-transcript dump from the search path. (Shape governed by the absorbed contract.)
-- `src/ccrecall/cli/commands.py` — modify: surface entrypoint B (a `--chunks`/message-
-  retrieval mode on `search`, or a sibling command) under the global `--json` contract.
+- `src/ccrecall/formatting.py` — modify: add card + snippet + envelope renderers; retire the
+  full-transcript dump *from the search path*. Keep `format_markdown_session` /
+  `format_json_sessions` (still used by `recent_chats.py`). (Shape governed by the contract.)
+- `src/ccrecall/recent_chats.py` — read/verify: imports `format_markdown_session` /
+  `format_json_sessions` (must stay); unchanged by this design but listed so the renderers are
+  not removed as "replaced."
+- `src/ccrecall/cli/commands.py` — modify: add a **`search-messages`** command (entrypoint B)
+  sharing `search`'s option group; under the global `--json` contract.
+- `src/ccrecall/hooks/memory_sync.py` / `src/ccrecall/hooks/sync_current.py` — modify: add the
+  `sync-current` concurrency lock-file guard (skip-if-running).
+- `src/ccrecall/hooks/memory_setup.py` / onboarding — modify: warm the fastembed model cache so
+  the detached `sync-current` never downloads on first install.
 - `skills/ccr-recall/SKILL.md`, `skills/ccr-recall/references/tool-reference.md` — modify:
-  output-shape docs.
+  output-shape docs; document `search-messages`, `score`/`ranked`, and `--verbose`/`--status`
+  semantics on the card path.
 - `CLAUDE.md` — modify: vec schema description.
 - `tests/test_*.py` (search, db, embeddings, session_ops, backfill_embeddings, fusion,
-  formatting) — modify/add per Test Strategy.
+  formatting, recent_chats) — modify/add per Test Strategy.
+
+**Deferred follow-up (not in this change):** the `branches_au` FTS trigger (`schema.py:128-138`)
+fires on *any* `UPDATE branches`, so the clear-first watermark UPDATE needlessly re-indexes
+`aggregated_content` (challenge Finding M20). Making the trigger column-selective
+(`WHEN old.aggregated_content IS NOT new.aggregated_content`) is pre-existing tech debt, tracked
+as follow-up — out of scope here.
 
 ### Behavioral Invariants
 - **Ranking algorithm unchanged:** RRF, the FTS5/FTS4/LIKE cascade, per-session dedup,
@@ -726,7 +945,17 @@ only true external boundaries.
 
 ## Open Questions
 
-*(none — the two load-bearing questions, Stop-hook blocking and vec0 multi-row delete
-semantics, were resolved by direct investigation + spike before this doc was written.
-Tunable constants — the overfetch multiplier and the head+tail cap size — are implementation
-parameters, not open design questions; their requirement, not their value, is fixed here.)*
+*No blocking questions remain.* The two load-bearing questions (Stop-hook blocking, vec0
+multi-row delete) were resolved by investigation + spike before this doc; the `/mine-challenge`
+pass's four CRITICAL and five HIGH findings are folded in above. Tunable constants
+(`MAX_WRITE_PATH_EMBEDS_PER_SYNC`, `CHUNK_COLLAPSE_FACTOR`, the cap budget) are implementation
+parameters — their *requirement* is fixed here, their *value* is for tuning.
+
+**Tracked deferrals (not blocking this design):**
+- **Keyword-path Track B fallback** for vec0-unavailable machines — **issue #34**. Track B
+  returns an empty `ranked:false` envelope there until then.
+- **Column-selective `branches_au` FTS trigger** — the clear-first watermark UPDATE double-fires
+  the FTS re-index (challenge M20). Pre-existing tech debt; follow-up.
+- **Single-result score presentation** — the absorbed contract (amended) sets `score: null`
+  for a one-result set rather than a misleading `1.00` (challenge M15); see the contract's Score
+  representation.

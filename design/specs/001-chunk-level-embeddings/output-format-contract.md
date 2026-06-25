@@ -318,14 +318,23 @@ comparable, so `score_raw` is for within-track/within-query inspection only — 
 
 - **Presented `score`:** min-max normalized to `[0,1]` within the result set (two decimals), for
   both tracks. Chosen for triage usefulness (relative gaps are visible) over raw scores (not
-  comparable across queries).
+  comparable across queries). **Single-result edge case (#31 amendment):** when the result set
+  has exactly one result, min-max is degenerate (`0/0`); rather than emit a misleading `1.00`,
+  `score` is `null` (the markdown renders without a score line) while `score_raw` is still
+  emitted. A lone `1.00` would read as a perfect match and give a triaging agent no calibration.
 - **A `score_raw`:** the fused RRF value — a small positive float (e.g. `0.0309`); larger = better
   already. Today `rrf()` returns ranked ids and *discards* this; the contract needs a
   **score-returning fusion** (a sibling returning `(id, score)` pairs) so the card can carry it.
-- **B `score_raw`:** SQLite `bm25()` (FTS5) returns a value where *more negative* = better, so the
-  contract stores its **negation** (e.g. native `-1.84` → `score_raw: 1.84`) to satisfy the
-  higher-is-better convention. FTS4 lacks BM25 → fall back to `matchinfo`/rank ordinal; if even
-  that is unavailable, `ranked: false`.
+- **B `score_raw` — keyword path:** SQLite `bm25()` (FTS5) returns a value where *more negative* =
+  better, so the contract stores its **negation** (e.g. native `-1.84` → `score_raw: 1.84`) to
+  satisfy the higher-is-better convention. FTS4 lacks BM25 → fall back to `matchinfo`/rank ordinal;
+  if even that is unavailable, `ranked: false`.
+- **B `score_raw` — vector path (#31 amendment):** the chunk-KNN distance is L2 on normalized
+  vectors (lower = better), stored as `score_raw = 1.0 - distance` (higher = better). On the
+  vector path the chunk *is* the matched unit, so there are no discrete term hits: **`matched_role`
+  is `null` and `match_terms` is `[]`** (the markdown excerpt renders without highlighting). Only
+  the keyword path populates `matched_role`/`match_terms`. The field *names* are identical across
+  ranking sources — consumers must accept `matched_role: null` and `match_terms: []` as valid.
 - **LIKE fallback (either track):** no ranker ⇒ `score: null`, `score_raw: null`, `ranked: false`,
   recency order.
 
