@@ -1,7 +1,7 @@
 ---
 task_id: "T02"
 title: "Bump embedding version, add token-aware cap, carry exchange uuid"
-status: "planned"
+status: "done"
 depends_on: []
 implements: ["FR#10", "AC#9"]
 ---
