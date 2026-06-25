@@ -32,6 +32,11 @@ SYNC_TEMP_PREFIX = "ccrecall-sync-"
 # (eligibility), count_status() (backfill progress), and search_conversations
 # print_status() (diagnostics) all build on it so their counts can't drift.
 EMBEDDABLE_BRANCH_FILTER = "is_active = 1 AND context_summary IS NOT NULL AND context_summary != ''"
+# Chunk-path universe: active leaf with at least one message. Wider than
+# EMBEDDABLE_BRANCH_FILTER because chunk embedding reads raw exchange text, not
+# the summary — branches with NULL context_summary still have embeddable content.
+# Keep EMBEDDABLE_BRANCH_FILTER for any summary-dependent caller; don't remove it.
+CHUNK_EMBEDDABLE_BRANCH_FILTER = "is_active = 1 AND EXISTS(SELECT 1 FROM branch_messages WHERE branch_id = branches.id)"
 # Sentinel written to a branch's embedding_version or summary_version when its
 # content can't be embedded or summarized (tokenizer overflow, malformed content).
 # Excluded from eligibility so it isn't retried forever; counted separately as

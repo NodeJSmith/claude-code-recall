@@ -383,7 +383,8 @@ def embed_branch_chunks(
     branch_msgs: list[dict],
     is_active: bool,
     vec_writable: bool,
-) -> None:
+    max_embeds: int | None = MAX_WRITE_PATH_EMBEDS_PER_SYNC,
+) -> int:
     """Embed per-exchange chunks for an active-leaf branch (incremental write path).
 
     Implements the clear-first/set-last watermark protocol:
@@ -392,9 +393,17 @@ def embed_branch_chunks(
       EMBEDDING_VERSION only after every exchange has a current-version chunk
       (step 8).
     - Version-stale chunks are deliberately left to the background backfill;
-      this path embeds only new or content-changed exchanges, capped at
-      MAX_WRITE_PATH_EMBEDS_PER_SYNC per sync so the detached process stays
-      bounded even immediately after an EMBEDDING_VERSION bump.
+      this path embeds only new or content-changed exchanges.
+
+    ``max_embeds`` bounds how many exchanges this call embeds. It defaults to
+    MAX_WRITE_PATH_EMBEDS_PER_SYNC so the detached Stop-sync write path stays
+    bounded even right after an EMBEDDING_VERSION bump. The off-hot-path backfill
+    passes ``max_embeds=None`` (no cap) so a single call fully embeds a branch of
+    any length — otherwise a branch with more exchanges than the cap would stay
+    eligible and trip the backfill's no-progress guard.
+
+    Returns the number of exchanges embedded by this call (the inference count) —
+    the backfill uses it for accurate progress/ETA without recomputing exchanges.
 
     Raises on failure — callers (sync_branch) must wrap in
     contextlib.suppress(Exception). Does not commit; the single commit at
@@ -402,12 +411,12 @@ def embed_branch_chunks(
     """
     # Step 1 — guard: nothing to do unless active, vec writable, and messages exist
     if not (is_active and vec_writable and branch_msgs):
-        return
+        return 0
 
     # Step 2 — build per-exchange pairs from the branch messages
     exchanges = build_exchange_pairs(branch_msgs)
     if not exchanges:
-        return
+        return 0
 
     # Step 3 — compute embedded text, content hash, and bounded display text per exchange.
     # Display columns use the same head+tail cap per turn so the shown excerpt aligns
@@ -466,7 +475,7 @@ def embed_branch_chunks(
                 "UPDATE branches SET embedding_version = ?, embedding_model = ? WHERE id = ?",
                 (EMBEDDING_VERSION, EMBEDDING_MODEL, branch_db_id),
             )
-        return
+        return 0
 
     # Step 5a — clear-first: if any exchange needs embedding, clear the watermark
     # BEFORE the loop so a mid-loop exception leaves the branch stale, never
@@ -474,8 +483,9 @@ def embed_branch_chunks(
     if needing_embed_full:
         cursor.execute("UPDATE branches SET embedding_version = 0 WHERE id = ?", (branch_db_id,))
 
-    # Cap the embed loop to bound per-sync inference cost
-    needing_embed = needing_embed_full[:MAX_WRITE_PATH_EMBEDS_PER_SYNC]
+    # Cap the embed loop to bound per-sync inference cost (write path); the
+    # backfill passes max_embeds=None to embed the whole branch in one call.
+    needing_embed = needing_embed_full if max_embeds is None else needing_embed_full[:max_embeds]
 
     # Step 6 — embed loop: for each needing-embed exchange, upsert the chunks row,
     # embed the text, then write the vector (order invariant: vector FIRST,
@@ -544,6 +554,8 @@ def embed_branch_chunks(
             "UPDATE branches SET embedding_version = ?, embedding_model = ? WHERE id = ?",
             (EMBEDDING_VERSION, EMBEDDING_MODEL, branch_db_id),
         )
+
+    return len(needing_embed)
 
 
 def sync_branch(
