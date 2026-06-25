@@ -918,6 +918,13 @@ fires on *any* `UPDATE branches`, so the clear-first watermark UPDATE needlessly
 (`WHEN old.aggregated_content IS NOT new.aggregated_content`) is pre-existing tech debt, tracked
 as follow-up — out of scope here.
 
+<!-- Gap check 2026-06-25 (mine-plan reverse-dependency scan): 4 gaps included, all folded into existing tasks.
+     1. Tests — tests/test_legacy_migration.py:138 asserts on branch_vec SQL post-migration; breaks once branch_vec is dropped → T06 (teardown) adapts it.
+     2. Tests — tests/test_summarizer.py + tests/test_context_injection.py call build_exchange_pairs; must tolerate the new first_message_uuid key and uuid-less messages → T02 Target Files + tests.
+     3. Documentation — src/ccrecall/legacy.py:18-22,147-148 describe vector-neutralization via "branch_vec dimension self-heal" (inaccurate after branch_vec→chunk_vec) → T06 fixes the docstrings.
+     4. Documentation (cosmetic) — src/ccrecall/hooks/import_conversations.py:173 comment names branch_vec → T06 fixes the comment.
+     Categories searched: Tests, Callers, Validators/guards, Documentation, Data structures. Skipped (N/A to this repo): CSS/layout, real-time paths, generated code, type aliases, SQL views/indexes. -->
+
 ### Behavioral Invariants
 - **Ranking algorithm unchanged:** RRF, the FTS5/FTS4/LIKE cascade, per-session dedup,
   `is_active` filtering, and all `--project`/`--session`/`--path` filters keep current
