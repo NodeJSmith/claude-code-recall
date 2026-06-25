@@ -13,13 +13,14 @@ import ccrecall.db as db_module
 from ccrecall.db import (
     CURRENT_ONBOARDING_VERSION,
     DEFAULT_SETTINGS,
+    fetch_branch_messages,
     get_db_connection,
     load_config,
     load_settings,
     log_hook_exception,
     vec_available,
 )
-from ccrecall.embeddings import EMBEDDING_DIM
+from ccrecall.embeddings import EMBEDDING_DIM, EMBEDDING_MODEL, EMBEDDING_VERSION
 from ccrecall.schema import SCHEMA, detect_fts_support
 from ccrecall.token_schema import ensure_schema as token_ensure_schema
 
@@ -549,6 +550,7 @@ class TestSchemaEquivalencePin:
         "branch_messages",
         "branches",
         "branches_fts",
+        "chunks",
         "import_log",
         "messages",
         "messages_fts",
@@ -584,6 +586,19 @@ class TestSchemaEquivalencePin:
         ],
         "branches_fts": [
             (0, "aggregated_content", "", 0, None, 0),
+        ],
+        "chunks": [
+            (0, "id", "INTEGER", 0, None, 1),
+            (1, "branch_id", "INTEGER", 1, None, 0),
+            (2, "exchange_index", "INTEGER", 1, None, 0),
+            (3, "content_hash", "TEXT", 1, None, 0),
+            (4, "first_message_uuid", "TEXT", 0, None, 0),
+            (5, "timestamp", "TEXT", 0, None, 0),
+            (6, "user_text", "TEXT", 0, None, 0),
+            (7, "assistant_text", "TEXT", 0, None, 0),
+            (8, "was_capped", "INTEGER", 1, "0", 0),
+            (9, "embedding_version", "INTEGER", 1, "0", 0),
+            (10, "embedding_model", "TEXT", 0, None, 0),
         ],
         "import_log": [
             (0, "id", "INTEGER", 0, None, 1),
@@ -633,6 +648,8 @@ class TestSchemaEquivalencePin:
         "idx_branches_embedding_version",
         "idx_branches_session",
         "idx_branches_summary_version",
+        "idx_chunks_branch",
+        "idx_chunks_version",
         "idx_messages_session",
         "idx_messages_session_uuid",
         "idx_messages_timestamp",
@@ -824,3 +841,246 @@ class TestExistingV6DbOpen:
         assert snap_row[0] == 42, "token_snapshots row was modified by get_db_connection"
 
         conn.close()
+
+
+# ── T01: chunk schema and persistence helpers ─────────────────────────────────
+
+
+class TestChunkSchema:
+    """chunks table + chunk_vec virtual table — additive schema additions for T01."""
+
+    def test_chunks_table_exists_in_schema_core(self, memory_db):
+        """chunks table is created by SCHEMA_CORE (plain path, no vec extension needed)."""
+        tables = {row[0] for row in memory_db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+        assert "chunks" in tables
+
+    def test_chunks_table_indexes_exist(self, memory_db):
+        """idx_chunks_branch and idx_chunks_version exist in SCHEMA_CORE."""
+        indexes = {row[0] for row in memory_db.execute("SELECT name FROM sqlite_master WHERE type='index'").fetchall()}
+        assert "idx_chunks_branch" in indexes
+        assert "idx_chunks_version" in indexes
+
+    @pytest.mark.skipif(not _VEC_AVAILABLE, reason="sqlite-vec not available in this environment")
+    def test_chunk_vec_exists_after_ensure_vec_schema(self):
+        """chunk_vec virtual table is created by _ensure_vec_schema."""
+        conn = make_vec_conn()
+        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+        assert "chunk_vec" in tables
+        conn.close()
+
+    @pytest.mark.skipif(not _VEC_AVAILABLE, reason="sqlite-vec not available in this environment")
+    def test_branch_vec_still_exists_additive(self):
+        """T01 is additive: branch_vec is NOT dropped; both vec tables coexist."""
+        conn = make_vec_conn()
+        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+        assert "branch_vec" in tables
+        assert "chunk_vec" in tables
+        conn.close()
+
+    @pytest.mark.skipif(not _VEC_AVAILABLE, reason="sqlite-vec not available in this environment")
+    def test_both_cascade_triggers_exist(self):
+        """branches_chunks_ad and chunks_vec_ad triggers exist after _ensure_vec_schema."""
+        conn = make_vec_conn()
+        triggers = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='trigger'").fetchall()}
+        assert "branches_chunks_ad" in triggers
+        assert "chunks_vec_ad" in triggers
+        conn.close()
+
+    @pytest.mark.skipif(not _VEC_AVAILABLE, reason="sqlite-vec not available in this environment")
+    def test_two_level_cascade_delete(self):
+        """AC#6: deleting a branch row removes all its chunks rows and their chunk_vec rows."""
+        conn = make_vec_conn()
+        cursor = conn.cursor()
+
+        cursor.execute("INSERT INTO projects (path, key, name) VALUES (?, ?, ?)", ("/p-casc", "-p-casc", "p-casc"))
+        proj_id = cursor.lastrowid
+        cursor.execute("INSERT INTO sessions (uuid, project_id) VALUES (?, ?)", ("sess-casc", proj_id))
+        sess_id = cursor.lastrowid
+        cursor.execute("INSERT INTO branches (session_id, leaf_uuid) VALUES (?, ?)", (sess_id, "leaf-casc"))
+        branch_id = cursor.lastrowid
+
+        cursor.execute(
+            "INSERT INTO chunks (branch_id, exchange_index, content_hash) VALUES (?, ?, ?)",
+            (branch_id, 0, "hash-0"),
+        )
+        chunk_id_0 = cursor.lastrowid
+        cursor.execute(
+            "INSERT INTO chunks (branch_id, exchange_index, content_hash) VALUES (?, ?, ?)",
+            (branch_id, 1, "hash-1"),
+        )
+        chunk_id_1 = cursor.lastrowid
+
+        vec = sqlite_vec.serialize_float32([0.1] * EMBEDDING_DIM)
+        cursor.execute("INSERT INTO chunk_vec(chunk_id, embedding) VALUES (?, ?)", (chunk_id_0, vec))
+        cursor.execute("INSERT INTO chunk_vec(chunk_id, embedding) VALUES (?, ?)", (chunk_id_1, vec))
+        conn.commit()
+
+        assert conn.execute("SELECT COUNT(*) FROM chunks WHERE branch_id = ?", (branch_id,)).fetchone()[0] == 2
+        assert conn.execute("SELECT COUNT(*) FROM chunk_vec").fetchone()[0] == 2
+
+        conn.execute("DELETE FROM branches WHERE id = ?", (branch_id,))
+        conn.commit()
+
+        assert conn.execute("SELECT COUNT(*) FROM chunks WHERE branch_id = ?", (branch_id,)).fetchone()[0] == 0, (
+            "branches_chunks_ad trigger must remove chunks rows when a branch is deleted"
+        )
+        assert conn.execute("SELECT COUNT(*) FROM chunk_vec").fetchone()[0] == 0, (
+            "chunks_vec_ad trigger must remove chunk_vec rows when chunks are deleted"
+        )
+        conn.close()
+
+    @pytest.mark.skipif(not _VEC_AVAILABLE, reason="sqlite-vec not available in this environment")
+    def test_chunk_vec_stale_dim_rebuilds_and_resets_watermarks(self):
+        """A stale-dim chunk_vec is rebuilt at EMBEDDING_DIM and branch watermarks reset to 0.
+
+        Per design.md "chunk_vec drop resets watermarks": dropping chunk_vec (e.g. an
+        embedding-model swap) leaves branches reporting EMBEDDING_VERSION while their
+        vectors are gone, so _ensure_vec_schema must zero branches.embedding_version
+        (the repurposed per-branch chunk watermark) to force backfill repopulation.
+        """
+        conn = make_vec_conn()
+        cursor = conn.cursor()
+
+        # Seed a branch already at the current watermark.
+        cursor.execute("INSERT INTO projects (path, key, name) VALUES (?, ?, ?)", ("/p-heal", "-p-heal", "p-heal"))
+        proj_id = cursor.lastrowid
+        cursor.execute("INSERT INTO sessions (uuid, project_id) VALUES (?, ?)", ("sess-heal", proj_id))
+        sess_id = cursor.lastrowid
+        cursor.execute(
+            "INSERT INTO branches (session_id, leaf_uuid, embedding_version, embedding_model) VALUES (?, ?, ?, ?)",
+            (sess_id, "leaf-heal", EMBEDDING_VERSION, EMBEDDING_MODEL),
+        )
+
+        # Replace chunk_vec with a stale-dim one carrying a row.
+        stale_dim = EMBEDDING_DIM * 2
+        conn.execute("DROP TRIGGER IF EXISTS chunks_vec_ad")
+        conn.execute("DROP TABLE chunk_vec")
+        conn.execute(
+            f"CREATE VIRTUAL TABLE chunk_vec USING vec0(chunk_id INTEGER PRIMARY KEY, embedding float[{stale_dim}])"
+        )
+        conn.execute(
+            "INSERT INTO chunk_vec(chunk_id, embedding) VALUES (?, ?)",
+            (1, sqlite_vec.serialize_float32([0.1] * stale_dim)),
+        )
+        conn.commit()
+
+        db_module._ensure_vec_schema(conn)
+        conn.commit()
+
+        sql = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='chunk_vec'").fetchone()[0]
+        assert f"float[{EMBEDDING_DIM}]" in sql
+        assert f"float[{stale_dim}]" not in sql
+        # Watermark reset to 0 so backfill repopulates the dropped vectors.
+        wm = conn.execute("SELECT embedding_version FROM branches WHERE leaf_uuid = ?", ("leaf-heal",)).fetchone()[0]
+        assert wm == 0, "chunk_vec drop must reset branches.embedding_version watermark to 0"
+        conn.close()
+
+    @pytest.mark.skipif(not _VEC_AVAILABLE, reason="sqlite-vec not available in this environment")
+    def test_write_chunk_embedding_round_trip(self):
+        """write_chunk_embedding writes the vector FIRST, then the chunk's version/model bookkeeping."""
+        conn = make_vec_conn()
+        cursor = conn.cursor()
+
+        cursor.execute("INSERT INTO projects (path, key, name) VALUES (?, ?, ?)", ("/p-wce", "-p-wce", "p-wce"))
+        proj_id = cursor.lastrowid
+        cursor.execute("INSERT INTO sessions (uuid, project_id) VALUES (?, ?)", ("sess-wce", proj_id))
+        sess_id = cursor.lastrowid
+        cursor.execute("INSERT INTO branches (session_id, leaf_uuid) VALUES (?, ?)", (sess_id, "leaf-wce"))
+        branch_id = cursor.lastrowid
+        cursor.execute(
+            "INSERT INTO chunks (branch_id, exchange_index, content_hash) VALUES (?, ?, ?)",
+            (branch_id, 0, "hash-wce"),
+        )
+        chunk_id = cursor.lastrowid
+        conn.commit()
+
+        db_module.write_chunk_embedding(cursor, chunk_id, [0.4] * EMBEDDING_DIM, EMBEDDING_VERSION, EMBEDDING_MODEL)
+        conn.commit()
+
+        # Vector written.
+        assert conn.execute("SELECT COUNT(*) FROM chunk_vec WHERE chunk_id = ?", (chunk_id,)).fetchone()[0] == 1
+        # Bookkeeping written on the chunk row.
+        ver, model = conn.execute(
+            "SELECT embedding_version, embedding_model FROM chunks WHERE id = ?", (chunk_id,)
+        ).fetchone()
+        assert ver == EMBEDDING_VERSION
+        assert model == EMBEDDING_MODEL
+        conn.close()
+
+    @pytest.mark.skipif(not _VEC_AVAILABLE, reason="sqlite-vec not available in this environment")
+    def test_upsert_chunk_vec_replaces_without_error(self):
+        """upsert_chunk_vec (DELETE+INSERT) replaces an existing row without error."""
+        conn = make_vec_conn()
+        cursor = conn.cursor()
+
+        cursor.execute("INSERT INTO projects (path, key, name) VALUES (?, ?, ?)", ("/p-up", "-p-up", "p-up"))
+        proj_id = cursor.lastrowid
+        cursor.execute("INSERT INTO sessions (uuid, project_id) VALUES (?, ?)", ("sess-up-chunk", proj_id))
+        sess_id = cursor.lastrowid
+        cursor.execute("INSERT INTO branches (session_id, leaf_uuid) VALUES (?, ?)", (sess_id, "leaf-up-chunk"))
+        branch_id = cursor.lastrowid
+        cursor.execute(
+            "INSERT INTO chunks (branch_id, exchange_index, content_hash) VALUES (?, ?, ?)",
+            (branch_id, 0, "hash-up"),
+        )
+        chunk_id = cursor.lastrowid
+        conn.commit()
+
+        embedding = [0.5] * EMBEDDING_DIM
+        db_module.upsert_chunk_vec(cursor, chunk_id, embedding)
+        conn.commit()
+
+        # Second call — must not raise on repeat
+        db_module.upsert_chunk_vec(cursor, chunk_id, embedding)
+        conn.commit()
+
+        count = conn.execute("SELECT COUNT(*) FROM chunk_vec WHERE chunk_id = ?", (chunk_id,)).fetchone()[0]
+        assert count == 1, "upsert_chunk_vec must produce exactly one row after repeated calls"
+        conn.close()
+
+
+class TestChunkVecQueryable:
+    """chunk_vec_queryable(conn) — sibling of branch_vec_queryable."""
+
+    def test_returns_false_without_vec(self):
+        """chunk_vec_queryable returns False when chunk_vec does not exist."""
+        conn = sqlite3.connect(":memory:")
+        conn.executescript(SCHEMA)
+        conn.commit()
+        assert db_module.chunk_vec_queryable(conn) is False
+        conn.close()
+
+    @pytest.mark.skipif(not _VEC_AVAILABLE, reason="sqlite-vec not available in this environment")
+    def test_returns_true_with_vec_loaded(self):
+        """chunk_vec_queryable returns True when chunk_vec exists and is queryable."""
+        conn = make_vec_conn()
+        assert db_module.chunk_vec_queryable(conn) is True
+        conn.close()
+
+
+class TestFetchBranchMessagesUuid:
+    """fetch_branch_messages must return the uuid field — additive extension for T01."""
+
+    def test_returns_uuid_field(self, memory_db):
+        """fetch_branch_messages returns a 'uuid' key in each message dict."""
+        cursor = memory_db.cursor()
+
+        cursor.execute("INSERT INTO projects (path, key, name) VALUES (?, ?, ?)", ("/p-fbm", "-p-fbm", "p-fbm"))
+        proj_id = cursor.lastrowid
+        cursor.execute("INSERT INTO sessions (uuid, project_id) VALUES (?, ?)", ("sess-fbm", proj_id))
+        sess_id = cursor.lastrowid
+        cursor.execute("INSERT INTO branches (session_id, leaf_uuid) VALUES (?, ?)", (sess_id, "leaf-fbm"))
+        branch_id = cursor.lastrowid
+        cursor.execute(
+            "INSERT INTO messages (session_id, uuid, role, content) VALUES (?, ?, ?, ?)",
+            (sess_id, "msg-uuid-test", "user", "hello"),
+        )
+        msg_id = cursor.lastrowid
+        cursor.execute("INSERT INTO branch_messages (branch_id, message_id) VALUES (?, ?)", (branch_id, msg_id))
+        memory_db.commit()
+
+        messages = fetch_branch_messages(cursor, branch_id, include_notifications=False)
+
+        assert len(messages) == 1
+        assert "uuid" in messages[0], "fetch_branch_messages must include 'uuid' key in each message dict"
+        assert messages[0]["uuid"] == "msg-uuid-test"

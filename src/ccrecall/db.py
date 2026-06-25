@@ -119,16 +119,31 @@ def vec_available(conn: sqlite3.Connection) -> bool:
 def branch_vec_queryable(conn: sqlite3.Connection) -> bool:
     """Return True iff the branch_vec virtual table exists and is queryable.
 
-    get_db_connection(load_vec=True) only creates branch_vec when sqlite-vec
-    loaded successfully, so a guarded probe is the cheapest way for the write,
-    query, and backfill paths to learn whether vector persistence is available
-    before spending inference or running branch_vec queries.
+    get_db_connection(load_vec=True) creates branch_vec and chunk_vec only when
+    sqlite-vec loaded successfully, so a guarded probe is the cheapest way for the
+    write, query, and backfill paths to learn whether vector persistence is
+    available before spending inference or running branch_vec queries.
 
     Scoped to sqlite3.Error (the table-missing OperationalError is the expected
     failure) so a non-DB bug — e.g. a bad connection object — still surfaces.
     """
     try:
         conn.execute("SELECT 1 FROM branch_vec LIMIT 1")
+        return True
+    except sqlite3.Error:
+        return False
+
+
+def chunk_vec_queryable(conn: sqlite3.Connection) -> bool:
+    """Return True iff the chunk_vec virtual table exists and is queryable.
+
+    Sibling of branch_vec_queryable at the chunk grain. Used by the write,
+    query, and backfill paths to guard chunk-vector operations.
+
+    Scoped to sqlite3.Error so a non-DB bug still surfaces.
+    """
+    try:
+        conn.execute("SELECT 1 FROM chunk_vec LIMIT 1")
         return True
     except sqlite3.Error:
         return False
@@ -154,11 +169,39 @@ def write_branch_embedding(
     )
 
 
+def upsert_chunk_vec(cursor: sqlite3.Cursor, chunk_id: int, embedding: list[float]) -> None:
+    """Replace a chunk's vector row (DELETE+INSERT — vec0 rejects INSERT OR REPLACE)."""
+    cursor.execute("DELETE FROM chunk_vec WHERE chunk_id = ?", (chunk_id,))
+    cursor.execute(
+        "INSERT INTO chunk_vec(chunk_id, embedding) VALUES (?, ?)",
+        (chunk_id, sqlite_vec.serialize_float32(embedding)),
+    )
+
+
+def write_chunk_embedding(
+    cursor: sqlite3.Cursor,
+    chunk_id: int,
+    embedding: list[float],
+    embedding_version: int,
+    embedding_model: str,
+) -> None:
+    """Persist a chunk's embedding: vector upsert FIRST, version columns LAST (order is load-bearing).
+
+    The chunk row is created by the caller before this is called; this helper
+    only writes the vector and bookkeeping columns.
+    """
+    upsert_chunk_vec(cursor, chunk_id, embedding)  # vector FIRST
+    cursor.execute(
+        "UPDATE chunks SET embedding_version = ?, embedding_model = ? WHERE id = ?",
+        (embedding_version, embedding_model, chunk_id),
+    )  # bookkeeping LAST
+
+
 def fetch_branch_messages(cursor: sqlite3.Cursor, branch_id: int, include_notifications: bool) -> list[dict]:
     """Return a branch's messages ordered by timestamp; notifications included only when asked."""
     cursor.execute(
         """
-        SELECT m.role, m.content, m.timestamp, COALESCE(m.is_notification, 0) as is_notification
+        SELECT m.role, m.content, m.timestamp, COALESCE(m.is_notification, 0) as is_notification, m.uuid
         FROM branch_messages bm
         JOIN messages m ON bm.message_id = m.id
         WHERE bm.branch_id = ?
@@ -167,22 +210,30 @@ def fetch_branch_messages(cursor: sqlite3.Cursor, branch_id: int, include_notifi
         """,
         (branch_id, include_notifications),
     )
-    return [{"role": r, "content": c, "timestamp": t, "is_notification": notif} for r, c, t, notif in cursor.fetchall()]
+    return [
+        {"role": r, "content": c, "timestamp": t, "is_notification": notif, "uuid": uuid}
+        for r, c, t, notif, uuid in cursor.fetchall()
+    ]
 
 
 def _ensure_vec_schema(conn: sqlite3.Connection) -> None:
-    """Create the branch_vec virtual table and orphan-cleanup trigger.
+    """Create vec0 virtual tables and cascade triggers for branch and chunk vectors.
 
     Caller is responsible for loading the sqlite-vec extension before calling
     this function (via vec_available or equivalent). Does not load the
     extension itself and does not commit — the caller manages the transaction.
 
-    Self-heals a stale embedding dimension: if branch_vec already exists at a
-    different float[N] than the current EMBEDDING_DIM (e.g. after an embedding
-    model swap), it is dropped and recreated. branch_vec holds only derived
-    vectors, so dropping is lossless — the backfill heal clause and embed-on-
-    write repopulate it at the new dimension.
+    Self-heals a stale embedding dimension for both vec0 tables: if either
+    table exists at a different float[N] than the current EMBEDDING_DIM (e.g.
+    after an embedding model swap), it is dropped and recreated. Both tables
+    hold only derived vectors, so dropping is lossless — the backfill heal
+    clause and embed-on-write repopulate them at the new dimension.
+
+    When chunk_vec is dropped (stale dimension), all branch watermarks are also
+    reset to 0 so backfill repopulates the missing vectors. Without the reset,
+    watermarks would still read EMBEDDING_VERSION while the vectors are gone.
     """
+    # ── branch_vec self-heal ─────────────────────────────────────────────────
     # sqlite_master stores the vec0 CREATE statement verbatim, so a substring
     # check for the current float[N] reliably detects a stale dimension. Lowercase
     # both sides so a hand-created FLOAT[...] table still compares correctly.
@@ -201,6 +252,34 @@ def _ensure_vec_schema(conn: sqlite3.Connection) -> None:
         "CREATE TRIGGER IF NOT EXISTS branches_vec_ad"
         " AFTER DELETE ON branches"
         " BEGIN DELETE FROM branch_vec WHERE branch_id = OLD.id; END"
+    )
+
+    # ── chunk_vec self-heal ──────────────────────────────────────────────────
+    row = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='chunk_vec'").fetchone()
+    if row and f"float[{EMBEDDING_DIM}]" not in row[0].lower():
+        # Drop the trigger first — same reason as branch_vec above.
+        conn.execute("DROP TRIGGER IF EXISTS chunks_vec_ad")
+        conn.execute("DROP TABLE chunk_vec")
+        # Reset branch watermarks: chunk_vec drop leaves branches reporting
+        # EMBEDDING_VERSION while their vectors are gone; zero forces backfill
+        # to repopulate.
+        conn.execute("UPDATE branches SET embedding_version = 0")
+    conn.execute(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS chunk_vec"
+        f" USING vec0(chunk_id INTEGER PRIMARY KEY, embedding float[{EMBEDDING_DIM}])"
+    )
+
+    # ── cascade triggers ─────────────────────────────────────────────────────
+    # Two-level chain: branches → chunks → chunk_vec
+    conn.execute(
+        "CREATE TRIGGER IF NOT EXISTS branches_chunks_ad"
+        " AFTER DELETE ON branches"
+        " BEGIN DELETE FROM chunks WHERE branch_id = OLD.id; END"
+    )
+    conn.execute(
+        "CREATE TRIGGER IF NOT EXISTS chunks_vec_ad"
+        " AFTER DELETE ON chunks"
+        " BEGIN DELETE FROM chunk_vec WHERE chunk_id = OLD.id; END"
     )
 
 
@@ -240,9 +319,9 @@ def get_db_connection(settings: dict | None = None, load_vec: bool = False) -> s
     Uses the settings-based db_path when provided and applies the base pragmas for
     concurrent-safe access. When ``load_vec`` is True, loads the sqlite-vec extension
     and raises busy_timeout to VEC_BUSY_TIMEOUT_MS — use it for connections that query
-    or write branch_vec (search, write path, backfill). Default False keeps the
-    extension unloaded, cheaper for recent-chats, token analytics, and setup paths
-    that never touch branch_vec.
+    or write branch_vec/chunk_vec (search, write path, backfill). Default False keeps
+    the extension unloaded, cheaper for recent-chats, token analytics, and setup paths
+    that never touch the vec tables.
     """
     db_path = get_db_path(settings)
     db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -260,8 +339,8 @@ def get_db_connection(settings: dict | None = None, load_vec: bool = False) -> s
 
     if load_vec and vec_available(conn):
         # First and only place the vec extension is loaded for this connection.
-        # _ensure_vec_schema creates branch_vec + trigger, then we commit and
-        # raise busy_timeout for concurrent vec writers.
+        # _ensure_vec_schema creates branch_vec + chunk_vec and their cascade
+        # triggers, then we commit and raise busy_timeout for concurrent vec writers.
         _ensure_vec_schema(conn)
         conn.commit()
         conn.execute(f"PRAGMA busy_timeout = {VEC_BUSY_TIMEOUT_MS}")

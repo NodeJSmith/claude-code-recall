@@ -1,7 +1,7 @@
 ---
 task_id: "T01"
 title: "Add chunk schema and persistence helpers (additive)"
-status: "planned"
+status: "done"
 depends_on: []
 implements: ["FR#7", "FR#8", "AC#6"]
 ---

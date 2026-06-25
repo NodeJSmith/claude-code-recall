@@ -97,6 +97,27 @@ CREATE TABLE IF NOT EXISTS import_log (
   messages_imported INTEGER DEFAULT 0
 );
 
+-- Chunk metadata table (per-exchange embedding store)
+-- Source of truth for which chunk rowids belong to a branch, and the carrier
+-- of the Track B locator (first_message_uuid, timestamp) plus bounded display
+-- text (user_text, assistant_text).
+CREATE TABLE IF NOT EXISTS chunks (
+  id                INTEGER PRIMARY KEY,
+  branch_id         INTEGER NOT NULL REFERENCES branches(id),
+  exchange_index    INTEGER NOT NULL,
+  content_hash      TEXT NOT NULL,
+  first_message_uuid TEXT,
+  timestamp         TEXT,
+  user_text         TEXT,
+  assistant_text    TEXT,
+  was_capped        INTEGER NOT NULL DEFAULT 0,
+  embedding_version INTEGER NOT NULL DEFAULT 0,
+  embedding_model   TEXT,
+  UNIQUE(branch_id, exchange_index)
+);
+CREATE INDEX IF NOT EXISTS idx_chunks_branch ON chunks(branch_id);
+CREATE INDEX IF NOT EXISTS idx_chunks_version ON chunks(embedding_version);
+
 """
 
 # FTS5 schema (best: porter stemming + unicode61, BM25 ranking)
