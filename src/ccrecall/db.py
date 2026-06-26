@@ -66,6 +66,9 @@ VEC_BUSY_TIMEOUT_MS = 30000
 LOG_MAX_BYTES = 1_000_000
 LOG_BACKUP_COUNT = 2
 
+# PID sentinel file permissions: owner read/write only.
+PID_FILE_MODE = 0o600
+
 
 def apply_base_pragmas(conn: sqlite3.Connection) -> None:
     """Set WAL mode, busy_timeout, and foreign-key enforcement for concurrent-safe access.
@@ -77,9 +80,6 @@ def apply_base_pragmas(conn: sqlite3.Connection) -> None:
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
     conn.execute("PRAGMA foreign_keys = ON")
-
-
-PID_FILE_MODE = 0o600  # owner read/write only
 
 
 def pid_file_path(pid_key: str) -> Path:
@@ -96,6 +96,22 @@ def remove_pid_file(pid_key: str) -> None:
 def escape_like(value: str) -> str:
     """Escape SQLite LIKE wildcards so a user value matches literally (pair with ESCAPE '\\')."""
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def parse_project_filter(project: str | None) -> list[str] | None:
+    """Split a comma-separated --project value into a stripped list (None if unset).
+
+    Shared by the search and recent CLI paths so the parsing can't drift.
+    """
+    return [p.strip() for p in project.split(",")] if project else None
+
+
+def resolve_db_settings(db: Path) -> dict | None:
+    """Build the settings dict carrying a non-default --db path (None for the default).
+
+    Shared by the search and recent CLI paths so the override transport stays single-sourced.
+    """
+    return {"db_path": str(db)} if db != DEFAULT_DB_PATH else None
 
 
 def vec_available(conn: sqlite3.Connection) -> bool:
@@ -160,11 +176,11 @@ def write_chunk_embedding(
     The chunk row is created by the caller before this is called; this helper
     only writes the vector and bookkeeping columns.
     """
-    upsert_chunk_vec(cursor, chunk_id, embedding)  # vector FIRST
+    upsert_chunk_vec(cursor, chunk_id, embedding)
     cursor.execute(
         "UPDATE chunks SET embedding_version = ?, embedding_model = ? WHERE id = ?",
         (embedding_version, embedding_model, chunk_id),
-    )  # bookkeeping LAST
+    )
 
 
 def fetch_branch_messages(cursor: sqlite3.Cursor, branch_id: int, include_notifications: bool) -> list[dict]:

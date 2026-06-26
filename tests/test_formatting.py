@@ -317,7 +317,7 @@ def _make_card(score_raw=0.03, score=0.87, topic="some topic", disposition="IN_P
     }
 
 
-def _make_snippet(score_raw=1.84, score=0.91, matched_role="assistant", match_terms=None):
+def _make_snippet(score_raw=0.84, score=0.91, matched_role="assistant", match_terms=None):
     """Return a minimal valid Track B snippet dict."""
     return {
         "score": score,

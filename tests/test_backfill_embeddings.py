@@ -11,6 +11,7 @@ and message-less branches are skipped.
 Opt-in: --days bounds by recency, --limit caps the run.
 """
 
+import builtins
 import json
 import sqlite3
 from unittest.mock import patch
@@ -789,11 +790,6 @@ class TestBackfillInferencesCounter:
         _insert_branch_with_messages(conn, num_exchanges=3)
 
         captured = []
-
-        class _CapturePrint:
-            """Context manager to capture print() to stdout."""
-
-        import builtins
 
         original_print = builtins.print
 

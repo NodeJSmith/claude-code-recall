@@ -10,8 +10,7 @@ MAX_FILES_DISPLAYED = 10
 
 
 def format_time(ts_str: str | None, fmt: str = "%H:%M") -> str:
-    """
-    Format an offset-aware ISO timestamp (Z or +HH:MM) to the given strftime
+    """Format an offset-aware ISO timestamp (Z or +HH:MM) to the given strftime
     format in the local timezone. Default: HH:MM.
 
     Expects the timezone-aware ISO strings the session journal emits; a naive
@@ -26,6 +25,12 @@ def format_time(ts_str: str | None, fmt: str = "%H:%M") -> str:
         return local.to_stdlib().strftime(fmt)
     except ValueError:
         return ts_str[:16] if ts_str else "??:??"
+
+
+def format_tool_counts(tool_counts: dict[str, int]) -> str:
+    """Render tool usage as a count-descending "name: count, ..." string."""
+    sorted_tools = sorted(tool_counts.items(), key=lambda kv: kv[1], reverse=True)
+    return ", ".join(f"{name}: {count}" for name, count in sorted_tools)
 
 
 def format_time_full(ts_str: str | None) -> str:
@@ -113,10 +118,8 @@ def format_markdown_session(session: dict, verbose: bool = False) -> str:
 
         tool_counts = session.get("tool_counts", {})
         if tool_counts:
-            sorted_tools = sorted(tool_counts.items(), key=lambda kv: kv[1], reverse=True)
-            tools_str = ", ".join(f"{name}: {count}" for name, count in sorted_tools)
             lines.append("\n### Tools Used")
-            lines.append(tools_str)
+            lines.append(format_tool_counts(tool_counts))
 
     lines.append("\n### Conversation\n")
 
@@ -258,9 +261,7 @@ def format_card_markdown(card: dict, verbose: bool = False) -> str:
         if commits:
             lines.append(f"Commits: {', '.join(commits)}")
         if tool_counts:
-            sorted_tools = sorted(tool_counts.items(), key=lambda kv: kv[1], reverse=True)
-            tools_str = ", ".join(f"{name}: {count}" for name, count in sorted_tools)
-            lines.append(f"Tools:  {tools_str}")
+            lines.append(f"Tools:  {format_tool_counts(tool_counts)}")
 
     return "\n".join(lines)
 

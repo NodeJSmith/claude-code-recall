@@ -22,6 +22,9 @@ from ccrecall.search_conversations import run as search_conversations_run
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures"
 
+# Canonical valid session UUID for hook-input fixtures (passes validate_session_id).
+VALID_SYNC_UUID = "12345678-1234-1234-1234-123456789abc"
+
 
 @pytest.fixture
 def memory_db_with_project():
@@ -603,8 +606,6 @@ class TestSearchConversationsDbFlag:
 class TestSyncCurrentExcludeProjects:
     """sync_current.run honors exclude_projects for the live session (matches import)."""
 
-    VALID_UUID = "12345678-1234-1234-1234-123456789abc"
-
     def _run(self, tmp_path, monkeypatch, *, settings, cwd):
         monkeypatch.setattr(sync_current, "load_settings", lambda: settings)
         synced = []
@@ -614,7 +615,7 @@ class TestSyncCurrentExcludeProjects:
         monkeypatch.setattr(sync_current, "get_session_file", lambda *a, **k: synced.append("reached") or None)
 
         input_file = tmp_path / "hook.json"
-        input_file.write_text(json.dumps({"session_id": self.VALID_UUID, "cwd": cwd}))
+        input_file.write_text(json.dumps({"session_id": VALID_SYNC_UUID, "cwd": cwd}))
         captured = io.StringIO()
         with patch("sys.stdout", captured):
             sync_current.run(input_file=input_file)
@@ -639,9 +640,6 @@ class TestSyncCurrentExcludeProjects:
         )
         assert out == {"continue": True}
         assert synced == ["reached"]  # guard let it through to session-file lookup
-
-
-VALID_SYNC_UUID = "12345678-1234-1234-1234-123456789abc"
 
 
 class TestSyncCurrentConcurrencyGuard:

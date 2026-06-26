@@ -6,7 +6,6 @@ PID-file lifecycle are preserved from the former cm-* entry points; only the
 argument-parsing layer changed (argparse -> cyclopts).
 """
 
-import sys
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -232,7 +231,7 @@ def cmd_search(
 @app.command(name="search-messages")
 def cmd_search_messages(
     *,
-    query: Annotated[str | None, Parameter(name=["--query", "-q"], help="Search query (required).")] = None,
+    query: Annotated[str, Parameter(name=["--query", "-q"], help="Search query (required).")],
     max_results: Annotated[
         int,
         Parameter(
@@ -256,9 +255,6 @@ def cmd_search_messages(
     No --verbose flag: B snippets carry pre-bounded user/assistant text with no
     collapsible metadata lists (unlike Track A session cards).
     """
-    if not query:
-        print("error: --query/-q is required", file=sys.stderr)
-        raise SystemExit(2)
     search_mod.run_messages(
         query=query,
         max_results=max_results,

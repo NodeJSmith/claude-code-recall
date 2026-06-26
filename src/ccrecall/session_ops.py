@@ -409,11 +409,9 @@ def embed_branch_chunks(
     contextlib.suppress(Exception). Does not commit; the single commit at
     sync_current.py:137 owns the transaction.
     """
-    # Step 1 — guard: nothing to do unless active, vec writable, and messages exist
     if not (is_active and vec_writable and branch_msgs):
         return 0
 
-    # Step 2 — build per-exchange pairs from the branch messages
     exchanges = build_exchange_pairs(branch_msgs)
     if not exchanges:
         return 0
@@ -443,7 +441,7 @@ def embed_branch_chunks(
             }
         )
 
-    # Step 4 — load existing chunks rows for this branch
+    # Load existing chunk rows for this branch.
     cursor.execute(
         "SELECT exchange_index, content_hash, embedding_version, embedding_model FROM chunks WHERE branch_id = ?",
         (branch_db_id,),

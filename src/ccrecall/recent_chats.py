@@ -9,7 +9,14 @@ import sqlite3
 import sys
 from pathlib import Path
 
-from ccrecall.db import DEFAULT_DB_PATH, escape_like, fetch_branch_messages, get_db_connection
+from ccrecall.db import (
+    DEFAULT_DB_PATH,
+    escape_like,
+    fetch_branch_messages,
+    get_db_connection,
+    parse_project_filter,
+    resolve_db_settings,
+)
 from ccrecall.formatting import format_json_sessions, format_markdown_session
 from ccrecall.serialization import decode_json_column
 
@@ -163,7 +170,7 @@ def run(
     # Backstop for direct callers; the CLI validator rejects out-of-range --n
     # before reaching here. Both sides bound on MAX_RECENT_SESSIONS.
     n = max(1, min(MAX_RECENT_SESSIONS, n))
-    projects = [p.strip() for p in project.split(",")] if project else None
+    projects = parse_project_filter(project)
 
     if not db.exists():
         if output_format == "json":
@@ -173,7 +180,7 @@ def run(
         sys.exit(1)
 
     try:
-        settings = {"db_path": str(db)} if db != DEFAULT_DB_PATH else None
+        settings = resolve_db_settings(db)
         conn = get_db_connection(settings)
         sessions = get_recent_sessions(
             conn,

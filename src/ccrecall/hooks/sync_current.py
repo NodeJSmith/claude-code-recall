@@ -40,6 +40,13 @@ _UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f
 # Skip (not queue) if another is running — recovered on the next Stop.
 PID_KEY = "ccrecall-sync-current"
 
+# Dedicated logger for the cold-model warning, kept separate from the main
+# ccrecall logger (LOGGER_NAME) so it fires regardless of logging_enabled (see
+# _warn_cold_model). The hyphen is intentional: "cold-model" keeps this name
+# distinct from the dotted "ccrecall.*" loggers that setup_logging gates, so the
+# warning isn't suppressed. Do not "normalize" the hyphen — it is load-bearing.
+COLD_MODEL_LOGGER_NAME = "ccrecall.cold-model"
+
 
 def _warn_cold_model() -> None:
     """Best-effort warning when the embedding model is absent from the disk cache.
@@ -54,7 +61,7 @@ def _warn_cold_model() -> None:
 
     try:
         DEFAULT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        warn_logger = logging.getLogger("ccrecall.cold-model")
+        warn_logger = logging.getLogger(COLD_MODEL_LOGGER_NAME)
         if not warn_logger.handlers:
             handler = RotatingFileHandler(
                 DEFAULT_LOG_PATH,
@@ -114,7 +121,7 @@ def get_session_file(projects_dir: Path, session_id: str) -> Path | None:
 
 def run(input_file: Path | None = None) -> None:
     """Sync only the current session into the memory DB (Stop-hook helper)."""
-    # ── Concurrency guard ──────────────────────────────────────────────────────
+    # Concurrency guard.
     # At most one sync-current at a time: skip (not queue) if another is alive.
     # Reap stale locks (dead PID) so a crash doesn't permanently block syncing.
     pid_path = pid_file_path(PID_KEY)

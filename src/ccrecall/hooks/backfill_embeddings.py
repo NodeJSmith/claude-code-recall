@@ -18,6 +18,7 @@ non-zero so the scheduler sees the failure.
 
 import contextlib
 import json
+import logging
 import os
 import sqlite3
 import sys
@@ -61,6 +62,15 @@ def cleanup_pid() -> None:
     remove_pid_file(PID_KEY)
 
 
+def days_modifier(days: int) -> str:
+    """SQLite datetime() modifier for an N-day lookback (days=7 -> '-7 days').
+
+    Single source of truth for the --days recency bound so build_selection()
+    (eligibility) and count_status() (progress) can't construct it differently.
+    """
+    return f"-{days} days"
+
+
 def build_selection(days: int | None) -> tuple[str, list]:
     """Return the shared WHERE clause + params for eligible-branch selection (chunk path).
 
@@ -96,11 +106,11 @@ def build_selection(days: int | None) -> tuple[str, list]:
     params: list = [EMBEDDING_VERSION, EMBEDDING_MODEL]
     if days is not None:
         where += "          AND ended_at > datetime('now', ?)\n"
-        params.append(f"-{days} days")
+        params.append(days_modifier(days))
     return where, params
 
 
-def count_status(cursor, days: int | None) -> dict[str, int]:
+def count_status(cursor: sqlite3.Cursor, days: int | None) -> dict[str, int]:
     """Count chunk-coverage backfill progress without doing any work.
 
     universe = chunks belonging to CHUNK_EMBEDDABLE branches.
@@ -119,7 +129,7 @@ def count_status(cursor, days: int | None) -> dict[str, int]:
     if days is not None:
         recency_joined = " AND branches.ended_at > datetime('now', ?)"
         recency_branch = " AND ended_at > datetime('now', ?)"
-        recency_params = [f"-{days} days"]
+        recency_params = [days_modifier(days)]
 
     # universe: total chunks belonging to CHUNK_EMBEDDABLE branches
     cursor.execute(
@@ -182,7 +192,13 @@ def format_duration(seconds: float) -> str:
     return f"{h}h{m:02d}m"
 
 
-def run_status(*, days, json_mode, settings, logger) -> int:
+def run_status(
+    *,
+    days: int | None,
+    json_mode: bool,
+    settings: dict | None,
+    logger: logging.Logger,
+) -> int:
     """Report chunk coverage (done/universe) and branch eligible/errored counts (read-only)."""
     try:
         conn = get_db_connection(settings, load_vec=True)
@@ -192,6 +208,7 @@ def run_status(*, days, json_mode, settings, logger) -> int:
         return EXIT_ABORT
 
     if not chunk_vec_queryable(conn):
+        logger.error("Backfill status: sqlite-vec unavailable")
         print("ccrecall backfill embeddings: sqlite-vec unavailable", file=sys.stderr)
         conn.close()
         return EXIT_ABORT

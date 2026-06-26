@@ -27,6 +27,14 @@ EMBEDDING_MODEL = "jinaai/jina-embeddings-v2-small-en"
 EMBEDDING_VERSION = 3  # Bumped from 2: per-exchange chunk granularity (was per-branch summary).
 EMBEDDING_DIM = 512
 
+# fastembed's supported-model registry serves jina-v2-small from the xenova/ HF
+# mirror (differs from EMBEDDING_MODEL's jinaai/ model-card prefix; there is no
+# programmatic map between the two, so this source repo is tracked explicitly and
+# must be updated alongside EMBEDDING_MODEL). The on-disk cache subdir follows
+# HuggingFace's models--{org}--{name} snapshot convention.
+EMBEDDING_MODEL_HF_SOURCE = "xenova/jina-embeddings-v2-small-en"
+EMBEDDING_MODEL_CACHE_SUBDIR = "models--" + EMBEDDING_MODEL_HF_SOURCE.replace("/", "--")
+
 # Token-aware cap constants for cap_for_embedding.
 # EMBED_CHAR_BUDGET is the initial char split (head + tail each get half).
 # MODEL_TOKEN_LIMIT is jina-v2-small's hard context limit; the cap tightens until
@@ -85,15 +93,13 @@ def is_model_cached_on_disk() -> bool:
     A False result means get_model() may trigger a ~120 MB network download.
 
     Cache root: $FASTEMBED_CACHE_PATH env var, or <tempdir>/fastembed_cache/.
-    Model subdir: models--xenova--jina-embeddings-v2-small-en — the HuggingFace
-    snapshot convention fastembed uses for non-deprecated models. The HF source for
-    EMBEDDING_MODEL is xenova/jina-embeddings-v2-small-en (from fastembed's
-    supported-model registry; differs from the jinaai/ model-card prefix).
+    Model subdir: EMBEDDING_MODEL_CACHE_SUBDIR (see its definition for how the
+    HuggingFace snapshot name is derived from the model's HF source repo).
     """
     try:
         default_cache = os.path.join(tempfile.gettempdir(), "fastembed_cache")
         cache_root = Path(os.environ.get("FASTEMBED_CACHE_PATH", default_cache))
-        return (cache_root / "models--xenova--jina-embeddings-v2-small-en").exists()
+        return (cache_root / EMBEDDING_MODEL_CACHE_SUBDIR).exists()
     except Exception:
         return False
 
@@ -197,7 +203,6 @@ def cap_for_embedding(text: str) -> tuple[str, bool]:
 
     capped = text[:head] + "\n\n[...]\n\n" + text[-tail:]
 
-    # Tighten until within token limit
     while model.token_count([capped]) > MODEL_TOKEN_LIMIT:
         head = max(head * 3 // 4, 1)
         tail = max(tail * 3 // 4, 1)

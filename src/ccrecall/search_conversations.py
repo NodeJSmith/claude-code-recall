@@ -19,6 +19,8 @@ from ccrecall.db import (
     chunk_vec_queryable,
     escape_like,
     get_db_connection,
+    parse_project_filter,
+    resolve_db_settings,
 )
 from ccrecall.embeddings import (
     DEPS_AVAILABLE,
@@ -56,6 +58,35 @@ OVERFETCH_FLOOR = 20
 # Multiply the overfetch by this factor so the post-rollup session count fills
 # max_results. Start at 8 (generous chunks-per-session estimate).
 CHUNK_COLLAPSE_FACTOR = 8
+
+
+def scope_filter_clause(
+    *,
+    projects: list[str] | None,
+    session_id: str | None,
+    path: str | None,
+) -> tuple[str, list]:
+    """Return (sql_fragment, params) for the project/session/path WHERE filters.
+
+    The fragment assumes the query's FROM aliases sessions as ``s`` and projects
+    as ``p``. The fragment leads with a space when non-empty; params are ordered
+    projects -> session -> path to match the clause order. Single source of truth
+    for the scope predicates shared by the FTS, LIKE, and chunk-KNN queries.
+    """
+    clauses: list[str] = []
+    params: list = []
+    if projects:
+        placeholders = ",".join("?" * len(projects))
+        clauses.append(f"p.name IN ({placeholders})")
+        params.extend(projects)
+    if session_id:
+        clauses.append("s.uuid LIKE ? ESCAPE '\\'")
+        params.append(f"{escape_like(session_id)}%")
+    if path:
+        clauses.append("s.cwd LIKE ? ESCAPE '\\'")
+        params.append(f"%{escape_like(path)}%")
+    fragment = "".join(f" AND {clause}" for clause in clauses)
+    return fragment, params
 
 
 def _get_fts_branch_ids(
@@ -96,18 +127,9 @@ def _get_fts_branch_ids(
         """
         params.append(fts_query)
 
-        if projects:
-            placeholders = ",".join("?" * len(projects))
-            sql += f" AND p.name IN ({placeholders})"
-            params.extend(projects)
-
-        if session_id:
-            sql += " AND s.uuid LIKE ? ESCAPE '\\'"
-            params.append(f"{escape_like(session_id)}%")
-
-        if path:
-            sql += " AND s.cwd LIKE ? ESCAPE '\\'"
-            params.append(f"%{escape_like(path)}%")
+        scope_sql, scope_params = scope_filter_clause(projects=projects, session_id=session_id, path=path)
+        sql += scope_sql
+        params.extend(scope_params)
 
         if fts_level == "fts5":
             sql += " ORDER BY bm25(branches_fts) LIMIT ?"
@@ -128,18 +150,9 @@ def _get_fts_branch_ids(
         """
         params.extend(f"%{term}%" for term in terms)
 
-        if projects:
-            placeholders = ",".join("?" * len(projects))
-            sql += f" AND p.name IN ({placeholders})"
-            params.extend(projects)
-
-        if session_id:
-            sql += " AND s.uuid LIKE ? ESCAPE '\\'"
-            params.append(f"{escape_like(session_id)}%")
-
-        if path:
-            sql += " AND s.cwd LIKE ? ESCAPE '\\'"
-            params.append(f"%{escape_like(path)}%")
+        scope_sql, scope_params = scope_filter_clause(projects=projects, session_id=session_id, path=path)
+        sql += scope_sql
+        params.extend(scope_params)
 
         sql += " ORDER BY b.ended_at DESC LIMIT ?"
         params.append(top_k)
@@ -193,18 +206,9 @@ def _execute_chunk_knn(
     """
     filter_params: list = [*chunk_ids, EMBEDDING_VERSION, EMBEDDING_MODEL]
 
-    if projects:
-        proj_placeholders = ",".join("?" * len(projects))
-        filter_sql += f" AND p.name IN ({proj_placeholders})"
-        filter_params.extend(projects)
-
-    if session_id:
-        filter_sql += " AND s.uuid LIKE ? ESCAPE '\\'"
-        filter_params.append(f"{escape_like(session_id)}%")
-
-    if path:
-        filter_sql += " AND s.cwd LIKE ? ESCAPE '\\'"
-        filter_params.append(f"%{escape_like(path)}%")
+    scope_sql, scope_params = scope_filter_clause(projects=projects, session_id=session_id, path=path)
+    filter_sql += scope_sql
+    filter_params.extend(scope_params)
 
     try:
         valid_rows = cursor.execute(filter_sql, filter_params).fetchall()
@@ -666,7 +670,7 @@ def run_messages(
     rather than erroring (FR#17/AC#14). A missing DB or an unexpected error exits 1.
     """
     max_results = max(1, min(MAX_SEARCH_RESULTS, max_results))
-    projects = [p.strip() for p in project.split(",")] if project else None
+    projects = parse_project_filter(project)
 
     if not db.exists():
         if output_format == "json":
@@ -675,7 +679,7 @@ def run_messages(
             print("Error: Database not found. Run memory setup first.")
         sys.exit(1)
 
-    settings = {"db_path": str(db)} if db != DEFAULT_DB_PATH else None
+    settings = resolve_db_settings(db)
 
     try:
         conn = get_db_connection(settings, load_vec=True)
@@ -782,7 +786,7 @@ def run(
     # Backstop for direct callers; the CLI validator rejects out-of-range
     # --max-results before reaching here. Both sides bound on MAX_SEARCH_RESULTS.
     max_results = max(1, min(MAX_SEARCH_RESULTS, max_results))
-    projects = [p.strip() for p in project.split(",")] if project else None
+    projects = parse_project_filter(project)
 
     if not db.exists():
         if status:
@@ -800,7 +804,7 @@ def run(
             print("Error: Database not found. Run memory setup first.")
         sys.exit(1)
 
-    settings = {"db_path": str(db)} if db != DEFAULT_DB_PATH else None
+    settings = resolve_db_settings(db)
 
     if status:
         print_status(settings)
