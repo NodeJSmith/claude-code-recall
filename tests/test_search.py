@@ -21,6 +21,7 @@ from ccrecall.search_conversations import (
     _dedup_by_session,
     _get_vec_chunk_ids,
     _hydrate_cards,
+    format_markdown,
     print_status,
     run,
     run_messages,
@@ -1140,6 +1141,47 @@ class TestMidSessionRecall:
         ex_idx = cursor.execute("SELECT exchange_index FROM chunks WHERE id = ?", (winning_chunk_id,)).fetchone()[0]
         assert ex_idx == 4, f"Best chunk must be exchange_index=4 (got {ex_idx})"
         conn.close()
+
+
+class TestVerboseCardMarkdown:
+    """--verbose must thread through format_markdown to expand card files/commits/tools (FR#10).
+
+    Regression guard: format_markdown previously dropped the verbose flag, so the
+    CLI --verbose was a no-op on the markdown card output.
+    """
+
+    def _card(self) -> dict:
+        return {
+            "score_raw": 1.0,
+            "project": "cf",
+            "git_branch": "main",
+            "ended_at": "2025-06-01T10:00:00Z",
+            "topic": "Wiring verbose",
+            "disposition": "shipped",
+            "exchange_count": 4,
+            "files_modified": ["a.py", "b.py"],
+            "commits": ["abc123"],
+            "tool_counts": {"Edit": 3, "Bash": 1},
+            "handle": "cf-sess-",
+        }
+
+    def test_verbose_expands_card_lists(self):
+        md = format_markdown([self._card()], "q", ranked=True, verbose=True)
+        assert "Files:" in md
+        assert "a.py" in md
+        assert "b.py" in md
+        assert "Commits: abc123" in md
+        assert "Tools:" in md
+        assert "Edit: 3" in md
+
+    def test_non_verbose_omits_card_lists(self):
+        md = format_markdown([self._card()], "q", ranked=True, verbose=False)
+        assert "Files:" not in md
+        assert "Commits:" not in md
+        assert "Tools:" not in md
+        # counts are still summarized in the Status line
+        assert "2 files" in md
+        assert "1 commits" in md
 
 
 class TestCappedChunkRetrieval:

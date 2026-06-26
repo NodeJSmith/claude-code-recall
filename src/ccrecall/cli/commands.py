@@ -57,7 +57,7 @@ _SEARCH_MODE = Group("Search mode", validator=_exactly_one_query_or_status)
 # user-facing flag intact.
 
 # Shared flag types mirroring the former cm-* read tools.
-_VERBOSE = Annotated[bool, _FLAG, Parameter(name=["--verbose", "-v"], help="Include files_modified and commits.")]
+_VERBOSE = Annotated[bool, _FLAG, Parameter(name=["--verbose", "-v"], help="Expand files, commits, and tool counts.")]
 _NOTIFS = Annotated[
     bool, _FLAG, Parameter(name=["--include-notifications"], help="Include task notification messages.")
 ]

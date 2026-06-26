@@ -1,7 +1,7 @@
 ---
 task_id: "T09"
 title: "Update skill, tool-reference, and CLAUDE.md for cards, snippets, and chunk schema"
-status: "planned"
+status: "done"
 depends_on: ["T06", "T07", "T08"]
 implements: ["FR#11"]
 ---

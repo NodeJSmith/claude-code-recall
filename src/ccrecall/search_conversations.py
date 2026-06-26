@@ -624,13 +624,17 @@ def search_messages(
     return snippets, True
 
 
-def format_markdown(cards: list[dict], query: str, ranked: bool) -> str:
-    """Format session cards as markdown."""
+def format_markdown(cards: list[dict], query: str, ranked: bool, verbose: bool = False) -> str:
+    """Format session cards as markdown.
+
+    verbose=True expands each card's files_modified/commits/tool_counts (FR#10);
+    the JSON path always carries the full lists regardless.
+    """
     if not cards:
         return f"No sessions found for query: {query}"
 
     normalized = apply_scores(cards, ranked)
-    card_markdowns = [format_card_markdown(c) for c in normalized]
+    card_markdowns = [format_card_markdown(c, verbose=verbose) for c in normalized]
     return format_result_list_markdown(ranked, card_markdowns)
 
 
@@ -762,7 +766,7 @@ def run(
     project: str | None = None,
     path: str | None = None,
     output_format: str = "markdown",
-    verbose: bool = False,  # noqa: ARG001 — accepted for CLI compat; A-path cards include all fields
+    verbose: bool = False,
     include_notifications: bool = False,  # noqa: ARG001 — accepted for CLI compat; A-path has no transcript hydration
     db: Path = DEFAULT_DB_PATH,
 ) -> None:
@@ -827,7 +831,7 @@ def run(
             envelope = build_envelope(query, ranked, json_cards)
             print(json.dumps(envelope, indent=2))
         else:
-            print(format_markdown(cards, query, ranked))
+            print(format_markdown(cards, query, ranked, verbose=verbose))
 
     # Deliberately broad: top-level CLI handler — reports any error to the user
     # and exits non-zero rather than dumping a traceback.
