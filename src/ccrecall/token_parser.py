@@ -4,6 +4,7 @@ for the token ingest pipeline.
 """
 
 import json
+import re
 import sqlite3
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -51,28 +52,40 @@ _BASH_ANTIPATTERN_PREDICATE = """
 
 # Pricing (USD per million tokens)
 # Source: https://docs.anthropic.com/en/docs/about-claude/pricing
-# Keys are substrings matched against model IDs (checked in order).
-# cache_write_5m = 1.25x input, cache_write_1h = 2x input, cache_read = 0.1x input.
+# Keys match as substrings of the lowercased model id, in order, but must NOT be
+# immediately followed by another digit (see get_pricing) — so "opus-4-1" matches
+# claude-opus-4-1 but not claude-opus-4-10. cache_write_5m = 1.25x input,
+# cache_write_1h = 2x input, cache_read = 0.1x input.
 
 MODEL_PRICING: list[tuple[str, dict[str, float]]] = [
+    # Legacy Opus (4.0 / 4.1) — the only Opus models at the old $15/$75 tier; all
+    # three keys alias the same rates. Enumerated explicitly so they're matched
+    # before the generic "opus" fallback below; relative order within this block
+    # doesn't matter (no key is a digit-boundary prefix of another).
+    #   "opus-4-0"        → the 4.0 alias (claude-opus-4-0)
+    #   "opus-4-20250514" → the dated 4.0 id. Must be the FULL date, not a year
+    #     prefix like "opus-4-2025": the digit-boundary rule in get_pricing rejects
+    #     a key immediately followed by a digit, so "opus-4-2025" (followed by "0")
+    #     would never match its own model id.
+    #   "opus-4-1"        → 4.1 (claude-opus-4-1, dated or bare)
     (
-        "opus-4-6",
+        "opus-4-0",
         {
-            "input": 5.0,
-            "output": 25.0,
-            "cache_write_5m": 6.25,
-            "cache_write_1h": 10.0,
-            "cache_read": 0.50,
+            "input": 15.0,
+            "output": 75.0,
+            "cache_write_5m": 18.75,
+            "cache_write_1h": 30.0,
+            "cache_read": 1.50,
         },
     ),
     (
-        "opus-4-5",
+        "opus-4-20250514",
         {
-            "input": 5.0,
-            "output": 25.0,
-            "cache_write_5m": 6.25,
-            "cache_write_1h": 10.0,
-            "cache_read": 0.50,
+            "input": 15.0,
+            "output": 75.0,
+            "cache_write_5m": 18.75,
+            "cache_write_1h": 30.0,
+            "cache_read": 1.50,
         },
     ),
     (
@@ -85,14 +98,18 @@ MODEL_PRICING: list[tuple[str, dict[str, float]]] = [
             "cache_read": 1.50,
         },
     ),
+    # Every other Opus (4.5+ and anything newer) is the current $5/$25 tier.
+    # A generic fallback rather than per-version entries so a new Opus release
+    # prices correctly with no table edit — the failure mode behind issue #37,
+    # where new opus-4-N ids silently hit the legacy $15/$75 catch-all.
     (
-        "opus-4",
+        "opus",
         {
-            "input": 15.0,
-            "output": 75.0,
-            "cache_write_5m": 18.75,
-            "cache_write_1h": 30.0,
-            "cache_read": 1.50,
+            "input": 5.0,
+            "output": 25.0,
+            "cache_write_5m": 6.25,
+            "cache_write_1h": 10.0,
+            "cache_read": 0.50,
         },
     ),
     (
@@ -124,11 +141,16 @@ DEFAULT_PRICING = next(rates for substr, rates in MODEL_PRICING if substr == "so
 
 
 def get_pricing(model: str | None) -> dict[str, float]:
-    """Return pricing dict for a model ID, falling back to Sonnet rates."""
+    """Return pricing dict for a model ID, falling back to Sonnet rates.
+
+    A key matches as a substring of the model id but must not be immediately
+    followed by another digit, so a version key like "opus-4-1" matches
+    claude-opus-4-1 without also matching a future claude-opus-4-10.
+    """
     if model:
         m = model.lower()
         for substr, rates in MODEL_PRICING:
-            if substr in m:
+            if re.search(re.escape(substr) + r"(?!\d)", m):
                 return rates
     return DEFAULT_PRICING
 
