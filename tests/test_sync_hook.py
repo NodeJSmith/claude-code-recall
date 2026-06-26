@@ -639,3 +639,198 @@ class TestSyncCurrentExcludeProjects:
         )
         assert out == {"continue": True}
         assert synced == ["reached"]  # guard let it through to session-file lookup
+
+
+VALID_SYNC_UUID = "12345678-1234-1234-1234-123456789abc"
+
+
+class TestSyncCurrentConcurrencyGuard:
+    """AC#13: sync-current skips if another instance holds the lock."""
+
+    def _make_input(self, tmp_path, session_id=VALID_SYNC_UUID):
+        p = tmp_path / "hook.json"
+        p.write_text(json.dumps({"session_id": session_id}))
+        return p
+
+    def _run(self, tmp_path, monkeypatch, *, session_id=VALID_SYNC_UUID, extra_patches=None):
+        monkeypatch.setattr(sync_current, "pid_file_path", lambda key: tmp_path / f".pid-{key}")
+        monkeypatch.setattr(sync_current, "remove_pid_file", lambda key: None)
+        monkeypatch.setattr(sync_current, "load_settings", lambda: {"exclude_projects": [], "logging_enabled": False})
+        monkeypatch.setattr(sync_current, "get_session_file", lambda *a, **k: None)
+        if extra_patches:
+            for attr, val in extra_patches.items():
+                monkeypatch.setattr(sync_current, attr, val)
+        input_file = self._make_input(tmp_path, session_id=session_id)
+        captured = io.StringIO()
+        with patch("sys.stdout", captured):
+            sync_current.run(input_file=input_file)
+        return json.loads(captured.getvalue())
+
+    def test_second_sync_skips_when_lock_held_by_live_pid(self, tmp_path, monkeypatch):
+        """When a live PID file exists, a second sync-current skips without embedding."""
+        monkeypatch.setattr(sync_current, "pid_file_path", lambda key: tmp_path / f".pid-{key}")
+        monkeypatch.setattr(sync_current, "remove_pid_file", lambda key: None)
+
+        # Write current process PID as "live" holder
+        (tmp_path / f".pid-{sync_current.PID_KEY}").write_text(str(os.getpid()))
+
+        sync_called = []
+        monkeypatch.setattr(sync_current, "sync_session", lambda *a, **k: sync_called.append(1) or 0)
+
+        input_file = self._make_input(tmp_path)
+        captured = io.StringIO()
+        with patch("sys.stdout", captured):
+            sync_current.run(input_file=input_file)
+
+        out = json.loads(captured.getvalue())
+        assert out == {"continue": True}
+        assert sync_called == [], "sync_session must NOT be called when lock is held"
+
+    def test_skip_outputs_exactly_continue_true(self, tmp_path, monkeypatch):
+        """Skip path prints exactly the hook-contract JSON: {\"continue\": true}."""
+        monkeypatch.setattr(sync_current, "pid_file_path", lambda key: tmp_path / f".pid-{key}")
+        monkeypatch.setattr(sync_current, "remove_pid_file", lambda key: None)
+        (tmp_path / f".pid-{sync_current.PID_KEY}").write_text(str(os.getpid()))
+
+        input_file = self._make_input(tmp_path)
+        captured = io.StringIO()
+        with patch("sys.stdout", captured):
+            sync_current.run(input_file=input_file)
+
+        # Must be exactly the string the hook harness expects
+        assert captured.getvalue().strip() == '{"continue": true}'
+
+    def test_stale_lock_is_reaped_and_run_proceeds(self, tmp_path, monkeypatch):
+        """A stale lock (dead PID) is reaped and the sync continues."""
+        monkeypatch.setattr(sync_current, "pid_file_path", lambda key: tmp_path / f".pid-{key}")
+        # Let remove_pid_file actually delete from tmp_path
+        monkeypatch.setattr(
+            sync_current,
+            "remove_pid_file",
+            lambda key: (tmp_path / f".pid-{key}").unlink(missing_ok=True),
+        )
+        monkeypatch.setattr(sync_current, "load_settings", lambda: {"exclude_projects": [], "logging_enabled": False})
+        monkeypatch.setattr(sync_current, "get_session_file", lambda *a, **k: None)
+
+        # Spawn a real subprocess and reap it to get a guaranteed-dead PID
+        proc = subprocess.Popen([sys.executable, "-c", ""])
+        proc.wait()
+        dead_pid = proc.pid
+
+        lock_file = tmp_path / f".pid-{sync_current.PID_KEY}"
+        lock_file.write_text(str(dead_pid))
+
+        input_file = self._make_input(tmp_path)
+        captured = io.StringIO()
+        with patch("sys.stdout", captured):
+            sync_current.run(input_file=input_file)
+
+        out = json.loads(captured.getvalue())
+        assert out == {"continue": True}
+        # Lock was reaped and cleaned up by the successful run's finally block
+        assert not lock_file.exists(), "stale lock file should be gone after run"
+
+    def test_first_sync_completes_normally_without_lock(self, tmp_path, monkeypatch):
+        """When no lock file exists, sync-current runs normally (no skip)."""
+        reached = []
+        out = self._run(
+            tmp_path,
+            monkeypatch,
+            extra_patches={"get_session_file": lambda *a, **k: reached.append(1) or None},
+        )
+        assert out == {"continue": True}
+        assert reached, "get_session_file should be reached (lock guard passed)"
+
+
+class TestModelWarmOnSetup:
+    """M22: model warm is spawned at setup, PID-guarded, non-blocking."""
+
+    WARM_PID_KEY = "ccrecall-warm-model"
+
+    def test_setup_spawns_warm_model_command(self, tmp_path, monkeypatch):
+        """memory_setup.main() spawns ccrecall-warm-model after DB setup."""
+        spawned: list[tuple[list[str], str]] = []
+
+        def mock_spawn(argv, pid_key):
+            spawned.append((argv, pid_key))
+
+        monkeypatch.setattr(memory_setup, "_spawn_background", mock_spawn)
+        monkeypatch.setattr(memory_setup, "DEFAULT_DB_PATH", tmp_path / "conversations.db")
+        monkeypatch.setattr(memory_setup, "load_settings", lambda: {"logging_enabled": False})
+        monkeypatch.setattr(memory_setup, "_needs_reimport", lambda *a, **k: False)
+        monkeypatch.setattr(memory_setup, "_needs_backfill", lambda *a, **k: False)
+        monkeypatch.setattr(memory_setup, "find_legacy_db", lambda: None)
+        monkeypatch.setattr(memory_setup, "_reap_stale_temp_files", lambda: None)
+
+        captured = io.StringIO()
+        with patch("sys.stdout", captured):
+            memory_setup.main()
+
+        warm_calls = [a for a, _ in spawned if a and a[0] == "ccrecall-warm-model"]
+        assert warm_calls, f"ccrecall-warm-model was not spawned; all spawns: {spawned}"
+
+    def test_warm_spawn_pid_guarded_by_spawn_background(self, tmp_path, monkeypatch):
+        """The warm spawn uses _spawn_background (which has the atomic PID guard)."""
+        spawn_keys: list[str] = []
+
+        def recording_spawn(argv, pid_key):
+            spawn_keys.append(pid_key)
+
+        monkeypatch.setattr(memory_setup, "_spawn_background", recording_spawn)
+        monkeypatch.setattr(memory_setup, "DEFAULT_DB_PATH", tmp_path / "conversations.db")
+        monkeypatch.setattr(memory_setup, "load_settings", lambda: {"logging_enabled": False})
+        monkeypatch.setattr(memory_setup, "_needs_reimport", lambda *a, **k: False)
+        monkeypatch.setattr(memory_setup, "_needs_backfill", lambda *a, **k: False)
+        monkeypatch.setattr(memory_setup, "find_legacy_db", lambda: None)
+        monkeypatch.setattr(memory_setup, "_reap_stale_temp_files", lambda: None)
+
+        with patch("sys.stdout", io.StringIO()):
+            memory_setup.main()
+
+        # The warm spawn must pass "ccrecall-warm-model" as the pid_key so the
+        # atomic O_CREAT|O_EXCL guard in _spawn_background prevents concurrent warms.
+        assert self.WARM_PID_KEY in spawn_keys, (
+            f"expected pid_key {self.WARM_PID_KEY!r} in spawn calls; got: {spawn_keys}"
+        )
+
+    def test_setup_non_blocking_returns_continue_true(self, tmp_path, monkeypatch):
+        """memory_setup.main() always prints {continue: true} (warm spawn is detached)."""
+        monkeypatch.setattr(memory_setup, "_spawn_background", lambda *a, **k: None)
+        monkeypatch.setattr(memory_setup, "DEFAULT_DB_PATH", tmp_path / "conversations.db")
+        monkeypatch.setattr(memory_setup, "load_settings", lambda: {"logging_enabled": False})
+        monkeypatch.setattr(memory_setup, "_needs_reimport", lambda *a, **k: False)
+        monkeypatch.setattr(memory_setup, "_needs_backfill", lambda *a, **k: False)
+        monkeypatch.setattr(memory_setup, "find_legacy_db", lambda: None)
+        monkeypatch.setattr(memory_setup, "_reap_stale_temp_files", lambda: None)
+
+        captured = io.StringIO()
+        with patch("sys.stdout", captured):
+            memory_setup.main()
+
+        out = json.loads(captured.getvalue())
+        assert out.get("continue") is True
+
+    def test_cold_model_warning_fires_when_disk_cache_absent(self, tmp_path):
+        """_warn_cold_model logs a warning when the fastembed disk cache is absent."""
+        warning_messages: list[str] = []
+        mock_logger = MagicMock()
+        mock_logger.handlers = []
+        mock_logger.warning = lambda msg, *a, **k: warning_messages.append(msg)
+
+        with (
+            patch("ccrecall.hooks.sync_current.is_model_cached_on_disk", return_value=False),
+            patch("ccrecall.hooks.sync_current.DEFAULT_LOG_PATH", tmp_path / "ccrecall.log"),
+            patch("logging.getLogger", return_value=mock_logger),
+        ):
+            sync_current._warn_cold_model()
+
+        assert warning_messages, "warning should fire when disk cache is absent"
+
+    def test_cold_model_warning_silent_when_disk_cache_present(self):
+        """_warn_cold_model is silent when the fastembed disk cache is already present."""
+        with (
+            patch("ccrecall.hooks.sync_current.is_model_cached_on_disk", return_value=True),
+            patch("logging.getLogger") as mock_get_logger,
+        ):
+            sync_current._warn_cold_model()
+            mock_get_logger.assert_not_called()

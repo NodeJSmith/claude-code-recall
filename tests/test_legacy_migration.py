@@ -187,7 +187,11 @@ class TestMemorySetupHook:
 
         out, spawned = _run_memory_setup(monkeypatch)
 
-        assert spawned == [["ccrecall", "migrate"]]  # migrate only — no fresh import
+        # migrate must be spawned; fresh import must NOT be (migrate-only path).
+        # warm-model is also spawned on every SessionStart — both are expected.
+        assert ["ccrecall", "migrate"] in spawned, "migrate must be spawned on legacy path"
+        assert ["ccrecall", "import"] not in spawned, "fresh import must not run alongside migrate"
+        assert ["ccrecall-warm-model"] in spawned, "model warm must be spawned"
         assert out["continue"] is True
         assert "claude-memory" in out["hookSpecificOutput"]["additionalContext"]
         assert not new_db.exists()  # never created an empty DB that migrate would refuse
@@ -200,7 +204,9 @@ class TestMemorySetupHook:
 
         out, spawned = _run_memory_setup(monkeypatch)
 
-        assert spawned == [["ccrecall", "import"]]
+        # import must be spawned; warm-model is also spawned on every SessionStart.
+        assert ["ccrecall", "import"] in spawned, "fresh import must be spawned"
+        assert ["ccrecall-warm-model"] in spawned, "model warm must be spawned"
         assert "hookSpecificOutput" not in out  # no migration notice on a clean install
 
 

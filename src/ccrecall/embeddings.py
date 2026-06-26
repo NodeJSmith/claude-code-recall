@@ -4,6 +4,10 @@ Both the write path and the query path must import from here. No second
 embedding code path may exist.
 """
 
+import os
+import tempfile
+from pathlib import Path
+
 import numpy as np
 
 # fastembed is a hard dep, but guard the import so model_available() can degrade
@@ -72,6 +76,26 @@ def get_model(threads: int | None = None):
     assert TextEmbedding is not None  # noqa: S101 — type-checker narrowing; the real guard is the RuntimeError above
     _model = TextEmbedding(model_name=EMBEDDING_MODEL, threads=resolve_thread_count(threads))
     return _model
+
+
+def is_model_cached_on_disk() -> bool:
+    """Return True iff the fastembed model's cache directory exists on disk.
+
+    A True result means get_model() will load from disk (fast — milliseconds).
+    A False result means get_model() may trigger a ~120 MB network download.
+
+    Cache root: $FASTEMBED_CACHE_PATH env var, or <tempdir>/fastembed_cache/.
+    Model subdir: models--xenova--jina-embeddings-v2-small-en — the HuggingFace
+    snapshot convention fastembed uses for non-deprecated models. The HF source for
+    EMBEDDING_MODEL is xenova/jina-embeddings-v2-small-en (from fastembed's
+    supported-model registry; differs from the jinaai/ model-card prefix).
+    """
+    try:
+        default_cache = os.path.join(tempfile.gettempdir(), "fastembed_cache")
+        cache_root = Path(os.environ.get("FASTEMBED_CACHE_PATH", default_cache))
+        return (cache_root / "models--xenova--jina-embeddings-v2-small-en").exists()
+    except Exception:
+        return False
 
 
 def model_available(threads: int | None = None) -> bool:

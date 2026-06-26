@@ -1,7 +1,7 @@
 ---
 task_id: "T08"
 title: "Guard sync-current concurrency and warm the model cache on setup"
-status: "planned"
+status: "done"
 depends_on: []
 implements: ["FR#16", "AC#13"]
 ---

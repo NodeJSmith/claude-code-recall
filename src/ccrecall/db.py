@@ -79,6 +79,9 @@ def apply_base_pragmas(conn: sqlite3.Connection) -> None:
     conn.execute("PRAGMA foreign_keys = ON")
 
 
+PID_FILE_MODE = 0o600  # owner read/write only
+
+
 def pid_file_path(pid_key: str) -> Path:
     """Path to a background job's PID sentinel (lives beside the DB)."""
     return DEFAULT_DB_PATH.parent / f".pid-{pid_key}"
