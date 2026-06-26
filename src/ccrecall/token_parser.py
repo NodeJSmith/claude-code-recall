@@ -57,9 +57,20 @@ _BASH_ANTIPATTERN_PREDICATE = """
 # claude-opus-4-1 but not claude-opus-4-10. cache_write_5m = 1.25x input,
 # cache_write_1h = 2x input, cache_read = 0.1x input.
 
+# Shared by the three legacy-Opus keys below so a legacy-rate correction is a
+# one-line edit instead of three in-sync copies. Read-only — get_pricing returns
+# it as-is and callers never mutate the dict.
+_LEGACY_OPUS_RATES: dict[str, float] = {
+    "input": 15.0,
+    "output": 75.0,
+    "cache_write_5m": 18.75,
+    "cache_write_1h": 30.0,
+    "cache_read": 1.50,
+}
+
 MODEL_PRICING: list[tuple[str, dict[str, float]]] = [
     # Legacy Opus (4.0 / 4.1) — the only Opus models at the old $15/$75 tier; all
-    # three keys alias the same rates. Enumerated explicitly so they're matched
+    # three keys alias _LEGACY_OPUS_RATES. Enumerated explicitly so they're matched
     # before the generic "opus" fallback below; relative order within this block
     # doesn't matter (no key is a digit-boundary prefix of another).
     #   "opus-4-0"        → the 4.0 alias (claude-opus-4-0)
@@ -68,36 +79,9 @@ MODEL_PRICING: list[tuple[str, dict[str, float]]] = [
     #     a key immediately followed by a digit, so "opus-4-2025" (followed by "0")
     #     would never match its own model id.
     #   "opus-4-1"        → 4.1 (claude-opus-4-1, dated or bare)
-    (
-        "opus-4-0",
-        {
-            "input": 15.0,
-            "output": 75.0,
-            "cache_write_5m": 18.75,
-            "cache_write_1h": 30.0,
-            "cache_read": 1.50,
-        },
-    ),
-    (
-        "opus-4-20250514",
-        {
-            "input": 15.0,
-            "output": 75.0,
-            "cache_write_5m": 18.75,
-            "cache_write_1h": 30.0,
-            "cache_read": 1.50,
-        },
-    ),
-    (
-        "opus-4-1",
-        {
-            "input": 15.0,
-            "output": 75.0,
-            "cache_write_5m": 18.75,
-            "cache_write_1h": 30.0,
-            "cache_read": 1.50,
-        },
-    ),
+    ("opus-4-0", _LEGACY_OPUS_RATES),
+    ("opus-4-20250514", _LEGACY_OPUS_RATES),
+    ("opus-4-1", _LEGACY_OPUS_RATES),
     # Every other Opus (4.5+ and anything newer) is the current $5/$25 tier.
     # A generic fallback rather than per-version entries so a new Opus release
     # prices correctly with no table edit — the failure mode behind issue #37,
