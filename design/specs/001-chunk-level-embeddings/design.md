@@ -1,7 +1,7 @@
 # Design: Chunk-Level Conversation Embeddings (Issue #31)
 
 **Date:** 2026-06-25
-**Status:** approved
+**Status:** archived
 **Scope-mode:** hold
 **Research:** design/research/2026-06-25-chunk-level-embeddings/research.md
 **Output contract:** design/specs/001-chunk-level-embeddings/output-format-contract.md (absorbed from draft PR #33)
@@ -599,7 +599,19 @@ envelope needs `ranked: false` on the LIKE-only rung. `rrf_scored` is never call
 rung, so the search entry point returns a `(results, ranked: bool)` pair (a small wrapper
 struct), and the card/snippet renderer uses `ranked == False` to emit `score: null`/
 `score_raw: null` per result and `ranked: false` in the envelope — wiring the existing
-FTS5→FTS4→LIKE cascade's bottom rung to the contract's unranked shape.
+FTS5→FTS4→LIKE cascade's bottom rung to the contract's unranked shape. (As-built, the fts4 rung
+also surfaces as `ranked: false` pending issue #35 — see the As-built keyword-rung note below.)
+
+**As-built keyword-rung ranking (Track A) and the fts4 deferral (issue #35).** On the degraded
+keyword path the **fts5/BM25** rung is ranked (`ranked: true` with a per-card `score_raw` = negated
+bm25, higher = better); the **LIKE** rung is unranked per FR#8 (null scores, recency order). The
+**fts4** rung is a documented exception: the contract's Key Constraints require the FTS5 → FTS4 →
+LIKE cascade to stay ranked at every rung except the bottom (LIKE) one, so fts4 is expected to
+carry a relevance score — but `_get_fts_branch_ids` orders fts4 by recency (no relevance score) — as
+it did before this feature — so this landing surfaces fts4 as `ranked: false` too. This is a deliberate,
+accepted scope boundary for a rare rung (fts5 ships on essentially all modern SQLite builds);
+**issue #35** tracks giving fts4 a `matchinfo` relevance score so only the LIKE rung remains
+unranked. This is distinct from #34, which is the Track B (`search-messages`) keyword fallback.
 
 **Track B on vec0-unavailable machines** (challenge Finding H7, decided: defer + document,
 tracked by **issue #34**). Track B's *only* ranking source in this landing is the chunk-KNN;

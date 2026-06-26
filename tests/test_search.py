@@ -256,6 +256,50 @@ class TestSearchSessionsFTS:
         assert len(results) == 0
 
 
+class TestKeywordRankedSignal:
+    """The keyword (non-fusion) path: fts5/BM25 is ranked; fts4 + LIKE are not.
+
+    Pins the FR#7/FR#8 boundary on the degraded path (no model/vec available): a
+    real relevance signal (BM25) → ranked:true with a per-card score_raw; recency
+    order (fts4, LIKE) → ranked:false with null scores. Regression guard for the
+    bug where every keyword rung was mislabeled ranked:false and discarded BM25.
+    """
+
+    def test_fts5_keyword_path_is_ranked_with_scores(self, search_db):
+        if detect_fts_support(search_db) != "fts5":
+            pytest.skip("requires an fts5 build for bm25 scoring")
+
+        cards, ranked = search_sessions(search_db, "pytest", "fts5", max_results=10)
+        assert ranked is True
+        assert len(cards) >= 2
+        assert all(c["score_raw"] is not None for c in cards), "fts5 cards carry a bm25 score_raw"
+        # score_raw is higher = better (negated bm25), and cards arrive best-first,
+        # so score_raw runs in descending order down the list.
+        raws = [c["score_raw"] for c in cards]
+        assert raws == sorted(raws, reverse=True)
+
+    def test_fts5_keyword_markdown_omits_unranked_marker(self, search_db):
+        if detect_fts_support(search_db) != "fts5":
+            pytest.skip("requires an fts5 build for bm25 scoring")
+
+        cards, ranked = search_sessions(search_db, "pytest", "fts5", max_results=10)
+        md = format_markdown(cards, "pytest", ranked)
+        assert "keyword fallback" not in md, "ranked fts5 path must not print the unranked marker"
+
+    def test_fts4_keyword_path_is_unranked(self, search_db):
+        # fts4 orders by recency with no bm25 — no relevance score in this landing,
+        # so it is surfaced as unranked. matchinfo ranking for fts4 is a deferred
+        # Track A gap (issue #35); only the LIKE rung is unranked by contract (FR#8).
+        cards, ranked = search_sessions(search_db, "pytest", "fts4", max_results=10)
+        assert ranked is False
+        assert all(c["score_raw"] is None for c in cards)
+
+    def test_like_keyword_path_is_unranked(self, search_db):
+        cards, ranked = search_sessions(search_db, "pytest", fts_level=None, max_results=10)
+        assert ranked is False
+        assert all(c["score_raw"] is None for c in cards)
+
+
 class TestSearchSessionsLIKE:
     """Test LIKE fallback when FTS is not available."""
 
@@ -516,7 +560,8 @@ class TestDegradation:
         uuids = {r["session_uuid"] for r in results}
         assert "sess-alpha-1" in uuids
         assert "sess-beta-1" in uuids
-        assert ranked is False  # keyword path → not ranked
+        # The BM25 signal survives the degrade: fts5 keyword rung is ranked; fts4 is not.
+        assert ranked == (fts_level == "fts5")
 
     def test_attribute_error_on_extension_does_not_raise(self, search_db):
         """AttributeError from extension load → keyword path, no raise."""
@@ -533,7 +578,7 @@ class TestDegradation:
 
         # Should return results via keyword fallback, not raise
         assert isinstance(results, list)
-        assert ranked is False
+        assert ranked == (fts_level == "fts5")
 
     def test_missing_model_path_does_not_raise(self, search_db):
         """model_available() is False (model unavailable) → keyword path."""
@@ -581,7 +626,7 @@ class TestDegradation:
         assert len(results) >= 1
         uuids = {r["session_uuid"] for r in results}
         assert "sess-alpha-2" in uuids
-        assert ranked is False
+        assert ranked == (fts_level == "fts5")
 
 
 # stale-version chunk rows excluded from vector candidates (AC#8)
@@ -1061,11 +1106,11 @@ class TestCardFields:
         assert card["disposition"] is None
         conn.close()
 
-    def test_keyword_search_returns_ranked_false(self, search_db):
-        """Keyword-only path returns ranked=False (no relevance signal)."""
+    def test_keyword_only_flag_ranked_by_rung(self, search_db):
+        """--keyword-only: the fts5/BM25 rung is ranked; fts4 + LIKE are not (FR#7/FR#8)."""
         fts_level = detect_fts_support(search_db)
         _results, ranked = search_sessions(search_db, "pytest", fts_level, max_results=10, keyword_only=True)
-        assert ranked is False
+        assert ranked == (fts_level == "fts5")
 
 
 # AC#1: chunk-KNN finds middle exchanges

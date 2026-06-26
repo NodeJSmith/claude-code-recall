@@ -185,7 +185,8 @@ def apply_scores(results: list[dict], ranked: bool) -> list[dict]:
     """Resolve the score fields for a result set per its ranked state.
 
     Ranked → render-time min-max normalization over this bounded set; unranked
-    (LIKE fallback) → score and score_raw both None per the contract. Single
+    (the LIKE rung — and, as-built, the fts4 rung too; see issue #35) → score
+    and score_raw both None per the contract. Single
     source of truth for this decision, shared by the JSON envelope and the
     markdown card path. Returns new dicts; does not mutate the input.
     """
@@ -365,8 +366,8 @@ def build_envelope(query: str, ranked: bool, results: list[dict]) -> dict:
 
     Applies render-time min-max score normalization when ranked=True (the
     normalization window is this bounded result set, not the full ranked list).
-    On the unranked path (ranked=False, LIKE fallback), sets all score and
-    score_raw to None per the contract.
+    On the unranked path (ranked=False — the LIKE rung, and as-built the fts4
+    rung; see issue #35), sets all score and score_raw to None per the contract.
 
     Returns {query, ranked, count, results} with score fields populated.
     """
@@ -382,8 +383,9 @@ def build_envelope(query: str, ranked: bool, results: list[dict]) -> dict:
 def format_result_list_markdown(ranked: bool, result_markdowns: list[str]) -> str:
     """Format a list of pre-rendered card/snippet markdown strings.
 
-    When ranked=False (LIKE-only fallback), prepends the unranked marker line so
-    consumers know no relevance score was available.
+    When ranked=False (any unranked keyword rung — LIKE, and as-built fts4),
+    prepends the unranked marker line so consumers know no relevance score was
+    available.
     """
     if not ranked:
         parts = ["(keyword fallback — unranked, ordered by recency)", ""]

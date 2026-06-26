@@ -97,11 +97,17 @@ def _get_fts_branch_ids(
     projects: list[str] | None = None,
     session_id: str | None = None,
     path: str | None = None,
-) -> list[int]:
-    """Return an ordered list of branch IDs from FTS or LIKE search.
+) -> list[tuple[int, float | None]]:
+    """Return ordered (branch_id, score_raw) pairs from FTS or LIKE search.
 
-    Returns branch_ids only (no hydration), ordered by relevance descending.
-    Returns empty list when query is empty or fts_level is None and LIKE has no results.
+    score_raw is the negated SQLite bm25 (higher = better) on the fts5 rung — the
+    only keyword rung with a relevance signal today. The LIKE fallback has no
+    relevance signal (FR#8: unranked, recency order), so its score_raw is None.
+    The fts4 rung also lacks a relevance score in this landing — it is ordered by
+    recency, not matchinfo, so its score_raw is None too and the caller surfaces
+    it as unranked. Ranking fts4 by matchinfo is a deferred Track A gap (issue
+    #35), not the contract's intended end state. Ordered by relevance (fts5) or
+    recency (fts4/LIKE) descending. Empty when the query is empty or has no hits.
     """
     terms = query.split()
     if not terms:
@@ -116,8 +122,10 @@ def _get_fts_branch_ids(
             return []
         fts_query = " OR ".join(f'"{term}"' for term in sanitized_terms)
 
-        sql = """
-            SELECT b.id
+        # fts5 carries a bm25 relevance score; fts4 has none (recency-ordered).
+        score_col = ", bm25(branches_fts)" if fts_level == "fts5" else ", NULL"
+        sql = f"""
+            SELECT b.id{score_col}
             FROM branches_fts
             JOIN branches b ON branches_fts.rowid = b.id
             JOIN sessions s ON b.session_id = s.id
@@ -138,10 +146,10 @@ def _get_fts_branch_ids(
         params.append(top_k)
 
     else:
-        # LIKE fallback
+        # LIKE fallback — no relevance signal, recency order, null score.
         like_clauses = " AND ".join("b.aggregated_content LIKE ?" for _ in terms)
         sql = f"""
-            SELECT b.id
+            SELECT b.id, NULL
             FROM branches b
             JOIN sessions s ON b.session_id = s.id
             JOIN projects p ON s.project_id = p.id
@@ -158,7 +166,8 @@ def _get_fts_branch_ids(
         params.append(top_k)
 
     cursor.execute(sql, params)
-    return [row[0] for row in cursor.fetchall()]
+    # bm25 is more-negative = better; negate so higher = better. NULL stays None.
+    return [(row[0], -row[1] if row[1] is not None else None) for row in cursor.fetchall()]
 
 
 def _execute_chunk_knn(
@@ -489,11 +498,13 @@ def search_sessions(
 ) -> tuple[list[dict], bool]:
     """Search for sessions, returning (cards, ranked).
 
-    ranked=True when FTS/vector fusion was used; ranked=False on the LIKE-only
-    fallback (no relevance signal — scores are null, order is by recency).
+    ranked=True when a relevance signal exists: RRF fusion (chunk-KNN + FTS), or
+    the fts5/BM25 keyword rung on the degraded path. ranked=False on the LIKE rung
+    (FR#8: unranked, recency order) and — as a deferred gap (issue #35) — the fts4
+    rung, which is recency-ordered rather than matchinfo-ranked in this landing.
     When model and vec extension are both available and keyword_only is False,
-    results are fused from chunk-KNN and FTS via Reciprocal Rank Fusion.
-    Degrades silently to keyword path on any vec/embed error.
+    results are fused from chunk-KNN and FTS via Reciprocal Rank Fusion. Degrades
+    silently to the keyword path on any vec/embed error.
     """
     terms = query.split()
     if not terms:
@@ -530,7 +541,10 @@ def search_sessions(
 
     if use_fusion and query_vec is not None:
         try:
-            fts_ids = _get_fts_branch_ids(cursor, query, fts_level, fts_top_k, projects, session_id, path)
+            fts_ids = [
+                bid
+                for bid, _score in _get_fts_branch_ids(cursor, query, fts_level, fts_top_k, projects, session_id, path)
+            ]
             chunk_results = _get_vec_chunk_ids(cursor, query_vec, chunk_top_k, projects, session_id, path)
             vec_branch_ids = [r[0] for r in chunk_results]
 
@@ -574,12 +588,18 @@ def search_sessions(
             file=sys.stderr,
         )
 
-    # Keyword-only path (FTS or LIKE) — unranked, ordered by recency
-    branch_ids = _get_fts_branch_ids(cursor, query, fts_level, fts_top_k, projects, session_id, path)
-    deduped_ids = _dedup_by_session(cursor, branch_ids)
+    # Keyword-only path. The fts5 rung ranks by BM25 (a relevance signal →
+    # ranked:true with scores). The LIKE fallback is unranked by the contract
+    # (FR#8: null scores, recency order). The fts4 rung is recency-ordered with no
+    # relevance score in this landing, so it is also surfaced as unranked — a
+    # deferred Track A gap (issue #35), not the contract's end state.
+    fts_rows = _get_fts_branch_ids(cursor, query, fts_level, fts_top_k, projects, session_id, path)
+    ranked = fts_level == "fts5" and bool(fts_rows)
+    branch_scores = {bid: score for bid, score in fts_rows if score is not None} if ranked else None
+    deduped_ids = _dedup_by_session(cursor, [bid for bid, _score in fts_rows])
     ordered_ids = deduped_ids[:max_results]
-    cards = _hydrate_cards(cursor, ordered_ids, branch_scores=None)
-    return cards, False
+    cards = _hydrate_cards(cursor, ordered_ids, branch_scores=branch_scores)
+    return cards, ranked
 
 
 def search_messages(
