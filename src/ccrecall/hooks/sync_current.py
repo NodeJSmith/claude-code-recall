@@ -23,6 +23,7 @@ from ccrecall.db import (
     LOG_BACKUP_COUNT,
     LOG_MAX_BYTES,
     PID_FILE_MODE,
+    ensure_parent_dir,
     get_db_connection,
     load_settings,
     pid_file_path,
@@ -60,7 +61,7 @@ def _warn_cold_model() -> None:
         return  # disk cache present — load will be fast, no download risk
 
     try:
-        DEFAULT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        ensure_parent_dir(DEFAULT_LOG_PATH)
         warn_logger = logging.getLogger(COLD_MODEL_LOGGER_NAME)
         if not warn_logger.handlers:
             handler = RotatingFileHandler(
@@ -129,7 +130,7 @@ def run(input_file: Path | None = None) -> None:
     # before anything else creates ~/.ccrecall/. Without this, the os.open() below
     # raises an uncaught FileNotFoundError (it's before the try/finally), leaving
     # the hook with no stdout — a violation of the {"continue": true} contract.
-    pid_path.parent.mkdir(parents=True, exist_ok=True)
+    ensure_parent_dir(pid_path)
     while True:
         try:
             # Atomic create — fails with FileExistsError if file already exists

@@ -10,7 +10,7 @@ import os
 import tempfile
 from pathlib import Path
 
-from ccrecall.db import CONFIG_PATH, CURRENT_ONBOARDING_VERSION, DEFAULT_SETTINGS
+from ccrecall.db import CONFIG_PATH, CURRENT_ONBOARDING_VERSION, DEFAULT_SETTINGS, ensure_parent_dir
 
 
 def run(*, defaults: bool = False, auto_inject_context: bool | None = None) -> None:
@@ -38,7 +38,7 @@ def run(*, defaults: bool = False, auto_inject_context: bool | None = None) -> N
     config["onboarding_version"] = CURRENT_ONBOARDING_VERSION
 
     # Atomic write
-    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    ensure_parent_dir(CONFIG_PATH)
     fd, tmp_path = tempfile.mkstemp(dir=CONFIG_PATH.parent, suffix=".tmp")
     try:
         with os.fdopen(fd, "w") as fh:

@@ -35,6 +35,7 @@ from ccrecall.db import (
     CONFIG_PATH,
     DEFAULT_DB_PATH,
     DEFAULT_SETTINGS,
+    ensure_parent_dir,
     get_db_connection,
     remove_pid_file,
 )
@@ -101,7 +102,7 @@ def copy_legacy_db(src: Path) -> bool:
         finally:
             conn.close()
 
-    DEFAULT_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    ensure_parent_dir(DEFAULT_DB_PATH)
     fd, tmp = tempfile.mkstemp(dir=DEFAULT_DB_PATH.parent, suffix=".migrating")
     os.close(fd)
     try:
@@ -129,7 +130,7 @@ def copy_legacy_config(src_config: Path) -> bool:
         return False
 
     kept = portable_config(old)
-    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    ensure_parent_dir(CONFIG_PATH)
     fd, tmp = tempfile.mkstemp(dir=CONFIG_PATH.parent, suffix=".tmp")
     try:
         with os.fdopen(fd, "w") as fh:

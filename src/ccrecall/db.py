@@ -17,10 +17,11 @@ from ccrecall.models import BUSY_TIMEOUT_MS, LOGGER_NAME
 from ccrecall.schema import SCHEMA_CORE, SCHEMA_FTS4, SCHEMA_FTS5, detect_fts_support
 
 # Default paths
-DEFAULT_DB_PATH = Path.home() / ".ccrecall" / "conversations.db"
+RUNTIME_DIR = Path.home() / ".ccrecall"
+DEFAULT_DB_PATH = RUNTIME_DIR / "conversations.db"
 DEFAULT_PROJECTS_DIR = Path.home() / ".claude" / "projects"
-DEFAULT_LOG_PATH = Path.home() / ".ccrecall" / "ccrecall.log"
-CONFIG_PATH = Path.home() / ".ccrecall" / "config.json"
+DEFAULT_LOG_PATH = RUNTIME_DIR / "ccrecall.log"
+CONFIG_PATH = RUNTIME_DIR / "config.json"
 
 # Hook filenames/prefixes — writer and reader live in different modules and must agree.
 CLEAR_HANDOFF_FILENAME = "clear-handoff.json"
@@ -82,9 +83,20 @@ def apply_base_pragmas(conn: sqlite3.Connection) -> None:
     conn.execute("PRAGMA foreign_keys = ON")
 
 
+def ensure_parent_dir(path: Path) -> None:
+    """Create ``path``'s parent directory (idempotent) before writing to it.
+
+    Centralizes the mkdir flags for runtime-dir writers, any of which may be the
+    first to run on a fresh machine before ~/.ccrecall/ exists. Takes a path
+    rather than hardcoding the runtime dir so a settings-overridden db_path
+    materializes under its own parent, not the default dir.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+
 def pid_file_path(pid_key: str) -> Path:
-    """Path to a background job's PID sentinel (lives beside the DB)."""
-    return DEFAULT_DB_PATH.parent / f".pid-{pid_key}"
+    """Path to a background job's PID sentinel (lives in the runtime dir, beside the DB)."""
+    return RUNTIME_DIR / f".pid-{pid_key}"
 
 
 def remove_pid_file(pid_key: str) -> None:
@@ -312,7 +324,7 @@ def get_db_connection(settings: dict | None = None, load_vec: bool = False) -> s
     that never touch the vec tables.
     """
     db_path = get_db_path(settings)
-    db_path.parent.mkdir(parents=True, exist_ok=True)
+    ensure_parent_dir(db_path)
     conn = sqlite3.connect(db_path)
     apply_base_pragmas(conn)
 
@@ -347,7 +359,7 @@ def setup_logging(settings: dict | None = None) -> logging.Logger:
         return logger
 
     log_path = DEFAULT_LOG_PATH
-    log_path.parent.mkdir(parents=True, exist_ok=True)
+    ensure_parent_dir(log_path)
 
     handler = RotatingFileHandler(
         log_path,

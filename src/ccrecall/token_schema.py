@@ -198,6 +198,9 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
 
 def connect_token_db(db_path: Path) -> sqlite3.Connection:
     """Open a connection to the token analytics database with standard PRAGMAs."""
+    # Inline rather than db.ensure_parent_dir: token_schema is intentionally
+    # decoupled from db.py (importing it would create a cycle via models.py), and
+    # this is a separate caller-supplied DB path, not the ~/.ccrecall/ runtime dir.
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path))
     conn.execute("PRAGMA journal_mode = WAL")

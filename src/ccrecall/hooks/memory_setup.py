@@ -15,6 +15,7 @@ from ccrecall.db import (
     DEFAULT_DB_PATH,
     PID_FILE_MODE,
     SYNC_TEMP_PREFIX,
+    ensure_parent_dir,
     get_db_connection,
     load_settings,
     log_hook_exception,
@@ -149,7 +150,7 @@ def main():
     # the body raises — the hook must print a valid response, never crash start.
     additional_context: str | None = None
     try:
-        DEFAULT_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+        ensure_parent_dir(DEFAULT_DB_PATH)
 
         # Clean up stale temp files from crashed/killed sync processes
         _reap_stale_temp_files()
