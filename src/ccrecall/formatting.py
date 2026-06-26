@@ -178,6 +178,19 @@ def normalize_scores(results: list[dict]) -> list[dict]:
     return [{**r, "score": round((r["score_raw"] - min_raw) / denom, 2)} for r in results]
 
 
+def apply_scores(results: list[dict], ranked: bool) -> list[dict]:
+    """Resolve the score fields for a result set per its ranked state.
+
+    Ranked → render-time min-max normalization over this bounded set; unranked
+    (LIKE fallback) → score and score_raw both None per the contract. Single
+    source of truth for this decision, shared by the JSON envelope and the
+    markdown card path. Returns new dicts; does not mutate the input.
+    """
+    if ranked:
+        return normalize_scores(results)
+    return [{**r, "score": None, "score_raw": None} for r in results]
+
+
 # ---------------------------------------------------------------------------
 # Track A — session-summary card renderer
 # ---------------------------------------------------------------------------
@@ -356,7 +369,7 @@ def build_envelope(query: str, ranked: bool, results: list[dict]) -> dict:
 
     Returns {query, ranked, count, results} with score fields populated.
     """
-    processed = normalize_scores(results) if ranked else [{**r, "score": None, "score_raw": None} for r in results]
+    processed = apply_scores(results, ranked)
     return {
         "query": query,
         "ranked": ranked,

@@ -1,7 +1,7 @@
 ---
 task_id: "T06"
 title: "Wire Entrypoint A to chunk-KNN cards and tear down branch_vec"
-status: "planned"
+status: "done"
 depends_on: ["T01", "T02", "T03", "T04", "T05"]
 implements: ["FR#2", "FR#3", "FR#9", "FR#11", "FR#12", "FR#8", "AC#1", "AC#2", "AC#8", "AC#9"]
 ---

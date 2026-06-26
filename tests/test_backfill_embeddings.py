@@ -19,8 +19,8 @@ import pytest
 import sqlite_vec
 from conftest import make_vec_conn
 
-from ccrecall.db import CONTENT_ERROR_VERSION, EMBEDDING_MODEL, EMBEDDING_VERSION
-from ccrecall.embeddings import EMBEDDING_DIM
+from ccrecall.db import CONTENT_ERROR_VERSION
+from ccrecall.embeddings import EMBEDDING_DIM, EMBEDDING_MODEL, EMBEDDING_VERSION
 from ccrecall.hooks.backfill_embeddings import BATCH_SIZE, EXIT_OK, run
 from ccrecall.session_ops import MAX_WRITE_PATH_EMBEDS_PER_SYNC
 

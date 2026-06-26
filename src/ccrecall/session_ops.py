@@ -30,7 +30,7 @@ from ccrecall.content import (
     is_tool_result,
     parse_origin,
 )
-from ccrecall.db import branch_vec_queryable, fetch_branch_messages, write_chunk_embedding
+from ccrecall.db import chunk_vec_queryable, fetch_branch_messages, write_chunk_embedding
 from ccrecall.embeddings import EMBEDDING_MODEL, EMBEDDING_VERSION, cap_for_embedding, embed_text
 from ccrecall.formatting import normalize_project_key
 from ccrecall.models import LOGGER_NAME
@@ -719,11 +719,11 @@ def sync_session(
     cursor.execute("SELECT id, leaf_uuid FROM branches WHERE session_id = ?", (session_id,))
     existing_branches = {row[1]: row[0] for row in cursor.fetchall()}
 
-    # Probe vec persistence once: if sqlite-vec didn't load, branch_vec doesn't
-    # exist and write_branch_embedding would raise. Skip embed-on-write entirely
+    # Probe vec persistence once: if sqlite-vec didn't load, chunk_vec doesn't
+    # exist and embed_branch_chunks would raise. Skip embed-on-write entirely
     # in that case rather than paying for embed_text inference on every active
     # leaf just to have the write swallowed.
-    vec_writable = branch_vec_queryable(conn)
+    vec_writable = chunk_vec_queryable(conn)
 
     for branch in branches:
         sync_branch(cursor, branch, messages, uuid_to_msg_id, existing_branches, session_id, vec_writable)
