@@ -149,6 +149,18 @@ class TestGetPricing:
     def test_opus_46(self):
         assert get_pricing("claude-opus-4-6-20260101")["input"] == 5.0
 
+    def test_opus_47_not_caught_by_opus_4_catch_all(self):
+        # opus-4-7 must hit the $5/$25 tier, not fall through to the opus-4 catch-all ($15/$75).
+        p = get_pricing("claude-opus-4-7")
+        assert p["input"] == 5.0
+        assert p["output"] == 25.0
+
+    def test_opus_48_not_caught_by_opus_4_catch_all(self):
+        # opus-4-8 must hit the $5/$25 tier, not fall through to the opus-4 catch-all ($15/$75).
+        p = get_pricing("claude-opus-4-8")
+        assert p["input"] == 5.0
+        assert p["output"] == 25.0
+
     def test_opus_41_distinct_from_46(self):
         # opus-4-1 is the older, pricier tier — must not collide with opus-4-6.
         assert get_pricing("claude-opus-4-1-20250805")["input"] == 15.0
