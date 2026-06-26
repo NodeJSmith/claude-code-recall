@@ -33,6 +33,8 @@ from ccrecall.formatting import (
     format_card_json,
     format_card_markdown,
     format_result_list_markdown,
+    format_snippet_json,
+    format_snippet_markdown,
 )
 from ccrecall.fusion import rrf_scored
 from ccrecall.schema import detect_fts_support
@@ -146,21 +148,21 @@ def _get_fts_branch_ids(
     return [row[0] for row in cursor.fetchall()]
 
 
-def _get_vec_chunk_ids(
+def _execute_chunk_knn(
     cursor: sqlite3.Cursor,
     query_vec: list[float],
     top_k: int,
     projects: list[str] | None = None,
     session_id: str | None = None,
     path: str | None = None,
-) -> list[tuple[int, float, int]]:
-    """Return ordered (branch_id, distance, chunk_id) from chunk-vec KNN.
+) -> list[tuple[int, int, float]]:
+    """Shared chunk-KNN core: run the vec MATCH query, filter to valid chunks, return in KNN order.
 
+    Returns [(chunk_id, branch_id, distance)] without any per-branch rollup —
+    both A's rollup and B's no-rollup path build on this single MATCH query.
     Filters to current embedding version + model at the chunk grain (FR#9), so
-    a partially re-embedded branch still returns its already-current chunks.
-    Keeps only the first (best-distance) chunk per branch (max rollup), preserving
-    KNN distance order. Returns empty list on DB error so the caller degrades to
-    keyword search; non-DB bugs propagate.
+    a partially re-embedded branch still contributes its already-current chunks.
+    Returns empty list on sqlite3.Error so callers can degrade; non-DB bugs propagate.
     """
     try:
         serialized = sqlite_vec.serialize_float32(query_vec)
@@ -211,19 +213,109 @@ def _get_vec_chunk_ids(
 
     chunk_to_branch: dict[int, int] = {row[0]: row[1] for row in valid_rows}
 
-    # Walk KNN order, keeping best (first) chunk per branch (max rollup)
+    # Preserve KNN distance order; exclude filtered-out chunks
+    return [(cid, chunk_to_branch[cid], chunk_to_dist[cid]) for cid in chunk_ids if cid in chunk_to_branch]
+
+
+def _get_vec_chunk_ids(
+    cursor: sqlite3.Cursor,
+    query_vec: list[float],
+    top_k: int,
+    projects: list[str] | None = None,
+    session_id: str | None = None,
+    path: str | None = None,
+) -> list[tuple[int, float, int]]:
+    """Return ordered (branch_id, distance, chunk_id) from chunk-vec KNN (Entrypoint A).
+
+    Applies best-chunk-per-branch max rollup on top of _execute_chunk_knn, keeping
+    the first (closest) chunk per branch in KNN order. Returns empty list on DB
+    error so the caller degrades to keyword search; non-DB bugs propagate.
+    """
+    raw = _execute_chunk_knn(cursor, query_vec, top_k, projects, session_id, path)
+    if not raw:
+        return []
+
     seen_branches: set[int] = set()
     result: list[tuple[int, float, int]] = []
-    for cid in chunk_ids:
-        bid = chunk_to_branch.get(cid)
-        if bid is None:
-            continue  # filtered out (stale version, wrong model, inactive, etc.)
+    for cid, bid, dist in raw:
         if bid in seen_branches:
-            continue  # already have best-distance chunk for this branch
+            continue  # already have the best-distance chunk for this branch
         seen_branches.add(bid)
-        result.append((bid, chunk_to_dist[cid], cid))
+        result.append((bid, dist, cid))
 
     return result
+
+
+def _hydrate_snippets(
+    cursor: sqlite3.Cursor,
+    chunk_hits: list[tuple[int, int, float]],
+) -> list[dict]:
+    """Hydrate Track B snippet dicts from chunk rows + branch/session/project join.
+
+    chunk_hits is [(chunk_id, branch_id, distance)] in score order (closest first).
+    Returns one snippet dict per hit preserving order.
+    score_raw = 1.0 - distance (L2-normalized vectors, lower distance = better → higher score_raw = better).
+    match_terms=[] and matched_role=None because the whole exchange is the vector match unit
+    (no discrete term hits on the KNN path; the deferred keyword B path populates these fields).
+    """
+    if not chunk_hits:
+        return []
+
+    chunk_ids = [cid for cid, _bid, _dist in chunk_hits]
+
+    placeholders = ",".join("?" * len(chunk_ids))
+    rows = cursor.execute(
+        f"""
+        SELECT ch.id, ch.exchange_index, ch.timestamp, ch.first_message_uuid,
+               ch.user_text, ch.assistant_text,
+               s.uuid as session_uuid, s.git_branch, p.name as project
+        FROM chunks ch
+        JOIN branches b ON ch.branch_id = b.id
+        JOIN sessions s ON b.session_id = s.id
+        JOIN projects p ON s.project_id = p.id
+        WHERE ch.id IN ({placeholders})
+        """,
+        chunk_ids,
+    ).fetchall()
+
+    row_map: dict[int, tuple] = {row[0]: row for row in rows}
+
+    snippets: list[dict] = []
+    for cid, _bid, dist in chunk_hits:
+        row = row_map.get(cid)
+        if row is None:
+            continue
+        (
+            _,
+            exchange_index,
+            timestamp,
+            first_message_uuid,
+            user_text,
+            assistant_text,
+            session_uuid,
+            git_branch,
+            project,
+        ) = row
+
+        handle = session_uuid[:8] if session_uuid else ""
+        snippets.append(
+            {
+                "session_uuid": session_uuid,
+                "handle": handle,
+                "project": project,
+                "git_branch": git_branch,
+                "exchange_index": exchange_index,
+                "timestamp": timestamp,
+                "first_message_uuid": first_message_uuid,
+                "user": user_text,
+                "assistant": assistant_text,
+                "match_terms": [],
+                "matched_role": None,
+                "score_raw": 1.0 - dist,
+            }
+        )
+
+    return snippets
 
 
 def _dedup_by_session(cursor: sqlite3.Cursor, ordered_branch_ids: list[int]) -> list[int]:
@@ -486,6 +578,52 @@ def search_sessions(
     return cards, False
 
 
+def search_messages(
+    conn: sqlite3.Connection,
+    query: str,
+    max_results: int = 5,
+    projects: list[str] | None = None,
+    session_id: str | None = None,
+    path: str | None = None,
+) -> tuple[list[dict], bool]:
+    """Search for matched exchanges (Entrypoint B), returning (snippets, ranked).
+
+    Uses chunk-KNN via _execute_chunk_knn with NO per-branch rollup — multiple
+    matching chunks in one session all appear as separate snippet results (AC#3).
+    ranked=False only on the pre-KNN gates (empty query, model unavailable,
+    chunk_vec unavailable, or embed_text failure). Once the KNN runs, ranked=True:
+    a sqlite3.Error inside _execute_chunk_knn degrades to an empty list that is
+    indistinguishable from "no matches" at this layer, so both stay ranked=True.
+    There is no keyword fallback for B in this landing — deferred to issue #34.
+    """
+    if not query.split():
+        return [], False
+
+    if not model_available():
+        return [], False
+
+    if not chunk_vec_queryable(conn):
+        return [], False
+
+    try:
+        query_vec = embed_text(query)
+    except Exception:  # embed_text wraps a third-party model stack (fastembed/onnxruntime)
+        return [], False
+
+    top_k = max(max_results * OVERFETCH_MULTIPLIER, OVERFETCH_FLOOR)
+    cursor = conn.cursor()
+
+    raw = _execute_chunk_knn(cursor, query_vec, top_k, projects, session_id, path)
+    if not raw:
+        # Either no matches or a DB error caught inside _execute_chunk_knn;
+        # both cases return ranked=True (vec was available but yielded nothing).
+        return [], True
+
+    ordered = raw[:max_results]
+    snippets = _hydrate_snippets(cursor, ordered)
+    return snippets, True
+
+
 def format_markdown(cards: list[dict], query: str, ranked: bool) -> str:
     """Format session cards as markdown."""
     if not cards:
@@ -494,6 +632,74 @@ def format_markdown(cards: list[dict], query: str, ranked: bool) -> str:
     normalized = apply_scores(cards, ranked)
     card_markdowns = [format_card_markdown(c) for c in normalized]
     return format_result_list_markdown(ranked, card_markdowns)
+
+
+def format_messages_markdown(snippets: list[dict], query: str, ranked: bool) -> str:
+    """Format matched-exchange snippets as markdown (Entrypoint B)."""
+    if not snippets:
+        return f"No messages found for query: {query}"
+
+    normalized = apply_scores(snippets, ranked)
+    snippet_markdowns = [format_snippet_markdown(s) for s in normalized]
+    return format_result_list_markdown(ranked, snippet_markdowns)
+
+
+def run_messages(
+    *,
+    query: str,
+    max_results: int = 5,
+    session: str | None = None,
+    project: str | None = None,
+    path: str | None = None,
+    output_format: str = "markdown",
+    include_notifications: bool = False,  # noqa: ARG001 — accepted for surface symmetry; moot on B (no fetch)
+    db: Path = DEFAULT_DB_PATH,
+) -> None:
+    """Search matched exchanges (Entrypoint B — chunk-KNN without rollup).
+
+    On a vec0-unavailable machine (or any pre-KNN failure) emits a well-formed
+    empty ranked:false envelope and returns normally, so the process exits 0
+    rather than erroring (FR#17/AC#14). A missing DB or an unexpected error exits 1.
+    """
+    max_results = max(1, min(MAX_SEARCH_RESULTS, max_results))
+    projects = [p.strip() for p in project.split(",")] if project else None
+
+    if not db.exists():
+        if output_format == "json":
+            print(json.dumps({"error": "Database not found", "query": query}))
+        else:
+            print("Error: Database not found. Run memory setup first.")
+        sys.exit(1)
+
+    settings = {"db_path": str(db)} if db != DEFAULT_DB_PATH else None
+
+    try:
+        conn = get_db_connection(settings, load_vec=True)
+
+        snippets, ranked = search_messages(
+            conn,
+            query=query,
+            max_results=max_results,
+            projects=projects,
+            session_id=session,
+            path=path,
+        )
+        conn.close()
+
+        if output_format == "json":
+            json_snippets = [format_snippet_json(s) for s in snippets]
+            envelope = build_envelope(query, ranked, json_snippets)
+            print(json.dumps(envelope, indent=2))
+        else:
+            print(format_messages_markdown(snippets, query, ranked))
+
+    # Deliberately broad: top-level CLI handler — reports the error and exits non-zero.
+    except Exception as e:
+        if output_format == "json":
+            print(json.dumps({"error": str(e), "query": query}))
+        else:
+            print(f"Error: {e}")
+        sys.exit(1)
 
 
 def print_status(settings: dict | None) -> None:

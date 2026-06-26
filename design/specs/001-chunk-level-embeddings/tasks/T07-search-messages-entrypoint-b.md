@@ -1,7 +1,7 @@
 ---
 task_id: "T07"
 title: "Add search-messages command for Entrypoint B matched exchanges"
-status: "planned"
+status: "done"
 depends_on: ["T05", "T06"]
 implements: ["FR#4", "FR#13", "FR#17", "FR#11", "AC#3", "AC#14"]
 ---

@@ -6,6 +6,7 @@ PID-file lifecycle are preserved from the former cm-* entry points; only the
 argument-parsing layer changed (argparse -> cyclopts).
 """
 
+import sys
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -223,6 +224,48 @@ def cmd_search(
         path=path,
         output_format=ctx.output_format,
         verbose=verbose,
+        include_notifications=include_notifications,
+        db=db,
+    )
+
+
+@app.command(name="search-messages")
+def cmd_search_messages(
+    *,
+    query: Annotated[str | None, Parameter(name=["--query", "-q"], help="Search query (required).")] = None,
+    max_results: Annotated[
+        int,
+        Parameter(
+            name=["--max-results"],
+            validator=Number(gte=1, lte=search_mod.MAX_SEARCH_RESULTS),
+            help=f"Max matched exchanges (1-{search_mod.MAX_SEARCH_RESULTS}).",
+        ),
+    ] = 5,
+    session: Annotated[str | None, Parameter(help="Filter by session UUID (prefix match).")] = None,
+    project: Annotated[str | None, Parameter(help="Filter by project name(s), comma-separated.")] = None,
+    path: Annotated[str | None, Parameter(help="Filter by cwd substring (e.g. worktree name).")] = None,
+    include_notifications: _NOTIFS = False,
+    db: _DB = DEFAULT_DB_PATH,
+    ctx: CLIContextParam = DEFAULT_CLI_CONTEXT,
+) -> None:
+    """Search matched exchanges by semantic similarity (chunk-KNN, Entrypoint B).
+
+    Returns matched exchanges ranked by chunk distance — not rolled up to session,
+    so multiple matches within one session all appear as separate results.
+    On machines where the vector index is unavailable, exits 0 with an empty result.
+    No --verbose flag: B snippets carry pre-bounded user/assistant text with no
+    collapsible metadata lists (unlike Track A session cards).
+    """
+    if not query:
+        print("error: --query/-q is required", file=sys.stderr)
+        raise SystemExit(2)
+    search_mod.run_messages(
+        query=query,
+        max_results=max_results,
+        session=session,
+        project=project,
+        path=path,
+        output_format=ctx.output_format,
         include_notifications=include_notifications,
         db=db,
     )

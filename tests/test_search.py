@@ -14,6 +14,7 @@ from ccrecall.db import (
     write_chunk_embedding,
 )
 from ccrecall.embeddings import EMBEDDING_DIM, EMBEDDING_MODEL, EMBEDDING_VERSION
+from ccrecall.formatting import apply_scores, format_snippet_json, format_snippet_markdown
 from ccrecall.recent_chats import get_recent_sessions
 from ccrecall.schema import SCHEMA, SCHEMA_CORE, detect_fts_support
 from ccrecall.search_conversations import (
@@ -22,6 +23,8 @@ from ccrecall.search_conversations import (
     _hydrate_cards,
     print_status,
     run,
+    run_messages,
+    search_messages,
     search_sessions,
 )
 
@@ -1275,4 +1278,254 @@ class TestPostTeardownWritePath:
         ).fetchone()
         assert ver == EMBEDDING_VERSION
         assert model == EMBEDDING_MODEL
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# T07: Entrypoint B — search_messages / search-messages command
+# ---------------------------------------------------------------------------
+
+
+def _seed_two_chunks_same_branch(
+    conn: sqlite3.Connection,
+    query_vec: list[float],
+) -> tuple[int, int, int, int]:
+    """Seed a single branch with two chunks, both similar to query_vec.
+
+    Returns (branch_id, chunk0_id, chunk1_id, session_db_id).
+    user_text[0] = 'first exchange user turn'  (bounded, shorter than full)
+    user_text[1] = 'second exchange user turn' (bounded, shorter than full)
+    assistant_text[0] = 'first exchange assistant turn'
+    assistant_text[1] = 'second exchange assistant turn'
+    """
+    cursor = conn.cursor()
+    cursor.execute("INSERT OR IGNORE INTO projects (path, key, name) VALUES (?, ?, ?)", ("/p/b2c", "-p-b2c", "b2c"))
+    cursor.execute("SELECT id FROM projects WHERE key = ?", ("-p-b2c",))
+    proj_id = cursor.fetchone()[0]
+    cursor.execute("INSERT INTO sessions (uuid, project_id, cwd) VALUES (?, ?, ?)", ("sess-b2c", proj_id, "/p/b2c"))
+    sess_id = cursor.lastrowid
+    cursor.execute(
+        """
+        INSERT INTO branches (session_id, leaf_uuid, is_active, exchange_count,
+                               aggregated_content, embedding_version, embedding_model)
+        VALUES (?, ?, 1, 2, ?, ?, ?)
+        """,
+        (sess_id, "leaf-b2c", "two chunk content", EMBEDDING_VERSION, EMBEDDING_MODEL),
+    )
+    branch_id = cursor.lastrowid
+
+    # Chunk 0 — exchange_index=0
+    cursor.execute(
+        """
+        INSERT INTO chunks (branch_id, exchange_index, content_hash,
+                            first_message_uuid, timestamp, user_text, assistant_text,
+                            embedding_version, embedding_model)
+        VALUES (?, 0, 'h0', 'uuid-m0', '2025-03-01T10:00:00Z',
+                'first exchange user turn', 'first exchange assistant turn', ?, ?)
+        """,
+        (branch_id, EMBEDDING_VERSION, EMBEDDING_MODEL),
+    )
+    chunk0_id = cursor.lastrowid
+    upsert_chunk_vec(cursor, chunk0_id, query_vec)
+
+    # Chunk 1 — exchange_index=1
+    cursor.execute(
+        """
+        INSERT INTO chunks (branch_id, exchange_index, content_hash,
+                            first_message_uuid, timestamp, user_text, assistant_text,
+                            embedding_version, embedding_model)
+        VALUES (?, 1, 'h1', 'uuid-m1', '2025-03-01T10:05:00Z',
+                'second exchange user turn', 'second exchange assistant turn', ?, ?)
+        """,
+        (branch_id, EMBEDDING_VERSION, EMBEDDING_MODEL),
+    )
+    chunk1_id = cursor.lastrowid
+    upsert_chunk_vec(cursor, chunk1_id, query_vec)
+
+    conn.commit()
+    return branch_id, chunk0_id, chunk1_id, sess_id
+
+
+class TestSearchMessages:
+    """T07: Entrypoint B — chunk-KNN without rollup, snippet shape."""
+
+    @pytest.mark.skipif(
+        not vec_available(sqlite3.connect(":memory:")),
+        reason="sqlite-vec not available",
+    )
+    def test_not_rolled_up_two_matches_same_session(self):
+        """AC#3: two chunks in one session both appear (no rollup to session)."""
+        conn = make_vec_conn()
+        query_vec = [1.0 / EMBEDDING_DIM**0.5] * EMBEDDING_DIM
+
+        _branch_id, _c0, _c1, _sess_id = _seed_two_chunks_same_branch(conn, query_vec)
+
+        with (
+            patch("ccrecall.search_conversations.model_available", return_value=True),
+            patch("ccrecall.search_conversations.embed_text", return_value=query_vec),
+        ):
+            snippets, ranked = search_messages(conn, "test query", max_results=10)
+
+        assert ranked is True
+        # Both chunk hits for the same session must appear (B does NOT roll up to session)
+        assert len(snippets) == 2, f"Expected 2 snippets (one per chunk), got {len(snippets)}"
+        exchange_indices = {s["exchange_index"] for s in snippets}
+        assert exchange_indices == {0, 1}, f"Expected exchange_indices 0 and 1, got {exchange_indices}"
+        conn.close()
+
+    @pytest.mark.skipif(
+        not vec_available(sqlite3.connect(":memory:")),
+        reason="sqlite-vec not available",
+    )
+    def test_locator_fields_present(self):
+        """AC#3: each snippet carries (handle, exchange_index, timestamp) locator."""
+        conn = make_vec_conn()
+        query_vec = [1.0 / EMBEDDING_DIM**0.5] * EMBEDDING_DIM
+
+        _branch_id, _c0, _c1, _sess_id = _seed_two_chunks_same_branch(conn, query_vec)
+
+        with (
+            patch("ccrecall.search_conversations.model_available", return_value=True),
+            patch("ccrecall.search_conversations.embed_text", return_value=query_vec),
+        ):
+            snippets, _ranked = search_messages(conn, "test query", max_results=10)
+
+        assert snippets, "Expected snippets to be non-empty"
+        s = snippets[0]
+        assert s.get("handle"), "Locator: handle must be present and non-empty"
+        assert s.get("exchange_index") is not None, "Locator: exchange_index must be present"
+        assert s.get("timestamp"), "Locator: timestamp must be present"
+        assert s["handle"] == "sess-b2c"[:8], "handle must be first 8 chars of session_uuid"
+        conn.close()
+
+    @pytest.mark.skipif(
+        not vec_available(sqlite3.connect(":memory:")),
+        reason="sqlite-vec not available",
+    )
+    def test_bounded_excerpt_used(self):
+        """AC#3 + FR#13: user_text/assistant_text from chunks row (pre-bounded) are returned as-is."""
+        conn = make_vec_conn()
+        query_vec = [1.0 / EMBEDDING_DIM**0.5] * EMBEDDING_DIM
+
+        _branch_id, _c0, _c1, _sess_id = _seed_two_chunks_same_branch(conn, query_vec)
+
+        with (
+            patch("ccrecall.search_conversations.model_available", return_value=True),
+            patch("ccrecall.search_conversations.embed_text", return_value=query_vec),
+        ):
+            snippets, _ranked = search_messages(conn, "test query", max_results=10)
+
+        s0 = next(s for s in snippets if s["exchange_index"] == 0)
+        assert s0["user"] == "first exchange user turn", "user field must come from chunks.user_text"
+        assert s0["assistant"] == "first exchange assistant turn", (
+            "assistant field must come from chunks.assistant_text"
+        )
+        conn.close()
+
+    def test_vec0_unavailable_returns_ranked_false_empty(self):
+        """AC#14: when chunk_vec_queryable returns False, search_messages returns ([], False)."""
+        conn = sqlite3.connect(":memory:")
+        # No sqlite-vec extension loaded → chunk_vec_queryable returns False
+        with patch("ccrecall.search_conversations.model_available", return_value=True):
+            snippets, ranked = search_messages(conn, "some query", max_results=5)
+        assert snippets == [], "vec0 unavailable: must return empty list"
+        assert ranked is False, "vec0 unavailable: must return ranked=False"
+        conn.close()
+
+    def test_run_messages_vec0_unavailable_returns_empty_envelope(self, tmp_path, capsys):
+        """AC#14: run_messages with vec0 unavailable emits an empty ranked:false JSON
+        envelope and returns normally (no SystemExit), so the CLI process exits 0."""
+        db_path = tmp_path / "test.db"
+        c = sqlite3.connect(str(db_path))
+        c.executescript(SCHEMA_CORE)
+        c.commit()
+        c.close()
+
+        # Patch chunk_vec_queryable at the search module level to simulate unavailability
+        with (
+            patch("ccrecall.search_conversations.model_available", return_value=True),
+            patch("ccrecall.search_conversations.chunk_vec_queryable", return_value=False),
+        ):
+            result = run_messages(query="some query", output_format="json", db=db_path)
+
+        assert result is None, "run_messages returns normally on the vec0-unavailable path → CLI exits 0"
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["ranked"] is False, "envelope must have ranked:false when vec0 unavailable"
+        assert data["results"] == [], "envelope must have empty results when vec0 unavailable"
+        assert data["count"] == 0
+
+    @pytest.mark.skipif(
+        not vec_available(sqlite3.connect(":memory:")),
+        reason="sqlite-vec not available",
+    )
+    def test_snippet_json_contract_parity(self):
+        """AC#10 snippet half: JSON snippet has all contract fields including matched_role:null, match_terms:[]."""
+        conn = make_vec_conn()
+        query_vec = [1.0 / EMBEDDING_DIM**0.5] * EMBEDDING_DIM
+
+        _seed_two_chunks_same_branch(conn, query_vec)
+
+        with (
+            patch("ccrecall.search_conversations.model_available", return_value=True),
+            patch("ccrecall.search_conversations.embed_text", return_value=query_vec),
+        ):
+            snippets, ranked = search_messages(conn, "test query", max_results=10)
+
+        assert snippets, "Expected non-empty snippets for contract parity check"
+        normalized = apply_scores(snippets, ranked)
+        json_snippet = format_snippet_json(normalized[0])
+
+        # All required contract fields must be present
+        required_fields = {
+            "score",
+            "score_raw",
+            "session_uuid",
+            "handle",
+            "project",
+            "git_branch",
+            "exchange_index",
+            "matched_role",
+            "timestamp",
+            "user",
+            "assistant",
+            "match_terms",
+        }
+        missing = required_fields - set(json_snippet.keys())
+        assert not missing, f"Missing contract fields in JSON snippet: {missing}"
+
+        # Vector path: matched_role must be None, match_terms must be []
+        assert json_snippet["matched_role"] is None, "Vector path: matched_role must be null"
+        assert json_snippet["match_terms"] == [], "Vector path: match_terms must be []"
+
+        # score_raw must be a float (1.0 - distance, higher=better)
+        assert isinstance(json_snippet["score_raw"], float), "score_raw must be a float"
+        assert 0.0 <= json_snippet["score_raw"] <= 1.0, "score_raw must be in [0, 1] for L2-normalized vecs"
+
+        conn.close()
+
+    @pytest.mark.skipif(
+        not vec_available(sqlite3.connect(":memory:")),
+        reason="sqlite-vec not available",
+    )
+    def test_snippet_markdown_contract_parity(self):
+        """AC#10 snippet half: markdown snippet renders score, locator, user, assistant, tail ref."""
+        conn = make_vec_conn()
+        query_vec = [1.0 / EMBEDDING_DIM**0.5] * EMBEDDING_DIM
+
+        _seed_two_chunks_same_branch(conn, query_vec)
+
+        with (
+            patch("ccrecall.search_conversations.model_available", return_value=True),
+            patch("ccrecall.search_conversations.embed_text", return_value=query_vec),
+        ):
+            snippets, ranked = search_messages(conn, "test query", max_results=2)
+
+        normalized = apply_scores(snippets, ranked)
+        md = format_snippet_markdown(normalized[0])
+        # Must include the ccrecall tail reference
+        assert "ccrecall tail" in md, "Snippet markdown must include 'ccrecall tail' navigation hint"
+        # Must include User and Asst labels
+        assert "User:" in md
+        assert "Asst:" in md
         conn.close()
