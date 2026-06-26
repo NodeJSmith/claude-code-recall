@@ -125,6 +125,11 @@ def run(input_file: Path | None = None) -> None:
     # At most one sync-current at a time: skip (not queue) if another is alive.
     # Reap stale locks (dead PID) so a crash doesn't permanently block syncing.
     pid_path = pid_file_path(PID_KEY)
+    # Ensure the runtime dir exists: on a fresh machine the Stop hook can fire
+    # before anything else creates ~/.ccrecall/. Without this, the os.open() below
+    # raises an uncaught FileNotFoundError (it's before the try/finally), leaving
+    # the hook with no stdout — a violation of the {"continue": true} contract.
+    pid_path.parent.mkdir(parents=True, exist_ok=True)
     while True:
         try:
             # Atomic create — fails with FileExistsError if file already exists

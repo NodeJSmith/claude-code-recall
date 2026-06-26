@@ -607,6 +607,8 @@ class TestSyncCurrentExcludeProjects:
     """sync_current.run honors exclude_projects for the live session (matches import)."""
 
     def _run(self, tmp_path, monkeypatch, *, settings, cwd):
+        monkeypatch.setattr(sync_current, "pid_file_path", lambda key: tmp_path / f".pid-{key}")
+        monkeypatch.setattr(sync_current, "remove_pid_file", lambda key: None)
         monkeypatch.setattr(sync_current, "load_settings", lambda: settings)
         synced = []
         monkeypatch.setattr(sync_current, "sync_session", lambda *a, **k: synced.append(1) or 0)
@@ -738,6 +740,26 @@ class TestSyncCurrentConcurrencyGuard:
         )
         assert out == {"continue": True}
         assert reached, "get_session_file should be reached (lock guard passed)"
+
+    def test_missing_runtime_dir_is_created(self, tmp_path, monkeypatch):
+        """Stop hook firing before ~/.ccrecall/ exists must not crash — run() creates it."""
+        # runtime_dir is where the pid file lives; it does not exist yet (only
+        # tmp_path does), so run() must create it before opening the lock.
+        # Can't reuse _run here: it pins pid_file_path to tmp_path, which always
+        # exists and so wouldn't exercise the missing-dir path.
+        runtime_dir = tmp_path / "absent"
+        monkeypatch.setattr(sync_current, "pid_file_path", lambda key: runtime_dir / f".pid-{key}")
+        monkeypatch.setattr(sync_current, "remove_pid_file", lambda key: None)
+        monkeypatch.setattr(sync_current, "load_settings", lambda: {"exclude_projects": [], "logging_enabled": False})
+        monkeypatch.setattr(sync_current, "get_session_file", lambda *a, **k: None)
+
+        input_file = self._make_input(tmp_path)
+        captured = io.StringIO()
+        with patch("sys.stdout", captured):
+            sync_current.run(input_file=input_file)
+
+        assert json.loads(captured.getvalue()) == {"continue": True}
+        assert runtime_dir.is_dir(), "run() should create the missing runtime dir"
 
 
 class TestModelWarmOnSetup:
