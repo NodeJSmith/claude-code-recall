@@ -1,0 +1,44 @@
+name: PR Title
+
+# The repo is squash-merge only and uses PR_TITLE as the squash commit subject
+# (repo setting `squash_merge_commit_title: PR_TITLE`). release-please derives the
+# changelog and the version bump from those commit subjects, so a PR title that
+# is not a valid Conventional Commit is silently dropped from the release — the
+# change ships with no changelog entry and no version bump. This check rejects
+# such titles at PR time instead.
+#
+# `edited` is included so retitling a PR re-runs the check; without it the title
+# is only validated on the initial push.
+
+on:
+    pull_request:
+        types: [opened, edited, synchronize, reopened]
+        branches: [main]
+
+permissions:
+    pull-requests: read
+
+jobs:
+    pr-title:
+        runs-on: ubuntu-latest
+        steps:
+            - name: Validate PR title against Conventional Commits
+              uses: amannn/action-semantic-pull-request@48f256284bd46cdaab1048c3721360e808335d50 # v6.1.1
+              env:
+                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+              with:
+                  # Mirrors the accepted types in commit-conventions; the ones with
+                  # a changelog-sections entry in release-please-config.json
+                  # (feat/fix/perf/refactor/docs) feed the changelog, the rest are
+                  # release-silent but still valid.
+                  types: |
+                      feat
+                      fix
+                      refactor
+                      docs
+                      test
+                      chore
+                      perf
+                      ci
+                  # Scopes are optional in this repo, e.g. `feat(challenge): ...`.
+                  requireScope: false
