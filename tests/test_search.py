@@ -1368,9 +1368,7 @@ class TestPostTeardownWritePath:
         conn.close()
 
 
-# ---------------------------------------------------------------------------
 # T07: Entrypoint B — search_messages / search-messages command
-# ---------------------------------------------------------------------------
 
 
 def _seed_two_chunks_same_branch(

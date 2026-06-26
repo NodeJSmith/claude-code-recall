@@ -292,9 +292,7 @@ class TestFormatMarkdownSession:
         assert "Subagent Result" not in md
 
 
-# ---------------------------------------------------------------------------
 # Fixtures
-# ---------------------------------------------------------------------------
 
 
 def _make_card(score_raw=0.03, score=0.87, topic="some topic", disposition="IN_PROGRESS"):
@@ -335,9 +333,7 @@ def _make_snippet(score_raw=0.84, score=0.91, matched_role="assistant", match_te
     }
 
 
-# ---------------------------------------------------------------------------
 # Track A card — markdown
-# ---------------------------------------------------------------------------
 
 
 class TestFormatCardMarkdown:
@@ -458,9 +454,7 @@ class TestFormatCardMarkdown:
         assert card["topic"] == original_topic
 
 
-# ---------------------------------------------------------------------------
 # Track A card — JSON
-# ---------------------------------------------------------------------------
 
 
 class TestFormatCardJson:
@@ -537,9 +531,7 @@ class TestFormatCardJson:
         assert card["files_modified"] == orig_files
 
 
-# ---------------------------------------------------------------------------
 # Track B snippet — markdown
-# ---------------------------------------------------------------------------
 
 
 class TestFormatSnippetMarkdown:
@@ -603,9 +595,7 @@ class TestFormatSnippetMarkdown:
         assert snippet["user"] == orig_user
 
 
-# ---------------------------------------------------------------------------
 # Track B snippet — JSON
-# ---------------------------------------------------------------------------
 
 
 class TestFormatSnippetJson:
@@ -654,9 +644,7 @@ class TestFormatSnippetJson:
         assert snippet["match_terms"] == orig_terms
 
 
-# ---------------------------------------------------------------------------
 # Score normalization
-# ---------------------------------------------------------------------------
 
 
 class TestNormalizeScores:
@@ -716,9 +704,7 @@ class TestNormalizeScores:
             assert r["score"] is None
 
 
-# ---------------------------------------------------------------------------
 # Envelope builder
-# ---------------------------------------------------------------------------
 
 
 class TestBuildEnvelope:
@@ -762,9 +748,7 @@ class TestBuildEnvelope:
         assert parsed["count"] == 1
 
 
-# ---------------------------------------------------------------------------
 # Markdown result list with unranked marker
-# ---------------------------------------------------------------------------
 
 
 class TestFormatResultListMarkdown:

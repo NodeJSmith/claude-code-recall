@@ -147,9 +147,7 @@ def format_json_sessions(sessions: list[dict], extra: dict | None = None) -> str
     return json.dumps(output, indent=2)
 
 
-# ---------------------------------------------------------------------------
 # Score normalization (render-time, over the bounded result set)
-# ---------------------------------------------------------------------------
 
 
 def normalize_scores(results: list[dict]) -> list[dict]:
@@ -195,9 +193,7 @@ def apply_scores(results: list[dict], ranked: bool) -> list[dict]:
     return [{**r, "score": None, "score_raw": None} for r in results]
 
 
-# ---------------------------------------------------------------------------
 # Track A — session-summary card renderer
-# ---------------------------------------------------------------------------
 
 # Contract markdown template:
 #   ## {score:.2f}  {project} · {git_branch} · {ended_date}
@@ -293,9 +289,7 @@ def format_card_json(card: dict) -> dict:
     }
 
 
-# ---------------------------------------------------------------------------
 # Track B — matched-exchange snippet renderer
-# ---------------------------------------------------------------------------
 
 # Contract markdown template:
 #   {score:.2f}  {project}/{git_branch} · {handle} · exchange {idx} · {time}
@@ -356,9 +350,7 @@ def format_snippet_json(snippet: dict) -> dict:
     }
 
 
-# ---------------------------------------------------------------------------
 # Shared envelope builder (JSON) and markdown result-list renderer
-# ---------------------------------------------------------------------------
 
 
 def build_envelope(query: str, ranked: bool, results: list[dict]) -> dict:

@@ -49,9 +49,7 @@ def _vec_available() -> bool:
 _VEC_SKIP = pytest.mark.skipif(not _vec_available(), reason="sqlite-vec not available in this environment")
 
 
-# ---------------------------------------------------------------------------
 # Helpers
-# ---------------------------------------------------------------------------
 
 
 def _insert_branch_with_messages(
@@ -176,9 +174,7 @@ def _run_backfill_with_stub(conn: sqlite3.Connection, *, days=None, limit=None):
         run(days=days, limit=limit)
 
 
-# ---------------------------------------------------------------------------
 # Backfill embeds all eligible branches
-# ---------------------------------------------------------------------------
 
 
 @_VEC_SKIP
@@ -283,9 +279,7 @@ class TestBackfillEmbedsFull:
         assert _chunk_count(conn) == count
 
 
-# ---------------------------------------------------------------------------
 # Resume processes only remaining; heal clause for missing chunk_vecs
-# ---------------------------------------------------------------------------
 
 
 @_VEC_SKIP
@@ -357,9 +351,7 @@ class TestBackfillResume:
         assert _branch_has_chunk_vecs(conn, bid)
 
 
-# ---------------------------------------------------------------------------
 # Version-bump eligibility (AC#5)
-# ---------------------------------------------------------------------------
 
 
 @_VEC_SKIP
@@ -414,9 +406,7 @@ class TestBackfillVersionBump:
         assert _branch_has_chunk_vecs(conn, bid)
 
 
-# ---------------------------------------------------------------------------
 # No-progress guard: loop breaks when same batch re-selected
-# ---------------------------------------------------------------------------
 
 
 @_VEC_SKIP
@@ -443,9 +433,7 @@ class TestBackfillNoProgressGuard:
         assert ev != EMBEDDING_VERSION, "Row should not be at EMBEDDING_VERSION — embed was no-op"
 
 
-# ---------------------------------------------------------------------------
 # Failure modes: model failure marks nothing; content errors mark only that row
-# ---------------------------------------------------------------------------
 
 
 @_VEC_SKIP
@@ -573,9 +561,7 @@ class TestBackfillFailureModes:
         assert _branch_embedding_version(conn, bid) != CONTENT_ERROR_VERSION
 
 
-# ---------------------------------------------------------------------------
 # Scope: only active leaves with messages are embedded
-# ---------------------------------------------------------------------------
 
 
 @_VEC_SKIP
@@ -593,9 +579,7 @@ class TestBackfillScopeActive:
         assert _chunk_count(conn) == 1
 
 
-# ---------------------------------------------------------------------------
 # Opt-in flags: --days bounds recency, --limit caps the run
-# ---------------------------------------------------------------------------
 
 
 @_VEC_SKIP
@@ -626,9 +610,7 @@ class TestBackfillFlags:
         assert _chunk_count(conn) == 2
 
 
-# ---------------------------------------------------------------------------
 # Backfill locator: first_message_uuid is set on backfilled chunks (M10)
-# ---------------------------------------------------------------------------
 
 
 @_VEC_SKIP
@@ -647,9 +629,7 @@ class TestBackfillLocator:
             assert uuid is not None, f"chunk {chunk_id} missing first_message_uuid"
 
 
-# ---------------------------------------------------------------------------
 # History preservation (AC#7)
-# ---------------------------------------------------------------------------
 
 
 @_VEC_SKIP
@@ -681,9 +661,7 @@ class TestHistoryPreservation:
         assert after["branch_messages"] == before["branch_messages"]
 
 
-# ---------------------------------------------------------------------------
 # --status: read-only chunk-coverage progress reporter
-# ---------------------------------------------------------------------------
 
 
 def _run_status(conn: sqlite3.Connection, capsys, *, json_mode=False, days=None):
@@ -777,9 +755,7 @@ class TestBackfillStatus:
         assert _chunk_count(conn) == before == 0
 
 
-# ---------------------------------------------------------------------------
 # Total inferences counter: reported alongside branches
-# ---------------------------------------------------------------------------
 
 
 @_VEC_SKIP
