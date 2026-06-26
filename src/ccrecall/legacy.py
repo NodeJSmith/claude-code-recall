@@ -16,10 +16,11 @@ like, and how do we carry it forward":
   background ``ccrecall migrate`` so an 800 MB+ copy never blocks session start.
 
 No embedding "fix" lives here on purpose: old-model vectors are already
-neutralized by the query-time model/version filter (search_conversations), the
-branch_vec dimension self-heal (db._ensure_vec_schema), and build_selection's
-re-embed-on-mismatch clause. Migration only relocates; semantic search rebuilds
-through those existing paths and the opt-in `ccrecall backfill embeddings`.
+neutralized by the query-time chunk-grain version/model filter
+(search_conversations), chunk_vec repopulation via EMBEDDING_VERSION bump and
+backfill, and build_selection's re-embed-on-mismatch clause. Migration only
+relocates; semantic search rebuilds through those existing paths and the opt-in
+`ccrecall backfill embeddings`.
 """
 
 import contextlib
@@ -34,6 +35,7 @@ from ccrecall.db import (
     CONFIG_PATH,
     DEFAULT_DB_PATH,
     DEFAULT_SETTINGS,
+    ensure_parent_dir,
     get_db_connection,
     remove_pid_file,
 )
@@ -100,7 +102,7 @@ def copy_legacy_db(src: Path) -> bool:
         finally:
             conn.close()
 
-    DEFAULT_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    ensure_parent_dir(DEFAULT_DB_PATH)
     fd, tmp = tempfile.mkstemp(dir=DEFAULT_DB_PATH.parent, suffix=".migrating")
     os.close(fd)
     try:
@@ -128,7 +130,7 @@ def copy_legacy_config(src_config: Path) -> bool:
         return False
 
     kept = portable_config(old)
-    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    ensure_parent_dir(CONFIG_PATH)
     fd, tmp = tempfile.mkstemp(dir=CONFIG_PATH.parent, suffix=".tmp")
     try:
         with os.fdopen(fd, "w") as fh:
@@ -144,9 +146,9 @@ def run_migration() -> int:
     """Carry a pre-rename install forward into ~/.ccrecall/. Idempotent.
 
     Copies the legacy DB and the portable config keys, then opens the new DB once
-    with vec loaded so the branch_vec dimension self-heal runs immediately (a
-    legacy DB embedded under the old model carries a stale-dimension branch_vec;
-    opening drops & recreates it at the current dimension). Safe to run twice:
+    with vec loaded so _ensure_vec_schema runs immediately: the obsolete branch_vec
+    is dropped unconditionally, chunk_vec is created, and branch watermarks are reset
+    to 0 so backfill re-embeds the legacy corpus at chunk grain. Safe to run twice:
     once ~/.ccrecall/conversations.db exists, find_legacy_db() returns None.
     """
     try:
@@ -158,9 +160,11 @@ def run_migration() -> int:
         copied = copy_legacy_db(src)
         copy_legacy_config(src.parent / LEGACY_CONFIG_NAME)
 
-        # Trigger the dimension/vec self-heal now so the migrated DB lands in a
-        # consistent state rather than on the first search. Best-effort: if vec
-        # can't load here, the search path heals it later all the same.
+        # Trigger the vec schema setup now so the migrated DB lands in a
+        # consistent state rather than on the first search: branch_vec is
+        # dropped unconditionally, chunk_vec is created, and branch watermarks
+        # are reset to 0 so backfill re-embeds at chunk grain. Best-effort: if
+        # vec can't load here, the search path handles it later all the same.
         with contextlib.suppress(sqlite3.Error, OSError):
             get_db_connection(load_vec=True).close()
 

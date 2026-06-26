@@ -12,18 +12,32 @@ description: >
 
 ## Tools
 
-Two scripts retrieve data. For full option catalogs, load `references/tool-reference.md`.
+Three commands retrieve data. For full option catalogs, load `references/tool-reference.md`.
 
-Semantic recall is active: `ccrecall search` fuses keyword ranking with vector similarity by default.
+Under a plugin install this skill is invoked as `/ccrecall:ccr-recall`; under a vendored install, `/ccr-recall`.
 
-**recent_chats.py** — retrieve recent sessions:
+Semantic recall is active: `ccrecall search` fuses keyword ranking with chunk-vector similarity by default.
+
+**recent_chats.py** — retrieve recent sessions with full transcript:
 ```bash
 ccrecall recent --n 3
 ```
 
-**search_conversations.py** — keyword search across all sessions:
+**search_conversations.py / Entrypoint A** — search sessions, returns **ranked session cards** (compact, no transcript):
 ```bash
 ccrecall search --query "keyword"
+```
+Each card carries a relevance `score` (normalized 0–1; `null` for a single result or the unranked LIKE path), `project`, `git_branch`, date, `topic`, `disposition`, exchange/file/commit counts, and a `handle`. The JSON envelope includes a `ranked` field (`false` on the LIKE-only fallback). To read the full session, use `ccrecall tail <handle>`.
+
+**search_conversations.py / Entrypoint B** — search matched exchanges, returns **bounded snippets**:
+```bash
+ccrecall search-messages --query "keyword"
+```
+Each snippet carries a `(handle, exchange_index, timestamp)` locator plus bounded `user`/`assistant` excerpts. Semantically ranked by chunk distance; exits 0 with an empty result when the vector index is unavailable. No keyword fallback in this release.
+
+**session_tail.py** — full-fetch drill-in for any handle from A or B:
+```bash
+ccrecall tail <handle>
 ```
 
 ---
@@ -45,12 +59,14 @@ ccrecall search --query "keyword"
 
 2. **Gather context** using lens-appropriate tools:
    - For recent context: `ccrecall recent --n N`
-   - For keyword search: `ccrecall search --query "keywords"`
+   - For session discovery: `ccrecall search --query "keywords"` — returns scored cards; triage by `score` and `topic` before tailing
+   - For a specific exchange: `ccrecall search-messages --query "phrase"` — returns bounded snippets with locators
+   - To open a full session: `ccrecall tail <handle>` (drill-in after A or B)
 
 3. **Apply lens questions** to analyze the retrieved conversations.
 
 4. **Deepen the search** if initial results are insufficient:
-   - Retrieve more sessions: `--n 20`
+   - Retrieve more sessions: `--n 20` on `recent`, or `--max-results 10` on `search`
    - Search for specific terms that surfaced
    - Filter by project: `--project projectname`
    - Filter by session: `--session <uuid-prefix>` (when a specific session ID is known)

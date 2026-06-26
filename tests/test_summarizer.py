@@ -99,6 +99,34 @@ class TestBuildExchangePairs:
         assert exchanges[0]["user"] == "Last question"
         assert exchanges[0]["assistant"] == ""
 
+    def test_carries_first_message_uuid(self):
+        """Each exchange carries the uuid of its first (user) message."""
+        messages = [
+            {"role": "user", "content": "Q1", "timestamp": "t1", "uuid": "uuid-user-1"},
+            {"role": "assistant", "content": "A1", "timestamp": "t1", "uuid": "uuid-asst-1"},
+            {"role": "user", "content": "Q2", "timestamp": "t2", "uuid": "uuid-user-2"},
+            {"role": "assistant", "content": "A2", "timestamp": "t2", "uuid": "uuid-asst-2"},
+        ]
+        exchanges = build_exchange_pairs(messages)
+        assert len(exchanges) == 2
+        # Each exchange carries the uuid of its opening user message
+        assert exchanges[0]["first_message_uuid"] == "uuid-user-1"
+        assert exchanges[1]["first_message_uuid"] == "uuid-user-2"
+        # Existing keys are still intact
+        assert exchanges[0]["user"] == "Q1"
+        assert exchanges[0]["index"] == 0
+        assert exchanges[1]["index"] == 1
+
+    def test_uuid_none_when_missing(self):
+        """Messages without a uuid key yield first_message_uuid=None without error."""
+        messages = [
+            {"role": "user", "content": "Hello", "timestamp": "t1"},
+            {"role": "assistant", "content": "Hi", "timestamp": "t1"},
+        ]
+        exchanges = build_exchange_pairs(messages)
+        assert len(exchanges) == 1
+        assert exchanges[0]["first_message_uuid"] is None
+
 
 class TestBuildContextSummaryJson:
     def test_basic_structure(self):

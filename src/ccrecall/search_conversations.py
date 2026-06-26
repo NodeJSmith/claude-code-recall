@@ -1,10 +1,11 @@
-"""Search conversations with FTS5/FTS4/LIKE, optionally fused with vector KNN via RRF.
+"""Search conversations with FTS5/FTS4/LIKE, optionally fused with chunk-KNN via RRF.
 
 Returns markdown by default (token-efficient), or JSON when output_format="json"
 (the CLI maps the global --json flag onto that argument).
 """
 
 import json
+import logging
 import sqlite3
 import sys
 from pathlib import Path
@@ -13,12 +14,13 @@ import sqlite_vec
 
 from ccrecall.content import sanitize_fts_term
 from ccrecall.db import (
+    CHUNK_EMBEDDABLE_BRANCH_FILTER,
     DEFAULT_DB_PATH,
-    EMBEDDABLE_BRANCH_FILTER,
-    branch_vec_queryable,
+    chunk_vec_queryable,
     escape_like,
-    fetch_branch_messages,
     get_db_connection,
+    parse_project_filter,
+    resolve_db_settings,
 )
 from ccrecall.embeddings import (
     DEPS_AVAILABLE,
@@ -27,10 +29,20 @@ from ccrecall.embeddings import (
     embed_text,
     model_available,
 )
-from ccrecall.formatting import format_json_sessions, format_markdown_session
-from ccrecall.fusion import rrf
+from ccrecall.formatting import (
+    apply_scores,
+    build_envelope,
+    format_card_json,
+    format_card_markdown,
+    format_result_list_markdown,
+    format_snippet_json,
+    format_snippet_markdown,
+)
+from ccrecall.fusion import rrf_scored
 from ccrecall.schema import detect_fts_support
 from ccrecall.serialization import decode_json_column
+
+_logger = logging.getLogger("ccrecall")
 
 # Upper bound on --max-results, single-sourced here and referenced by the CLI
 # validator (cli/commands.py) so the clamp and the validator can't drift apart.
@@ -41,6 +53,41 @@ MAX_SEARCH_RESULTS = 10
 OVERFETCH_MULTIPLIER = 4
 OVERFETCH_FLOOR = 20
 
+# Chunk overfetch factor for A: chunk-KNN returns many chunks per branch, so the
+# post-best-chunk-per-branch rollup may collapse N chunks to far fewer branches.
+# Multiply the overfetch by this factor so the post-rollup session count fills
+# max_results. Start at 8 (generous chunks-per-session estimate).
+CHUNK_COLLAPSE_FACTOR = 8
+
+
+def scope_filter_clause(
+    *,
+    projects: list[str] | None,
+    session_id: str | None,
+    path: str | None,
+) -> tuple[str, list]:
+    """Return (sql_fragment, params) for the project/session/path WHERE filters.
+
+    The fragment assumes the query's FROM aliases sessions as ``s`` and projects
+    as ``p``. The fragment leads with a space when non-empty; params are ordered
+    projects -> session -> path to match the clause order. Single source of truth
+    for the scope predicates shared by the FTS, LIKE, and chunk-KNN queries.
+    """
+    clauses: list[str] = []
+    params: list = []
+    if projects:
+        placeholders = ",".join("?" * len(projects))
+        clauses.append(f"p.name IN ({placeholders})")
+        params.extend(projects)
+    if session_id:
+        clauses.append("s.uuid LIKE ? ESCAPE '\\'")
+        params.append(f"{escape_like(session_id)}%")
+    if path:
+        clauses.append("s.cwd LIKE ? ESCAPE '\\'")
+        params.append(f"%{escape_like(path)}%")
+    fragment = "".join(f" AND {clause}" for clause in clauses)
+    return fragment, params
+
 
 def _get_fts_branch_ids(
     cursor: sqlite3.Cursor,
@@ -50,11 +97,17 @@ def _get_fts_branch_ids(
     projects: list[str] | None = None,
     session_id: str | None = None,
     path: str | None = None,
-) -> list[int]:
-    """Return an ordered list of branch IDs from FTS or LIKE search.
+) -> list[tuple[int, float | None]]:
+    """Return ordered (branch_id, score_raw) pairs from FTS or LIKE search.
 
-    Returns branch_ids only (no hydration), ordered by relevance descending.
-    Returns empty list when query is empty or fts_level is None and LIKE has no results.
+    score_raw is the negated SQLite bm25 (higher = better) on the fts5 rung — the
+    only keyword rung with a relevance signal today. The LIKE fallback has no
+    relevance signal (unranked, recency order), so its score_raw is None.
+    The fts4 rung also lacks a relevance score in this landing — it is ordered by
+    recency, not matchinfo, so its score_raw is None too and the caller surfaces
+    it as unranked. Ranking fts4 by matchinfo is a deferred Track A gap (issue
+    #35), not the contract's intended end state. Ordered by relevance (fts5) or
+    recency (fts4/LIKE) descending. Empty when the query is empty or has no hits.
     """
     terms = query.split()
     if not terms:
@@ -69,8 +122,10 @@ def _get_fts_branch_ids(
             return []
         fts_query = " OR ".join(f'"{term}"' for term in sanitized_terms)
 
-        sql = """
-            SELECT b.id
+        # fts5 carries a bm25 relevance score; fts4 has none (recency-ordered).
+        score_col = ", bm25(branches_fts)" if fts_level == "fts5" else ", NULL"
+        sql = f"""
+            SELECT b.id{score_col}
             FROM branches_fts
             JOIN branches b ON branches_fts.rowid = b.id
             JOIN sessions s ON b.session_id = s.id
@@ -80,18 +135,9 @@ def _get_fts_branch_ids(
         """
         params.append(fts_query)
 
-        if projects:
-            placeholders = ",".join("?" * len(projects))
-            sql += f" AND p.name IN ({placeholders})"
-            params.extend(projects)
-
-        if session_id:
-            sql += " AND s.uuid LIKE ? ESCAPE '\\'"
-            params.append(f"{escape_like(session_id)}%")
-
-        if path:
-            sql += " AND s.cwd LIKE ? ESCAPE '\\'"
-            params.append(f"%{escape_like(path)}%")
+        scope_sql, scope_params = scope_filter_clause(projects=projects, session_id=session_id, path=path)
+        sql += scope_sql
+        params.extend(scope_params)
 
         if fts_level == "fts5":
             sql += " ORDER BY bm25(branches_fts) LIMIT ?"
@@ -100,10 +146,10 @@ def _get_fts_branch_ids(
         params.append(top_k)
 
     else:
-        # LIKE fallback
+        # LIKE fallback — no relevance signal, recency order, null score.
         like_clauses = " AND ".join("b.aggregated_content LIKE ?" for _ in terms)
         sql = f"""
-            SELECT b.id
+            SELECT b.id, NULL
             FROM branches b
             JOIN sessions s ON b.session_id = s.id
             JOIN projects p ON s.project_id = p.id
@@ -112,89 +158,177 @@ def _get_fts_branch_ids(
         """
         params.extend(f"%{term}%" for term in terms)
 
-        if projects:
-            placeholders = ",".join("?" * len(projects))
-            sql += f" AND p.name IN ({placeholders})"
-            params.extend(projects)
-
-        if session_id:
-            sql += " AND s.uuid LIKE ? ESCAPE '\\'"
-            params.append(f"{escape_like(session_id)}%")
-
-        if path:
-            sql += " AND s.cwd LIKE ? ESCAPE '\\'"
-            params.append(f"%{escape_like(path)}%")
+        scope_sql, scope_params = scope_filter_clause(projects=projects, session_id=session_id, path=path)
+        sql += scope_sql
+        params.extend(scope_params)
 
         sql += " ORDER BY b.ended_at DESC LIMIT ?"
         params.append(top_k)
 
     cursor.execute(sql, params)
-    return [row[0] for row in cursor.fetchall()]
+    # bm25 is more-negative = better; negate so higher = better. NULL stays None.
+    return [(row[0], -row[1] if row[1] is not None else None) for row in cursor.fetchall()]
 
 
-def _get_vec_branch_ids(
+def _execute_chunk_knn(
     cursor: sqlite3.Cursor,
     query_vec: list[float],
     top_k: int,
     projects: list[str] | None = None,
     session_id: str | None = None,
     path: str | None = None,
-) -> list[int]:
-    """Return ordered branch IDs from vec0 KNN, filtered to current embedding version.
+) -> list[tuple[int, int, float]]:
+    """Shared chunk-KNN core: run the vec MATCH query, filter to valid chunks, return in KNN order.
 
-    Only returns branches whose embedding_version == EMBEDDING_VERSION and
-    embedding_model == EMBEDDING_MODEL (stale-version exclusion).
-    Returns empty list when the vec query fails (e.g. extension unavailable),
-    so the caller degrades to keyword search; non-DB bugs propagate.
+    Returns [(chunk_id, branch_id, distance)] without any per-branch rollup —
+    both A's rollup and B's no-rollup path build on this single MATCH query.
+    Filters to current embedding version + model at the chunk grain, so
+    a partially re-embedded branch still contributes its already-current chunks.
+    Returns empty list on sqlite3.Error so callers can degrade; non-DB bugs propagate.
     """
     try:
         serialized = sqlite_vec.serialize_float32(query_vec)
-        rows = cursor.execute(
-            "SELECT branch_id, distance FROM branch_vec WHERE embedding MATCH ? AND k = ? ORDER BY distance",
+        knn_rows = cursor.execute(
+            "SELECT chunk_id, distance FROM chunk_vec WHERE embedding MATCH ? AND k = ? ORDER BY distance",
             (serialized, top_k),
         ).fetchall()
     except sqlite3.Error:
         return []
 
-    if not rows:
+    if not knn_rows:
         return []
 
-    candidate_ids = [row[0] for row in rows]
-    placeholders = ",".join("?" * len(candidate_ids))
+    chunk_ids = [row[0] for row in knn_rows]
+    chunk_to_dist: dict[int, float] = {row[0]: row[1] for row in knn_rows}
 
-    # Filter to current embedding version and apply optional user filters
+    placeholders = ",".join("?" * len(chunk_ids))
     filter_sql = f"""
-        SELECT b.id
-        FROM branches b
+        SELECT ch.id as chunk_id, b.id as branch_id
+        FROM chunks ch
+        JOIN branches b ON ch.branch_id = b.id
         JOIN sessions s ON b.session_id = s.id
         JOIN projects p ON s.project_id = p.id
-        WHERE b.id IN ({placeholders})
+        WHERE ch.id IN ({placeholders})
+          AND ch.embedding_version = ?
+          AND ch.embedding_model = ?
           AND b.is_active = 1
-          AND b.embedding_version = ?
-          AND b.embedding_model = ?
     """
-    filter_params: list = [*candidate_ids, EMBEDDING_VERSION, EMBEDDING_MODEL]
+    filter_params: list = [*chunk_ids, EMBEDDING_VERSION, EMBEDDING_MODEL]
 
-    if projects:
-        proj_placeholders = ",".join("?" * len(projects))
-        filter_sql += f" AND p.name IN ({proj_placeholders})"
-        filter_params.extend(projects)
-
-    if session_id:
-        filter_sql += " AND s.uuid LIKE ? ESCAPE '\\'"
-        filter_params.append(f"{escape_like(session_id)}%")
-
-    if path:
-        filter_sql += " AND s.cwd LIKE ? ESCAPE '\\'"
-        filter_params.append(f"%{escape_like(path)}%")
+    scope_sql, scope_params = scope_filter_clause(projects=projects, session_id=session_id, path=path)
+    filter_sql += scope_sql
+    filter_params.extend(scope_params)
 
     try:
-        valid_ids = {row[0] for row in cursor.execute(filter_sql, filter_params).fetchall()}
+        valid_rows = cursor.execute(filter_sql, filter_params).fetchall()
     except sqlite3.Error:
         return []
 
-    # Preserve KNN distance ordering, keeping only valid (current-version) IDs
-    return [bid for bid in candidate_ids if bid in valid_ids]
+    chunk_to_branch: dict[int, int] = {row[0]: row[1] for row in valid_rows}
+
+    # Preserve KNN distance order; exclude filtered-out chunks
+    return [(cid, chunk_to_branch[cid], chunk_to_dist[cid]) for cid in chunk_ids if cid in chunk_to_branch]
+
+
+def _get_vec_chunk_ids(
+    cursor: sqlite3.Cursor,
+    query_vec: list[float],
+    top_k: int,
+    projects: list[str] | None = None,
+    session_id: str | None = None,
+    path: str | None = None,
+) -> list[tuple[int, float, int]]:
+    """Return ordered (branch_id, distance, chunk_id) from chunk-vec KNN (Entrypoint A).
+
+    Applies best-chunk-per-branch max rollup on top of _execute_chunk_knn, keeping
+    the first (closest) chunk per branch in KNN order. Returns empty list on DB
+    error so the caller degrades to keyword search; non-DB bugs propagate.
+    """
+    raw = _execute_chunk_knn(cursor, query_vec, top_k, projects, session_id, path)
+    if not raw:
+        return []
+
+    seen_branches: set[int] = set()
+    result: list[tuple[int, float, int]] = []
+    for cid, bid, dist in raw:
+        if bid in seen_branches:
+            continue  # already have the best-distance chunk for this branch
+        seen_branches.add(bid)
+        result.append((bid, dist, cid))
+
+    return result
+
+
+def _hydrate_snippets(
+    cursor: sqlite3.Cursor,
+    chunk_hits: list[tuple[int, int, float]],
+) -> list[dict]:
+    """Hydrate Track B snippet dicts from chunk rows + branch/session/project join.
+
+    chunk_hits is [(chunk_id, branch_id, distance)] in score order (closest first).
+    Returns one snippet dict per hit preserving order.
+    score_raw = 1.0 - distance (L2-normalized vectors, lower distance = better → higher score_raw = better).
+    match_terms=[] and matched_role=None because the whole exchange is the vector match unit
+    (no discrete term hits on the KNN path; the deferred keyword B path populates these fields).
+    """
+    if not chunk_hits:
+        return []
+
+    chunk_ids = [cid for cid, _bid, _dist in chunk_hits]
+
+    placeholders = ",".join("?" * len(chunk_ids))
+    rows = cursor.execute(
+        f"""
+        SELECT ch.id, ch.exchange_index, ch.timestamp, ch.first_message_uuid,
+               ch.user_text, ch.assistant_text,
+               s.uuid as session_uuid, s.git_branch, p.name as project
+        FROM chunks ch
+        JOIN branches b ON ch.branch_id = b.id
+        JOIN sessions s ON b.session_id = s.id
+        JOIN projects p ON s.project_id = p.id
+        WHERE ch.id IN ({placeholders})
+        """,
+        chunk_ids,
+    ).fetchall()
+
+    row_map: dict[int, tuple] = {row[0]: row for row in rows}
+
+    snippets: list[dict] = []
+    for cid, _bid, dist in chunk_hits:
+        row = row_map.get(cid)
+        if row is None:
+            continue
+        (
+            _,
+            exchange_index,
+            timestamp,
+            first_message_uuid,
+            user_text,
+            assistant_text,
+            session_uuid,
+            git_branch,
+            project,
+        ) = row
+
+        handle = session_uuid[:8] if session_uuid else ""
+        snippets.append(
+            {
+                "session_uuid": session_uuid,
+                "handle": handle,
+                "project": project,
+                "git_branch": git_branch,
+                "exchange_index": exchange_index,
+                "timestamp": timestamp,
+                "first_message_uuid": first_message_uuid,
+                "user": user_text,
+                "assistant": assistant_text,
+                "match_terms": [],
+                "matched_role": None,
+                "score_raw": 1.0 - dist,
+            }
+        )
+
+    return snippets
 
 
 def _dedup_by_session(cursor: sqlite3.Cursor, ordered_branch_ids: list[int]) -> list[int]:
@@ -225,21 +359,38 @@ def _dedup_by_session(cursor: sqlite3.Cursor, ordered_branch_ids: list[int]) -> 
     return deduped
 
 
-def _hydrate_branches(
+def _hydrate_cards(
     cursor: sqlite3.Cursor,
     branch_ids: list[int],
-    verbose: bool = False,
-    include_notifications: bool = False,
+    branch_scores: dict[int, float] | None = None,
 ) -> list[dict]:
-    """Fetch session metadata and messages for an ordered list of branch IDs."""
+    """Build Track A session-summary card dicts for an ordered list of branch IDs.
+
+    Reads context_summary_json (topic/disposition) and branch/session/project join
+    columns. Does NOT call fetch_branch_messages — A renders from summary data only
+    (no full transcript hydration).
+
+    Graceful degrade: when context_summary_json is absent, topic is
+    derived from the first user message via a targeted single-row LIMIT 1 query.
+    tool_counts is guarded by a PRAGMA table_info check (absent on pre-column DBs).
+    score_raw is taken from branch_scores when provided (ranked path), else None.
+    """
     if not branch_ids:
         return []
+
+    # Guard tool_counts column — absent on DBs created before it was added
+    cursor.execute("PRAGMA table_info(branches)")
+    branch_col_names = {row[1] for row in cursor.fetchall()}
+    has_tool_counts = "tool_counts" in branch_col_names
+    tool_counts_col = ", b.tool_counts" if has_tool_counts else ""
 
     placeholders = ",".join("?" * len(branch_ids))
     rows = cursor.execute(
         f"""
-        SELECT s.id, s.uuid, b.started_at, b.ended_at, b.files_modified,
-               b.commits, s.git_branch, p.name as project, b.id as branch_db_id
+        SELECT b.id as _branch_db_id, s.uuid as session_uuid,
+               b.started_at, b.ended_at, b.exchange_count,
+               b.files_modified, b.commits, s.git_branch,
+               p.name as project, b.context_summary_json{tool_counts_col}
         FROM branches b
         JOIN sessions s ON b.session_id = s.id
         JOIN projects p ON s.project_id = p.id
@@ -248,45 +399,91 @@ def _hydrate_branches(
         branch_ids,
     ).fetchall()
 
-    # Index by branch_id so we can re-order by the caller's ranking
-    branch_map: dict[int, tuple] = {row[8]: row for row in rows}
+    branch_map: dict[int, tuple] = {row[0]: row for row in rows}
 
-    results = []
+    cards: list[dict] = []
     for bid in branch_ids:
         row = branch_map.get(bid)
         if row is None:
             continue
 
-        (
-            _session_id,
-            uuid,
-            started_at,
-            ended_at,
-            files_json,
-            commits_json,
-            git_branch,
-            project,
-            branch_db_id,
-        ) = row
+        if has_tool_counts:
+            (
+                _branch_db_id,
+                session_uuid,
+                started_at,
+                ended_at,
+                exchange_count,
+                files_json,
+                commits_json,
+                git_branch,
+                project,
+                summary_json,
+                tool_counts_json,
+            ) = row
+        else:
+            (
+                _branch_db_id,
+                session_uuid,
+                started_at,
+                ended_at,
+                exchange_count,
+                files_json,
+                commits_json,
+                git_branch,
+                project,
+                summary_json,
+            ) = row
+            tool_counts_json = None
 
-        messages = fetch_branch_messages(cursor, branch_db_id, include_notifications)
+        # Prefer join columns for list metadata; parse summary for topic/disposition
+        files_modified: list = decode_json_column(files_json, [])
+        commits: list = decode_json_column(commits_json, [])
+        tool_counts: dict = decode_json_column(tool_counts_json, {}) if has_tool_counts else {}
 
-        session_data = {
-            "uuid": uuid,
-            "project": project,
-            "started_at": started_at,
-            "ended_at": ended_at,
-            "git_branch": git_branch,
-            "messages": messages,
-        }
+        topic: str | None = None
+        disposition: str | None = None
+        summary = decode_json_column(summary_json, {})
+        if summary:
+            topic = summary.get("topic") or None
+            disposition = summary.get("disposition") or None
 
-        if verbose:
-            session_data["files_modified"] = decode_json_column(files_json, [])
-            session_data["commits"] = decode_json_column(commits_json, [])
+        # Graceful degrade: no context_summary_json → first user message as topic
+        if not topic:
+            msg_row = cursor.execute(
+                """
+                SELECT m.content FROM branch_messages bm
+                JOIN messages m ON bm.message_id = m.id
+                WHERE bm.branch_id = ? AND m.role = 'user'
+                ORDER BY m.timestamp ASC LIMIT 1
+                """,
+                (bid,),
+            ).fetchone()
+            if msg_row and msg_row[0]:
+                topic = msg_row[0][:200]  # truncate to keep card compact
 
-        results.append(session_data)
+        handle = session_uuid[:8] if session_uuid else ""
+        score_raw = branch_scores.get(bid) if branch_scores else None
 
-    return results
+        cards.append(
+            {
+                "session_uuid": session_uuid,
+                "handle": handle,
+                "project": project,
+                "git_branch": git_branch,
+                "started_at": started_at,
+                "ended_at": ended_at,
+                "topic": topic,
+                "disposition": disposition,
+                "exchange_count": exchange_count or 0,
+                "files_modified": files_modified,
+                "commits": commits,
+                "tool_counts": tool_counts,
+                "score_raw": score_raw,
+            }
+        )
+
+    return cards
 
 
 def search_sessions(
@@ -297,22 +494,28 @@ def search_sessions(
     projects: list[str] | None = None,
     session_id: str | None = None,
     path: str | None = None,
-    verbose: bool = False,
-    include_notifications: bool = False,
     keyword_only: bool = False,
-) -> list[dict]:
-    """Search for sessions using branch-level FTS with BM25 ranking, FTS4 MATCH, or LIKE fallback.
+) -> tuple[list[dict], bool]:
+    """Search for sessions, returning (cards, ranked).
 
-    When model and vec extension are available and keyword_only is False, results
-    are fused from vector KNN and FTS via Reciprocal Rank Fusion. Otherwise falls
-    back to keyword-only ranking. Degrades silently to keyword path on any error.
+    ranked=True when a relevance signal exists: RRF fusion (chunk-KNN + FTS), or
+    the fts5/BM25 keyword rung on the degraded path. ranked=False on the LIKE rung
+    (unranked, recency order) and — as a deferred gap (issue #35) — the fts4
+    rung, which is recency-ordered rather than matchinfo-ranked in this landing.
+    When model and vec extension are both available and keyword_only is False,
+    results are fused from chunk-KNN and FTS via Reciprocal Rank Fusion. Degrades
+    silently to the keyword path on any vec/embed error.
     """
     terms = query.split()
     if not terms:
-        return []
+        return [], False
 
     cursor = conn.cursor()
-    top_k = max(max_results * OVERFETCH_MULTIPLIER, OVERFETCH_FLOOR)
+    # Chunk overfetch: after best-chunk-per-branch rollup many chunks collapse to
+    # fewer branches, so fetch more to ensure max_results distinct sessions remain.
+    chunk_top_k = max(max_results * OVERFETCH_MULTIPLIER * CHUNK_COLLAPSE_FACTOR, OVERFETCH_FLOOR)
+    # FTS overfetch: no rollup, standard window
+    fts_top_k = max(max_results * OVERFETCH_MULTIPLIER, OVERFETCH_FLOOR)
 
     use_fusion = not keyword_only
     query_vec: list[float] | None = None
@@ -322,7 +525,7 @@ def search_sessions(
     if use_fusion:
         if not model_available():
             use_fusion = False
-        elif not branch_vec_queryable(conn):
+        elif not chunk_vec_queryable(conn):
             use_fusion = False
             _emit_degrade = True
 
@@ -338,12 +541,42 @@ def search_sessions(
 
     if use_fusion and query_vec is not None:
         try:
-            fts_ids = _get_fts_branch_ids(cursor, query, fts_level, top_k, projects, session_id, path)
-            vec_ids = _get_vec_branch_ids(cursor, query_vec, top_k, projects, session_id, path)
-            fused_ids = rrf([fts_ids, vec_ids])
-            deduped_ids = _dedup_by_session(cursor, fused_ids)
+            fts_ids = [
+                bid
+                for bid, _score in _get_fts_branch_ids(cursor, query, fts_level, fts_top_k, projects, session_id, path)
+            ]
+            chunk_results = _get_vec_chunk_ids(cursor, query_vec, chunk_top_k, projects, session_id, path)
+            vec_branch_ids = [r[0] for r in chunk_results]
+
+            # Score-returning fusion — branch_id → rrf_score (higher = better)
+            scored_pairs = rrf_scored([fts_ids, vec_branch_ids])
+            branch_rrf_scores: dict[int, float] = {bid: score for bid, score in scored_pairs}
+            scored_branch_ids = [bid for bid, _ in scored_pairs]
+
+            deduped_ids = _dedup_by_session(cursor, scored_branch_ids)
             ordered_ids = deduped_ids[:max_results]
-            return _hydrate_branches(cursor, ordered_ids, verbose, include_notifications)
+
+            # Observability: log under-fill so chronic collapse is visible
+            if len(ordered_ids) < max_results and chunk_results:
+                pre_rollup = len(chunk_results)
+                post_rollup = len(ordered_ids)
+                ratio = pre_rollup / max(post_rollup, 1)
+                _logger.debug(
+                    "search under-fill: %d chunks → %d sessions (collapse ratio %.1f); "
+                    "consider increasing CHUNK_COLLAPSE_FACTOR",
+                    pre_rollup,
+                    post_rollup,
+                    ratio,
+                )
+
+            # Every ordered id is a dedup-subset of the rrf-scored ids, so each is a
+            # key in branch_rrf_scores — direct index yields dict[int, float].
+            cards = _hydrate_cards(
+                cursor,
+                ordered_ids,
+                branch_scores={bid: branch_rrf_scores[bid] for bid in ordered_ids},
+            )
+            return cards, True
         except sqlite3.Error:
             # DB-level failure in the fusion path: degrade to keyword search.
             # Bugs in fusion/hydration (rrf, dedup) propagate instead of hiding.
@@ -355,32 +588,156 @@ def search_sessions(
             file=sys.stderr,
         )
 
-    # Keyword-only path (FTS or LIKE)
-    branch_ids = _get_fts_branch_ids(cursor, query, fts_level, top_k, projects, session_id, path)
-    deduped_ids = _dedup_by_session(cursor, branch_ids)
+    # Keyword-only path. The fts5 rung ranks by BM25 (a relevance signal →
+    # ranked:true with scores). The LIKE fallback is unranked by the contract
+    # (null scores, recency order). The fts4 rung is recency-ordered with no
+    # relevance score in this landing, so it is also surfaced as unranked — a
+    # deferred Track A gap (issue #35), not the contract's end state.
+    fts_rows = _get_fts_branch_ids(cursor, query, fts_level, fts_top_k, projects, session_id, path)
+    ranked = fts_level == "fts5" and bool(fts_rows)
+    branch_scores = {bid: score for bid, score in fts_rows if score is not None} if ranked else None
+    deduped_ids = _dedup_by_session(cursor, [bid for bid, _score in fts_rows])
     ordered_ids = deduped_ids[:max_results]
-    return _hydrate_branches(cursor, ordered_ids, verbose, include_notifications)
+    cards = _hydrate_cards(cursor, ordered_ids, branch_scores=branch_scores)
+    return cards, ranked
 
 
-def format_markdown(sessions: list[dict], query: str, verbose: bool = False) -> str:
-    """Format sessions as markdown."""
-    if not sessions:
+def search_messages(
+    conn: sqlite3.Connection,
+    query: str,
+    max_results: int = 5,
+    projects: list[str] | None = None,
+    session_id: str | None = None,
+    path: str | None = None,
+) -> tuple[list[dict], bool]:
+    """Search for matched exchanges (Entrypoint B), returning (snippets, ranked).
+
+    Uses chunk-KNN via _execute_chunk_knn with NO per-branch rollup — multiple
+    matching chunks in one session all appear as separate snippet results.
+    ranked=False only on the pre-KNN gates (empty query, model unavailable,
+    chunk_vec unavailable, or embed_text failure). Once the KNN runs, ranked=True:
+    a sqlite3.Error inside _execute_chunk_knn degrades to an empty list that is
+    indistinguishable from "no matches" at this layer, so both stay ranked=True.
+    There is no keyword fallback for B in this landing — deferred to issue #34.
+    """
+    if not query.split():
+        return [], False
+
+    if not model_available():
+        return [], False
+
+    if not chunk_vec_queryable(conn):
+        return [], False
+
+    try:
+        query_vec = embed_text(query)
+    except Exception:  # embed_text wraps a third-party model stack (fastembed/onnxruntime)
+        return [], False
+
+    top_k = max(max_results * OVERFETCH_MULTIPLIER, OVERFETCH_FLOOR)
+    cursor = conn.cursor()
+
+    raw = _execute_chunk_knn(cursor, query_vec, top_k, projects, session_id, path)
+    if not raw:
+        # Either no matches or a DB error caught inside _execute_chunk_knn;
+        # both cases return ranked=True (vec was available but yielded nothing).
+        return [], True
+
+    ordered = raw[:max_results]
+    snippets = _hydrate_snippets(cursor, ordered)
+    return snippets, True
+
+
+def format_markdown(cards: list[dict], query: str, ranked: bool, verbose: bool = False) -> str:
+    """Format session cards as markdown.
+
+    verbose=True expands each card's files_modified/commits/tool_counts;
+    the JSON path always carries the full lists regardless.
+    """
+    if not cards:
         return f"No sessions found for query: {query}"
 
-    lines = [f'# Search Results: "{query}" ({len(sessions)} sessions)\n']
-    lines.extend(format_markdown_session(session, verbose=verbose) for session in sessions)
+    normalized = apply_scores(cards, ranked)
+    card_markdowns = [format_card_markdown(c, verbose=verbose) for c in normalized]
+    return format_result_list_markdown(ranked, card_markdowns)
 
-    return "\n".join(lines)
+
+def format_messages_markdown(snippets: list[dict], query: str, ranked: bool) -> str:
+    """Format matched-exchange snippets as markdown (Entrypoint B)."""
+    if not snippets:
+        return f"No messages found for query: {query}"
+
+    normalized = apply_scores(snippets, ranked)
+    snippet_markdowns = [format_snippet_markdown(s) for s in normalized]
+    return format_result_list_markdown(ranked, snippet_markdowns)
+
+
+def run_messages(
+    *,
+    query: str,
+    max_results: int = 5,
+    session: str | None = None,
+    project: str | None = None,
+    path: str | None = None,
+    output_format: str = "markdown",
+    include_notifications: bool = False,  # noqa: ARG001 — accepted for surface symmetry; moot on B (no fetch)
+    db: Path = DEFAULT_DB_PATH,
+) -> None:
+    """Search matched exchanges (Entrypoint B — chunk-KNN without rollup).
+
+    On a vec0-unavailable machine (or any pre-KNN failure) emits a well-formed
+    empty ranked:false envelope and returns normally, so the process exits 0
+    rather than erroring. A missing DB or an unexpected error exits 1.
+    """
+    max_results = max(1, min(MAX_SEARCH_RESULTS, max_results))
+    projects = parse_project_filter(project)
+
+    if not db.exists():
+        if output_format == "json":
+            print(json.dumps({"error": "Database not found", "query": query}))
+        else:
+            print("Error: Database not found. Run memory setup first.")
+        sys.exit(1)
+
+    settings = resolve_db_settings(db)
+
+    try:
+        conn = get_db_connection(settings, load_vec=True)
+
+        snippets, ranked = search_messages(
+            conn,
+            query=query,
+            max_results=max_results,
+            projects=projects,
+            session_id=session,
+            path=path,
+        )
+        conn.close()
+
+        if output_format == "json":
+            json_snippets = [format_snippet_json(s) for s in snippets]
+            envelope = build_envelope(query, ranked, json_snippets)
+            print(json.dumps(envelope, indent=2))
+        else:
+            print(format_messages_markdown(snippets, query, ranked))
+
+    # Deliberately broad: top-level CLI handler — reports the error and exits non-zero.
+    except Exception as e:
+        if output_format == "json":
+            print(json.dumps({"error": str(e), "query": query}))
+        else:
+            print(f"Error: {e}")
+        sys.exit(1)
 
 
 def print_status(settings: dict | None) -> None:
     """Print diagnostic status and exit 0."""
-    # Open one connection with vec loaded; branch_vec_queryable probes whether
+    # Open one connection with vec loaded; chunk_vec_queryable probes whether
     # the vec table is usable — get_db_connection already loaded the extension
     # iff it could, so the table-existence probe is sufficient.
     try:
         conn = get_db_connection(settings, load_vec=True)
-        is_vec = branch_vec_queryable(conn)
+        is_vec = chunk_vec_queryable(conn)
     except (sqlite3.Error, OSError):
         conn = None
         is_vec = False
@@ -391,24 +748,33 @@ def print_status(settings: dict | None) -> None:
     # download it (~120 MB) on a cold cache, which a read-only status must not do.
     print(f"model: {EMBEDDING_MODEL} (deps {'available' if DEPS_AVAILABLE else 'missing'})")
 
-    # Embedded vs total branch counts — reuse the same connection
+    # Chunk coverage (current-version chunks / total chunks) and branch watermark
     if conn is not None:
         try:
-            # Denominator is the shared embeddable universe (db.EMBEDDABLE_BRANCH_FILTER),
-            # the same predicate the backfill's build_selection()/count_status() use,
-            # so this diagnostic can't drift from `ccrecall backfill embeddings --status`.
-            total = conn.execute(f"SELECT count(*) FROM branches WHERE {EMBEDDABLE_BRANCH_FILTER}").fetchone()[0]
-            embedded = conn.execute(
-                f"SELECT count(*) FROM branches WHERE {EMBEDDABLE_BRANCH_FILTER}"
+            total_chunks = conn.execute("SELECT count(*) FROM chunks").fetchone()[0]
+            current_chunks = conn.execute(
+                "SELECT count(*) FROM chunks WHERE embedding_version = ? AND embedding_model = ?",
+                (EMBEDDING_VERSION, EMBEDDING_MODEL),
+            ).fetchone()[0]
+            print(f"chunk coverage: {current_chunks}/{total_chunks} chunks at current version")
+
+            # Branch watermark: branches where all chunks are at current version
+            total_branches = conn.execute(
+                f"SELECT count(*) FROM branches WHERE {CHUNK_EMBEDDABLE_BRANCH_FILTER}"
+            ).fetchone()[0]
+            embedded_branches = conn.execute(
+                f"SELECT count(*) FROM branches WHERE {CHUNK_EMBEDDABLE_BRANCH_FILTER}"
                 " AND embedding_version = ? AND embedding_model = ?",
                 (EMBEDDING_VERSION, EMBEDDING_MODEL),
             ).fetchone()[0]
-            print(f"embedded branches: {embedded}/{total}")
+            print(f"embedded branches: {embedded_branches}/{total_branches} (watermark)")
         except sqlite3.Error as e:
+            print(f"chunk coverage: error ({e})")
             print(f"embedded branches: error ({e})")
         finally:
             conn.close()
     else:
+        print("chunk coverage: error (could not open database)")
         print("embedded branches: error (could not open database)")
 
     sys.exit(0)
@@ -425,10 +791,10 @@ def run(
     path: str | None = None,
     output_format: str = "markdown",
     verbose: bool = False,
-    include_notifications: bool = False,
+    include_notifications: bool = False,  # noqa: ARG001 — accepted for CLI compat; A-path has no transcript hydration
     db: Path = DEFAULT_DB_PATH,
 ) -> None:
-    """Search conversation sessions (keyword + vector fusion)."""
+    """Search conversation sessions (keyword + chunk-vector fusion)."""
     # Validate: exactly one of --query / --status must be provided.
     if not status and not query:
         print("error: one of --query/-q or --status is required", file=sys.stderr)
@@ -440,7 +806,7 @@ def run(
     # Backstop for direct callers; the CLI validator rejects out-of-range
     # --max-results before reaching here. Both sides bound on MAX_SEARCH_RESULTS.
     max_results = max(1, min(MAX_SEARCH_RESULTS, max_results))
-    projects = [p.strip() for p in project.split(",")] if project else None
+    projects = parse_project_filter(project)
 
     if not db.exists():
         if status:
@@ -449,6 +815,7 @@ def run(
             # DB is absent (deps check only — no download in a read-only path).
             print("vec extension: no")
             print(f"model: {EMBEDDING_MODEL} (deps {'available' if DEPS_AVAILABLE else 'missing'})")
+            print("chunk coverage: error (database not found)")
             print("embedded branches: error (database not found)")
             sys.exit(0)
         if output_format == "json":
@@ -457,7 +824,7 @@ def run(
             print("Error: Database not found. Run memory setup first.")
         sys.exit(1)
 
-    settings = {"db_path": str(db)} if db != DEFAULT_DB_PATH else None
+    settings = resolve_db_settings(db)
 
     if status:
         print_status(settings)
@@ -471,7 +838,7 @@ def run(
         conn = get_db_connection(settings, load_vec=True)
         fts_level = detect_fts_support(conn)
 
-        sessions = search_sessions(
+        cards, ranked = search_sessions(
             conn,
             query=query,
             fts_level=fts_level,
@@ -479,16 +846,16 @@ def run(
             projects=projects,
             session_id=session,
             path=path,
-            verbose=verbose,
-            include_notifications=include_notifications,
             keyword_only=keyword_only,
         )
         conn.close()
 
         if output_format == "json":
-            print(format_json_sessions(sessions, {"query": query}))
+            json_cards = [format_card_json(c) for c in cards]
+            envelope = build_envelope(query, ranked, json_cards)
+            print(json.dumps(envelope, indent=2))
         else:
-            print(format_markdown(sessions, query, verbose=verbose))
+            print(format_markdown(cards, query, ranked, verbose=verbose))
 
     # Deliberately broad: top-level CLI handler — reports any error to the user
     # and exits non-zero rather than dumping a traceback.

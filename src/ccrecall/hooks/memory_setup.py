@@ -13,22 +13,22 @@ from pathlib import Path
 from ccrecall.db import (
     CONTENT_ERROR_VERSION,
     DEFAULT_DB_PATH,
+    PID_FILE_MODE,
     SYNC_TEMP_PREFIX,
+    ensure_parent_dir,
     get_db_connection,
     load_settings,
     log_hook_exception,
     pid_file_path,
 )
 from ccrecall.hooks import backfill_summaries, import_conversations
+from ccrecall.hooks.warm_model import PID_KEY as WARM_MODEL_PID_KEY
 from ccrecall.legacy import PID_KEY as MIGRATE_PID_KEY
 from ccrecall.legacy import find_legacy_db
 from ccrecall.summarizer import SUMMARY_VERSION
 
 # Stale sync temp files older than this (seconds) are reaped on SessionStart.
 STALE_TEMP_FILE_MAX_AGE_SECONDS = 3600
-
-# PID-file permissions: owner read/write only.
-PID_FILE_MODE = 0o600
 
 # Injected when a pre-rename install is detected and migration is auto-spawned.
 # "auto-migrate with a message": the copy runs in the background; this tells
@@ -150,7 +150,7 @@ def main():
     # the body raises — the hook must print a valid response, never crash start.
     additional_context: str | None = None
     try:
-        DEFAULT_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+        ensure_parent_dir(DEFAULT_DB_PATH)
 
         # Clean up stale temp files from crashed/killed sync processes
         _reap_stale_temp_files()
@@ -186,6 +186,13 @@ def main():
         # forward by embed-on-write (active leaves only); historical seeding is
         # opt-in via `ccrecall backfill embeddings [--days N] [--limit N]` so
         # embedding the full history never fires unbidden (machines.md thrash risk).
+
+        # Pre-warm the fastembed model cache so sync-current's first embed never
+        # triggers an invisible ~120 MB download. PID-guarded via _spawn_background
+        # (O_CREAT|O_EXCL): at most one concurrent warm runs at a time.
+        # Runs on every SessionStart; fast no-op after the first download since the
+        # model is already cached on disk.
+        _spawn_background(["ccrecall-warm-model"], WARM_MODEL_PID_KEY)
     except Exception:
         # Top-level hook guard: must never crash the session start. Log
         # best-effort (no-op unless logging_enabled) so the failure isn't silent.

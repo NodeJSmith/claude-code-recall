@@ -1,15 +1,17 @@
-"""Tests for the embedding backfill hook.
+"""Tests for the chunk-grain embedding backfill hook.
 
-Backfill embeds all eligible branches in a vec-enabled DB. Resume processes only
-remaining branches; the heal clause re-embeds "version-done but no vector" rows.
-Per-batch progress is logged. Bumping EMBEDDING_VERSION / model / summary_version
-makes rows re-appear. A model-load failure marks nothing; one bad summary marks
-exactly that row.
+Backfill embeds all eligible branches at chunk grain via embed_branch_chunks.
+Resume processes only remaining branches; the heal clause re-embeds "version-done
+but chunk_vec missing" rows. Per-batch progress is logged. Bumping EMBEDDING_VERSION
+makes branches re-appear. A model-load failure marks nothing; one bad embed marks
+exactly that branch.
 
-Scope: only active leaves (is_active=1) are embedded — inactive forks are skipped.
+Scope: only active leaves (is_active=1) with messages are embedded — inactive forks
+and message-less branches are skipped.
 Opt-in: --days bounds by recency, --limit caps the run.
 """
 
+import builtins
 import json
 import sqlite3
 from unittest.mock import patch
@@ -18,14 +20,18 @@ import pytest
 import sqlite_vec
 from conftest import make_vec_conn
 
+from ccrecall.db import CONTENT_ERROR_VERSION
 from ccrecall.embeddings import EMBEDDING_DIM, EMBEDDING_MODEL, EMBEDDING_VERSION
-from ccrecall.hooks.backfill_embeddings import BATCH_SIZE, run
-from ccrecall.summarizer import SUMMARY_VERSION
+from ccrecall.hooks.backfill_embeddings import BATCH_SIZE, EXIT_OK, run
+from ccrecall.session_ops import MAX_WRITE_PATH_EMBEDS_PER_SYNC
 
 # A fixed EMBEDDING_DIM-dim float vector for stubbing embed_text.
 _FIXED_VEC = [0.001] * EMBEDDING_DIM
 
 pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
+
+# Monotonic counter for unique IDs across test helpers.
+_branch_counter = [0]
 
 
 def _vec_available() -> bool:
@@ -46,38 +52,59 @@ _VEC_SKIP = pytest.mark.skipif(not _vec_available(), reason="sqlite-vec not avai
 # Helpers
 
 
-def _insert_branch(
+def _insert_branch_with_messages(
     conn: sqlite3.Connection,
-    summary: str | None = "hello world",
     is_active: int = 1,
     ended_at: str | None = None,
+    num_exchanges: int = 1,
+    context_summary: str | None = None,
 ) -> int:
-    """Insert a minimal branch row and return its id.
+    """Insert a branch with messages and return its id.
 
-    Defaults to an active leaf (is_active=1) since only active leaves are
-    eligible for embedding. ended_at lets recency (--days) tests place a row.
+    Creates `num_exchanges` user+assistant message pairs. The branch is active
+    by default. `context_summary` may be NULL (chunk path doesn't require it).
     """
+    _branch_counter[0] += 1
+    uid = _branch_counter[0]
+
     conn.execute(
         "INSERT INTO sessions(uuid, project_id) VALUES (?, NULL)",
-        (f"sess-{id(summary)}-{conn.execute('SELECT COUNT(*) FROM sessions').fetchone()[0]}",),
+        (f"sess-{uid}",),
     )
     session_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
     conn.execute(
         """
         INSERT INTO branches(session_id, leaf_uuid, context_summary, summary_version,
                              is_active, ended_at)
-        VALUES (?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, 0, ?, ?)
         """,
-        (
-            session_id,
-            f"leaf-{session_id}",
-            summary,
-            SUMMARY_VERSION,
-            is_active,
-            ended_at,
-        ),
+        (session_id, f"leaf-{uid}", context_summary, is_active, ended_at),
     )
     branch_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+    for i in range(num_exchanges):
+        ts_h = 10 + i
+        conn.execute(
+            "INSERT INTO messages(session_id, uuid, role, content, timestamp) VALUES (?, ?, 'user', ?, ?)",
+            (session_id, f"u-{uid}-{i}", f"User message {i}", f"2024-01-01T{ts_h:02d}:00:00Z"),
+        )
+        user_msg_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.execute(
+            "INSERT INTO branch_messages(branch_id, message_id) VALUES (?, ?)",
+            (branch_id, user_msg_id),
+        )
+
+        conn.execute(
+            "INSERT INTO messages(session_id, uuid, role, content, timestamp) VALUES (?, ?, 'assistant', ?, ?)",
+            (session_id, f"a-{uid}-{i}", f"Assistant response {i}", f"2024-01-01T{ts_h:02d}:30:00Z"),
+        )
+        asst_msg_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.execute(
+            "INSERT INTO branch_messages(branch_id, message_id) VALUES (?, ?)",
+            (branch_id, asst_msg_id),
+        )
+
     conn.commit()
     return branch_id
 
@@ -87,12 +114,32 @@ def _branch_embedding_version(conn: sqlite3.Connection, branch_id: int) -> int |
     return row[0] if row else None
 
 
-def _vec_count(conn: sqlite3.Connection) -> int:
-    return conn.execute("SELECT COUNT(*) FROM branch_vec").fetchone()[0]
+def _chunk_count(conn: sqlite3.Connection) -> int:
+    """Total chunk_vec rows."""
+    return conn.execute("SELECT COUNT(*) FROM chunk_vec").fetchone()[0]
 
 
-def _has_vec(conn: sqlite3.Connection, branch_id: int) -> bool:
-    return conn.execute("SELECT COUNT(*) FROM branch_vec WHERE branch_id = ?", (branch_id,)).fetchone()[0] == 1
+def _branch_has_chunk_vecs(conn: sqlite3.Connection, branch_id: int) -> bool:
+    """True if any chunk_vec exists for chunks belonging to this branch."""
+    return (
+        conn.execute(
+            """
+            SELECT COUNT(*) FROM chunk_vec
+            JOIN chunks ON chunk_vec.chunk_id = chunks.id
+            WHERE chunks.branch_id = ?
+            """,
+            (branch_id,),
+        ).fetchone()[0]
+        > 0
+    )
+
+
+def _chunks_for_branch(conn: sqlite3.Connection, branch_id: int) -> list[tuple]:
+    """Return (id, embedding_version, first_message_uuid) for all chunks of a branch."""
+    return conn.execute(
+        "SELECT id, embedding_version, first_message_uuid FROM chunks WHERE branch_id = ?",
+        (branch_id,),
+    ).fetchall()
 
 
 class _NoCloseConn:
@@ -113,13 +160,10 @@ class _NoCloseConn:
 
 
 def _run_backfill_with_stub(conn: sqlite3.Connection, *, days=None, limit=None):
-    """Run run(...) with embed_text stubbed to _FIXED_VEC, using given conn."""
+    """Run run() with embed_text stubbed via session_ops to _FIXED_VEC."""
     with (
         patch("ccrecall.hooks.backfill_embeddings.model_available", return_value=True),
-        patch(
-            "ccrecall.hooks.backfill_embeddings.embed_text",
-            return_value=_FIXED_VEC,
-        ),
+        patch("ccrecall.session_ops.embed_text", return_value=_FIXED_VEC),
         patch(
             "ccrecall.hooks.backfill_embeddings.get_db_connection",
             return_value=_NoCloseConn(conn),
@@ -130,72 +174,112 @@ def _run_backfill_with_stub(conn: sqlite3.Connection, *, days=None, limit=None):
         run(days=days, limit=limit)
 
 
-# backfill embeds all eligible branches
+# Backfill embeds all eligible branches
 
 
 @_VEC_SKIP
 class TestBackfillEmbedsFull:
     def test_all_eligible_branches_embedded(self):
-        """All branches with non-empty context_summary get embedded."""
+        """All active-leaf branches with messages get chunk-embedded."""
         conn = make_vec_conn()
-        ids = [_insert_branch(conn, f"summary {i}") for i in range(5)]
+        ids = [_insert_branch_with_messages(conn) for _ in range(5)]
 
         _run_backfill_with_stub(conn)
 
-        assert _vec_count(conn) == 5
+        assert _chunk_count(conn) == 5  # 1 exchange per branch
         for bid in ids:
             assert _branch_embedding_version(conn, bid) == EMBEDDING_VERSION
-            assert _has_vec(conn, bid)
+            assert _branch_has_chunk_vecs(conn, bid)
 
-    def test_null_summary_skipped(self):
-        """Branches with NULL context_summary are not embedded."""
+    def test_long_branch_fully_embedded_in_one_run(self):
+        """A branch with more exchanges than the write-path cap is FULLY embedded.
+
+        The backfill passes max_embeds=None so a single run embeds every exchange.
+        With the write-path cap inherited, this branch would get only the cap's
+        worth of chunks, stay eligible, and trip the no-progress guard (EXIT_ABORT)
+        on re-selection — leaving long sessions (the feature's whole point)
+        permanently under-embedded. Guards version-bump eligibility for branches longer than the cap.
+        """
         conn = make_vec_conn()
-        _insert_branch(conn, summary=None)
-        _insert_branch(conn, summary="good summary")
+        n_exchanges = MAX_WRITE_PATH_EMBEDS_PER_SYNC * 2 + 3  # well over the write-path cap
+        bid = _insert_branch_with_messages(conn, num_exchanges=n_exchanges)
+
+        exit_code = None
+        with (
+            patch("ccrecall.hooks.backfill_embeddings.model_available", return_value=True),
+            patch("ccrecall.session_ops.embed_text", return_value=_FIXED_VEC),
+            patch("ccrecall.hooks.backfill_embeddings.get_db_connection", return_value=_NoCloseConn(conn)),
+            patch("ccrecall.hooks.backfill_embeddings.load_settings", return_value={}),
+            patch("ccrecall.hooks.backfill_embeddings.time.sleep"),
+        ):
+            exit_code = run()
+
+        # No no-progress abort, and every exchange has a current-version chunk vector.
+        assert exit_code == EXIT_OK, "backfill must complete (not no-progress abort) on a long branch"
+        assert _branch_embedding_version(conn, bid) == EMBEDDING_VERSION
+        chunk_vec_for_branch = conn.execute(
+            "SELECT COUNT(*) FROM chunk_vec JOIN chunks ON chunk_vec.chunk_id = chunks.id WHERE chunks.branch_id = ?",
+            (bid,),
+        ).fetchone()[0]
+        assert chunk_vec_for_branch == n_exchanges, (
+            f"all {n_exchanges} exchanges must have a chunk vector after backfill, got {chunk_vec_for_branch}"
+        )
+
+    def test_null_summary_still_embedded(self):
+        """Branches with NULL context_summary are embedded — the chunk path
+        reads raw exchange text, not the summary."""
+        conn = make_vec_conn()
+        bid = _insert_branch_with_messages(conn, context_summary=None)
 
         _run_backfill_with_stub(conn)
 
-        assert _vec_count(conn) == 1
+        assert _branch_has_chunk_vecs(conn, bid)
+        assert _branch_embedding_version(conn, bid) == EMBEDDING_VERSION
 
-    def test_empty_summary_skipped(self):
-        """Branches with empty string context_summary are not embedded."""
+    def test_branch_without_messages_skipped(self):
+        """A branch with no messages is not eligible (CHUNK_EMBEDDABLE requires messages)."""
         conn = make_vec_conn()
-        _insert_branch(conn, summary="")
-        _insert_branch(conn, summary="valid summary")
+        _branch_counter[0] += 1
+        uid = _branch_counter[0]
+        conn.execute("INSERT INTO sessions(uuid, project_id) VALUES (?, NULL)", (f"sess-{uid}",))
+        session_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.execute(
+            "INSERT INTO branches(session_id, leaf_uuid, is_active) VALUES (?, ?, 1)",
+            (session_id, f"leaf-{uid}"),
+        )
+        conn.commit()
 
         _run_backfill_with_stub(conn)
 
-        assert _vec_count(conn) == 1
+        assert _chunk_count(conn) == 0
 
     def test_version_columns_set_correctly(self):
-        """embedding_version, embedding_model, summary_version_at_embed all written."""
+        """embedding_version and embedding_model are written on the branch watermark."""
         conn = make_vec_conn()
-        bid = _insert_branch(conn, "test summary")
+        bid = _insert_branch_with_messages(conn)
 
         _run_backfill_with_stub(conn)
 
         row = conn.execute(
-            "SELECT embedding_version, embedding_model, summary_version_at_embed FROM branches WHERE id = ?",
+            "SELECT embedding_version, embedding_model FROM branches WHERE id = ?",
             (bid,),
         ).fetchone()
         assert row[0] == EMBEDDING_VERSION
         assert row[1] == EMBEDDING_MODEL
-        assert row[2] == SUMMARY_VERSION
 
     def test_commits_per_batch(self):
         """Each batch is committed; data is durable between batches."""
         conn = make_vec_conn()
-        # Insert more than BATCH_SIZE to exercise multi-batch path
         count = BATCH_SIZE + 3
-        for i in range(count):
-            _insert_branch(conn, f"summary {i}")
+        for _ in range(count):
+            _insert_branch_with_messages(conn)
 
         _run_backfill_with_stub(conn)
 
-        assert _vec_count(conn) == count
+        assert _chunk_count(conn) == count
 
 
-# resume processes only remaining; heal clause for missing vectors
+# Resume processes only remaining; heal clause for missing chunk_vecs
 
 
 @_VEC_SKIP
@@ -203,151 +287,101 @@ class TestBackfillResume:
     def test_resume_skips_already_done(self):
         """Second run does not re-embed already-done branches."""
         conn = make_vec_conn()
-        ids = [_insert_branch(conn, f"summary {i}") for i in range(4)]
+        ids = [_insert_branch_with_messages(conn) for _ in range(4)]
 
         call_count = [0]
-        original_vec = _FIXED_VEC[:]
 
         def counting_embed(text: str) -> list[float]:
             call_count[0] += 1
-            return original_vec
+            return _FIXED_VEC[:]
 
-        with (
-            patch(
-                "ccrecall.hooks.backfill_embeddings.model_available",
-                return_value=True,
-            ),
-            patch(
-                "ccrecall.hooks.backfill_embeddings.embed_text",
-                side_effect=counting_embed,
-            ),
-            patch(
-                "ccrecall.hooks.backfill_embeddings.get_db_connection",
-                return_value=_NoCloseConn(conn),
-            ),
-            patch("ccrecall.hooks.backfill_embeddings.load_settings", return_value={}),
-            patch("ccrecall.hooks.backfill_embeddings.time.sleep"),
-        ):
-            run()
+        def _run_counting(conn):
+            with (
+                patch("ccrecall.hooks.backfill_embeddings.model_available", return_value=True),
+                patch("ccrecall.session_ops.embed_text", side_effect=counting_embed),
+                patch("ccrecall.hooks.backfill_embeddings.get_db_connection", return_value=_NoCloseConn(conn)),
+                patch("ccrecall.hooks.backfill_embeddings.load_settings", return_value={}),
+                patch("ccrecall.hooks.backfill_embeddings.time.sleep"),
+            ):
+                run()
 
+        _run_counting(conn)
         first_run_calls = call_count[0]
         assert first_run_calls == len(ids)
 
         # Second run: nothing new to process
         call_count[0] = 0
-        with (
-            patch(
-                "ccrecall.hooks.backfill_embeddings.model_available",
-                return_value=True,
-            ),
-            patch(
-                "ccrecall.hooks.backfill_embeddings.embed_text",
-                side_effect=counting_embed,
-            ),
-            patch(
-                "ccrecall.hooks.backfill_embeddings.get_db_connection",
-                return_value=_NoCloseConn(conn),
-            ),
-            patch("ccrecall.hooks.backfill_embeddings.load_settings", return_value={}),
-            patch("ccrecall.hooks.backfill_embeddings.time.sleep"),
-        ):
-            run()
-
+        _run_counting(conn)
         assert call_count[0] == 0
 
     def test_resume_processes_new_branch(self):
         """After first run, a newly added branch is processed on second run."""
         conn = make_vec_conn()
-        _insert_branch(conn, "first summary")
+        _insert_branch_with_messages(conn)
 
         _run_backfill_with_stub(conn)
-        assert _vec_count(conn) == 1
+        assert _chunk_count(conn) == 1
 
-        new_id = _insert_branch(conn, "second summary")
+        new_id = _insert_branch_with_messages(conn)
         _run_backfill_with_stub(conn)
 
-        assert _vec_count(conn) == 2
-        assert _has_vec(conn, new_id)
+        assert _chunk_count(conn) == 2
+        assert _branch_has_chunk_vecs(conn, new_id)
 
-    def test_heal_clause_missing_vec_row(self):
-        """Heal clause: version says done but branch_vec row absent → re-selected."""
+    def test_heal_clause_chunk_without_vec(self):
+        """Heal clause: chunk row exists with no chunk_vec, watermark reads
+        EMBEDDING_VERSION → branch is re-selected and the missing vector is created."""
         conn = make_vec_conn()
-        bid = _insert_branch(conn, "summary that needs healing")
+        bid = _insert_branch_with_messages(conn)
 
-        # Mark as "done" but do NOT insert a branch_vec row
+        # Run once to create the chunk rows and set watermark
+        _run_backfill_with_stub(conn)
+        assert _branch_has_chunk_vecs(conn, bid)
+
+        # Simulate a crash victim: delete the chunk_vec row but leave the chunks row
         conn.execute(
-            """
-            UPDATE branches
-            SET embedding_version = ?, embedding_model = ?, summary_version_at_embed = ?
-            WHERE id = ?
-            """,
-            (EMBEDDING_VERSION, EMBEDDING_MODEL, SUMMARY_VERSION, bid),
+            "DELETE FROM chunk_vec WHERE chunk_id IN (SELECT id FROM chunks WHERE branch_id = ?)",
+            (bid,),
         )
         conn.commit()
-        assert not _has_vec(conn, bid)
+        assert not _branch_has_chunk_vecs(conn, bid)
 
+        # Heal clause should re-select this branch and recreate the missing vector
         _run_backfill_with_stub(conn)
-
-        # Heal clause should have inserted the missing vector
-        assert _has_vec(conn, bid)
+        assert _branch_has_chunk_vecs(conn, bid)
 
 
-# version bump / model change / summary_version change re-selects rows
+# Version-bump eligibility
 
 
 @_VEC_SKIP
 class TestBackfillVersionBump:
-    def test_embedding_version_bump_reselects(self):
-        """A row with stale embedding_version (below current) is re-embedded.
+    def test_version_bump_makes_branches_eligible(self):
+        """After an EMBEDDING_VERSION bump, all active-leaf branches are eligible.
 
-        Seeds a branch with embedding_version=0 (below real EMBEDDING_VERSION=1)
-        and current model/summary.  Runs _main() with real constants — the SELECT
-        and write both use the same constants so the loop terminates after one pass.
+        Simulates the post-bump state by inserting branches with a stale watermark
+        (embedding_version = 0) and verifying backfill re-embeds them.
         """
         conn = make_vec_conn()
-        bid = _insert_branch(conn, "test summary")
-        # Seed as "done at old version 0" — stale embedding_version
-        conn.execute(
-            """
-            UPDATE branches
-            SET embedding_version = 0, embedding_model = ?, summary_version_at_embed = ?
-            WHERE id = ?
-            """,
-            (EMBEDDING_MODEL, SUMMARY_VERSION, bid),
-        )
-        # Also insert a branch_vec row so the heal clause doesn't add noise
-        conn.execute(
-            "INSERT OR REPLACE INTO branch_vec(branch_id, embedding) VALUES (?, ?)",
-            (bid, bytes(4 * EMBEDDING_DIM)),
-        )
+        ids = [_insert_branch_with_messages(conn) for _ in range(3)]
+        # Seed as "done at old version 0" — stale watermark
+        for bid in ids:
+            conn.execute("UPDATE branches SET embedding_version = 0 WHERE id = ?", (bid,))
         conn.commit()
 
         _run_backfill_with_stub(conn)
 
-        row = conn.execute("SELECT embedding_version FROM branches WHERE id = ?", (bid,)).fetchone()
-        assert row[0] == EMBEDDING_VERSION
+        for bid in ids:
+            assert _branch_embedding_version(conn, bid) == EMBEDDING_VERSION
+            assert _branch_has_chunk_vecs(conn, bid)
 
     def test_model_change_reselects(self):
-        """A row with a stale embedding_model is re-embedded to current model.
-
-        Seeds a branch at current EMBEDDING_VERSION/SUMMARY_VERSION but with a
-        stale model name.  _main() re-embeds it and writes the current model.
-        """
+        """A branch at current version but a stale embedding_model is re-embedded."""
         conn = make_vec_conn()
-        bid = _insert_branch(conn, "test summary")
-        # Seed as "done with old model" — stale embedding_model
+        bid = _insert_branch_with_messages(conn)
         conn.execute(
-            """
-            UPDATE branches
-            SET embedding_version = ?, embedding_model = 'old/stale-model',
-                summary_version_at_embed = ?
-            WHERE id = ?
-            """,
-            (EMBEDDING_VERSION, SUMMARY_VERSION, bid),
-        )
-        conn.execute(
-            "INSERT OR REPLACE INTO branch_vec(branch_id, embedding) VALUES (?, ?)",
-            (bid, bytes(4 * EMBEDDING_DIM)),
+            "UPDATE branches SET embedding_version = ?, embedding_model = 'old/stale-model' WHERE id = ?",
+            (EMBEDDING_VERSION, bid),
         )
         conn.commit()
 
@@ -356,80 +390,50 @@ class TestBackfillVersionBump:
         row = conn.execute("SELECT embedding_model FROM branches WHERE id = ?", (bid,)).fetchone()
         assert row[0] == EMBEDDING_MODEL
 
-    def test_summary_version_mismatch_reselects(self):
-        """A row with stale summary_version_at_embed is re-embedded.
-
-        Seeds a branch at current version/model but summary_version_at_embed=0
-        (below real SUMMARY_VERSION).  _main() re-embeds and stamps current
-        SUMMARY_VERSION.
-        """
+    def test_embedding_version_stale_reselects(self):
+        """A branch with embedding_version < EMBEDDING_VERSION is re-embedded."""
         conn = make_vec_conn()
-        bid = _insert_branch(conn, "test summary")
-        # Seed as "done at old summary version 0" — stale summary_version_at_embed
-        stale_sv = max(0, SUMMARY_VERSION - 1)
+        bid = _insert_branch_with_messages(conn)
         conn.execute(
-            """
-            UPDATE branches
-            SET embedding_version = ?, embedding_model = ?,
-                summary_version_at_embed = ?
-            WHERE id = ?
-            """,
-            (EMBEDDING_VERSION, EMBEDDING_MODEL, stale_sv, bid),
-        )
-        conn.execute(
-            "INSERT OR REPLACE INTO branch_vec(branch_id, embedding) VALUES (?, ?)",
-            (bid, bytes(4 * EMBEDDING_DIM)),
+            "UPDATE branches SET embedding_version = 0, embedding_model = ? WHERE id = ?",
+            (EMBEDDING_MODEL, bid),
         )
         conn.commit()
 
         _run_backfill_with_stub(conn)
 
-        row = conn.execute("SELECT summary_version_at_embed FROM branches WHERE id = ?", (bid,)).fetchone()
-        assert row[0] == SUMMARY_VERSION
+        assert _branch_embedding_version(conn, bid) == EMBEDDING_VERSION
+        assert _branch_has_chunk_vecs(conn, bid)
 
 
-# No-progress guard (Fix A): loop breaks when same batch re-selected
+# No-progress guard: loop breaks when same batch re-selected
 
 
 @_VEC_SKIP
 class TestBackfillNoProgressGuard:
-    def test_guard_fires_when_write_does_not_advance_row(self):
-        """Fix A: if write_branch_embedding is a no-op (skew simulation), the
-        no-progress guard detects the same batch on the next iteration and breaks
-        rather than looping forever.
-        """
+    def test_guard_fires_when_embed_does_not_advance_row(self):
+        """If embed_branch_chunks is a no-op (row stays eligible), the no-progress
+        guard detects the same batch on the next iteration and aborts rather than
+        looping forever."""
         conn = make_vec_conn()
-        bid = _insert_branch(conn, "stuck summary")
+        bid = _insert_branch_with_messages(conn)
 
-        # write_branch_embedding is patched to do nothing — the row stays eligible,
-        # so the next SELECT returns the same batch_ids.  The guard must fire and
-        # _main() must return (not hang).
         with (
-            patch(
-                "ccrecall.hooks.backfill_embeddings.model_available",
-                return_value=True,
-            ),
-            patch(
-                "ccrecall.hooks.backfill_embeddings.embed_text",
-                return_value=_FIXED_VEC,
-            ),
-            patch("ccrecall.hooks.backfill_embeddings.write_branch_embedding"),  # no-op: row never stamped done
-            patch(
-                "ccrecall.hooks.backfill_embeddings.get_db_connection",
-                return_value=_NoCloseConn(conn),
-            ),
+            patch("ccrecall.hooks.backfill_embeddings.model_available", return_value=True),
+            # no-op: row never advanced; return_value=0 so total_inferences stays an int
+            patch("ccrecall.hooks.backfill_embeddings.embed_branch_chunks", return_value=0),
+            patch("ccrecall.hooks.backfill_embeddings.get_db_connection", return_value=_NoCloseConn(conn)),
             patch("ccrecall.hooks.backfill_embeddings.load_settings", return_value={}),
             patch("ccrecall.hooks.backfill_embeddings.time.sleep"),
         ):
             run()  # must return, not hang
 
-        # Row was never actually stamped (write was a no-op), confirming
-        # _main() exited via the guard, not via the row becoming done.
+        # Row was never stamped (embed was a no-op), confirming exit via the guard.
         ev = _branch_embedding_version(conn, bid)
-        assert ev != EMBEDDING_VERSION, "Row should not be at EMBEDDING_VERSION — write was patched to no-op"
+        assert ev != EMBEDDING_VERSION, "Row should not be at EMBEDDING_VERSION — embed was no-op"
 
 
-# model failure marks nothing; one bad summary marks only itself
+# Failure modes: model failure marks nothing; content errors mark only that row
 
 
 @_VEC_SKIP
@@ -437,103 +441,81 @@ class TestBackfillFailureModes:
     def test_model_unavailable_marks_nothing(self):
         """model_available=False → zero rows marked, all stay eligible."""
         conn = make_vec_conn()
-        ids = [_insert_branch(conn, f"summary {i}") for i in range(3)]
+        ids = [_insert_branch_with_messages(conn) for _ in range(3)]
 
         with (
-            patch(
-                "ccrecall.hooks.backfill_embeddings.model_available",
-                return_value=False,
-            ),
-            patch(
-                "ccrecall.hooks.backfill_embeddings.get_db_connection",
-                return_value=_NoCloseConn(conn),
-            ),
+            patch("ccrecall.hooks.backfill_embeddings.model_available", return_value=False),
+            patch("ccrecall.hooks.backfill_embeddings.get_db_connection", return_value=_NoCloseConn(conn)),
             patch("ccrecall.hooks.backfill_embeddings.load_settings", return_value={}),
         ):
             run()
 
-        # All rows still eligible (embedding_version still NULL or 0, not -1)
         for bid in ids:
             ev = _branch_embedding_version(conn, bid)
-            assert ev != -1, f"branch {bid} should not be marked -1"
-        assert _vec_count(conn) == 0
+            assert ev != CONTENT_ERROR_VERSION, f"branch {bid} should not be marked -1"
+        assert _chunk_count(conn) == 0
 
-    def test_single_bad_summary_marks_only_itself(self):
-        """One row's embed_text raising marks only that row -1; rest succeed."""
+    def test_single_bad_embed_marks_only_itself(self):
+        """One branch whose embed_text raises marks only that branch -1; rest succeed."""
         conn = make_vec_conn()
-        good_id1 = _insert_branch(conn, "good summary one")
-        bad_id = _insert_branch(conn, "bad summary that will fail")
-        good_id2 = _insert_branch(conn, "good summary two")
+        good_id1 = _insert_branch_with_messages(conn)
+        bad_id = _insert_branch_with_messages(conn)
+        good_id2 = _insert_branch_with_messages(conn)
 
-        def selective_embed(text: str) -> list[float]:
-            if "bad summary" in text:
-                raise ValueError("simulated tokenizer overflow for this text")
+        # Raise on the second call (bad_id was inserted second)
+        call_no = [0]
+
+        def counting_embed(text: str) -> list[float]:
+            call_no[0] += 1
+            if call_no[0] == 2:  # second branch's embed raises
+                raise ValueError("simulated tokenizer overflow")
             return _FIXED_VEC
 
         with (
-            patch(
-                "ccrecall.hooks.backfill_embeddings.model_available",
-                return_value=True,
-            ),
-            patch(
-                "ccrecall.hooks.backfill_embeddings.embed_text",
-                side_effect=selective_embed,
-            ),
-            patch(
-                "ccrecall.hooks.backfill_embeddings.get_db_connection",
-                return_value=_NoCloseConn(conn),
-            ),
+            patch("ccrecall.hooks.backfill_embeddings.model_available", return_value=True),
+            patch("ccrecall.session_ops.embed_text", side_effect=counting_embed),
+            patch("ccrecall.hooks.backfill_embeddings.get_db_connection", return_value=_NoCloseConn(conn)),
             patch("ccrecall.hooks.backfill_embeddings.load_settings", return_value={}),
             patch("ccrecall.hooks.backfill_embeddings.time.sleep"),
         ):
             run()
 
-        # Bad row marked -1
-        assert _branch_embedding_version(conn, bad_id) == -1
-        assert not _has_vec(conn, bad_id)
+        # Second branch (bad_id) is marked -1
+        assert _branch_embedding_version(conn, bad_id) == CONTENT_ERROR_VERSION
+        assert not _branch_has_chunk_vecs(conn, bad_id)
 
-        # Good rows completed
+        # First and third branches succeeded
         assert _branch_embedding_version(conn, good_id1) == EMBEDDING_VERSION
         assert _branch_embedding_version(conn, good_id2) == EMBEDDING_VERSION
-        assert _has_vec(conn, good_id1)
-        assert _has_vec(conn, good_id2)
+        assert _branch_has_chunk_vecs(conn, good_id1)
+        assert _branch_has_chunk_vecs(conn, good_id2)
 
     def test_infra_failure_marks_no_rows(self):
-        """Fix 2: RuntimeError from embed_text (infra failure) → zero rows marked -1, all stay eligible."""
+        """RuntimeError from embed_text (infra failure) → zero rows marked -1, all stay eligible."""
         conn = make_vec_conn()
-        ids = [_insert_branch(conn, f"summary {i}") for i in range(3)]
+        ids = [_insert_branch_with_messages(conn) for _ in range(3)]
 
         def infra_fail(text: str) -> list[float]:
             raise RuntimeError("ONNX session crashed")
 
         with (
-            patch(
-                "ccrecall.hooks.backfill_embeddings.model_available",
-                return_value=True,
-            ),
-            patch(
-                "ccrecall.hooks.backfill_embeddings.embed_text",
-                side_effect=infra_fail,
-            ),
-            patch(
-                "ccrecall.hooks.backfill_embeddings.get_db_connection",
-                return_value=_NoCloseConn(conn),
-            ),
+            patch("ccrecall.hooks.backfill_embeddings.model_available", return_value=True),
+            patch("ccrecall.session_ops.embed_text", side_effect=infra_fail),
+            patch("ccrecall.hooks.backfill_embeddings.get_db_connection", return_value=_NoCloseConn(conn)),
             patch("ccrecall.hooks.backfill_embeddings.load_settings", return_value={}),
             patch("ccrecall.hooks.backfill_embeddings.time.sleep"),
         ):
             run()
 
-        # No rows should be marked -1 — infra failure aborts without marking
         for bid in ids:
             ev = _branch_embedding_version(conn, bid)
-            assert ev != -1, f"branch {bid} should not be marked -1 on infra failure"
-        assert _vec_count(conn) == 0
+            assert ev != CONTENT_ERROR_VERSION, f"branch {bid} should not be marked -1 on infra failure"
+        assert _chunk_count(conn) == 0
 
     def test_sentinel_row_not_reprocessed(self):
-        """A row with embedding_version=-1 is excluded from the selection predicate."""
+        """A branch with embedding_version=-1 is excluded from the selection predicate."""
         conn = make_vec_conn()
-        bid = _insert_branch(conn, "previously failed summary")
+        bid = _insert_branch_with_messages(conn)
         conn.execute("UPDATE branches SET embedding_version = -1 WHERE id = ?", (bid,))
         conn.commit()
 
@@ -544,18 +526,9 @@ class TestBackfillFailureModes:
             return _FIXED_VEC
 
         with (
-            patch(
-                "ccrecall.hooks.backfill_embeddings.model_available",
-                return_value=True,
-            ),
-            patch(
-                "ccrecall.hooks.backfill_embeddings.embed_text",
-                side_effect=counting_embed,
-            ),
-            patch(
-                "ccrecall.hooks.backfill_embeddings.get_db_connection",
-                return_value=_NoCloseConn(conn),
-            ),
+            patch("ccrecall.hooks.backfill_embeddings.model_available", return_value=True),
+            patch("ccrecall.session_ops.embed_text", side_effect=counting_embed),
+            patch("ccrecall.hooks.backfill_embeddings.get_db_connection", return_value=_NoCloseConn(conn)),
             patch("ccrecall.hooks.backfill_embeddings.load_settings", return_value={}),
             patch("ccrecall.hooks.backfill_embeddings.time.sleep"),
         ):
@@ -563,25 +536,47 @@ class TestBackfillFailureModes:
 
         assert call_count[0] == 0
 
+    def test_content_error_vs_batch_abort(self):
+        """T1: sqlite3.Error from fetch_branch_messages is a batch-abort (EXIT_ABORT),
+        NOT a per-row content-error sentinel — the two must not be conflated."""
+        conn = make_vec_conn()
+        bid = _insert_branch_with_messages(conn)
 
-# Scope: only active leaves are embedded (query path filters is_active=1)
+        with (
+            patch("ccrecall.hooks.backfill_embeddings.model_available", return_value=True),
+            # Simulate an infra failure during message fetch
+            patch(
+                "ccrecall.hooks.backfill_embeddings.fetch_branch_messages",
+                side_effect=sqlite3.OperationalError("disk I/O error"),
+            ),
+            patch("ccrecall.hooks.backfill_embeddings.get_db_connection", return_value=_NoCloseConn(conn)),
+            patch("ccrecall.hooks.backfill_embeddings.load_settings", return_value={}),
+            patch("ccrecall.hooks.backfill_embeddings.time.sleep"),
+        ):
+            exit_code = run()
+
+        # Must be a batch abort, not per-row error sentinel
+        assert exit_code == 1  # EXIT_ABORT
+        # Branch must NOT be marked CONTENT_ERROR_VERSION
+        assert _branch_embedding_version(conn, bid) != CONTENT_ERROR_VERSION
+
+
+# Scope: only active leaves with messages are embedded
 
 
 @_VEC_SKIP
 class TestBackfillScopeActive:
     def test_inactive_branch_not_embedded(self):
-        """is_active=0 branches are skipped — a vector on them is never returnable."""
+        """is_active=0 branches are skipped — vectors on them are never returnable."""
         conn = make_vec_conn()
-        active = _insert_branch(conn, "active summary", is_active=1)
-        inactive = _insert_branch(conn, "inactive summary", is_active=0)
+        active = _insert_branch_with_messages(conn, is_active=1)
+        inactive = _insert_branch_with_messages(conn, is_active=0)
 
         _run_backfill_with_stub(conn)
 
-        assert _has_vec(conn, active)
-        assert not _has_vec(conn, inactive)
-        # Untouched: the inactive row keeps version 0, but is_active excludes it.
-        assert _branch_embedding_version(conn, inactive) == 0
-        assert _vec_count(conn) == 1
+        assert _branch_has_chunk_vecs(conn, active)
+        assert not _branch_has_chunk_vecs(conn, inactive)
+        assert _chunk_count(conn) == 1
 
 
 # Opt-in flags: --days bounds recency, --limit caps the run
@@ -592,43 +587,87 @@ class TestBackfillFlags:
     def test_days_excludes_branches_outside_window(self):
         """--days N only embeds active leaves ended within the last N days."""
         conn = make_vec_conn()
-        recent = _insert_branch(conn, "recent")
-        old = _insert_branch(conn, "old")
-        # Set ended_at relative to 'now' so the test is wall-clock independent.
+        recent = _insert_branch_with_messages(conn)
+        old = _insert_branch_with_messages(conn)
         conn.execute("UPDATE branches SET ended_at = datetime('now') WHERE id = ?", (recent,))
-        conn.execute(
-            "UPDATE branches SET ended_at = datetime('now', '-60 days') WHERE id = ?",
-            (old,),
-        )
+        conn.execute("UPDATE branches SET ended_at = datetime('now', '-60 days') WHERE id = ?", (old,))
         conn.commit()
 
         _run_backfill_with_stub(conn, days=30)
 
-        assert _has_vec(conn, recent)
-        assert not _has_vec(conn, old)
-        assert _vec_count(conn) == 1
+        assert _branch_has_chunk_vecs(conn, recent)
+        assert not _branch_has_chunk_vecs(conn, old)
+        assert _chunk_count(conn) == 1
 
     def test_limit_caps_embeds_across_batches(self):
         """--limit N stops after N branches even though batches are BATCH_SIZE-wide."""
         conn = make_vec_conn()
-        for i in range(5):
-            _insert_branch(conn, f"summary {i}")
+        for _ in range(5):
+            _insert_branch_with_messages(conn)
 
         _run_backfill_with_stub(conn, limit=2)
 
-        assert _vec_count(conn) == 2
+        assert _chunk_count(conn) == 2
 
 
-# --status: read-only progress reader (done / eligible / errored / total)
+# Backfill locator: first_message_uuid is set on backfilled chunks (M10)
+
+
+@_VEC_SKIP
+class TestBackfillLocator:
+    def test_backfilled_chunks_have_first_message_uuid(self):
+        """M10: backfilled chunks carry a non-NULL first_message_uuid (fetch_branch_messages
+        selects m.uuid so the locator is populated even for historical branches)."""
+        conn = make_vec_conn()
+        bid = _insert_branch_with_messages(conn, num_exchanges=2)
+
+        _run_backfill_with_stub(conn)
+
+        chunks = _chunks_for_branch(conn, bid)
+        assert len(chunks) == 2
+        for chunk_id, _ev, uuid in chunks:
+            assert uuid is not None, f"chunk {chunk_id} missing first_message_uuid"
+
+
+# History preservation
+
+
+@_VEC_SKIP
+class TestHistoryPreservation:
+    def test_messages_branches_unchanged_after_backfill(self):
+        """messages/branches/branch_messages row counts and contents are
+        unchanged across an EMBEDDING_VERSION bump + backfill."""
+        conn = make_vec_conn()
+        for _ in range(3):
+            _insert_branch_with_messages(conn, num_exchanges=2)
+
+        def _snapshot(conn):
+            return {
+                "messages": conn.execute("SELECT id, content FROM messages ORDER BY id").fetchall(),
+                "branches_core": conn.execute(
+                    "SELECT id, session_id, leaf_uuid, is_active FROM branches ORDER BY id"
+                ).fetchall(),
+                "branch_messages": conn.execute(
+                    "SELECT branch_id, message_id FROM branch_messages ORDER BY branch_id, message_id"
+                ).fetchall(),
+            }
+
+        before = _snapshot(conn)
+        _run_backfill_with_stub(conn)
+        after = _snapshot(conn)
+
+        assert after["messages"] == before["messages"]
+        assert after["branches_core"] == before["branches_core"]
+        assert after["branch_messages"] == before["branch_messages"]
+
+
+# --status: read-only chunk-coverage progress reporter
 
 
 def _run_status(conn: sqlite3.Connection, capsys, *, json_mode=False, days=None):
     """Invoke run(status=True, ...) against conn; return captured stdout."""
     with (
-        patch(
-            "ccrecall.hooks.backfill_embeddings.get_db_connection",
-            return_value=_NoCloseConn(conn),
-        ),
+        patch("ccrecall.hooks.backfill_embeddings.get_db_connection", return_value=_NoCloseConn(conn)),
         patch("ccrecall.hooks.backfill_embeddings.load_settings", return_value={}),
     ):
         code = run(status=True, json_mode=json_mode, days=days)
@@ -639,13 +678,13 @@ def _run_status(conn: sqlite3.Connection, capsys, *, json_mode=False, days=None)
 @_VEC_SKIP
 class TestBackfillStatus:
     def _seed_mixed(self, conn: sqlite3.Connection) -> None:
-        """3 done, 2 eligible, 1 errored — universe of 6."""
-        for i in range(3):
-            _insert_branch(conn, f"done {i}")
-        _run_backfill_with_stub(conn)  # marks those 3 done
-        for i in range(2):
-            _insert_branch(conn, f"eligible {i}")
-        errored = _insert_branch(conn, "errored")
+        """3 done branches (embedded), 2 eligible, 1 errored — 6 total branches."""
+        for _ in range(3):
+            _insert_branch_with_messages(conn)
+        _run_backfill_with_stub(conn)  # marks those 3 done (3 chunk_vec rows)
+        for _ in range(2):
+            _insert_branch_with_messages(conn)
+        errored = _insert_branch_with_messages(conn)
         conn.execute("UPDATE branches SET embedding_version = -1 WHERE id = ?", (errored,))
         conn.commit()
 
@@ -656,36 +695,34 @@ class TestBackfillStatus:
         out = _run_status(conn, capsys, json_mode=True)
         data = json.loads(out)
 
-        assert data["universe"] == 6
+        # universe = total chunks (3 done branches x 1 exchange = 3 chunks)
+        assert data["universe"] == 3
+        # done = current-version chunks with chunk_vec (the 3 embedded above)
         assert data["done"] == 3
+        # eligible = branches still needing work (the 2 new eligible ones)
         assert data["eligible"] == 2
+        # errored = branches with content-error sentinel (1)
         assert data["errored"] == 1
         assert data["days"] is None
 
-    def test_human_output_reports_progress(self, capsys):
+    def test_human_output_reports_chunk_coverage(self, capsys):
         conn = make_vec_conn()
         self._seed_mixed(conn)
 
         out = _run_status(conn, capsys)
 
-        assert "embedded:  3 / 6" in out
-        assert "remaining: 2" in out
-        assert "errored:   1" in out
+        assert "3 / 3 chunks" in out
+        assert "2 branches" in out
+        assert "errored" in out
 
     def test_days_filters_counts(self, capsys):
-        """--status --days N bounds universe/eligible/errored by recency.
-
-        Mirrors count_status's recency clause. Two rows fall outside a 30-day
-        window for different reasons: an explicitly old row (ended 60 days ago)
-        and a never-ended row (NULL ended_at, since `NULL > datetime(...)` is
-        false in SQLite). Both must drop out of every counted set.
-        """
+        """--status --days N bounds universe/eligible/errored by recency."""
         conn = make_vec_conn()
-        recent = _insert_branch(conn, "recent eligible")
-        recent_err = _insert_branch(conn, "recent errored")
-        old = _insert_branch(conn, "old eligible")  # ended 60d ago → out of window
-        _insert_branch(conn, "never ended")  # NULL ended_at → out of window
-        # Use SQLite's clock so the window math is wall-clock independent.
+        recent = _insert_branch_with_messages(conn)
+        recent_err = _insert_branch_with_messages(conn)
+        old = _insert_branch_with_messages(conn)  # ended 60d ago → out of window
+        _insert_branch_with_messages(conn)  # NULL ended_at → out of window
+
         conn.execute(
             "UPDATE branches SET ended_at = datetime('now') WHERE id IN (?, ?)",
             (recent, recent_err),
@@ -700,20 +737,57 @@ class TestBackfillStatus:
         out = _run_status(conn, capsys, json_mode=True, days=30)
         data = json.loads(out)
 
-        # Only `recent` (eligible) and `recent_err` (errored) are within the
-        # window; both count toward universe. `old` and the NULL row are excluded.
-        assert data["universe"] == 2
+        # Only recent (eligible) and recent_err (errored) are within the window.
+        # universe = chunks in those branches = 0 (neither has been embedded yet,
+        # but universe counts existing chunks; recent has none since not yet run)
         assert data["eligible"] == 1
         assert data["errored"] == 1
-        assert data["done"] == 0
         assert data["days"] == 30
 
     def test_status_does_not_embed(self, capsys):
         """--status is read-only: it must not write any vectors."""
         conn = make_vec_conn()
-        _insert_branch(conn, "untouched")
+        _insert_branch_with_messages(conn)
 
-        before = _vec_count(conn)
+        before = _chunk_count(conn)
         _run_status(conn, capsys, json_mode=True)
 
-        assert _vec_count(conn) == before == 0
+        assert _chunk_count(conn) == before == 0
+
+
+# Total inferences counter: reported alongside branches
+
+
+@_VEC_SKIP
+class TestBackfillInferencesCounter:
+    def test_json_output_includes_inferences(self):
+        """The JSON completion output includes 'inferences' alongside 'embedded'."""
+        conn = make_vec_conn()
+        _insert_branch_with_messages(conn, num_exchanges=3)
+
+        captured = []
+
+        original_print = builtins.print
+
+        def capturing_print(*args, **kwargs):
+            if kwargs.get("file") is None:
+                captured.append(args[0] if args else "")
+            original_print(*args, **kwargs)
+
+        with (
+            patch("ccrecall.hooks.backfill_embeddings.model_available", return_value=True),
+            patch("ccrecall.session_ops.embed_text", return_value=_FIXED_VEC),
+            patch("ccrecall.hooks.backfill_embeddings.get_db_connection", return_value=_NoCloseConn(conn)),
+            patch("ccrecall.hooks.backfill_embeddings.load_settings", return_value={}),
+            patch("ccrecall.hooks.backfill_embeddings.time.sleep"),
+            patch("builtins.print", side_effect=capturing_print),
+        ):
+            run(json_mode=True)
+
+        # At least one JSON line was captured to stdout
+        json_lines = [c for c in captured if c.startswith("{")]
+        assert json_lines, "Expected JSON output on stdout"
+        data = json.loads(json_lines[-1])
+        assert "inferences" in data
+        assert data["inferences"] >= 1  # at least 1 exchange was embedded
+        assert data["embedded"] >= 1

@@ -126,10 +126,16 @@ def build_exchange_pairs(messages: list[dict]) -> list[dict]:
 
     All assistant parts following a user message accumulate into that exchange's
     single ``assistant`` string (joined with blank lines) until the next user turn.
+
+    Each exchange carries ``first_message_uuid`` — the ``uuid`` of the opening
+    user message — for use as a Track B locator anchor. Messages that lack a
+    ``uuid`` key (older fixtures, context-injection callers) yield
+    ``first_message_uuid=None`` without error.
     """
     exchanges = []
     current_user = None
     current_user_ts = None
+    current_user_uuid: str | None = None
     current_asst_parts: list[str] = []
 
     for m in messages:
@@ -141,10 +147,12 @@ def build_exchange_pairs(messages: list[dict]) -> list[dict]:
                         "assistant": "\n\n".join(current_asst_parts),
                         "timestamp": current_user_ts,
                         "index": len(exchanges),
+                        "first_message_uuid": current_user_uuid,
                     }
                 )
             current_user = m["content"]
             current_user_ts = m.get("timestamp")
+            current_user_uuid = m.get("uuid")
             current_asst_parts = []
         elif m["role"] == "assistant" and current_user is not None:
             cleaned = re.sub(r"\[Tool: \w+\]", "", m["content"]).strip()
@@ -158,6 +166,7 @@ def build_exchange_pairs(messages: list[dict]) -> list[dict]:
                 "assistant": "\n\n".join(current_asst_parts),
                 "timestamp": current_user_ts,
                 "index": len(exchanges),
+                "first_message_uuid": current_user_uuid,
             }
         )
 
@@ -401,8 +410,10 @@ def compute_context_summary(cursor: sqlite3.Cursor, branch_db_id: int) -> tuple[
     }
 
     # Fetch messages for this branch. Standalone (not db.fetch_branch_messages):
-    # summarizer sits below db in the import graph, so it can't import db;
-    # this query also needs only the 3 non-notification columns.
+    # summarizer sits below db in the import graph, so it can't import db. uuid is
+    # intentionally omitted — the summary JSON drops first_message_uuid, so this
+    # path needs only the 3 non-notification columns. The Track B locator uuid
+    # flows through db.fetch_branch_messages (which selects uuid) on the chunk path.
     cursor.execute(
         """
         SELECT m.role, m.content, m.timestamp

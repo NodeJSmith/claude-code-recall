@@ -4,6 +4,10 @@ Both the write path and the query path must import from here. No second
 embedding code path may exist.
 """
 
+import os
+import tempfile
+from pathlib import Path
+
 import numpy as np
 
 # fastembed is a hard dep, but guard the import so model_available() can degrade
@@ -20,8 +24,23 @@ except (ImportError, OSError):
 DEPS_AVAILABLE = TextEmbedding is not None
 
 EMBEDDING_MODEL = "jinaai/jina-embeddings-v2-small-en"
-EMBEDDING_VERSION = 2  # Bumped from 1 (bge-m3): different model and vector space.
+EMBEDDING_VERSION = 3  # Bumped from 2: per-exchange chunk granularity (was per-branch summary).
 EMBEDDING_DIM = 512
+
+# fastembed's supported-model registry serves jina-v2-small from the xenova/ HF
+# mirror (differs from EMBEDDING_MODEL's jinaai/ model-card prefix; there is no
+# programmatic map between the two, so this source repo is tracked explicitly and
+# must be updated alongside EMBEDDING_MODEL). The on-disk cache subdir follows
+# HuggingFace's models--{org}--{name} snapshot convention.
+EMBEDDING_MODEL_HF_SOURCE = "xenova/jina-embeddings-v2-small-en"
+EMBEDDING_MODEL_CACHE_SUBDIR = "models--" + EMBEDDING_MODEL_HF_SOURCE.replace("/", "--")
+
+# Token-aware cap constants for cap_for_embedding.
+# EMBED_CHAR_BUDGET is the initial char split (head + tail each get half).
+# MODEL_TOKEN_LIMIT is jina-v2-small's hard context limit; the cap tightens until
+# len(tokens) <= MODEL_TOKEN_LIMIT so dense content never trips CONTENT_ERROR.
+EMBED_CHAR_BUDGET = 32_000
+MODEL_TOKEN_LIMIT = 8192
 
 # fastembed defaults its inference parallelism to every CPU core, so each
 # single inference briefly saturates the whole machine. Embedding here is always
@@ -65,6 +84,24 @@ def get_model(threads: int | None = None):
     assert TextEmbedding is not None  # noqa: S101 — type-checker narrowing; the real guard is the RuntimeError above
     _model = TextEmbedding(model_name=EMBEDDING_MODEL, threads=resolve_thread_count(threads))
     return _model
+
+
+def is_model_cached_on_disk() -> bool:
+    """Return True iff the fastembed model's cache directory exists on disk.
+
+    A True result means get_model() will load from disk (fast — milliseconds).
+    A False result means get_model() may trigger a ~120 MB network download.
+
+    Cache root: $FASTEMBED_CACHE_PATH env var, or <tempdir>/fastembed_cache/.
+    Model subdir: EMBEDDING_MODEL_CACHE_SUBDIR (see its definition for how the
+    HuggingFace snapshot name is derived from the model's HF source repo).
+    """
+    try:
+        default_cache = os.path.join(tempfile.gettempdir(), "fastembed_cache")
+        cache_root = Path(os.environ.get("FASTEMBED_CACHE_PATH", default_cache))
+        return (cache_root / EMBEDDING_MODEL_CACHE_SUBDIR).exists()
+    except Exception:
+        return False
 
 
 def model_available(threads: int | None = None) -> bool:
@@ -123,3 +160,55 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
     """
     model = get_model()
     return [embed_one(model, text) for text in texts]
+
+
+def cap_for_embedding(text: str) -> tuple[str, bool]:
+    """Head+tail-cap text to fit within the embedding model's token limit.
+
+    Returns ``(possibly_capped_text, was_capped)``. ``was_capped=False`` means
+    the text was already within both the char budget and the token limit and is
+    returned unchanged. ``was_capped=True`` means the middle was dropped and the
+    returned text is the head+tail-capped form.
+
+    The cap always keeps both the beginning and the end of the text so a single
+    large pasted block or tool dump degrades one chunk's signal rather than
+    discarding the exchange. The post-check loop tightens the cap until
+    ``len(tokens) <= MODEL_TOKEN_LIMIT``, so dense content (base64, minified JSON)
+    that is under the char budget but over the token limit cannot reach
+    ``embed_text`` and trip ``CONTENT_ERROR``.
+
+    Reaches the tokenizer through ``get_model()`` (the singleton accessor) — no
+    second embedding code path is created.
+    """
+    if not text:
+        return text, False
+
+    model = get_model()
+
+    # Fast path: text fits within both budgets as-is
+    if len(text) <= EMBED_CHAR_BUDGET and model.token_count([text]) <= MODEL_TOKEN_LIMIT:
+        return text, False
+
+    # Determine initial head/tail split.
+    # Char-over-budget case: split at the budget boundary.
+    # Dense-token case (text <= char budget but token-dense): start at 40 % each
+    # side so the middle is genuinely dropped on the first iteration — starting at
+    # 50 % each side would reconstruct the full text and make no progress.
+    if len(text) > EMBED_CHAR_BUDGET:
+        head = EMBED_CHAR_BUDGET // 2
+        tail = EMBED_CHAR_BUDGET // 2
+    else:
+        head = max(len(text) * 2 // 5, 1)
+        tail = max(len(text) * 2 // 5, 1)
+
+    capped = text[:head] + "\n\n[...]\n\n" + text[-tail:]
+
+    while model.token_count([capped]) > MODEL_TOKEN_LIMIT:
+        head = max(head * 3 // 4, 1)
+        tail = max(tail * 3 // 4, 1)
+        next_capped = text[:head] + "\n\n[...]\n\n" + text[-tail:]
+        if next_capped == capped:
+            break  # no further reduction possible; pathological — let embed_text raise
+        capped = next_capped
+
+    return capped, True

@@ -170,7 +170,7 @@ def print_stats(db: Path = DEFAULT_DB_PATH) -> None:
     lifecycle with run()), so `ccrecall stats` can't delete a live background
     import's PID sentinel and let the session hook spawn a duplicate import.
     load_vec=False keeps it genuinely read-only — the counts never query
-    branch_vec, so there's no reason to create and commit the vec schema here.
+    chunk_vec, so there's no reason to create and commit the vec schema here.
     """
     settings = load_settings()
     if db != DEFAULT_DB_PATH:

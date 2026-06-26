@@ -18,7 +18,6 @@ import ccrecall.db as _db_mod
 import ccrecall.hooks.memory_setup as memory_setup
 import ccrecall.hooks.onboarding as onboarding
 import ccrecall.legacy as legacy
-from ccrecall.embeddings import EMBEDDING_DIM
 from ccrecall.schema import SCHEMA
 
 
@@ -119,8 +118,13 @@ class TestCopyHelpers:
 
 
 class TestRunMigration:
-    def test_full_migration_heals_dim_and_filters_config(self, tmp_path, monkeypatch):
+    def test_full_migration_tears_down_branch_vec_and_filters_config(self, tmp_path, monkeypatch):
         new_db, legacy_dir = _patch_paths(monkeypatch, tmp_path)
+        # _make_legacy_db seeds a branch_vec at 1024 (stale dim) and a branch with
+        # embedding_version=1 (stale watermark). After migration:
+        # - branch_vec must be ABSENT (torn down via _ensure_vec_schema)
+        # - chunk_vec must EXIST (created by _ensure_vec_schema)
+        # - branches.embedding_version must be 0 (reset because branch_vec existed)
         src = _make_legacy_db(legacy_dir, vec_dim=1024)
         (legacy_dir / "config.json").write_text(
             json.dumps({"onboarding_completed": True, "onboarding_version": 1, "consolidation_min_hours": 9})
@@ -135,9 +139,16 @@ class TestRunMigration:
         assert cfg["onboarding_completed"] is True
 
         conn = sqlite3.connect(new_db)
-        vec_sql = conn.execute("SELECT sql FROM sqlite_master WHERE name='branch_vec'").fetchone()[0]
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+        assert "branch_vec" not in tables, "branch_vec must be torn down during migration"
+        assert "chunk_vec" in tables, "chunk_vec must exist after migration"
+        # Stale branch-level watermark must be reset so backfill re-embeds at chunk grain.
+        wm = conn.execute("SELECT embedding_version FROM branches WHERE leaf_uuid = 'lf'").fetchone()[0]
         conn.close()
-        assert f"float[{EMBEDDING_DIM}]" in vec_sql.lower()  # stale 1024-dim healed to current
+        assert wm == 0, "embedding_version must be 0 after branch_vec teardown clears old watermarks"
 
     def test_idempotent_second_run_is_noop(self, tmp_path, monkeypatch):
         _, legacy_dir = _patch_paths(monkeypatch, tmp_path)
@@ -176,7 +187,11 @@ class TestMemorySetupHook:
 
         out, spawned = _run_memory_setup(monkeypatch)
 
-        assert spawned == [["ccrecall", "migrate"]]  # migrate only — no fresh import
+        # migrate must be spawned; fresh import must NOT be (migrate-only path).
+        # warm-model is also spawned on every SessionStart — both are expected.
+        assert ["ccrecall", "migrate"] in spawned, "migrate must be spawned on legacy path"
+        assert ["ccrecall", "import"] not in spawned, "fresh import must not run alongside migrate"
+        assert ["ccrecall-warm-model"] in spawned, "model warm must be spawned"
         assert out["continue"] is True
         assert "claude-memory" in out["hookSpecificOutput"]["additionalContext"]
         assert not new_db.exists()  # never created an empty DB that migrate would refuse
@@ -189,7 +204,9 @@ class TestMemorySetupHook:
 
         out, spawned = _run_memory_setup(monkeypatch)
 
-        assert spawned == [["ccrecall", "import"]]
+        # import must be spawned; warm-model is also spawned on every SessionStart.
+        assert ["ccrecall", "import"] in spawned, "fresh import must be spawned"
+        assert ["ccrecall-warm-model"] in spawned, "model warm must be spawned"
         assert "hookSpecificOutput" not in out  # no migration notice on a clean install
 
 
