@@ -147,10 +147,43 @@ class TestParseSessionCharacterization:
 
 class TestGetPricing:
     def test_opus_46(self):
+        # No explicit 4-6 entry anymore — resolved by the generic "opus" $5/$25 fallback.
         assert get_pricing("claude-opus-4-6-20260101")["input"] == 5.0
 
-    def test_opus_41_distinct_from_46(self):
-        # opus-4-1 is the older, pricier tier — must not collide with opus-4-6.
+    def test_opus_47_current_tier(self):
+        # opus-4-7 must hit the current $5/$25 tier, not the legacy $15/$75 tier (issue #37).
+        p = get_pricing("claude-opus-4-7")
+        assert p["input"] == 5.0
+        assert p["output"] == 25.0
+
+    def test_opus_48_current_tier(self):
+        # opus-4-8 must hit the current $5/$25 tier, not the legacy $15/$75 tier (issue #37).
+        p = get_pricing("claude-opus-4-8")
+        assert p["input"] == 5.0
+        assert p["output"] == 25.0
+
+    def test_unknown_future_opus_defaults_to_current_tier(self):
+        # The structural fix for issue #37: an unrecognized Opus id falls through to the
+        # generic "opus" entry (current $5/$25), NOT the legacy $15/$75 rate. Guards against
+        # a future Opus release being silently mispriced 3x high until someone edits the table.
+        # The 4-10/4-11/4-12 cases pin the digit-boundary rule: without it, "opus-4-1" would
+        # prefix-match those and re-introduce the legacy-rate misprice.
+        for model in (
+            "claude-opus-4-9",
+            "claude-opus-4-10",
+            "claude-opus-4-11",
+            "claude-opus-4-12",
+            "claude-opus-5",
+            "claude-opus-9-99",
+        ):
+            p = get_pricing(model)
+            assert p["input"] == 5.0, model
+            assert p["output"] == 25.0, model
+
+    def test_legacy_opus_40_and_41_priced_at_old_tier(self):
+        # The only Opus models still at $15/$75 — alias, dated, and 4.1 forms.
+        assert get_pricing("claude-opus-4-0")["input"] == 15.0
+        assert get_pricing("claude-opus-4-20250514")["input"] == 15.0
         assert get_pricing("claude-opus-4-1-20250805")["input"] == 15.0
 
     def test_sonnet(self):
