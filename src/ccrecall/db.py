@@ -220,13 +220,13 @@ def _ensure_vec_schema(conn: sqlite3.Connection) -> None:
     watermarks would still read EMBEDDING_VERSION while the vectors are gone.
 
     The obsolete branch_vec table and its branches_vec_ad trigger are
-    unconditionally dropped (T06 teardown). This is an explicit, idempotent
+    unconditionally dropped. This is an explicit, idempotent
     DROP … IF EXISTS — NOT routed through the dimension self-heal, which would
     never fire at the unchanged float[512]. When branch_vec was present,
     watermarks are reset to 0: those values referred to the removed branch-level
     embedding mechanism, so zeroing forces backfill to re-embed at chunk grain.
     """
-    # ── branch_vec teardown (T06: unconditional, not via dimension self-heal) ─
+    # ── branch_vec teardown (unconditional, not via dimension self-heal) ─
     # Check first so the watermark reset fires only when the table actually existed.
     bv_existed = (
         conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='branch_vec'").fetchone() is not None

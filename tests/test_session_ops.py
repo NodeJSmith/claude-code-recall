@@ -553,7 +553,7 @@ class TestEmbedBranchChunks:
     """Tests for embed_branch_chunks: incremental write path per design.md §(2)."""
 
     def test_incremental_diff_embeds_only_new_exchange(self, tmp_path):
-        """After embedding 2 exchanges, adding 1 more re-syncs only the new one (AC#4)."""
+        """After embedding 2 exchanges, adding 1 more re-syncs only the new one."""
         conn = _make_vec_conn(tmp_path)
         if conn is None:
             pytest.skip("sqlite-vec not available")
@@ -590,7 +590,7 @@ class TestEmbedBranchChunks:
         conn.close()
 
     def test_no_embed_on_unchanged_content(self, tmp_path):
-        """Re-syncing with no content change calls embed_text zero times (FR#5)."""
+        """Re-syncing with no content change calls embed_text zero times."""
         conn = _make_vec_conn(tmp_path)
         if conn is None:
             pytest.skip("sqlite-vec not available")
@@ -674,7 +674,7 @@ class TestEmbedBranchChunks:
 
     def test_version_bump_cap_embeds_at_most_max(self, tmp_path):
         """After simulating many needing-embed exchanges, at most MAX_WRITE_PATH_EMBEDS_PER_SYNC
-        chunk vectors are written per sync; the rest are left for backfill (AC#11)."""
+        chunk vectors are written per sync; the rest are left for backfill."""
         conn = _make_vec_conn(tmp_path)
         if conn is None:
             pytest.skip("sqlite-vec not available")

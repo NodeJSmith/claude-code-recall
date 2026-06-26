@@ -281,7 +281,7 @@ class TestVecAvailable:
 
 
 class TestVecSchema:
-    """chunk_vec table and chunk cascade triggers — branch_vec torn down unconditionally by T06."""
+    """chunk_vec table and chunk cascade triggers — branch_vec torn down unconditionally."""
 
     def test_raw_no_vec_connection_unaffected(self):
         """The plain schema path never creates branch_vec or chunk_vec — vec schema is load_vec=True only."""
@@ -304,7 +304,7 @@ class TestVecSchema:
 
     @pytest.mark.skipif(not _VEC_AVAILABLE, reason="sqlite-vec not available in this environment")
     def test_branch_vec_absent_after_teardown(self):
-        """T06 teardown: _ensure_vec_schema unconditionally drops branch_vec.
+        """branch_vec teardown: _ensure_vec_schema unconditionally drops branch_vec.
 
         A fresh make_vec_conn() runs _ensure_vec_schema, which must produce a DB
         where branch_vec does NOT exist — the table is unconditionally dropped
@@ -317,7 +317,7 @@ class TestVecSchema:
 
     @pytest.mark.skipif(not _VEC_AVAILABLE, reason="sqlite-vec not available in this environment")
     def test_branches_vec_ad_trigger_absent_and_chunk_triggers_present(self):
-        """T06 teardown: branches_vec_ad is dropped; branches_chunks_ad + chunks_vec_ad are present."""
+        """branch_vec teardown: branches_vec_ad is dropped; branches_chunks_ad + chunks_vec_ad are present."""
         conn = make_vec_conn()
         triggers = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='trigger'").fetchall()}
         assert "branches_vec_ad" not in triggers, "branches_vec_ad must be dropped by T06 teardown"
@@ -335,7 +335,7 @@ class TestVecSchema:
         - branches.embedding_version reset to 0 (stale branch-level watermark gone)
         - chunk_vec exists and accepts inserts
         """
-        # Build a DB with branch_vec manually (pre-T06 state)
+        # Build a DB with branch_vec manually (pre-teardown state)
         conn = sqlite3.connect(":memory:")
         conn.executescript(SCHEMA)
         conn.enable_load_extension(True)
@@ -437,7 +437,7 @@ class TestLoadVecParameter:
         monkeypatch.setattr(db_module, "DEFAULT_DB_PATH", db_file)
 
         conn = get_db_connection(load_vec=True)
-        # chunk_vec must be queryable (extension loaded, branch_vec absent by T06 teardown)
+        # chunk_vec must be queryable (extension loaded, branch_vec absent by teardown)
         count = conn.execute("SELECT COUNT(*) FROM chunk_vec").fetchone()[0]
         assert count == 0
         tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
@@ -778,11 +778,11 @@ class TestExistingV6DbOpen:
         conn.close()
 
 
-# ── T01: chunk schema and persistence helpers ─────────────────────────────────
+# ── chunk schema and persistence helpers ─────────────────────────────────
 
 
 class TestChunkSchema:
-    """chunks table + chunk_vec virtual table — additive schema additions for T01."""
+    """chunks table + chunk_vec virtual table — additive schema additions."""
 
     def test_chunks_table_exists_in_schema_core(self, memory_db):
         """chunks table is created by SCHEMA_CORE (plain path, no vec extension needed)."""
@@ -805,7 +805,7 @@ class TestChunkSchema:
 
     @pytest.mark.skipif(not _VEC_AVAILABLE, reason="sqlite-vec not available in this environment")
     def test_branch_vec_absent_chunk_vec_present_after_teardown(self):
-        """T06 teardown: branch_vec absent, chunk_vec present after _ensure_vec_schema."""
+        """branch_vec teardown: branch_vec absent, chunk_vec present after _ensure_vec_schema."""
         conn = make_vec_conn()
         tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
         assert "branch_vec" not in tables, "branch_vec must be torn down by T06"
@@ -823,7 +823,7 @@ class TestChunkSchema:
 
     @pytest.mark.skipif(not _VEC_AVAILABLE, reason="sqlite-vec not available in this environment")
     def test_two_level_cascade_delete(self):
-        """AC#6: deleting a branch row removes all its chunks rows and their chunk_vec rows."""
+        """deleting a branch row removes all its chunks rows and their chunk_vec rows."""
         conn = make_vec_conn()
         cursor = conn.cursor()
 
@@ -994,7 +994,7 @@ class TestChunkVecQueryable:
 
 
 class TestFetchBranchMessagesUuid:
-    """fetch_branch_messages must return the uuid field — additive extension for T01."""
+    """fetch_branch_messages must return the uuid field — additive extension."""
 
     def test_returns_uuid_field(self, memory_db):
         """fetch_branch_messages returns a 'uuid' key in each message dict."""

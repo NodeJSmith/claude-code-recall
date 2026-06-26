@@ -114,7 +114,7 @@ class TestCapForEmbedding:
     def test_dense_content_tightened_until_token_limit_fits(self, monkeypatch):
         """Dense text (under char budget but over token limit) is tightened until it fits.
 
-        This is AC#9 — the cap mechanism that prevents CONTENT_ERROR on dense exchanges.
+        This exercises the cap mechanism that prevents CONTENT_ERROR on dense exchanges.
         The capped form still carries head and tail signal and produces a usable vector.
         """
         # Text is short enough to pass the char budget check but mocked to be over

@@ -209,7 +209,7 @@ def format_card_markdown(card: dict, verbose: bool = False) -> str:
 
     score=None (single-result or unranked) omits the score prefix from the heading.
     verbose=True expands files_modified, commits, and tool_counts; JSON always
-    carries full lists regardless of verbose (FR#10).
+    carries full lists regardless of verbose.
     """
     score = card.get("score")
     project = card.get("project", "")
@@ -268,8 +268,8 @@ def format_card_json(card: dict) -> dict:
 
     Produces the exact superset shape from output-format-contract.md.
     Carries full files_modified/commits/tool_counts lists regardless of
-    whether the card was rendered in verbose markdown (FR#10).
-    Does not include exchange/message body text (FR#2, FR#12).
+    whether the card was rendered in verbose markdown.
+    Does not include exchange/message body text (summary data only).
     """
     return {
         "score": card.get("score"),

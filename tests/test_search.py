@@ -213,7 +213,7 @@ class TestSearchSessionsFTS:
         assert len(results) >= 1
 
     def test_cards_have_no_full_transcript(self, search_db):
-        """FR#12: Track A cards must not include full message lists — summary data only."""
+        """Track A cards must not include full message lists — summary data only."""
         fts_level = detect_fts_support(search_db)
         if fts_level not in ("fts5", "fts4"):
             pytest.skip("FTS not available")
@@ -259,7 +259,7 @@ class TestSearchSessionsFTS:
 class TestKeywordRankedSignal:
     """The keyword (non-fusion) path: fts5/BM25 is ranked; fts4 + LIKE are not.
 
-    Pins the FR#7/FR#8 boundary on the degraded path (no model/vec available): a
+    Pins the ranked/unranked boundary on the degraded path (no model/vec available): a
     real relevance signal (BM25) → ranked:true with a per-card score_raw; recency
     order (fts4, LIKE) → ranked:false with null scores. Regression guard for the
     bug where every keyword rung was mislabeled ranked:false and discarded BM25.
@@ -289,7 +289,7 @@ class TestKeywordRankedSignal:
     def test_fts4_keyword_path_is_unranked(self, search_db):
         # fts4 orders by recency with no bm25 — no relevance score in this landing,
         # so it is surfaced as unranked. matchinfo ranking for fts4 is a deferred
-        # Track A gap (issue #35); only the LIKE rung is unranked by contract (FR#8).
+        # Track A gap (issue #35); only the LIKE rung is unranked by contract.
         cards, ranked = search_sessions(search_db, "pytest", "fts4", max_results=10)
         assert ranked is False
         assert all(c["score_raw"] is None for c in cards)
@@ -629,7 +629,7 @@ class TestDegradation:
         assert ranked == (fts_level == "fts5")
 
 
-# stale-version chunk rows excluded from vector candidates (AC#8)
+# stale-version chunk rows excluded from vector candidates
 
 
 def _seed_branch_with_chunk(
@@ -669,7 +669,7 @@ def _seed_branch_with_chunk(
 
 
 class TestStaleVersionExclusion:
-    """Chunks with old embedding_version must not appear via the chunk-KNN path (AC#8)."""
+    """Chunks with old embedding_version must not appear via the chunk-KNN path."""
 
     @pytest.fixture
     def vec_conn(self):
@@ -706,7 +706,7 @@ class TestStaleVersionExclusion:
         reason="sqlite-vec not available",
     )
     def test_stale_chunk_excluded_from_vec_candidates(self, stale_db):
-        """_get_vec_chunk_ids must not return branches whose chunks are at a stale version (AC#8)."""
+        """_get_vec_chunk_ids must not return branches whose chunks are at a stale version."""
         conn, current_id, stale_id = stale_db
         cursor = conn.cursor()
         fake_vec = [0.1] * EMBEDDING_DIM
@@ -1089,7 +1089,7 @@ class TestCardFields:
         assert cards[0]["handle"] == uuid[:8]
 
     def test_card_graceful_degrade_no_summary_json(self):
-        """When context_summary_json is absent, topic is derived from first user message (FR#11)."""
+        """When context_summary_json is absent, topic is derived from first user message."""
         conn = sqlite3.connect(":memory:")
         conn.executescript(SCHEMA)
         conn.commit()
@@ -1107,17 +1107,17 @@ class TestCardFields:
         conn.close()
 
     def test_keyword_only_flag_ranked_by_rung(self, search_db):
-        """--keyword-only: the fts5/BM25 rung is ranked; fts4 + LIKE are not (FR#7/FR#8)."""
+        """--keyword-only: the fts5/BM25 rung is ranked; fts4 + LIKE are not."""
         fts_level = detect_fts_support(search_db)
         _results, ranked = search_sessions(search_db, "pytest", fts_level, max_results=10, keyword_only=True)
         assert ranked == (fts_level == "fts5")
 
 
-# AC#1: chunk-KNN finds middle exchanges
+# chunk-KNN finds middle exchanges
 
 
 class TestMidSessionRecall:
-    """AC#1: In a session with many exchanges, a query matching exchange 5 finds the session via chunk-KNN."""
+    """In a session with many exchanges, a query matching exchange 5 finds the session via chunk-KNN."""
 
     @pytest.mark.skipif(
         not vec_available(sqlite3.connect(":memory:")),
@@ -1189,7 +1189,7 @@ class TestMidSessionRecall:
 
 
 class TestVerboseCardMarkdown:
-    """--verbose must thread through format_markdown to expand card files/commits/tools (FR#10).
+    """--verbose must thread through format_markdown to expand card files/commits/tools.
 
     Regression guard: format_markdown previously dropped the verbose flag, so the
     CLI --verbose was a no-op on the markdown card output.
@@ -1230,8 +1230,8 @@ class TestVerboseCardMarkdown:
 
 
 class TestCappedChunkRetrieval:
-    """AC#9 (retrieval half): a chunk embedded from a head+tail-capped exchange is still
-    retrievable via chunk-KNN for a query matching it — the end-to-end complement to T02's
+    """Retrieval half: a chunk embedded from a head+tail-capped exchange is still
+    retrievable via chunk-KNN for a query matching it — the end-to-end complement to the
     cap-produces-a-vector unit test."""
 
     @pytest.mark.skipif(
@@ -1329,7 +1329,7 @@ class TestPostTeardownWritePath:
     def test_write_chunk_embedding_works_after_teardown(self):
         """write_chunk_embedding inserts into chunk_vec after branch_vec has been torn down.
 
-        Verifies that the T06 teardown (which removes branch_vec and its infrastructure)
+        Verifies that the branch_vec teardown (which removes branch_vec and its infrastructure)
         does NOT break the chunk embedding write path used by session_ops.
         """
         conn = make_vec_conn()  # _ensure_vec_schema runs → branch_vec absent, chunk_vec present
@@ -1368,7 +1368,7 @@ class TestPostTeardownWritePath:
         conn.close()
 
 
-# T07: Entrypoint B — search_messages / search-messages command
+# Entrypoint B — search_messages / search-messages command
 
 
 def _seed_two_chunks_same_branch(
@@ -1432,14 +1432,14 @@ def _seed_two_chunks_same_branch(
 
 
 class TestSearchMessages:
-    """T07: Entrypoint B — chunk-KNN without rollup, snippet shape."""
+    """Entrypoint B — chunk-KNN without rollup, snippet shape."""
 
     @pytest.mark.skipif(
         not vec_available(sqlite3.connect(":memory:")),
         reason="sqlite-vec not available",
     )
     def test_not_rolled_up_two_matches_same_session(self):
-        """AC#3: two chunks in one session both appear (no rollup to session)."""
+        """two chunks in one session both appear (no rollup to session)."""
         conn = make_vec_conn()
         query_vec = [1.0 / EMBEDDING_DIM**0.5] * EMBEDDING_DIM
 
@@ -1463,7 +1463,7 @@ class TestSearchMessages:
         reason="sqlite-vec not available",
     )
     def test_locator_fields_present(self):
-        """AC#3: each snippet carries (handle, exchange_index, timestamp) locator."""
+        """each snippet carries (handle, exchange_index, timestamp) locator."""
         conn = make_vec_conn()
         query_vec = [1.0 / EMBEDDING_DIM**0.5] * EMBEDDING_DIM
 
@@ -1488,7 +1488,7 @@ class TestSearchMessages:
         reason="sqlite-vec not available",
     )
     def test_bounded_excerpt_used(self):
-        """AC#3 + FR#13: user_text/assistant_text from chunks row (pre-bounded) are returned as-is."""
+        """user_text/assistant_text from chunks row (pre-bounded) are returned as-is."""
         conn = make_vec_conn()
         query_vec = [1.0 / EMBEDDING_DIM**0.5] * EMBEDDING_DIM
 
@@ -1508,7 +1508,7 @@ class TestSearchMessages:
         conn.close()
 
     def test_vec0_unavailable_returns_ranked_false_empty(self):
-        """AC#14: when chunk_vec_queryable returns False, search_messages returns ([], False)."""
+        """when chunk_vec_queryable returns False, search_messages returns ([], False)."""
         conn = sqlite3.connect(":memory:")
         # No sqlite-vec extension loaded → chunk_vec_queryable returns False
         with patch("ccrecall.search_conversations.model_available", return_value=True):
@@ -1518,7 +1518,7 @@ class TestSearchMessages:
         conn.close()
 
     def test_run_messages_vec0_unavailable_returns_empty_envelope(self, tmp_path, capsys):
-        """AC#14: run_messages with vec0 unavailable emits an empty ranked:false JSON
+        """run_messages with vec0 unavailable emits an empty ranked:false JSON
         envelope and returns normally (no SystemExit), so the CLI process exits 0."""
         db_path = tmp_path / "test.db"
         c = sqlite3.connect(str(db_path))
@@ -1545,7 +1545,7 @@ class TestSearchMessages:
         reason="sqlite-vec not available",
     )
     def test_snippet_json_contract_parity(self):
-        """AC#10 snippet half: JSON snippet has all contract fields including matched_role:null, match_terms:[]."""
+        """snippet half: JSON snippet has all contract fields including matched_role:null, match_terms:[]."""
         conn = make_vec_conn()
         query_vec = [1.0 / EMBEDDING_DIM**0.5] * EMBEDDING_DIM
 
@@ -1594,7 +1594,7 @@ class TestSearchMessages:
         reason="sqlite-vec not available",
     )
     def test_snippet_markdown_contract_parity(self):
-        """AC#10 snippet half: markdown snippet renders score, locator, user, assistant, tail ref."""
+        """snippet half: markdown snippet renders score, locator, user, assistant, tail ref."""
         conn = make_vec_conn()
         query_vec = [1.0 / EMBEDDING_DIM**0.5] * EMBEDDING_DIM
 

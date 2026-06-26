@@ -643,7 +643,7 @@ class TestSyncCurrentExcludeProjects:
 
 
 class TestSyncCurrentConcurrencyGuard:
-    """AC#13: sync-current skips if another instance holds the lock."""
+    """sync-current skips if another instance holds the lock."""
 
     def _make_input(self, tmp_path, session_id=VALID_SYNC_UUID):
         p = tmp_path / "hook.json"

@@ -102,7 +102,7 @@ def _get_fts_branch_ids(
 
     score_raw is the negated SQLite bm25 (higher = better) on the fts5 rung — the
     only keyword rung with a relevance signal today. The LIKE fallback has no
-    relevance signal (FR#8: unranked, recency order), so its score_raw is None.
+    relevance signal (unranked, recency order), so its score_raw is None.
     The fts4 rung also lacks a relevance score in this landing — it is ordered by
     recency, not matchinfo, so its score_raw is None too and the caller surfaces
     it as unranked. Ranking fts4 by matchinfo is a deferred Track A gap (issue
@@ -182,7 +182,7 @@ def _execute_chunk_knn(
 
     Returns [(chunk_id, branch_id, distance)] without any per-branch rollup —
     both A's rollup and B's no-rollup path build on this single MATCH query.
-    Filters to current embedding version + model at the chunk grain (FR#9), so
+    Filters to current embedding version + model at the chunk grain, so
     a partially re-embedded branch still contributes its already-current chunks.
     Returns empty list on sqlite3.Error so callers can degrade; non-DB bugs propagate.
     """
@@ -368,9 +368,9 @@ def _hydrate_cards(
 
     Reads context_summary_json (topic/disposition) and branch/session/project join
     columns. Does NOT call fetch_branch_messages — A renders from summary data only
-    (no full transcript hydration, per FR#12).
+    (no full transcript hydration).
 
-    Graceful degrade (FR#11): when context_summary_json is absent, topic is
+    Graceful degrade: when context_summary_json is absent, topic is
     derived from the first user message via a targeted single-row LIMIT 1 query.
     tool_counts is guarded by a PRAGMA table_info check (absent on pre-column DBs).
     score_raw is taken from branch_scores when provided (ranked path), else None.
@@ -448,7 +448,7 @@ def _hydrate_cards(
             topic = summary.get("topic") or None
             disposition = summary.get("disposition") or None
 
-        # Graceful degrade (FR#11): no context_summary_json → first user message as topic
+        # Graceful degrade: no context_summary_json → first user message as topic
         if not topic:
             msg_row = cursor.execute(
                 """
@@ -500,7 +500,7 @@ def search_sessions(
 
     ranked=True when a relevance signal exists: RRF fusion (chunk-KNN + FTS), or
     the fts5/BM25 keyword rung on the degraded path. ranked=False on the LIKE rung
-    (FR#8: unranked, recency order) and — as a deferred gap (issue #35) — the fts4
+    (unranked, recency order) and — as a deferred gap (issue #35) — the fts4
     rung, which is recency-ordered rather than matchinfo-ranked in this landing.
     When model and vec extension are both available and keyword_only is False,
     results are fused from chunk-KNN and FTS via Reciprocal Rank Fusion. Degrades
@@ -590,7 +590,7 @@ def search_sessions(
 
     # Keyword-only path. The fts5 rung ranks by BM25 (a relevance signal →
     # ranked:true with scores). The LIKE fallback is unranked by the contract
-    # (FR#8: null scores, recency order). The fts4 rung is recency-ordered with no
+    # (null scores, recency order). The fts4 rung is recency-ordered with no
     # relevance score in this landing, so it is also surfaced as unranked — a
     # deferred Track A gap (issue #35), not the contract's end state.
     fts_rows = _get_fts_branch_ids(cursor, query, fts_level, fts_top_k, projects, session_id, path)
@@ -613,7 +613,7 @@ def search_messages(
     """Search for matched exchanges (Entrypoint B), returning (snippets, ranked).
 
     Uses chunk-KNN via _execute_chunk_knn with NO per-branch rollup — multiple
-    matching chunks in one session all appear as separate snippet results (AC#3).
+    matching chunks in one session all appear as separate snippet results.
     ranked=False only on the pre-KNN gates (empty query, model unavailable,
     chunk_vec unavailable, or embed_text failure). Once the KNN runs, ranked=True:
     a sqlite3.Error inside _execute_chunk_knn degrades to an empty list that is
@@ -651,7 +651,7 @@ def search_messages(
 def format_markdown(cards: list[dict], query: str, ranked: bool, verbose: bool = False) -> str:
     """Format session cards as markdown.
 
-    verbose=True expands each card's files_modified/commits/tool_counts (FR#10);
+    verbose=True expands each card's files_modified/commits/tool_counts;
     the JSON path always carries the full lists regardless.
     """
     if not cards:
@@ -687,7 +687,7 @@ def run_messages(
 
     On a vec0-unavailable machine (or any pre-KNN failure) emits a well-formed
     empty ranked:false envelope and returns normally, so the process exits 0
-    rather than erroring (FR#17/AC#14). A missing DB or an unexpected error exits 1.
+    rather than erroring. A missing DB or an unexpected error exits 1.
     """
     max_results = max(1, min(MAX_SEARCH_RESULTS, max_results))
     projects = parse_project_filter(project)

@@ -198,7 +198,7 @@ class TestBackfillEmbedsFull:
         With the write-path cap inherited, this branch would get only the cap's
         worth of chunks, stay eligible, and trip the no-progress guard (EXIT_ABORT)
         on re-selection — leaving long sessions (the feature's whole point)
-        permanently under-embedded. Guards AC#5 for branches longer than the cap.
+        permanently under-embedded. Guards version-bump eligibility for branches longer than the cap.
         """
         conn = make_vec_conn()
         n_exchanges = MAX_WRITE_PATH_EMBEDS_PER_SYNC * 2 + 3  # well over the write-path cap
@@ -226,7 +226,7 @@ class TestBackfillEmbedsFull:
         )
 
     def test_null_summary_still_embedded(self):
-        """Branches with NULL context_summary are embedded — AC#15: chunk path
+        """Branches with NULL context_summary are embedded — the chunk path
         reads raw exchange text, not the summary."""
         conn = make_vec_conn()
         bid = _insert_branch_with_messages(conn, context_summary=None)
@@ -329,7 +329,7 @@ class TestBackfillResume:
         assert _branch_has_chunk_vecs(conn, new_id)
 
     def test_heal_clause_chunk_without_vec(self):
-        """Heal clause (AC#12): chunk row exists with no chunk_vec, watermark reads
+        """Heal clause: chunk row exists with no chunk_vec, watermark reads
         EMBEDDING_VERSION → branch is re-selected and the missing vector is created."""
         conn = make_vec_conn()
         bid = _insert_branch_with_messages(conn)
@@ -351,13 +351,13 @@ class TestBackfillResume:
         assert _branch_has_chunk_vecs(conn, bid)
 
 
-# Version-bump eligibility (AC#5)
+# Version-bump eligibility
 
 
 @_VEC_SKIP
 class TestBackfillVersionBump:
     def test_version_bump_makes_branches_eligible(self):
-        """AC#5: After an EMBEDDING_VERSION bump, all active-leaf branches are eligible.
+        """After an EMBEDDING_VERSION bump, all active-leaf branches are eligible.
 
         Simulates the post-bump state by inserting branches with a stale watermark
         (embedding_version = 0) and verifying backfill re-embeds them.
@@ -629,13 +629,13 @@ class TestBackfillLocator:
             assert uuid is not None, f"chunk {chunk_id} missing first_message_uuid"
 
 
-# History preservation (AC#7)
+# History preservation
 
 
 @_VEC_SKIP
 class TestHistoryPreservation:
     def test_messages_branches_unchanged_after_backfill(self):
-        """AC#7: messages/branches/branch_messages row counts and contents are
+        """messages/branches/branch_messages row counts and contents are
         unchanged across an EMBEDDING_VERSION bump + backfill."""
         conn = make_vec_conn()
         for _ in range(3):

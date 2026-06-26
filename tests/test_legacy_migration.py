@@ -122,7 +122,7 @@ class TestRunMigration:
         new_db, legacy_dir = _patch_paths(monkeypatch, tmp_path)
         # _make_legacy_db seeds a branch_vec at 1024 (stale dim) and a branch with
         # embedding_version=1 (stale watermark). After migration:
-        # - branch_vec must be ABSENT (T06 teardown via _ensure_vec_schema)
+        # - branch_vec must be ABSENT (torn down via _ensure_vec_schema)
         # - chunk_vec must EXIST (created by _ensure_vec_schema)
         # - branches.embedding_version must be 0 (reset because branch_vec existed)
         src = _make_legacy_db(legacy_dir, vec_dim=1024)
