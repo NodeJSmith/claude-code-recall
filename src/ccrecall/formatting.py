@@ -184,9 +184,9 @@ def apply_scores(results: list[dict], ranked: bool) -> list[dict]:
 
     Ranked → render-time min-max normalization over this bounded set; unranked
     (the LIKE rung — and, as-built, the fts4 rung too; see issue #35) → score
-    and score_raw both None per the contract. Single
-    source of truth for this decision, shared by the JSON envelope and the
-    markdown card path. Returns new dicts; does not mutate the input.
+    and score_raw both None per the contract. Single source of truth for this
+    decision, shared by the JSON envelope and the markdown card path. Returns
+    new dicts; does not mutate the input.
     """
     if ranked:
         return normalize_scores(results)
