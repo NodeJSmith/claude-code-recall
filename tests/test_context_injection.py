@@ -17,6 +17,7 @@ from ccrecall.health import (
     record_embedding_failure,
 )
 from ccrecall.hooks.memory_context import (
+    TOPIC_PREVIEW_MAX_CHARS,
     _build_fallback_context,
     _proactive_alert_block,
     build_context,
@@ -703,7 +704,7 @@ class TestBuildFallbackContext:
 
         # Build the same thing via render_context_summary directly
         exchanges = build_exchange_pairs(messages)
-        topic = exchanges[0]["user"][:120] if exchanges else ""
+        topic = exchanges[0]["user"][:TOPIC_PREVIEW_MAX_CHARS] if exchanges else ""
         disposition = detect_disposition(exchanges, commits=commits)
         summary_json = {
             "version": 3,

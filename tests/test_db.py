@@ -13,6 +13,7 @@ import ccrecall.db as db_module
 from ccrecall.db import (
     CURRENT_ONBOARDING_VERSION,
     DEFAULT_SETTINGS,
+    atomic_write_json,
     fetch_branch_messages,
     get_db_connection,
     load_config,
@@ -167,6 +168,30 @@ class TestLogHookException:
                 raise ValueError("boom")
             except ValueError:
                 log_hook_exception("test")  # suppressed; must return normally
+
+
+class TestAtomicWriteJson:
+    """atomic_write_json is the single runtime-dir atomic-write helper."""
+
+    def test_writes_json_with_trailing_newline(self, tmp_path):
+        path = tmp_path / "out.json"
+        atomic_write_json(path, {"a": 1})
+        assert path.read_text() == json.dumps({"a": 1}, indent=2) + "\n"
+
+    def test_no_tmp_orphan_on_success(self, tmp_path):
+        atomic_write_json(tmp_path / "out.json", {})
+        assert list(tmp_path.glob("*.tmp")) == []
+
+    def test_creates_parent_dir(self, tmp_path):
+        path = tmp_path / "sub" / "out.json"
+        atomic_write_json(path, {})
+        assert path.exists()
+
+    def test_no_tmp_orphan_on_write_error(self, tmp_path):
+        """A serialization failure must clean up the temp file and re-raise."""
+        with pytest.raises(TypeError):
+            atomic_write_json(tmp_path / "out.json", {"bad": object()})
+        assert list(tmp_path.glob("*.tmp")) == []
 
 
 class TestLoadSettingsWithConfig:

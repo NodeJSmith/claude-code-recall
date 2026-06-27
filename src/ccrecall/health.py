@@ -15,13 +15,12 @@ import json
 import logging
 import os
 import sqlite3
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
 from whenever import Instant
 
-from ccrecall.db import PID_FILE_MODE, RUNTIME_DIR, ensure_parent_dir
+from ccrecall.db import PID_FILE_MODE, RUNTIME_DIR, atomic_write_json
 from ccrecall.models import LOGGER_NAME
 
 # ── Sidecar paths ──────────────────────────────────────────────────────────────
@@ -138,32 +137,13 @@ def read_embedding_status(path: Path = EMBEDDING_STATUS_PATH) -> dict | None:
         return None
 
 
-def _atomic_write_json(path: Path, data: dict) -> None:
-    """Atomically write ``data`` as JSON to ``path`` (tempfile + replace + cleanup).
-
-    The single in-module implementation of the write_config.py atomic-write pattern,
-    shared by both sidecars. Ensures the parent dir exists, then writes via a temp
-    file in the same directory and replaces in one step so a concurrent reader never
-    sees a partial file. Removes the temp file on any error before re-raising.
-    """
-    ensure_parent_dir(path)
-    fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w") as fh:
-            fh.write(json.dumps(data, indent=2) + "\n")
-        Path(tmp).replace(path)
-    except Exception:
-        Path(tmp).unlink(missing_ok=True)
-        raise
-
-
 def record_embedding_failure(reason: str, path: Path = EMBEDDING_STATUS_PATH) -> None:
     """Write an embedding-capability-failure record to the sidecar (FR#4).
 
     Written by the detached embedding process on structural failure.
     Uses an atomic write to avoid partial reads by the SessionStart hook.
     """
-    _atomic_write_json(path, {"reason": reason, "since": Instant.now().format_iso()})
+    atomic_write_json(path, {"reason": reason, "since": Instant.now().format_iso()})
 
 
 def clear_embedding_failure(path: Path = EMBEDDING_STATUS_PATH) -> None:
@@ -192,11 +172,10 @@ def _read_snooze_ledger(path: Path) -> dict:
 def _write_snooze_ledger(path: Path, ledger: dict) -> None:
     """Write the snooze ledger atomically (FR#8).
 
-    Delegates to _atomic_write_json (tempfile + replace + cleanup + ensure_parent_dir);
-    path-first to match that helper's signature.
+    Delegates to db.atomic_write_json (tempfile + replace + cleanup + ensure_parent_dir).
     Raises on failure — callers that need FR#10 degradation catch externally.
     """
-    _atomic_write_json(path, ledger)
+    atomic_write_json(path, ledger)
 
 
 def evaluate_alerts(

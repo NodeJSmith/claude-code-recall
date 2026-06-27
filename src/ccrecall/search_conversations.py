@@ -60,6 +60,9 @@ OVERFETCH_FLOOR = 20
 # max_results. Start at 8 (generous chunks-per-session estimate).
 CHUNK_COLLAPSE_FACTOR = 8
 
+# Fallback topic truncation for a recall card when no precomputed topic exists.
+FALLBACK_TOPIC_MAX_CHARS = 200
+
 
 def scope_filter_clause(
     *,
@@ -461,7 +464,7 @@ def _hydrate_cards(
                 (bid,),
             ).fetchone()
             if msg_row and msg_row[0]:
-                topic = msg_row[0][:200]  # truncate to keep card compact
+                topic = msg_row[0][:FALLBACK_TOPIC_MAX_CHARS]
 
         handle = session_uuid[:8] if session_uuid else ""
         score_raw = branch_scores.get(bid) if branch_scores else None

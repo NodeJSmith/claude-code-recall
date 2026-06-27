@@ -1,7 +1,7 @@
 # Design: ccrecall Surfacing Model (self-heal / reactive / proactive)
 
 **Date:** 2026-06-27
-**Status:** approved
+**Status:** archived
 **Scope-mode:** reduce
 **Research:** prior-art survey (background-dev-tool alerting) + codebase failure-mode audit, summarized in `~/.claude/projects/-home-jessica-source-claude-code-recall/memory/next-steps-plan.md`
 

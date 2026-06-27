@@ -23,7 +23,7 @@ from conftest import make_vec_conn, patched_clear, patched_record
 from ccrecall.db import CONTENT_ERROR_VERSION
 from ccrecall.embeddings import EMBEDDING_DIM, EMBEDDING_MODEL, EMBEDDING_VERSION
 from ccrecall.health import REASON_VEC_UNAVAILABLE
-from ccrecall.hooks.backfill_embeddings import BATCH_SIZE, EXIT_OK, run
+from ccrecall.hooks.backfill_embeddings import BATCH_SIZE, EXIT_ABORT, EXIT_OK, run
 from ccrecall.session_ops import MAX_WRITE_PATH_EMBEDS_PER_SYNC
 
 # A fixed EMBEDDING_DIM-dim float vector for stubbing embed_text.
@@ -639,7 +639,7 @@ class TestBackfillFailureModes:
             exit_code = run()
 
         # Must be a batch abort, not per-row error sentinel
-        assert exit_code == 1  # EXIT_ABORT
+        assert exit_code == EXIT_ABORT
         # Branch must NOT be marked CONTENT_ERROR_VERSION
         assert _branch_embedding_version(conn, bid) != CONTENT_ERROR_VERSION
 

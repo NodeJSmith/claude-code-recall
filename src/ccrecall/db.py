@@ -6,7 +6,9 @@ Schema constants live in ccrecall.schema.
 import contextlib
 import json
 import logging
+import os
 import sqlite3
+import tempfile
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -93,6 +95,25 @@ def ensure_parent_dir(path: Path) -> None:
     materializes under its own parent, not the default dir.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
+
+
+def atomic_write_json(path: Path, data: dict) -> None:
+    """Atomically write ``data`` as JSON to ``path`` (tempfile + replace + cleanup).
+
+    The single implementation of the runtime-dir atomic-write pattern (config.json,
+    the embedding-status sidecar, the snooze ledger). Ensures the parent dir exists, writes via
+    a temp file in the same directory, and replaces in one step so a concurrent reader
+    never sees a partial file. Removes the temp file on any error before re-raising.
+    """
+    ensure_parent_dir(path)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write(json.dumps(data, indent=2) + "\n")
+        Path(tmp).replace(path)
+    except Exception:
+        Path(tmp).unlink(missing_ok=True)
+        raise
 
 
 def pid_file_path(pid_key: str) -> Path:
