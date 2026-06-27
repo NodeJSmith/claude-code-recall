@@ -1,7 +1,7 @@
 ---
 task_id: "T01"
 title: "Add health.py: probes, snooze ledger, embedding-status, alert builder"
-status: "planned"
+status: "done"
 depends_on: []
 implements: ["FR#1", "FR#2", "FR#3", "FR#7", "FR#8", "FR#9", "FR#10", "FR#11", "FR#13", "FR#14", "AC#4", "AC#5", "AC#6", "AC#11", "AC#12"]
 ---

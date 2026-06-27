@@ -87,6 +87,7 @@ class TestLoadSettings:
         assert DEFAULT_SETTINGS["max_context_sessions"] == 2
         assert DEFAULT_SETTINGS["logging_enabled"] is False
         assert isinstance(DEFAULT_SETTINGS["exclude_projects"], list)
+        assert DEFAULT_SETTINGS["alert_snooze_hours"] == 24
 
 
 class TestLoadConfig:
@@ -190,6 +191,20 @@ class TestLoadSettingsWithConfig:
         assert result["auto_inject_context"] is False
         assert result["max_context_sessions"] == 5
         assert result["logging_enabled"] is False  # unchanged default
+
+    def test_alert_snooze_hours_override_and_default(self, tmp_path, monkeypatch):
+        """AC#11: the snooze window changes when alert_snooze_hours is set in config;
+        the 24h default applies when the key is absent."""
+        cfg = tmp_path / "config.json"
+        monkeypatch.setattr("ccrecall.db.CONFIG_PATH", cfg)
+
+        # Absent → default of 24 applies.
+        cfg.write_text(json.dumps({"auto_inject_context": True}))
+        assert load_settings()["alert_snooze_hours"] == 24
+
+        # Present → the configured value flows through load_settings unchanged.
+        cfg.write_text(json.dumps({"alert_snooze_hours": 12}))
+        assert load_settings()["alert_snooze_hours"] == 12
 
     def test_logging_enabled_and_exclude_projects_honored(self, tmp_path, monkeypatch):
         """logging_enabled and exclude_projects are user-overridable from config.json."""

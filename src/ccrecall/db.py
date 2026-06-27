@@ -55,6 +55,7 @@ DEFAULT_SETTINGS = {
     "max_context_sessions": 2,
     "exclude_projects": [],
     "logging_enabled": False,
+    "alert_snooze_hours": 24,
 }
 
 CURRENT_ONBOARDING_VERSION = 1
