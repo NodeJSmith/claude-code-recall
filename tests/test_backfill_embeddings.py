@@ -14,11 +14,11 @@ Opt-in: --days bounds by recency, --limit caps the run.
 import builtins
 import json
 import sqlite3
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 import sqlite_vec
-from conftest import make_vec_conn
+from conftest import make_vec_conn, patched_clear, patched_record
 
 from ccrecall.db import CONTENT_ERROR_VERSION
 from ccrecall.embeddings import EMBEDDING_DIM, EMBEDDING_MODEL, EMBEDDING_VERSION
@@ -29,6 +29,19 @@ from ccrecall.session_ops import MAX_WRITE_PATH_EMBEDS_PER_SYNC
 _FIXED_VEC = [0.001] * EMBEDDING_DIM
 
 pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
+
+
+@pytest.fixture(autouse=True)
+def _isolate_embedding_status(monkeypatch):
+    """Keep every test in this module off the real ~/.ccrecall sidecar.
+
+    run()'s success path calls clear_embedding_failure() (added in T02), which
+    would otherwise delete a developer's live embedding-status.json. Default to a
+    no-op; the status-recording tests re-patch this locally with a tmp-path
+    side_effect, which overrides this guard inside their own `with patch(...)`.
+    """
+    monkeypatch.setattr("ccrecall.hooks.backfill_embeddings.clear_embedding_failure", lambda *a, **k: None)
+
 
 # Monotonic counter for unique IDs across test helpers.
 _branch_counter = [0]
@@ -202,6 +215,8 @@ def _run_backfill_with_stub(conn: sqlite3.Connection, *, days=None, limit=None):
         ),
         patch("ccrecall.hooks.backfill_embeddings.load_settings", return_value={}),
         patch("ccrecall.hooks.backfill_embeddings.time.sleep"),
+        # Patch clear so the success path never touches the real ~/.ccrecall sidecar.
+        patch("ccrecall.hooks.backfill_embeddings.clear_embedding_failure"),
     ):
         run(days=days, limit=limit)
 
@@ -866,3 +881,105 @@ class TestBackfillInferencesCounter:
         assert "inferences" in data
         assert data["inferences"] >= 1  # at least 1 exchange was embedded
         assert data["embedded"] >= 1
+
+
+# T02: embedding-status sidecar recording/clearing in backfill_embeddings.run()
+
+
+class TestBackfillEmbeddingStatusRecording:
+    """T02: backfill_embeddings.run() records capability failures and clears on success.
+
+    Only the points inside run() (not run_status()) are instrumented — do NOT
+    instrument run_status(), which is a read-only diagnostic.
+    """
+
+    def test_model_unavailable_records_reason(self, tmp_path):
+        """model_available() → False inside run() writes 'model_unavailable' to sidecar."""
+        sidecar = tmp_path / "embedding-status.json"
+
+        with (
+            patch("ccrecall.hooks.backfill_embeddings.model_available", return_value=False),
+            patch("ccrecall.hooks.backfill_embeddings.load_settings", return_value={}),
+            patch(
+                "ccrecall.hooks.backfill_embeddings.record_embedding_failure",
+                side_effect=patched_record(sidecar),
+            ),
+        ):
+            run()
+
+        assert sidecar.exists(), "sidecar must be written on model-unavailable abort"
+        data = json.loads(sidecar.read_text())
+        assert data["reason"] == "model_unavailable"
+        assert "since" in data
+
+    def test_vec_unavailable_records_reason(self, tmp_path):
+        """chunk_vec_queryable() → False inside run() writes 'vec_unavailable' to sidecar."""
+        sidecar = tmp_path / "embedding-status.json"
+        mock_conn = MagicMock()
+
+        with (
+            patch("ccrecall.hooks.backfill_embeddings.model_available", return_value=True),
+            patch("ccrecall.hooks.backfill_embeddings.get_db_connection", return_value=mock_conn),
+            patch("ccrecall.hooks.backfill_embeddings.chunk_vec_queryable", return_value=False),
+            patch("ccrecall.hooks.backfill_embeddings.load_settings", return_value={}),
+            patch(
+                "ccrecall.hooks.backfill_embeddings.record_embedding_failure",
+                side_effect=patched_record(sidecar),
+            ),
+        ):
+            run()
+
+        assert sidecar.exists(), "sidecar must be written on vec-unavailable abort"
+        data = json.loads(sidecar.read_text())
+        assert data["reason"] == "vec_unavailable"
+        assert "since" in data
+
+    @_VEC_SKIP
+    def test_successful_run_clears_status(self, tmp_path):
+        """A run() that embeds successfully clears the embedding-status sidecar (FR#5)."""
+        conn = make_vec_conn()
+        _insert_branch_with_messages(conn)
+
+        sidecar = tmp_path / "embedding-status.json"
+        # Pre-seed sidecar as if there was a prior failure
+        sidecar.write_text('{"reason": "vec_unavailable", "since": "2026-01-01T00:00:00Z"}')
+
+        with (
+            patch("ccrecall.hooks.backfill_embeddings.model_available", return_value=True),
+            patch("ccrecall.session_ops.embed_text", return_value=_FIXED_VEC),
+            patch("ccrecall.hooks.backfill_embeddings.get_db_connection", return_value=_NoCloseConn(conn)),
+            patch("ccrecall.hooks.backfill_embeddings.load_settings", return_value={}),
+            patch("ccrecall.hooks.backfill_embeddings.time.sleep"),
+            patch(
+                "ccrecall.hooks.backfill_embeddings.clear_embedding_failure",
+                side_effect=patched_clear(sidecar),
+            ),
+        ):
+            run()
+
+        assert not sidecar.exists(), "sidecar must be absent (cleared) after a successful embedding run"
+
+    def test_run_status_does_not_record(self, tmp_path):
+        """run(status=True) (run_status) must NOT record to the sidecar even when vec is unavailable.
+
+        Recording inside run_status() would fire a false alert every time the user
+        runs `ccrecall backfill embeddings --status` — a design violation (Edge Cases).
+        """
+        mock_conn = MagicMock()
+
+        record_calls = []
+
+        with (
+            patch("ccrecall.hooks.backfill_embeddings.get_db_connection", return_value=mock_conn),
+            patch("ccrecall.hooks.backfill_embeddings.chunk_vec_queryable", return_value=False),
+            patch("ccrecall.hooks.backfill_embeddings.load_settings", return_value={}),
+            patch(
+                "ccrecall.hooks.backfill_embeddings.record_embedding_failure",
+                side_effect=lambda reason: record_calls.append(reason),
+            ),
+        ):
+            run(status=True)
+
+        assert record_calls == [], (
+            f"run_status() (--status path) must never call record_embedding_failure; got calls: {record_calls}"
+        )

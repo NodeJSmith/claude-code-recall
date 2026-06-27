@@ -13,6 +13,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+from conftest import patched_clear, patched_record
 
 from ccrecall.hooks import memory_setup, memory_sync, sync_current
 from ccrecall.hooks.sync_current import sync_session, validate_session_id
@@ -854,3 +855,125 @@ class TestModelWarmOnSetup:
         ):
             sync_current._warn_cold_model()
             mock_get_logger.assert_not_called()
+
+
+# T02: embedding-status sidecar recording/clearing in sync_current.run()
+
+
+class TestSyncEmbeddingStatusRecording:
+    """T02: sync_current.run() records vec-unavailable failures and clears on success.
+
+    Structural capability check in sync_current: chunk_vec_queryable only.
+    Model failures are silently swallowed by contextlib.suppress in session_ops
+    and are detected authoritatively by backfill_embeddings instead.
+    """
+
+    def _run(
+        self,
+        tmp_path,
+        monkeypatch,
+        *,
+        vec_queryable=True,
+        extra_patches=None,
+    ):
+        """Run sync_current.run() with mocked infrastructure; return parsed stdout JSON."""
+        monkeypatch.setattr(sync_current, "pid_file_path", lambda key: tmp_path / f".pid-{key}")
+        monkeypatch.setattr(sync_current, "remove_pid_file", lambda key: None)
+        monkeypatch.setattr(
+            sync_current,
+            "load_settings",
+            lambda: {"exclude_projects": [], "logging_enabled": False},
+        )
+        monkeypatch.setattr(sync_current, "_warn_cold_model", lambda: None)
+
+        session_file = tmp_path / f"{VALID_SYNC_UUID}.jsonl"
+        session_file.write_text("{}")
+        monkeypatch.setattr(sync_current, "get_session_file", lambda *a, **k: session_file)
+
+        mock_conn = MagicMock()
+        monkeypatch.setattr(sync_current, "get_db_connection", lambda *a, **k: mock_conn)
+        monkeypatch.setattr(sync_current, "chunk_vec_queryable", lambda conn: vec_queryable)
+        monkeypatch.setattr(sync_current, "sync_session", lambda *a, **k: 0)
+
+        if extra_patches:
+            for attr, val in extra_patches.items():
+                monkeypatch.setattr(sync_current, attr, val)
+
+        input_file = tmp_path / "hook.json"
+        input_file.write_text(json.dumps({"session_id": VALID_SYNC_UUID}))
+
+        captured = io.StringIO()
+        with patch("sys.stdout", captured):
+            sync_current.run(input_file=input_file)
+
+        return json.loads(captured.getvalue())
+
+    def test_vec_unavailable_records_reason(self, tmp_path, monkeypatch):
+        """chunk_vec_queryable() → False in sync_current writes 'vec_unavailable' to sidecar."""
+        sidecar = tmp_path / "embedding-status.json"
+
+        self._run(
+            tmp_path,
+            monkeypatch,
+            vec_queryable=False,
+            extra_patches={
+                "record_embedding_failure": patched_record(sidecar),
+            },
+        )
+
+        assert sidecar.exists(), "sidecar must be written when vec is unavailable"
+        data = json.loads(sidecar.read_text())
+        assert data["reason"] == "vec_unavailable"
+        assert "since" in data
+
+    def test_vec_available_clears_status(self, tmp_path, monkeypatch):
+        """A sync run with vec available clears the embedding-status sidecar (FR#5)."""
+        sidecar = tmp_path / "embedding-status.json"
+        # Pre-seed sidecar as if there was a prior failure
+        sidecar.write_text('{"reason": "vec_unavailable", "since": "2026-01-01T00:00:00Z"}')
+
+        self._run(
+            tmp_path,
+            monkeypatch,
+            vec_queryable=True,
+            extra_patches={
+                "clear_embedding_failure": patched_clear(sidecar),
+            },
+        )
+
+        assert not sidecar.exists(), "sidecar must be cleared when vec is available and sync completes"
+
+    def test_vec_unavailable_does_not_clear(self, tmp_path, monkeypatch):
+        """When vec is unavailable, clear_embedding_failure must NOT be called."""
+        sidecar = tmp_path / "embedding-status.json"
+        sidecar.write_text('{"reason": "vec_unavailable", "since": "2026-01-01T00:00:00Z"}')
+
+        clear_calls = []
+
+        self._run(
+            tmp_path,
+            monkeypatch,
+            vec_queryable=False,
+            extra_patches={
+                "record_embedding_failure": lambda reason: None,
+                "clear_embedding_failure": lambda: clear_calls.append(1),
+            },
+        )
+
+        assert clear_calls == [], "clear must not be called when vec is unavailable"
+        assert sidecar.exists(), "pre-seeded sidecar should remain when vec is unavailable"
+
+    def test_recording_failure_does_not_break_hook(self, tmp_path, monkeypatch):
+        """A sidecar write failure must not affect the hook's continue=true output."""
+
+        def raising_record(reason):
+            raise OSError("disk full")
+
+        out = self._run(
+            tmp_path,
+            monkeypatch,
+            vec_queryable=False,
+            extra_patches={"record_embedding_failure": raising_record},
+        )
+
+        assert out == {"continue": True}, "hook must still output continue:true even if sidecar write raises"

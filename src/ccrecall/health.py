@@ -43,6 +43,12 @@ RECALL_CAVEAT_COVERAGE_THRESHOLD = 0.95
 ALERT_CANT_PERSIST = "cant_persist"
 ALERT_EMBEDDINGS_FAILING = "embeddings_failing"
 
+# Embedding-capability failure reason codes (the sub-protocol the detached embedding
+# process writes into the embedding-status sidecar; T03 reads them back). Shared here
+# so the writer (backfill/sync) and any reader agree on the exact strings.
+REASON_VEC_UNAVAILABLE = "vec_unavailable"
+REASON_MODEL_UNAVAILABLE = "model_unavailable"
+
 
 # ── Probe result ───────────────────────────────────────────────────────────────
 @dataclass(frozen=True)
