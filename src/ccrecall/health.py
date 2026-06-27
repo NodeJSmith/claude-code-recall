@@ -281,6 +281,15 @@ _ALERT_PROSE: dict[str, tuple[str, str, str]] = {
 
 _RELAY_INSTRUCTION = "Surface this to the user in prose; do not hard-code how prominently to raise it."
 
+# Maps machine-readable embedding-status reason codes to user-facing cause prose,
+# so the alert never shows a raw code like "vec_unavailable". Unknown codes pass
+# through as-is (future-safe). Lives here beside the REASON_* constants — the
+# parse/format boundary for the embedding-status sub-protocol.
+_REASON_PROSE: dict[str, str] = {
+    REASON_VEC_UNAVAILABLE: "vector extension (sqlite-vec) unavailable",
+    REASON_MODEL_UNAVAILABLE: "embedding model unavailable or inaccessible",
+}
+
 
 def build_alert_block(
     keys_to_fire: list[str],
@@ -308,7 +317,9 @@ def build_alert_block(
 
     custom_causes = {
         ALERT_CANT_PERSIST: fault_reason,
-        ALERT_EMBEDDINGS_FAILING: embedding_reason,
+        # Translate the embedding reason code to prose here so callers pass the raw
+        # code from the sidecar and never have to know the prose mapping.
+        ALERT_EMBEDDINGS_FAILING: _REASON_PROSE.get(embedding_reason, embedding_reason),
     }
 
     for key in keys_to_fire:
