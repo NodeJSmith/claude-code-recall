@@ -377,6 +377,19 @@ def write_branch_summary(cursor: sqlite3.Cursor, branch_db_id: int) -> str | Non
 MAX_WRITE_PATH_EMBEDS_PER_SYNC = 8
 
 
+def _stamp_branch_watermark(cursor: sqlite3.Cursor, branch_db_id: int) -> None:
+    """Set a branch's embedding watermark to the current version + model.
+
+    Meaning: every current exchange of this branch has a current-version chunk
+    vector. Written at the three points that establish that invariant — the
+    zero-exchange case, the idempotent repair, and the step-8 success path.
+    """
+    cursor.execute(
+        "UPDATE branches SET embedding_version = ?, embedding_model = ? WHERE id = ?",
+        (EMBEDDING_VERSION, EMBEDDING_MODEL, branch_db_id),
+    )
+
+
 def embed_branch_chunks(
     cursor: sqlite3.Cursor,
     branch_db_id: int,
@@ -407,13 +420,23 @@ def embed_branch_chunks(
 
     Raises on failure — callers (sync_branch) must wrap in
     contextlib.suppress(Exception). Does not commit; the single commit at
-    sync_current.py:137 owns the transaction.
+    sync_current.py:239 owns the transaction.
     """
-    if not (is_active and vec_writable and branch_msgs):
+    if not (is_active and vec_writable):
         return 0
 
     exchanges = build_exchange_pairs(branch_msgs)
     if not exchanges:
+        # Active, writable branch with no embeddable exchange — e.g. a sub-agent /
+        # sidechain branch whose messages are all assistant-role, or one left with
+        # only notifications after the notification filter. There is nothing to
+        # embed, but the branch is still eligible for the backfill, so stamp the
+        # watermark to current: with zero exchanges the "all exchanges embedded"
+        # invariant holds trivially. This drops the branch out of the eligible
+        # set so the backfill doesn't re-select it forever and abort via the
+        # no-progress guard. Self-correcting: if a user turn later lands, the
+        # content diff re-clears the watermark and the new exchange is embedded.
+        _stamp_branch_watermark(cursor, branch_db_id)
         return 0
 
     # Step 3 — compute embedded text, content hash, and bounded display text per exchange.
@@ -469,15 +492,12 @@ def embed_branch_chunks(
         if exchange_data and all(
             existing_chunks.get(ed["index"], {}).get("embedding_version") == EMBEDDING_VERSION for ed in exchange_data
         ):
-            cursor.execute(
-                "UPDATE branches SET embedding_version = ?, embedding_model = ? WHERE id = ?",
-                (EMBEDDING_VERSION, EMBEDDING_MODEL, branch_db_id),
-            )
+            _stamp_branch_watermark(cursor, branch_db_id)
         return 0
 
     # Step 5a — clear-first: if any exchange needs embedding, clear the watermark
     # BEFORE the loop so a mid-loop exception leaves the branch stale, never
-    # stale-but-true (single commit — sync_current.py:137 — persists this state).
+    # stale-but-true (single commit — sync_current.py:239 — persists this state).
     if needing_embed_full:
         cursor.execute("UPDATE branches SET embedding_version = 0 WHERE id = ?", (branch_db_id,))
 
@@ -548,10 +568,7 @@ def embed_branch_chunks(
             all_current = False
             break
     if all_current:
-        cursor.execute(
-            "UPDATE branches SET embedding_version = ?, embedding_model = ? WHERE id = ?",
-            (EMBEDDING_VERSION, EMBEDDING_MODEL, branch_db_id),
-        )
+        _stamp_branch_watermark(cursor, branch_db_id)
 
     return len(needing_embed)
 
