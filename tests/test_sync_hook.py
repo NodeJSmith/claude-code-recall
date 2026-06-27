@@ -858,11 +858,11 @@ class TestModelWarmOnSetup:
             mock_get_logger.assert_not_called()
 
 
-# T02: embedding-status sidecar recording/clearing in sync_current.run()
+# Embedding-status sidecar recording/clearing in sync_current.run()
 
 
 class TestSyncEmbeddingStatusRecording:
-    """T02: sync_current.run() records vec-unavailable failures and clears on success.
+    """sync_current.run() records vec-unavailable failures and clears on success.
 
     Structural capability check in sync_current: chunk_vec_queryable only.
     Model failures are silently swallowed by contextlib.suppress in session_ops
@@ -928,7 +928,7 @@ class TestSyncEmbeddingStatusRecording:
         assert "since" in data
 
     def test_vec_available_clears_status(self, tmp_path, monkeypatch):
-        """A sync run with vec available clears the embedding-status sidecar (FR#5)."""
+        """A sync run with vec available clears the embedding-status sidecar."""
         sidecar = tmp_path / "embedding-status.json"
         # Pre-seed sidecar as if there was a prior failure
         sidecar.write_text(json.dumps({"reason": REASON_VEC_UNAVAILABLE, "since": "2026-01-01T00:00:00Z"}))

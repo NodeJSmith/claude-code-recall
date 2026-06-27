@@ -756,7 +756,6 @@ class TestBuildFallbackContext:
 class TestProactiveAlerts:
     """Tests for proactive health-alert injection in the SessionStart hook.
 
-    Tests cover AC#1, AC#2, AC#3, AC#5, AC#7, AC#9, AC#10 per T03 task spec.
     Each test calls _proactive_alert_block() directly with injected sidecar paths
     so the real ~/.ccrecall/ directory is never touched.
     """
@@ -764,19 +763,19 @@ class TestProactiveAlerts:
     def _settings(self) -> dict:
         return {"alert_snooze_hours": 24}
 
-    # ── (f) AC#10: import inspection ────────────────────────────────────────────
+    # ── (f) import inspection ────────────────────────────────────────────
 
     def test_ac10_no_fastembed_on_hook_path(self):
         """health.py (the embedding-alert module) must not import fastembed or onnxruntime.
 
-        AC#10: the SessionStart hook reads the embedding-status sidecar via health.py.
+        The SessionStart hook reads the embedding-status sidecar via health.py.
         health.py must never import the vector/embedding stack — doing so would violate
         the ~440ms hot-path invariant. Verified via AST inspection of health.py source.
 
         Note: db.py transitively imports fastembed (via embeddings.py, guarded try/except)
         for the embedding dimension constant — that is pre-existing behavior unrelated to
         the proactive alert path. This test specifically guards health.py, which is the
-        new module T03 wires into the SessionStart hook path for alert evaluation.
+        new module wired into the SessionStart hook path for alert evaluation.
         """
         spec = importlib.util.find_spec("ccrecall.health")
         assert spec is not None, "ccrecall.health not found"
@@ -794,12 +793,12 @@ class TestProactiveAlerts:
         for lib in ("fastembed", "onnxruntime", "sqlite_vec"):
             assert lib not in imported, f"health.py imports {lib} — violates AC#10 hot-path invariant"
 
-    # ── (a) AC#1: dir unwritable → block fires even with no sessions ────────────
+    # ── (a) dir unwritable → block fires even with no sessions ────────────
 
     def test_ac1_dir_unwritable_no_sessions(self, tmp_path):
         """With dir unwritable, proactive block fires even when there are no sessions.
 
-        AC#1: cannot-persist alert leads; sessions, origin, pending all absent.
+        Cannot-persist alert leads; sessions, origin, pending all absent.
         """
         unwritable = tmp_path / "no-write"
         unwritable.mkdir()
@@ -835,7 +834,7 @@ class TestProactiveAlerts:
         # cant_persist alert from DB probe (conn=None)
         assert "cannot" in block.lower() or "persist" in block.lower() or "database" in block.lower()
 
-    # ── (b) AC#2: DB read-only → block; concurrent lock → no false alert ────────
+    # ── (b) DB read-only → block; concurrent lock → no false alert ────────
 
     def test_ac2_db_readonly_block(self, tmp_path):
         """When the DB directory is unwritable, connect fails → probe_db(None) → block.
@@ -912,12 +911,12 @@ class TestProactiveAlerts:
 
         assert result.ok, f"Lock contention must not be a fault: {result.reason}"
 
-    # ── (c) AC#3: embedding-status sidecar → "embeddings failing" block ─────────
+    # ── (c) embedding-status sidecar → "embeddings failing" block ─────────
 
     def test_ac3_embedding_status_sidecar(self, tmp_path):
         """Embedding-status sidecar present → 'embeddings failing' block named.
 
-        AC#3: block must name the reason without importing fastembed/onnxruntime.
+        Block must name the reason without importing fastembed/onnxruntime.
         """
         status_path = tmp_path / "embedding-status.json"
         record_embedding_failure(REASON_VEC_UNAVAILABLE, path=status_path)
@@ -957,10 +956,10 @@ class TestProactiveAlerts:
         assert "## ⚠" in block
         assert "embedding" in block.lower()
 
-    # ── (d) AC#7: both alerts active → single combined block ─────────────────────
+    # ── (d) both alerts active → single combined block ─────────────────────
 
     def test_ac7_both_alerts_single_block(self, tmp_path):
-        """Both FS fault + embedding failure → exactly one ## ⚠ heading (FR#13)."""
+        """Both FS fault + embedding failure → exactly one ## ⚠ heading."""
         unwritable = tmp_path / "no-write"
         unwritable.mkdir()
         unwritable.chmod(0o555)
@@ -986,7 +985,7 @@ class TestProactiveAlerts:
         assert "persist" in block.lower() or "write" in block.lower() or "runtime" in block.lower()
         assert "embedding" in block.lower()
 
-    # ── (e) AC#9: exception in proactive path → "" (hook still works) ───────────
+    # ── (e) exception in proactive path → "" (hook still works) ───────────
 
     def test_ac9_proactive_exception_degrades_to_empty(self, tmp_path, monkeypatch):
         """Forced exception inside the proactive path → '' (defensive wrap)."""
@@ -1008,12 +1007,12 @@ class TestProactiveAlerts:
 
         assert block == "", "Defensive wrap must return '' on exception"
 
-    # ── (g) AC#5: condition clears → no block; snooze record gone ────────────────
+    # ── (g) condition clears → no block; snooze record gone ────────────────
 
     def test_ac5_condition_clears_no_block_snooze_reset(self, tmp_path):
         """After condition clears, next session injects no block; snooze record gone.
 
-        AC#5: auto-clear (FR#9): when the active key is absent from active_keys,
+        Auto-clear: when the active key is absent from active_keys,
         evaluate_alerts drops it from the ledger so a future recurrence fires immediately.
         """
         snooze_path = tmp_path / "snooze.json"
@@ -1048,17 +1047,17 @@ class TestProactiveAlerts:
         )
         assert block2 == "", "No block should fire after condition is cleared"
 
-        # Ledger should be empty / the key should be gone (auto-clear FR#9)
+        # Ledger should be empty / the key should be gone (auto-clear)
         if snooze_path.exists():
             ledger = json.loads(snooze_path.read_text())
             assert ALERT_EMBEDDINGS_FAILING not in ledger, "Snooze entry must be auto-cleared when condition is gone"
 
-    # ── Block heading (FR#12 ordering is structurally enforced) ──────────────────
+    # ── Block heading (ordering is structurally enforced) ──────────────────
 
     def test_proactive_block_has_alert_heading(self, tmp_path):
         """The proactive block leads with the ## ⚠ heading.
 
-        FR#12 (the block sits ahead of origin/pending/context) is enforced
+        The block sits ahead of origin/pending/context, enforced
         structurally by the single assembly f-string in memory_context.main
         (`directive + proactive + origin + pending + context`); this test verifies
         the block itself produces the alert heading the assembly relies on.

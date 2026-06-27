@@ -35,8 +35,8 @@ ALERT_SNOOZE_PATH = RUNTIME_DIR / "alert-snooze.json"
 _PROBE_MARKER_PATH = RUNTIME_DIR / ".write-probe"
 
 # ── Named constants ────────────────────────────────────────────────────────────
-# Reactive-caveat threshold consumed by T04 (recall path).
-# Coverage at or above this fraction suppresses the recall caveat (FR#15).
+# Reactive-caveat threshold consumed by the recall path. Coverage at or above this
+# fraction suppresses the recall caveat.
 RECALL_CAVEAT_COVERAGE_THRESHOLD = 0.95
 
 # Alert key constants — one per proactive alert class.
@@ -44,7 +44,7 @@ ALERT_CANT_PERSIST = "cant_persist"
 ALERT_EMBEDDINGS_FAILING = "embeddings_failing"
 
 # Embedding-capability failure reason codes (the sub-protocol the detached embedding
-# process writes into the embedding-status sidecar; T03 reads them back). Shared here
+# process writes into the embedding-status sidecar; the SessionStart hook reads them back). Shared here
 # so the writer (backfill/sync) and any reader agree on the exact strings.
 REASON_VEC_UNAVAILABLE = "vec_unavailable"
 REASON_MODEL_UNAVAILABLE = "model_unavailable"
@@ -74,7 +74,7 @@ class ProbeResult:
 
 
 def probe_filesystem(marker_path: Path = _PROBE_MARKER_PATH) -> ProbeResult:
-    """Active filesystem writability probe (FR#1).
+    """Active filesystem writability probe.
 
     Uses O_CREAT|O_TRUNC (deliberately NOT O_EXCL) so the probe is idempotent
     and survives a stale marker left by a crash between write and unlink.  Any
@@ -93,7 +93,7 @@ def probe_filesystem(marker_path: Path = _PROBE_MARKER_PATH) -> ProbeResult:
 
 
 def probe_db(conn: sqlite3.Connection | None) -> ProbeResult:
-    """Active DB writability probe via BEGIN IMMEDIATE / ROLLBACK (FR#2).
+    """Active DB writability probe via BEGIN IMMEDIATE / ROLLBACK.
 
     Accepts the already-open connection from memory_context (or None when the
     caller couldn't open it — the dir-unwritable case).
@@ -123,7 +123,7 @@ def probe_db(conn: sqlite3.Connection | None) -> ProbeResult:
 
 
 def read_embedding_status(path: Path = EMBEDDING_STATUS_PATH) -> dict | None:
-    """Read the embedding-capability-failure sidecar (FR#6).
+    """Read the embedding-capability-failure sidecar.
 
     Returns the parsed dict on success, None if missing or malformed.
     Tolerates all read/parse errors so the SessionStart hook path is never broken.
@@ -138,7 +138,7 @@ def read_embedding_status(path: Path = EMBEDDING_STATUS_PATH) -> dict | None:
 
 
 def record_embedding_failure(reason: str, path: Path = EMBEDDING_STATUS_PATH) -> None:
-    """Write an embedding-capability-failure record to the sidecar (FR#4).
+    """Write an embedding-capability-failure record to the sidecar.
 
     Written by the detached embedding process on structural failure.
     Uses an atomic write to avoid partial reads by the SessionStart hook.
@@ -147,7 +147,7 @@ def record_embedding_failure(reason: str, path: Path = EMBEDDING_STATUS_PATH) ->
 
 
 def clear_embedding_failure(path: Path = EMBEDDING_STATUS_PATH) -> None:
-    """Remove the embedding-capability-failure sidecar (FR#5).
+    """Remove the embedding-capability-failure sidecar.
 
     Called by the embedding process on a successful embed run.
     No-op if the file is already absent.
@@ -170,10 +170,10 @@ def _read_snooze_ledger(path: Path) -> dict:
 
 
 def _write_snooze_ledger(path: Path, ledger: dict) -> None:
-    """Write the snooze ledger atomically (FR#8).
+    """Write the snooze ledger atomically.
 
     Delegates to db.atomic_write_json (tempfile + replace + cleanup + ensure_parent_dir).
-    Raises on failure — callers that need FR#10 degradation catch externally.
+    Raises on failure — callers that need the degrade-to-re-fire behavior catch externally.
     """
     atomic_write_json(path, ledger)
 
@@ -189,10 +189,10 @@ def evaluate_alerts(
     - Not in ledger OR last_fired older than snooze_hours → fire, update ledger.
     - last_fired within snooze_hours → suppress, keep ledger record.
 
-    Auto-clear (FR#9): any key NOT in active_keys is dropped from the ledger so a
+    Auto-clear: any key NOT in active_keys is dropped from the ledger so a
     later recurrence fires immediately rather than being held by a stale record.
 
-    FR#10: if the ledger write fails (runtime dir unwritable), the fire list is
+    If the ledger write fails (runtime dir unwritable), the fire list is
     still returned — degrading to re-tell every session is preferable to swallowing
     the most severe alert class.
     """
@@ -234,7 +234,7 @@ def evaluate_alerts(
     try:
         _write_snooze_ledger(snooze_path, new_ledger)
     except Exception:
-        # FR#10: write failure (e.g. dir unwritable) must not suppress the alert.
+        # A write failure (e.g. dir unwritable) must not suppress the alert.
         logging.getLogger(LOGGER_NAME).exception("snooze ledger write failed; degrading to re-fire every session")
 
     return keys_to_fire
@@ -276,14 +276,14 @@ def build_alert_block(
     fault_reason: str = "",
     embedding_reason: str = "",
 ) -> str:
-    """Build a single Markdown alert block for all active, un-snoozed alerts (FR#11, FR#13).
+    """Build a single Markdown alert block for all active, un-snoozed alerts.
 
     Returns "" when keys_to_fire is empty.
 
     Mirrors format_pending_block(for_injection=True): ## ⚠ heading followed by
     prose paragraphs — each carrying a likely cause, suggested action, and an
     explicit instruction to relay to the user without hard-coding prominence.
-    Multiple alerts are concatenated into ONE block (FR#13).
+    Multiple alerts are concatenated into ONE block.
 
     Lines are joined with a blank line ("\\n\\n") — deliberately paragraph-separated
     rather than the single-newline join in format_pending_block (whose lines are a

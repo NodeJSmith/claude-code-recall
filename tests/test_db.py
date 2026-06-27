@@ -218,7 +218,7 @@ class TestLoadSettingsWithConfig:
         assert result["logging_enabled"] is False  # unchanged default
 
     def test_alert_snooze_hours_override_and_default(self, tmp_path, monkeypatch):
-        """AC#11: the snooze window changes when alert_snooze_hours is set in config;
+        """The snooze window changes when alert_snooze_hours is set in config;
         the 24h default applies when the key is absent."""
         cfg = tmp_path / "config.json"
         monkeypatch.setattr("ccrecall.db.CONFIG_PATH", cfg)

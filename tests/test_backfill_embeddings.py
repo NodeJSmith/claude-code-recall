@@ -36,7 +36,7 @@ pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
 def _isolate_embedding_status(monkeypatch):
     """Keep every test in this module off the real ~/.ccrecall sidecar.
 
-    run()'s success path calls clear_embedding_failure() (added in T02), which
+    run()'s success path calls clear_embedding_failure(), which
     would otherwise delete a developer's live embedding-status.json. Default to a
     no-op; the status-recording tests re-patch this locally with a tmp-path
     side_effect, which overrides this guard inside their own `with patch(...)`.
@@ -884,11 +884,11 @@ class TestBackfillInferencesCounter:
         assert data["embedded"] >= 1
 
 
-# T02: embedding-status sidecar recording/clearing in backfill_embeddings.run()
+# Embedding-status sidecar recording/clearing in backfill_embeddings.run()
 
 
 class TestBackfillEmbeddingStatusRecording:
-    """T02: backfill_embeddings.run() records capability failures and clears on success.
+    """backfill_embeddings.run() records capability failures and clears on success.
 
     Only the points inside run() (not run_status()) are instrumented — do NOT
     instrument run_status(), which is a read-only diagnostic.
@@ -937,7 +937,7 @@ class TestBackfillEmbeddingStatusRecording:
 
     @_VEC_SKIP
     def test_successful_run_clears_status(self, tmp_path):
-        """A run() that embeds successfully clears the embedding-status sidecar (FR#5)."""
+        """A run() that embeds successfully clears the embedding-status sidecar."""
         conn = make_vec_conn()
         _insert_branch_with_messages(conn)
 

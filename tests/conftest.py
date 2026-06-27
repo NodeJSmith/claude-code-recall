@@ -20,7 +20,7 @@ FIXTURE_DIR = Path(__file__).parent / "fixtures"
 def patched_record(sidecar: Path):
     """side_effect redirecting record_embedding_failure to a tmp sidecar path.
 
-    Shared by the T02 embedding-status recording tests in test_backfill_embeddings
+    Shared by the embedding-status recording tests in test_backfill_embeddings
     and test_sync_hook so the real ~/.ccrecall sidecar is never touched.
     """
     return lambda reason: record_embedding_failure(reason, path=sidecar)

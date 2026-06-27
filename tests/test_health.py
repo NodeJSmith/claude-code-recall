@@ -231,7 +231,7 @@ class TestSnoozeLedger:
         assert "a" in result
 
     def test_auto_clear_drops_inactive_key(self, tmp_path):
-        """Key absent from active_keys is dropped from the ledger (auto-clear FR#9)."""
+        """Key absent from active_keys is dropped from the ledger (auto-clear)."""
         path = tmp_path / "alert-snooze.json"
         evaluate_alerts({"a", "b"}, snooze_hours=24, snooze_path=path)
         # "b" condition clears
@@ -241,7 +241,7 @@ class TestSnoozeLedger:
         assert "a" in ledger
 
     def test_auto_clear_reset_fires_immediately_on_recurrence(self, tmp_path):
-        """AC#5: after auto-clear, key's recurrence fires immediately (no stale record)."""
+        """After auto-clear, key's recurrence fires immediately (no stale record)."""
         path = tmp_path / "alert-snooze.json"
         # Fire both
         evaluate_alerts({"a", "b"}, snooze_hours=24, snooze_path=path)
@@ -252,7 +252,7 @@ class TestSnoozeLedger:
         assert "b" in result
 
     def test_unwritable_dir_still_fires_alert(self, tmp_path):
-        """AC#6 / FR#10: unwritable runtime dir → alert fires every evaluation."""
+        """Unwritable runtime dir → alert fires every evaluation."""
         readonly_dir = tmp_path / "readonly"
         readonly_dir.mkdir()
         readonly_dir.chmod(0o555)
@@ -264,14 +264,14 @@ class TestSnoozeLedger:
             readonly_dir.chmod(0o755)
 
     def test_atomic_write_no_tmp_orphan(self, tmp_path):
-        """Successful write leaves no .tmp files (FR#8)."""
+        """Successful write leaves no .tmp files."""
         path = tmp_path / "alert-snooze.json"
         _write_snooze_ledger(path, {"key": "val"})
         leftover = list(tmp_path.glob("*.tmp"))
         assert leftover == []
 
     def test_atomic_write_last_writer_wins(self, tmp_path):
-        """Sequential writes: last write wins and file is valid JSON (FR#8)."""
+        """Sequential writes: last write wins and file is valid JSON."""
         path = tmp_path / "alert-snooze.json"
         _write_snooze_ledger(path, {"a": "t1"})
         _write_snooze_ledger(path, {"b": "t2"})
@@ -288,7 +288,7 @@ class TestSnoozeLedger:
         assert "x" in result
 
     def test_fire_once_suppress_within_window_refire_after(self, tmp_path):
-        """AC#4: fire-once → suppress-within-window → fire-after-window."""
+        """Fire-once → suppress-within-window → fire-after-window."""
         path = tmp_path / "alert-snooze.json"
 
         # First: fires
@@ -306,7 +306,7 @@ class TestSnoozeLedger:
         assert "k" in r3, "call after window lapses must fire again"
 
     def test_unwritable_dir_fires_every_evaluation(self, tmp_path):
-        """AC#6: consecutive evaluations with unwritable dir each fire (degrade to re-tell)."""
+        """Consecutive evaluations with unwritable dir each fire (degrade to re-tell)."""
         readonly_dir = tmp_path / "readonly2"
         readonly_dir.mkdir()
         readonly_dir.chmod(0o555)
@@ -329,7 +329,7 @@ class TestSnoozeLedger:
 
 
 class TestBlockBuilder:
-    """Alert-block builder — AC#12: not a bare heading."""
+    """Alert-block builder — not a bare heading."""
 
     def test_empty_keys_returns_empty_string(self):
         """No active alerts → empty string."""
@@ -378,7 +378,7 @@ class TestBlockBuilder:
         assert "hard-code" in lower or "hard code" in lower
 
     def test_multiple_alerts_single_heading(self):
-        """FR#13: multiple alerts → exactly one ## ⚠ heading."""
+        """Multiple alerts → exactly one ## ⚠ heading."""
         result = build_alert_block([ALERT_CANT_PERSIST, ALERT_EMBEDDINGS_FAILING])
         assert result.count("## ⚠") == 1
 
@@ -393,7 +393,7 @@ class TestBlockBuilder:
         assert "model missing" in result
 
     def test_ac12_block_is_not_bare_heading(self):
-        """AC#12: block has substantial prose beyond the heading."""
+        """Block has substantial prose beyond the heading."""
         result = build_alert_block([ALERT_CANT_PERSIST], fault_reason="disk full")
         lines = [ln for ln in result.split("\n") if ln.strip()]
         assert len(lines) >= 2, "must have at least heading + prose"

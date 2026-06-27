@@ -1617,15 +1617,15 @@ class TestSearchMessages:
         conn.close()
 
 
-# FR#15 / FR#16 / AC#8 / AC#9 — reactive coverage caveat
+# Reactive coverage caveat
 
 
 class TestRecallCaveat:
     """Reactive caveat appended to recall output when embeddings are unavailable or coverage is partial.
 
-    FR#15: caveat present when vec unavailable or coverage < threshold; absent when healthy.
-    FR#16 / AC#9: a failure computing the caveat degrades to no caveat and never breaks recall.
-    AC#8: total == 0 does not crash.
+    Caveat present when vec unavailable or coverage < threshold; absent when healthy.
+    A failure computing the caveat degrades to no caveat and never breaks recall.
+    total == 0 does not crash.
     """
 
     def test_caveat_when_vec_unavailable(self):
@@ -1714,7 +1714,7 @@ class TestRecallCaveat:
         conn.close()
 
     def test_no_crash_when_total_zero(self):
-        """_compute_caveat returns None (no crash) when there are no embeddable branches (AC#8)."""
+        """_compute_caveat returns None (no crash) when there are no embeddable branches."""
         conn = sqlite3.connect(":memory:")
         conn.executescript(SCHEMA)
         conn.commit()
@@ -1727,7 +1727,7 @@ class TestRecallCaveat:
         conn.close()
 
     def test_caveat_degrades_on_error(self):
-        """_compute_caveat returns None (no exception) when coverage computation fails (AC#9)."""
+        """_compute_caveat returns None (no exception) when coverage computation fails."""
         conn = sqlite3.connect(":memory:")
         with (
             patch("ccrecall.search_conversations.chunk_vec_queryable", return_value=True),
@@ -1762,7 +1762,7 @@ class TestRecallCaveat:
         assert out["caveat"] == "embeddings unavailable — keyword-only results"
 
     def test_run_json_caveat_null_when_healthy(self, tmp_path, capsys):
-        """run() in JSON mode has 'caveat': null when embeddings are healthy (AC#8)."""
+        """run() in JSON mode has 'caveat': null when embeddings are healthy."""
         db_path = tmp_path / "test.db"
         c = sqlite3.connect(str(db_path))
         c.executescript(SCHEMA_CORE)
@@ -1800,7 +1800,7 @@ class TestRecallCaveat:
         assert "embeddings unavailable" in out
 
     def test_run_markdown_no_caveat_when_healthy(self, tmp_path, capsys):
-        """run() in markdown mode appends nothing when embeddings are healthy (AC#8)."""
+        """run() in markdown mode appends nothing when embeddings are healthy."""
         db_path = tmp_path / "test.db"
         c = sqlite3.connect(str(db_path))
         c.executescript(SCHEMA_CORE)

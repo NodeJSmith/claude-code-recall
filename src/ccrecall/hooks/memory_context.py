@@ -104,19 +104,19 @@ def _proactive_alert_block(
     _snooze_path: Path | None = None,
     _status_path: Path | None = None,
 ) -> str:
-    """Build the proactive health-alert block for SessionStart injection (FR#11-FR#13, FR#16).
+    """Build the proactive health-alert block for SessionStart injection.
 
     Evaluates both proactive alert classes:
     - Filesystem writability probe (active, cheap, no DB required)
     - Embedding-status sidecar read (passive, plain file read — never imports
-      fastembed/onnxruntime/sqlite_vec — hot-path invariant AC#10)
+      fastembed/onnxruntime/sqlite_vec — hot-path invariant)
     - DB write-lock probe (active, on the already-open connection, or conn=None
       when the connection itself failed — that failure becomes a fault)
 
     Passes active keys through the snooze ledger (fire / suppress / auto-clear)
-    and builds ONE combined block for whatever fires (FR#13).
+    and builds ONE combined block for whatever fires.
 
-    Defensive wrapper (FR#16): follows the _pending_question_block precedent — any
+    Defensive wrapper: follows the _pending_question_block precedent — any
     exception degrades to "" so the hook is never broken and context injection is
     unaffected.
 
@@ -156,7 +156,7 @@ def _proactive_alert_block(
             # (the mapping lives in health.py beside the REASON_* constants).
             embedding_reason = embedding_status.get("reason", "")
 
-        # 5. Evaluate snooze ledger: fire / suppress / auto-clear (FR#7-FR#9).
+        # 5. Evaluate snooze ledger: fire / suppress / auto-clear.
         # load_settings() always carries alert_snooze_hours from DEFAULT_SETTINGS;
         # fall back to the canonical default only for sparse (test) settings dicts.
         snooze_hours = float(settings.get("alert_snooze_hours", DEFAULT_SETTINGS["alert_snooze_hours"]))
@@ -166,7 +166,7 @@ def _proactive_alert_block(
             else evaluate_alerts(active_keys, snooze_hours, _snooze_path)
         )
 
-        # 6. Build one combined block (FR#13).
+        # 6. Build one combined block.
         return build_alert_block(
             keys_to_fire,
             fault_reason=fault_reason,
@@ -587,7 +587,7 @@ def main():
 
     # ── Proactive alert evaluation ──────────────────────────────────────────────
     # Must run before ALL early-return gates so alerts fire even when sessions is
-    # empty, the DB is inaccessible, or onboarding is incomplete (FR#12, AC#1).
+    # empty, the DB is inaccessible, or onboarding is incomplete.
     proactive_block = _proactive_alert_block(settings, conn, db_available)
 
     # ── Gate: onboarding incomplete ────────────────────────────────────────────
@@ -672,7 +672,7 @@ def main():
         # Assemble: directive + proactive (if any) + origin + pending + context.
         # The directive is first (it tells Claude how to read the rest); the
         # proactive block immediately follows it, ahead of origin / pending /
-        # prior-session content (FR#12 — highest-attention position for the alert).
+        # prior-session content (highest-attention position for the alert).
         origin = build_origin_block(source, sessions)
         pending = _pending_question_block(sessions, cwd)
         if proactive_block:
