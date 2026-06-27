@@ -14,8 +14,8 @@ import sqlite_vec
 
 from ccrecall.content import sanitize_fts_term
 from ccrecall.db import (
-    CHUNK_EMBEDDABLE_BRANCH_FILTER,
     DEFAULT_DB_PATH,
+    branch_embedding_coverage,
     chunk_vec_queryable,
     escape_like,
     get_db_connection,
@@ -758,15 +758,8 @@ def print_status(settings: dict | None) -> None:
             ).fetchone()[0]
             print(f"chunk coverage: {current_chunks}/{total_chunks} chunks at current version")
 
-            # Branch watermark: branches where all chunks are at current version
-            total_branches = conn.execute(
-                f"SELECT count(*) FROM branches WHERE {CHUNK_EMBEDDABLE_BRANCH_FILTER}"
-            ).fetchone()[0]
-            embedded_branches = conn.execute(
-                f"SELECT count(*) FROM branches WHERE {CHUNK_EMBEDDABLE_BRANCH_FILTER}"
-                " AND embedding_version = ? AND embedding_model = ?",
-                (EMBEDDING_VERSION, EMBEDDING_MODEL),
-            ).fetchone()[0]
+            # Branch watermark: branches whose every current exchange is embedded.
+            embedded_branches, total_branches = branch_embedding_coverage(conn)
             print(f"embedded branches: {embedded_branches}/{total_branches} (watermark)")
         except sqlite3.Error as e:
             print(f"chunk coverage: error ({e})")

@@ -770,17 +770,22 @@ class TestBackfillStatus:
         assert data["eligible"] == 2
         # errored = branches with content-error sentinel (1)
         assert data["errored"] == 1
+        # branch grain: 6 embeddable total, 3 embedded (= total - eligible - errored)
+        assert data["total_branches"] == 6
+        assert data["embedded_branches"] == 3
         assert data["days"] is None
 
-    def test_human_output_reports_chunk_coverage(self, capsys):
+    def test_human_output_reports_branch_coverage(self, capsys):
         conn = make_vec_conn()
         self._seed_mixed(conn)
 
         out = _run_status(conn, capsys)
 
-        assert "3 / 3 chunks" in out
-        assert "2 branches" in out
+        # Honest branch-grain coverage, not the misleading partial-universe chunk %.
+        assert "3 / 6 embedded" in out
+        assert "remaining: 2 branches" in out
         assert "errored" in out
+        assert "chunks" not in out
 
     def test_days_filters_counts(self, capsys):
         """--status --days N bounds universe/eligible/errored by recency."""
@@ -809,6 +814,9 @@ class TestBackfillStatus:
         # but universe counts existing chunks; recent has none since not yet run)
         assert data["eligible"] == 1
         assert data["errored"] == 1
+        # Branch grain is recency-bounded too: 2 in-window branches, 0 embedded.
+        assert data["total_branches"] == 2
+        assert data["embedded_branches"] == 0
         assert data["days"] == 30
 
     def test_status_does_not_embed(self, capsys):

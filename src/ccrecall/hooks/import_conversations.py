@@ -14,6 +14,7 @@ from pathlib import Path
 from ccrecall.db import (
     DEFAULT_DB_PATH,
     DEFAULT_PROJECTS_DIR,
+    branch_embedding_coverage,
     get_db_connection,
     get_db_path,
     load_settings,
@@ -191,6 +192,8 @@ def print_stats(db: Path = DEFAULT_DB_PATH) -> None:
         active = cursor.fetchone()[0]
         cursor.execute("SELECT COUNT(*) FROM branches WHERE is_active = 0")
         abandoned = cursor.fetchone()[0]
+        # Branch-grain embedding coverage (vec-free watermark count).
+        embedded, embeddable = branch_embedding_coverage(conn)
 
     db_size = db_path.stat().st_size if db_path.exists() else 0
 
@@ -200,6 +203,10 @@ def print_stats(db: Path = DEFAULT_DB_PATH) -> None:
     print(f"Sessions: {sessions}")
     print(f"Branches: {total_branches} ({active} active, {abandoned} abandoned)")
     print(f"Messages: {messages}")
+    if embeddable:
+        print(f"Embeddings: {embedded}/{embeddable} branches ({embedded / embeddable * 100:.0f}%)")
+    else:
+        print("Embeddings: 0/0 branches")
 
 
 def run(
