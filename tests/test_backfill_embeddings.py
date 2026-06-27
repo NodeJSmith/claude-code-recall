@@ -22,6 +22,7 @@ from conftest import make_vec_conn, patched_clear, patched_record
 
 from ccrecall.db import CONTENT_ERROR_VERSION
 from ccrecall.embeddings import EMBEDDING_DIM, EMBEDDING_MODEL, EMBEDDING_VERSION
+from ccrecall.health import REASON_VEC_UNAVAILABLE
 from ccrecall.hooks.backfill_embeddings import BATCH_SIZE, EXIT_OK, run
 from ccrecall.session_ops import MAX_WRITE_PATH_EMBEDS_PER_SYNC
 
@@ -942,7 +943,7 @@ class TestBackfillEmbeddingStatusRecording:
 
         sidecar = tmp_path / "embedding-status.json"
         # Pre-seed sidecar as if there was a prior failure
-        sidecar.write_text('{"reason": "vec_unavailable", "since": "2026-01-01T00:00:00Z"}')
+        sidecar.write_text(json.dumps({"reason": REASON_VEC_UNAVAILABLE, "since": "2026-01-01T00:00:00Z"}))
 
         with (
             patch("ccrecall.hooks.backfill_embeddings.model_available", return_value=True),

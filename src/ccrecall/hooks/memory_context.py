@@ -26,6 +26,7 @@ from whenever import Instant
 
 from ccrecall.db import (
     CLEAR_HANDOFF_FILENAME,
+    DEFAULT_SETTINGS,
     get_db_connection,
     get_db_path,
     load_config,
@@ -156,7 +157,9 @@ def _proactive_alert_block(
             embedding_reason = embedding_status.get("reason", "")
 
         # 5. Evaluate snooze ledger: fire / suppress / auto-clear (FR#7-FR#9).
-        snooze_hours = float(settings.get("alert_snooze_hours", 24))
+        # load_settings() always carries alert_snooze_hours from DEFAULT_SETTINGS;
+        # fall back to the canonical default only for sparse (test) settings dicts.
+        snooze_hours = float(settings.get("alert_snooze_hours", DEFAULT_SETTINGS["alert_snooze_hours"]))
         keys_to_fire = (
             evaluate_alerts(active_keys, snooze_hours)
             if _snooze_path is None

@@ -25,8 +25,9 @@ from ccrecall.db import PID_FILE_MODE, RUNTIME_DIR, ensure_parent_dir
 from ccrecall.models import LOGGER_NAME
 
 # ── Sidecar paths ──────────────────────────────────────────────────────────────
-# These are module-level constants so T03 and the embedding process can import
-# the canonical paths without re-deriving them.
+# Module-level so they are the single canonical location for each sidecar. Callers
+# don't import these directly — they go through the functions below, which default
+# their `path` argument to these constants (tests override `path` to a tmp dir).
 EMBEDDING_STATUS_PATH = RUNTIME_DIR / "embedding-status.json"
 ALERT_SNOOZE_PATH = RUNTIME_DIR / "alert-snooze.json"
 

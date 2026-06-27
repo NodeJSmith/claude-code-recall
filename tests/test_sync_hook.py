@@ -15,6 +15,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from conftest import patched_clear, patched_record
 
+from ccrecall.health import REASON_VEC_UNAVAILABLE
 from ccrecall.hooks import memory_setup, memory_sync, sync_current
 from ccrecall.hooks.sync_current import sync_session, validate_session_id
 from ccrecall.recent_chats import run as recent_chats_run
@@ -930,7 +931,7 @@ class TestSyncEmbeddingStatusRecording:
         """A sync run with vec available clears the embedding-status sidecar (FR#5)."""
         sidecar = tmp_path / "embedding-status.json"
         # Pre-seed sidecar as if there was a prior failure
-        sidecar.write_text('{"reason": "vec_unavailable", "since": "2026-01-01T00:00:00Z"}')
+        sidecar.write_text(json.dumps({"reason": REASON_VEC_UNAVAILABLE, "since": "2026-01-01T00:00:00Z"}))
 
         self._run(
             tmp_path,
@@ -946,7 +947,7 @@ class TestSyncEmbeddingStatusRecording:
     def test_vec_unavailable_does_not_clear(self, tmp_path, monkeypatch):
         """When vec is unavailable, clear_embedding_failure must NOT be called."""
         sidecar = tmp_path / "embedding-status.json"
-        sidecar.write_text('{"reason": "vec_unavailable", "since": "2026-01-01T00:00:00Z"}')
+        sidecar.write_text(json.dumps({"reason": REASON_VEC_UNAVAILABLE, "since": "2026-01-01T00:00:00Z"}))
 
         clear_calls = []
 

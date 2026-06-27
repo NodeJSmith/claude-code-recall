@@ -92,7 +92,16 @@ Semantic fusion is automatically disabled when:
 - `fastembed` cannot be imported
 - `sqlite-vec` cannot be loaded on the connection (e.g. Python built without loadable extensions)
 
-In all cases, search falls back to keyword-only and returns results normally. Use `ccrecall search --status` to check which path is active.
+In all cases, search falls back to keyword-only and returns results normally. When this happens (or when embedding coverage is still catching up below ~95%), a recall appends a one-line caveat to its own results so you know they may be partial — surfaced only when you actually run a recall, never as a standalone nag. Use `ccrecall search --status` to check which path is active.
+
+## When ccrecall speaks up
+
+ccrecall is meant to be invisible — it runs in the background and Claude consumes its output. It will interrupt you, once, only when something is actually broken and only you can fix it:
+
+- **It can't save your history** — the data directory or database is unwritable (disk full, permissions, corruption). Left unsaid, a working install would silently stop recording sessions.
+- **Embeddings are persistently failing** — the vector extension or embedding model is unavailable, so semantic search is degraded until you fix the environment.
+
+When either condition holds, the next session injects a short alert for Claude to relay to you in plain language. It's **told once, then goes quiet for ~24h** (tunable via `alert_snooze_hours` in the config file) even if still broken, and **clears itself the moment the condition resolves**. Coverage that's merely catching up is never surfaced this way — only genuine, unrecoverable failures earn the interruption.
 
 ## Skills
 
