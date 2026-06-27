@@ -12,7 +12,7 @@ from pathlib import Path
 
 import sqlite_vec
 
-from ccrecall.embeddings import EMBEDDING_DIM
+from ccrecall.embeddings import EMBEDDING_DIM, EMBEDDING_MODEL, EMBEDDING_VERSION
 from ccrecall.models import BUSY_TIMEOUT_MS, LOGGER_NAME
 from ccrecall.schema import SCHEMA_CORE, SCHEMA_FTS4, SCHEMA_FTS5, detect_fts_support
 
@@ -347,6 +347,30 @@ def get_db_connection(settings: dict | None = None, load_vec: bool = False) -> s
         conn.execute(f"PRAGMA busy_timeout = {VEC_BUSY_TIMEOUT_MS}")
 
     return conn
+
+
+def branch_embedding_coverage(conn: sqlite3.Connection) -> tuple[int, int]:
+    """Return (embedded, total) embeddable branches by watermark.
+
+    `total` is every CHUNK_EMBEDDABLE branch; `embedded` is those whose
+    watermark (embedding_version/embedding_model) is at the current version and
+    model. Vec-free — reads only the branches table, whose embedding columns
+    live in the base schema — so coverage reports work even where sqlite-vec
+    can't load. Shared by `ccrecall stats` and search's `print_status` so the
+    two surfaces can't drift (see CHUNK_EMBEDDABLE_BRANCH_FILTER).
+
+    This is the watermark view. `backfill embeddings --status` reports a
+    stricter, heal-aware count (its eligible set also flags watermark-current
+    branches that lost a chunk_vec row), so on a DB with orphaned vectors that
+    surface can show slightly fewer embedded branches than this one.
+    """
+    total = conn.execute(f"SELECT COUNT(*) FROM branches WHERE {CHUNK_EMBEDDABLE_BRANCH_FILTER}").fetchone()[0]
+    embedded = conn.execute(
+        f"SELECT COUNT(*) FROM branches WHERE {CHUNK_EMBEDDABLE_BRANCH_FILTER} "
+        "AND embedding_version = ? AND embedding_model = ?",
+        (EMBEDDING_VERSION, EMBEDDING_MODEL),
+    ).fetchone()[0]
+    return embedded, total
 
 
 def setup_logging(settings: dict | None = None) -> logging.Logger:
