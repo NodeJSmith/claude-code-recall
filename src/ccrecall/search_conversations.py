@@ -39,6 +39,7 @@ from ccrecall.formatting import (
     format_snippet_markdown,
 )
 from ccrecall.fusion import rrf_scored
+from ccrecall.health import RECALL_CAVEAT_COVERAGE_THRESHOLD
 from ccrecall.schema import detect_fts_support
 from ccrecall.serialization import decode_json_column
 
@@ -519,25 +520,21 @@ def search_sessions(
 
     use_fusion = not keyword_only
     query_vec: list[float] | None = None
-    _emit_degrade: bool = False
 
     # Attempt vector path only if model and vec extension are both available
     if use_fusion:
-        if not model_available():
+        if not model_available() or not chunk_vec_queryable(conn):
             use_fusion = False
-        elif not chunk_vec_queryable(conn):
-            use_fusion = False
-            _emit_degrade = True
 
     if use_fusion:
         # Deliberately broad: embed_text wraps a third-party model stack
         # (fastembed/onnxruntime) whose failure modes aren't a fixed exception
-        # type. Degrade to keyword search and announce it via _emit_degrade.
+        # type. Degrade to keyword search; _compute_caveat in run() surfaces the
+        # degradation to the user.
         try:
             query_vec = embed_text(query)
         except Exception:
             use_fusion = False
-            _emit_degrade = True
 
     if use_fusion and query_vec is not None:
         try:
@@ -578,15 +575,10 @@ def search_sessions(
             )
             return cards, True
         except sqlite3.Error:
-            # DB-level failure in the fusion path: degrade to keyword search.
+            # DB-level failure in the fusion path: degrade to keyword search
+            # (falls through to the keyword path below; _compute_caveat surfaces it).
             # Bugs in fusion/hydration (rrf, dedup) propagate instead of hiding.
-            _emit_degrade = True
-
-    if _emit_degrade and not keyword_only:
-        print(
-            "search: vector index unavailable, using keyword search",
-            file=sys.stderr,
-        )
+            use_fusion = False
 
     # Keyword-only path. The fts5 rung ranks by BM25 (a relevance signal →
     # ranked:true with scores). The LIKE fallback is unranked by the contract
@@ -646,6 +638,28 @@ def search_messages(
     ordered = raw[:max_results]
     snippets = _hydrate_snippets(cursor, ordered)
     return snippets, True
+
+
+def _compute_caveat(conn: sqlite3.Connection) -> str | None:
+    """Return a one-line recall caveat or None when results are unimpaired.
+
+    Returns a caveat string when embeddings are unavailable (results degraded to
+    keyword-only) or branch coverage is below RECALL_CAVEAT_COVERAGE_THRESHOLD.
+    Returns None at/above threshold on a healthy install, or when total == 0
+    (nothing embedded yet — not a degradation). A failure computing coverage
+    degrades to None so a broken probe never breaks the recall itself.
+    """
+    try:
+        if not chunk_vec_queryable(conn):
+            return "embeddings unavailable — keyword-only results"
+        embedded, total = branch_embedding_coverage(conn)
+        if total > 0 and embedded / total < RECALL_CAVEAT_COVERAGE_THRESHOLD:
+            pct = int(100 * embedded / total)
+            return f"{pct}% of history embedded; results may be partial"
+        return None
+    except Exception:
+        _logger.exception("caveat computation failed")
+        return None
 
 
 def format_markdown(cards: list[dict], query: str, ranked: bool, verbose: bool = False) -> str:
@@ -841,14 +855,19 @@ def run(
             path=path,
             keyword_only=keyword_only,
         )
+        caveat = _compute_caveat(conn)
         conn.close()
 
         if output_format == "json":
             json_cards = [format_card_json(c) for c in cards]
             envelope = build_envelope(query, ranked, json_cards)
+            envelope["caveat"] = caveat
             print(json.dumps(envelope, indent=2))
         else:
-            print(format_markdown(cards, query, ranked, verbose=verbose))
+            md = format_markdown(cards, query, ranked, verbose=verbose)
+            if caveat is not None:
+                md += f"\n\n_{caveat}_"
+            print(md)
 
     # Deliberately broad: top-level CLI handler — reports any error to the user
     # and exits non-zero rather than dumping a traceback.

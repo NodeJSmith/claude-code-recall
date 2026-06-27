@@ -1,7 +1,7 @@
 ---
 task_id: "T04"
 title: "Append reactive coverage/availability caveat to recall results"
-status: "planned"
+status: "done"
 depends_on: ["T01"]
 implements: ["FR#15", "FR#16", "AC#8", "AC#9"]
 ---
