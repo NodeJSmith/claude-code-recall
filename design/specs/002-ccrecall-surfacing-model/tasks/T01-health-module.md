@@ -3,7 +3,7 @@ task_id: "T01"
 title: "Add health.py: probes, snooze ledger, embedding-status, alert builder"
 status: "planned"
 depends_on: []
-implements: ["FR#1", "FR#2", "FR#3", "FR#7", "FR#8", "FR#9", "FR#10", "FR#11", "FR#14", "AC#4", "AC#5", "AC#6", "AC#11", "AC#12"]
+implements: ["FR#1", "FR#2", "FR#3", "FR#7", "FR#8", "FR#9", "FR#10", "FR#11", "FR#13", "FR#14", "AC#4", "AC#5", "AC#6", "AC#11", "AC#12"]
 ---
 
 ## Summary
@@ -47,7 +47,7 @@ Write `tests/test_health.py` covering every function: probe ok/fault classificat
 ## Focus
 - `RUNTIME_DIR`, `CONFIG_PATH`, `PID_FILE_MODE`, `ensure_parent_dir`, `apply_base_pragmas` all live in `src/ccrecall/db.py` — import from there; don't redefine paths.
 - The atomic-write idiom and the `O_CREAT|O_TRUNC` vs `O_EXCL` distinction are in context.md Convention Examples — follow them exactly. The blocking comb finding on the source design was precisely an `O_EXCL`/`O_TRUNC` mix-up; do not reintroduce it.
-- `whenever` only for time: `Instant.now()`, `Instant.parse_common_iso(...)`, and `(Instant.now() - then).in_hours()` style math. Do NOT import stdlib `datetime`. See `session_tail.py` / `memory_context.py` for the existing `whenever` usage pattern (`Instant.now()`, `.total("seconds")`).
+- `whenever` only for time. Match the **established codebase pattern** for delta math: `(Instant.now() - then).total("seconds")` (see `memory_context.py:222-223`) and compare against `snooze_hours * 3600` — do NOT assume an `.in_hours()` method exists (it may not be on the pinned `whenever` version). Parse stored ISO timestamps the same way the codebase already does (`Instant.parse_*` per the existing usage; confirm the exact parser against `memory_context.py`/`session_tail.py`). Do NOT import stdlib `datetime`.
 - Distinguishing a SQLite "database is locked" / "database is busy" OperationalError from a real fault is by message substring — there is no dedicated exception subclass. Be tolerant in matching.
 - Keep functions pure where possible (return values, no global mutation); the sidecars are the only state. This module must NOT import fastembed, onnxruntime, or sqlite_vec — it only ever reads the embedding-status sidecar, never probes capability (hot-path invariant).
 - `tests/test_db.py` asserts the exact `DEFAULT_SETTINGS` dict — adding a key WILL break it; update that assertion in this task.
@@ -61,6 +61,7 @@ Write `tests/test_health.py` covering every function: probe ok/fault classificat
 - [ ] FR#9: an alert key whose condition is no longer active has its ledger entry dropped, and a later recurrence fires immediately.
 - [ ] FR#10: when the ledger write fails due to an unwritable runtime dir, the alert is still reported as "fire".
 - [ ] FR#11: the block builder emits a `## ⚠` block containing cause, action, and a relay-not-hard-code instruction.
+- [ ] FR#13: the block builder accepts a list of active alerts and emits exactly one combined block (the multi-alert concatenation the T03 injection relies on).
 - [ ] FR#14: `DEFAULT_SETTINGS` includes the snooze-window key with a 24h default and it is overridable via config (test_db.py updated and green).
 - [ ] AC#4: test proves fire-once → suppress-within-window → fire-after-window.
 - [ ] AC#5: test proves auto-clear resets the snooze record when the condition clears.

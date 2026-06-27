@@ -19,10 +19,12 @@ Make the detached embedding process the authoritative detector of embedding-pipe
 ## Prompt
 Using the helpers added in T01 (`record_embedding_failure(reason)`, `clear_embedding_failure()` in `src/ccrecall/health.py`), instrument the embedding process per design `## Architecture` (Tier 3, embedding-failure detection) and `## Edge Cases`.
 
-In `src/ccrecall/hooks/backfill_embeddings.py`, the capability-failure points already exist and currently only `logger.error` + return `EXIT_ABORT`:
-- `chunk_vec_queryable(conn)` is False (sqlite-vec unavailable) — around lines 233 and 318.
-- `model_available(...)` is False (model unavailable / download blocked) — around line 294.
-At each, call `record_embedding_failure(reason=...)` with a distinct reason string (e.g. `"vec_unavailable"`, `"model_unavailable"`) before returning `EXIT_ABORT`. On the **success path** — when a backfill run completes having embedded rows without a capability abort — call `clear_embedding_failure()`.
+In `src/ccrecall/hooks/backfill_embeddings.py`, instrument ONLY the capability-failure points inside the embedding pipeline function `run()` (def at line 260) — currently each only `logger.error` + return `EXIT_ABORT`:
+- `model_available(...)` is False (model unavailable / download blocked) — line 294.
+- `chunk_vec_queryable(conn)` is False (sqlite-vec unavailable) — line 318.
+At each, call `record_embedding_failure(reason=...)` with a distinct reason string (e.g. `"vec_unavailable"`, `"model_unavailable"`) before returning `EXIT_ABORT`. On the **success path** — when a `run()` completes having embedded rows without a capability abort — call `clear_embedding_failure()`.
+
+**Do NOT instrument `run_status()` (def at line 218) — its `chunk_vec_queryable` check at line 233 is the read-only `--status` diagnostic, not the embedding pipeline.** Recording there would fire a false "embeddings failing" alert every time the user runs `ccrecall backfill embeddings --status` on a vec-unavailable machine, violating the design Edge Case "must key off capability failure recorded by the embedding process" — a status probe is not the embedding process.
 
 In `src/ccrecall/hooks/sync_current.py`, find the embedding step on the current-session sync path (it embeds the just-synced exchanges). Apply the same rule: on a structural capability failure, `record_embedding_failure(...)`; on a clean embedding pass, `clear_embedding_failure()`. Do not record for ordinary per-row CONTENT_ERROR (`-1`) outcomes — those are self-healing degradation of a single branch, not a pipeline-capability failure (design Non-goals + Edge Cases: "coverage mid-backfill must not trip the alert").
 
