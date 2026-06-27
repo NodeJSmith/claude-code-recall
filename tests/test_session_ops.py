@@ -613,6 +613,53 @@ class TestEmbedBranchChunks:
 
         conn.close()
 
+    def test_zero_exchange_branch_stamps_watermark(self, tmp_path):
+        """An active branch with no embeddable exchange (all-assistant messages,
+        as in a sub-agent/sidechain transcript) embeds nothing but advances its
+        watermark to current, so the backfill stops re-selecting it and stalling."""
+        conn = _make_vec_conn(tmp_path)
+        if conn is None:
+            pytest.skip("sqlite-vec not available")
+
+        cursor = conn.cursor()
+        branch_id = _seed_branch(cursor)  # embedding_version defaults to 0
+        conn.commit()
+
+        # Assistant-only messages form no user->assistant exchange pair.
+        msgs = [{"role": "assistant", "content": "sidechain output", "timestamp": "2024-01-01T00:00:30", "uuid": None}]
+
+        with patch("ccrecall.session_ops.embed_text") as mock_embed:
+            returned = embed_branch_chunks(cursor, branch_id, msgs, is_active=True, vec_writable=True)
+
+        assert returned == 0
+        assert mock_embed.call_count == 0, "no exchange means no embedding"
+        ev = cursor.execute("SELECT embedding_version FROM branches WHERE id = ?", (branch_id,)).fetchone()[0]
+        assert ev == EMBEDDING_VERSION, "zero-exchange branch must advance watermark to leave the eligible set"
+
+        conn.close()
+
+    def test_zero_exchange_inactive_branch_not_stamped(self):
+        """An inactive branch must not have its watermark set by the zero-exchange
+        path: the is_active guard early-returns before any stamping. Uses a plain
+        connection — this path never reaches the vector layer, so it must run even
+        where sqlite-vec is unavailable."""
+        conn = sqlite3.connect(":memory:")
+        conn.executescript(SCHEMA)
+        conn.commit()
+
+        cursor = conn.cursor()
+        branch_id = _seed_branch(cursor, is_active=0)
+        conn.commit()
+
+        msgs = [{"role": "assistant", "content": "x", "timestamp": "2024-01-01T00:00:30", "uuid": None}]
+        returned = embed_branch_chunks(cursor, branch_id, msgs, is_active=False, vec_writable=True)
+
+        assert returned == 0
+        ev = cursor.execute("SELECT embedding_version FROM branches WHERE id = ?", (branch_id,)).fetchone()[0]
+        assert ev == 0, "inactive branch must not be stamped"
+
+        conn.close()
+
     def test_prune_on_exchange_shrink(self, tmp_path):
         """Removing an exchange deletes its chunks and chunk_vec rows (cascade)."""
         conn = _make_vec_conn(tmp_path)

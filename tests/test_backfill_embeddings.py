@@ -109,6 +109,38 @@ def _insert_branch_with_messages(
     return branch_id
 
 
+def _insert_assistant_only_branch(conn: sqlite3.Connection, num_messages: int = 3) -> int:
+    """Insert an active branch whose only messages are assistant-role (no user turns).
+
+    Mirrors a sub-agent / sidechain transcript: eligible under CHUNK_EMBEDDABLE
+    (it has branch_messages) but build_exchange_pairs yields nothing, so there is
+    nothing to embed. Such a branch must not perpetually re-select and stall.
+    """
+    _branch_counter[0] += 1
+    uid = _branch_counter[0]
+
+    conn.execute("INSERT INTO sessions(uuid, project_id) VALUES (?, NULL)", (f"sess-{uid}",))
+    session_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+    conn.execute(
+        "INSERT INTO branches(session_id, leaf_uuid, summary_version, is_active) VALUES (?, ?, 0, 1)",
+        (session_id, f"leaf-{uid}"),
+    )
+    branch_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+    for i in range(num_messages):
+        ts_h = 10 + i
+        conn.execute(
+            "INSERT INTO messages(session_id, uuid, role, content, timestamp) VALUES (?, ?, 'assistant', ?, ?)",
+            (session_id, f"a-{uid}-{i}", f"Assistant message {i}", f"2024-01-01T{ts_h:02d}:00:00Z"),
+        )
+        msg_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.execute("INSERT INTO branch_messages(branch_id, message_id) VALUES (?, ?)", (branch_id, msg_id))
+
+    conn.commit()
+    return branch_id
+
+
 def _branch_embedding_version(conn: sqlite3.Connection, branch_id: int) -> int | None:
     row = conn.execute("SELECT embedding_version FROM branches WHERE id = ?", (branch_id,)).fetchone()
     return row[0] if row else None
@@ -431,6 +463,41 @@ class TestBackfillNoProgressGuard:
         # Row was never stamped (embed was a no-op), confirming exit via the guard.
         ev = _branch_embedding_version(conn, bid)
         assert ev != EMBEDDING_VERSION, "Row should not be at EMBEDDING_VERSION — embed was no-op"
+
+
+@_VEC_SKIP
+class TestBackfillZeroExchangeBranches:
+    """Assistant-only (sub-agent/sidechain) branches are eligible under
+    CHUNK_EMBEDDABLE but have no embeddable exchange. They must leave the
+    eligible set instead of re-selecting forever and stalling the backfill."""
+
+    def test_assistant_only_branch_does_not_stall(self):
+        """A branch with no user turns embeds nothing but advances its watermark,
+        so it isn't perpetually re-selected."""
+        conn = make_vec_conn()
+        bid = _insert_assistant_only_branch(conn)
+
+        _run_backfill_with_stub(conn)
+
+        assert _chunk_count(conn) == 0
+        assert _branch_embedding_version(conn, bid) == EMBEDDING_VERSION
+
+    def test_assistant_only_does_not_block_real_branch(self):
+        """A whole batch of zero-exchange branches must not prevent a real,
+        embeddable branch behind them from being reached and embedded — the
+        roadblock that the pre-fix no-progress guard hit."""
+        conn = make_vec_conn()
+        # Insert the zero-exchange branches first so they fill the first batch
+        # (selection is ORDER BY id) and the real branch lands in a later batch.
+        for _ in range(BATCH_SIZE):
+            _insert_assistant_only_branch(conn)
+        real = _insert_branch_with_messages(conn)
+
+        _run_backfill_with_stub(conn)
+
+        assert _branch_has_chunk_vecs(conn, real), (
+            "real branch must embed, not be blocked behind zero-exchange branches"
+        )
 
 
 # Failure modes: model failure marks nothing; content errors mark only that row
