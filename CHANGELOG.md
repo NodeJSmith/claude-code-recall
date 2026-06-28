@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.13.0](https://github.com/NodeJSmith/claude-code-recall/compare/v0.12.0...v0.13.0) (2026-06-28)
+
+
+### Features
+
+* ccrecall surfacing model — proactive alerts + reactive caveat ([#44](https://github.com/NodeJSmith/claude-code-recall/issues/44)) ([ce3a000](https://github.com/NodeJSmith/claude-code-recall/commit/ce3a0007f0cdfe17d31aafe4007b755f9c8eff6e))
+* honest branch-grain embedding coverage in stats and --status ([#43](https://github.com/NodeJSmith/claude-code-recall/issues/43)) ([98db6e3](https://github.com/NodeJSmith/claude-code-recall/commit/98db6e3a0054f44bff90a620e82eef3a4dd22c57))
+
+
+### Bug Fixes
+
+* stamp embedding watermark for zero-exchange branches ([#41](https://github.com/NodeJSmith/claude-code-recall/issues/41)) ([1a6f132](https://github.com/NodeJSmith/claude-code-recall/commit/1a6f1323438ce9726ce6a0b66f3d6b8f26e4d2f3))
+
 ## [0.12.0](https://github.com/NodeJSmith/claude-code-recall/compare/v0.11.1...v0.12.0) (2026-06-26)
 
 
