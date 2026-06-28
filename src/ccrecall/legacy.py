@@ -35,6 +35,7 @@ from ccrecall.db import (
     CONFIG_PATH,
     DEFAULT_DB_PATH,
     DEFAULT_SETTINGS,
+    atomic_write_json,
     ensure_parent_dir,
     get_db_connection,
     remove_pid_file,
@@ -130,15 +131,7 @@ def copy_legacy_config(src_config: Path) -> bool:
         return False
 
     kept = portable_config(old)
-    ensure_parent_dir(CONFIG_PATH)
-    fd, tmp = tempfile.mkstemp(dir=CONFIG_PATH.parent, suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w") as fh:
-            fh.write(json.dumps(kept, indent=2) + "\n")
-        Path(tmp).replace(CONFIG_PATH)
-    except Exception:
-        Path(tmp).unlink(missing_ok=True)
-        raise
+    atomic_write_json(CONFIG_PATH, kept)
     return True
 
 

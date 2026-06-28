@@ -8,12 +8,27 @@ import sqlite_vec
 from token_helpers import TOKEN_JNL, token_session, token_turn
 
 from ccrecall.db import _ensure_vec_schema
+from ccrecall.health import clear_embedding_failure, record_embedding_failure
 from ccrecall.schema import SCHEMA
 from ccrecall.token_analytics import import_session
 from ccrecall.token_parser import ToolCall
 from ccrecall.token_schema import ensure_schema
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures"
+
+
+def patched_record(sidecar: Path):
+    """side_effect redirecting record_embedding_failure to a tmp sidecar path.
+
+    Shared by the embedding-status recording tests in test_backfill_embeddings
+    and test_sync_hook so the real ~/.ccrecall sidecar is never touched.
+    """
+    return lambda reason: record_embedding_failure(reason, path=sidecar)
+
+
+def patched_clear(sidecar: Path):
+    """side_effect redirecting clear_embedding_failure to a tmp sidecar path."""
+    return lambda: clear_embedding_failure(path=sidecar)
 
 
 def make_vec_conn(db_path: str = ":memory:") -> sqlite3.Connection:

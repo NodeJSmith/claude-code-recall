@@ -1,10 +1,25 @@
 """Tests for memory-context.py — session selection and context injection."""
 
+import ast
+import importlib.util
+import json
 import sqlite3
+from pathlib import Path
 from uuid import uuid4
 
+from ccrecall.health import (
+    ALERT_CANT_PERSIST,
+    ALERT_EMBEDDINGS_FAILING,
+    REASON_MODEL_UNAVAILABLE,
+    REASON_VEC_UNAVAILABLE,
+    clear_embedding_failure,
+    probe_db,
+    record_embedding_failure,
+)
 from ccrecall.hooks.memory_context import (
+    TOPIC_PREVIEW_MAX_CHARS,
     _build_fallback_context,
+    _proactive_alert_block,
     build_context,
     select_sessions,
 )
@@ -689,7 +704,7 @@ class TestBuildFallbackContext:
 
         # Build the same thing via render_context_summary directly
         exchanges = build_exchange_pairs(messages)
-        topic = exchanges[0]["user"][:120] if exchanges else ""
+        topic = exchanges[0]["user"][:TOPIC_PREVIEW_MAX_CHARS] if exchanges else ""
         disposition = detect_disposition(exchanges, commits=commits)
         summary_json = {
             "version": 3,
@@ -736,3 +751,340 @@ class TestBuildFallbackContext:
         assert fallback_result == render_result, (
             "_build_fallback_context() should produce identical output to render_context_summary()"
         )
+
+
+class TestProactiveAlerts:
+    """Tests for proactive health-alert injection in the SessionStart hook.
+
+    Each test calls _proactive_alert_block() directly with injected sidecar paths
+    so the real ~/.ccrecall/ directory is never touched.
+    """
+
+    def _settings(self) -> dict:
+        return {"alert_snooze_hours": 24}
+
+    # ── (f) import inspection ────────────────────────────────────────────
+
+    def test_ac10_no_fastembed_on_hook_path(self):
+        """health.py (the embedding-alert module) must not import fastembed or onnxruntime.
+
+        The SessionStart hook reads the embedding-status sidecar via health.py.
+        health.py must never import the vector/embedding stack — doing so would violate
+        the ~440ms hot-path invariant. Verified via AST inspection of health.py source.
+
+        Note: db.py transitively imports fastembed (via embeddings.py, guarded try/except)
+        for the embedding dimension constant — that is pre-existing behavior unrelated to
+        the proactive alert path. This test specifically guards health.py, which is the
+        new module wired into the SessionStart hook path for alert evaluation.
+        """
+        spec = importlib.util.find_spec("ccrecall.health")
+        assert spec is not None, "ccrecall.health not found"
+        source = Path(spec.origin).read_text()
+        tree = ast.parse(source)
+
+        imported: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    imported.add(alias.name.split(".")[0])
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                imported.add(node.module.split(".")[0])
+
+        for lib in ("fastembed", "onnxruntime", "sqlite_vec"):
+            assert lib not in imported, f"health.py imports {lib} — violates AC#10 hot-path invariant"
+
+    # ── (a) dir unwritable → block fires even with no sessions ────────────
+
+    def test_ac1_dir_unwritable_no_sessions(self, tmp_path):
+        """With dir unwritable, proactive block fires even when there are no sessions.
+
+        Cannot-persist alert leads; sessions, origin, pending all absent.
+        """
+        unwritable = tmp_path / "no-write"
+        unwritable.mkdir()
+        unwritable.chmod(0o555)
+
+        try:
+            block = _proactive_alert_block(
+                self._settings(),
+                conn=None,
+                db_available=False,
+                _marker_path=unwritable / ".probe",
+                _snooze_path=tmp_path / "snooze.json",
+                _status_path=tmp_path / "status.json",
+            )
+        finally:
+            unwritable.chmod(0o755)
+
+        assert "## ⚠" in block, "Expected alert heading"
+        assert ALERT_CANT_PERSIST in block.lower() or "persist" in block.lower() or "write" in block.lower()
+
+    def test_ac1_block_fires_when_db_available_but_connection_failed(self, tmp_path):
+        """When DB exists but connection fails, probe_db(None) fires the cant-persist alert."""
+        block = _proactive_alert_block(
+            self._settings(),
+            conn=None,  # connection failed
+            db_available=True,  # but DB file exists → probe is invoked with None
+            _marker_path=tmp_path / ".probe",  # writable → fs probe passes
+            _snooze_path=tmp_path / "snooze.json",
+            _status_path=tmp_path / "status.json",
+        )
+
+        assert "## ⚠" in block
+        # cant_persist alert from DB probe (conn=None)
+        assert "cannot" in block.lower() or "persist" in block.lower() or "database" in block.lower()
+
+    # ── (b) DB read-only → block; concurrent lock → no false alert ────────
+
+    def test_ac2_db_readonly_block(self, tmp_path):
+        """When the DB directory is unwritable, connect fails → probe_db(None) → block.
+
+        On Linux/SQLite with WAL mode, making only the DB *file* read-only is not
+        sufficient to trigger the probe (BEGIN IMMEDIATE succeeds because SQLite
+        defers the actual write-lock on the file until COMMIT). The reliable scenario
+        is a read-only *directory*: SQLite can't create the WAL/shm sidecar files →
+        sqlite3.connect() itself raises → conn=None → probe_db(None) reports fault.
+        This matches the primary production failure mode: a disk-full or permission
+        change on ~/.ccrecall prevents DB access entirely.
+        """
+        ccrecall_dir = tmp_path / "ccrecall"
+        ccrecall_dir.mkdir()
+        db_path = ccrecall_dir / "conversations.db"
+
+        # Create a valid DB, then seal the directory
+        setup = sqlite3.connect(str(db_path))
+        setup.execute("CREATE TABLE sentinel (id INTEGER PRIMARY KEY)")
+        setup.commit()
+        setup.close()
+
+        ccrecall_dir.chmod(0o555)  # read/execute only — SQLite can't create WAL files
+        try:
+            try:
+                conn = sqlite3.connect(str(db_path))
+                conn.execute("PRAGMA journal_mode = WAL")  # forces WAL sidecar creation
+                conn.execute("PRAGMA busy_timeout = 100")
+            except Exception:
+                conn = None
+
+            block = _proactive_alert_block(
+                self._settings(),
+                conn=conn,
+                db_available=True,  # file exists; connect failed → probe_db(None)
+                _marker_path=tmp_path / ".probe",  # writable (outside sealed dir)
+                _snooze_path=tmp_path / "snooze.json",
+                _status_path=tmp_path / "status.json",
+            )
+            if conn is not None:
+                conn.close()
+        finally:
+            ccrecall_dir.chmod(0o755)
+
+        assert "## ⚠" in block, "Expected proactive block when DB is inaccessible"
+
+    def test_ac2_concurrent_lock_no_false_alert(self, tmp_path):
+        """A concurrent write-lock holder does NOT produce a false cant-persist alert.
+
+        probe_db treats OperationalError("database is locked"/"busy") as success.
+        """
+        db_path = tmp_path / "test.db"
+        setup = sqlite3.connect(str(db_path))
+        setup.execute("PRAGMA journal_mode = WAL")
+        setup.execute("CREATE TABLE sentinel (id INTEGER PRIMARY KEY)")
+        setup.commit()
+        setup.close()
+
+        # conn1 holds a write transaction
+        conn1 = sqlite3.connect(str(db_path))
+        conn1.execute("PRAGMA journal_mode = WAL")
+        conn1.execute("BEGIN IMMEDIATE")
+
+        # conn2 probes — should see "locked" and report success
+        conn2 = sqlite3.connect(str(db_path))
+        conn2.execute("PRAGMA journal_mode = WAL")
+        conn2.execute("PRAGMA busy_timeout = 50")  # short so test is fast
+
+        result = probe_db(conn2)
+
+        conn1.execute("ROLLBACK")
+        conn1.close()
+        conn2.close()
+
+        assert result.ok, f"Lock contention must not be a fault: {result.reason}"
+
+    # ── (c) embedding-status sidecar → "embeddings failing" block ─────────
+
+    def test_ac3_embedding_status_sidecar(self, tmp_path):
+        """Embedding-status sidecar present → 'embeddings failing' block named.
+
+        Block must name the reason without importing fastembed/onnxruntime.
+        """
+        status_path = tmp_path / "embedding-status.json"
+        record_embedding_failure(REASON_VEC_UNAVAILABLE, path=status_path)
+
+        block = _proactive_alert_block(
+            self._settings(),
+            conn=None,
+            db_available=False,
+            _marker_path=tmp_path / ".probe",
+            _snooze_path=tmp_path / "snooze.json",
+            _status_path=status_path,
+        )
+
+        assert "## ⚠" in block
+        assert "embedding" in block.lower()
+        # The machine-readable reason code must be mapped to prose — the user should
+        # never see a raw code like "vec_unavailable" as the only cause text.
+        assert REASON_VEC_UNAVAILABLE not in block, (
+            "Raw reason code must be mapped to human-readable prose before injection"
+        )
+        assert "vector" in block.lower(), "Mapped prose for vec_unavailable must mention 'vector'"
+
+    def test_ac3_embedding_reason_model_unavailable(self, tmp_path):
+        """model_unavailable reason flows through into the alert block."""
+        status_path = tmp_path / "embedding-status.json"
+        record_embedding_failure(REASON_MODEL_UNAVAILABLE, path=status_path)
+
+        block = _proactive_alert_block(
+            self._settings(),
+            conn=None,
+            db_available=False,
+            _marker_path=tmp_path / ".probe",
+            _snooze_path=tmp_path / "snooze.json",
+            _status_path=status_path,
+        )
+
+        assert "## ⚠" in block
+        assert "embedding" in block.lower()
+
+    # ── (d) both alerts active → single combined block ─────────────────────
+
+    def test_ac7_both_alerts_single_block(self, tmp_path):
+        """Both FS fault + embedding failure → exactly one ## ⚠ heading."""
+        unwritable = tmp_path / "no-write"
+        unwritable.mkdir()
+        unwritable.chmod(0o555)
+
+        status_path = tmp_path / "embedding-status.json"
+        record_embedding_failure(REASON_VEC_UNAVAILABLE, path=status_path)
+
+        try:
+            block = _proactive_alert_block(
+                self._settings(),
+                conn=None,
+                db_available=False,
+                _marker_path=unwritable / ".probe",
+                _snooze_path=tmp_path / "snooze.json",
+                _status_path=status_path,
+            )
+        finally:
+            unwritable.chmod(0o755)
+
+        heading_count = block.count("## ⚠")
+        assert heading_count == 1, f"Expected exactly one alert heading; got {heading_count}"
+        # Both alerts named in the single block
+        assert "persist" in block.lower() or "write" in block.lower() or "runtime" in block.lower()
+        assert "embedding" in block.lower()
+
+    # ── (e) exception in proactive path → "" (hook still works) ───────────
+
+    def test_ac9_proactive_exception_degrades_to_empty(self, tmp_path, monkeypatch):
+        """Forced exception inside the proactive path → '' (defensive wrap)."""
+
+        def _explode(**_kwargs):
+            raise RuntimeError("injected test failure")
+
+        # Patch inside memory_context's namespace (imported from health)
+        monkeypatch.setattr("ccrecall.hooks.memory_context.probe_filesystem", _explode)
+
+        block = _proactive_alert_block(
+            self._settings(),
+            conn=None,
+            db_available=False,
+            _marker_path=tmp_path / ".probe",
+            _snooze_path=tmp_path / "snooze.json",
+            _status_path=tmp_path / "status.json",
+        )
+
+        assert block == "", "Defensive wrap must return '' on exception"
+
+    # ── (g) condition clears → no block; snooze record gone ────────────────
+
+    def test_ac5_condition_clears_no_block_snooze_reset(self, tmp_path):
+        """After condition clears, next session injects no block; snooze record gone.
+
+        Auto-clear: when the active key is absent from active_keys,
+        evaluate_alerts drops it from the ledger so a future recurrence fires immediately.
+        """
+        snooze_path = tmp_path / "snooze.json"
+        status_path = tmp_path / "status.json"
+        marker_path = tmp_path / ".probe"
+
+        # Step 1: record an embedding failure → alert fires
+        record_embedding_failure(REASON_VEC_UNAVAILABLE, path=status_path)
+        block1 = _proactive_alert_block(
+            self._settings(),
+            conn=None,
+            db_available=False,
+            _marker_path=marker_path,
+            _snooze_path=snooze_path,
+            _status_path=status_path,
+        )
+        assert "## ⚠" in block1, "Alert should have fired on first session"
+        assert snooze_path.exists(), "Snooze ledger should have been written"
+
+        # Step 2: embedding process clears the status (condition resolved)
+        clear_embedding_failure(path=status_path)
+        assert not status_path.exists()
+
+        # Step 3: next session — no active conditions → no block, ledger reset
+        block2 = _proactive_alert_block(
+            self._settings(),
+            conn=None,
+            db_available=False,
+            _marker_path=marker_path,
+            _snooze_path=snooze_path,
+            _status_path=status_path,
+        )
+        assert block2 == "", "No block should fire after condition is cleared"
+
+        # Ledger should be empty / the key should be gone (auto-clear)
+        if snooze_path.exists():
+            ledger = json.loads(snooze_path.read_text())
+            assert ALERT_EMBEDDINGS_FAILING not in ledger, "Snooze entry must be auto-cleared when condition is gone"
+
+    # ── Block heading (ordering is structurally enforced) ──────────────────
+
+    def test_proactive_block_has_alert_heading(self, tmp_path):
+        """The proactive block leads with the ## ⚠ heading.
+
+        The block sits ahead of origin/pending/context, enforced
+        structurally by the single assembly f-string in memory_context.main
+        (`directive + proactive + origin + pending + context`); this test verifies
+        the block itself produces the alert heading the assembly relies on.
+        """
+        status_path = tmp_path / "embedding-status.json"
+        record_embedding_failure(REASON_VEC_UNAVAILABLE, path=status_path)
+        snooze_path = tmp_path / "snooze.json"
+
+        block = _proactive_alert_block(
+            self._settings(),
+            conn=None,
+            db_available=False,
+            _marker_path=tmp_path / ".probe",
+            _snooze_path=snooze_path,
+            _status_path=status_path,
+        )
+
+        assert block.startswith("## ⚠"), "Proactive block must start with the alert heading"
+
+    def test_healthy_system_no_proactive_block(self, tmp_path):
+        """With no faults and no embedding failure, proactive block is empty."""
+        block = _proactive_alert_block(
+            self._settings(),
+            conn=None,
+            db_available=False,
+            _marker_path=tmp_path / ".probe",  # writable tmp → fs probe passes
+            _snooze_path=tmp_path / "snooze.json",
+            _status_path=tmp_path / "status.json",  # absent → no embedding failure
+        )
+        assert block == "", f"Expected empty block on healthy system; got: {block!r}"

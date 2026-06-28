@@ -13,6 +13,7 @@ import ccrecall.db as db_module
 from ccrecall.db import (
     CURRENT_ONBOARDING_VERSION,
     DEFAULT_SETTINGS,
+    atomic_write_json,
     fetch_branch_messages,
     get_db_connection,
     load_config,
@@ -87,6 +88,7 @@ class TestLoadSettings:
         assert DEFAULT_SETTINGS["max_context_sessions"] == 2
         assert DEFAULT_SETTINGS["logging_enabled"] is False
         assert isinstance(DEFAULT_SETTINGS["exclude_projects"], list)
+        assert DEFAULT_SETTINGS["alert_snooze_hours"] == 24
 
 
 class TestLoadConfig:
@@ -168,6 +170,30 @@ class TestLogHookException:
                 log_hook_exception("test")  # suppressed; must return normally
 
 
+class TestAtomicWriteJson:
+    """atomic_write_json is the single runtime-dir atomic-write helper."""
+
+    def test_writes_json_with_trailing_newline(self, tmp_path):
+        path = tmp_path / "out.json"
+        atomic_write_json(path, {"a": 1})
+        assert path.read_text() == json.dumps({"a": 1}, indent=2) + "\n"
+
+    def test_no_tmp_orphan_on_success(self, tmp_path):
+        atomic_write_json(tmp_path / "out.json", {})
+        assert list(tmp_path.glob("*.tmp")) == []
+
+    def test_creates_parent_dir(self, tmp_path):
+        path = tmp_path / "sub" / "out.json"
+        atomic_write_json(path, {})
+        assert path.exists()
+
+    def test_no_tmp_orphan_on_write_error(self, tmp_path):
+        """A serialization failure must clean up the temp file and re-raise."""
+        with pytest.raises(TypeError):
+            atomic_write_json(tmp_path / "out.json", {"bad": object()})
+        assert list(tmp_path.glob("*.tmp")) == []
+
+
 class TestLoadSettingsWithConfig:
     """load_settings() must stay safe when config.json contains non-dict JSON."""
 
@@ -190,6 +216,20 @@ class TestLoadSettingsWithConfig:
         assert result["auto_inject_context"] is False
         assert result["max_context_sessions"] == 5
         assert result["logging_enabled"] is False  # unchanged default
+
+    def test_alert_snooze_hours_override_and_default(self, tmp_path, monkeypatch):
+        """The snooze window changes when alert_snooze_hours is set in config;
+        the 24h default applies when the key is absent."""
+        cfg = tmp_path / "config.json"
+        monkeypatch.setattr("ccrecall.db.CONFIG_PATH", cfg)
+
+        # Absent → default of 24 applies.
+        cfg.write_text(json.dumps({"auto_inject_context": True}))
+        assert load_settings()["alert_snooze_hours"] == 24
+
+        # Present → the configured value flows through load_settings unchanged.
+        cfg.write_text(json.dumps({"alert_snooze_hours": 12}))
+        assert load_settings()["alert_snooze_hours"] == 12
 
     def test_logging_enabled_and_exclude_projects_honored(self, tmp_path, monkeypatch):
         """logging_enabled and exclude_projects are user-overridable from config.json."""

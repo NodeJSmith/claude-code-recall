@@ -26,6 +26,7 @@ from whenever import Instant
 
 from ccrecall.db import (
     CLEAR_HANDOFF_FILENAME,
+    DEFAULT_SETTINGS,
     get_db_connection,
     get_db_path,
     load_config,
@@ -36,6 +37,15 @@ from ccrecall.formatting import (
     format_time_full,
     get_project_key,
     normalize_cwd,
+)
+from ccrecall.health import (
+    ALERT_CANT_PERSIST,
+    ALERT_EMBEDDINGS_FAILING,
+    build_alert_block,
+    evaluate_alerts,
+    probe_db,
+    probe_filesystem,
+    read_embedding_status,
 )
 from ccrecall.models import LOGGER_NAME, HookInput
 from ccrecall.serialization import decode_json_column
@@ -52,6 +62,7 @@ from ccrecall.summarizer import (
 
 # Reject a clear-handoff written more than this many seconds ago (stale guard).
 HANDOFF_STALE_SECONDS = 30
+
 # Uncached topic fallback truncates the first user message to this many chars.
 TOPIC_PREVIEW_MAX_CHARS = 120
 # Most recent prior branches scanned when picking sessions to inject.
@@ -61,6 +72,113 @@ _CANDIDATE_LIMIT = 20
 def _emit_empty() -> None:
     """Print the empty SessionStart response (inject no context)."""
     print(json.dumps({}))
+
+
+def _emit_with_proactive(proactive_block: str) -> None:
+    """Emit hook output containing only the proactive alert block (no session context).
+
+    Falls back to _emit_empty() when there is no proactive block to inject.
+    Hook stdout must never contain bare text — only the JSON envelope.
+    """
+    if not proactive_block:
+        _emit_empty()
+        return
+    print(
+        json.dumps(
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "SessionStart",
+                    "additionalContext": proactive_block,
+                }
+            }
+        )
+    )
+
+
+def _proactive_alert_block(
+    settings: dict,
+    conn: sqlite3.Connection | None,
+    db_available: bool,
+    *,
+    _marker_path: Path | None = None,
+    _snooze_path: Path | None = None,
+    _status_path: Path | None = None,
+) -> str:
+    """Build the proactive health-alert block for SessionStart injection.
+
+    Evaluates both proactive alert classes:
+    - Filesystem writability probe (active, cheap, no DB required)
+    - Embedding-status sidecar read (passive, plain file read — never imports
+      fastembed/onnxruntime/sqlite_vec — hot-path invariant)
+    - DB write-lock probe (active, on the already-open connection, or conn=None
+      when the connection itself failed — that failure becomes a fault)
+
+    Passes active keys through the snooze ledger (fire / suppress / auto-clear)
+    and builds ONE combined block for whatever fires.
+
+    Defensive wrapper: follows the _pending_question_block precedent — any
+    exception degrades to "" so the hook is never broken and context injection is
+    unaffected.
+
+    _marker_path / _snooze_path / _status_path: test injection points for sidecar
+    paths; None means use the health.py function defaults (production paths).
+    """
+    try:
+        # 1. Filesystem probe — no DB needed, unconditional.
+        fs_result = probe_filesystem() if _marker_path is None else probe_filesystem(_marker_path)
+
+        # 2. Embedding-status sidecar — plain file read only, no vec/fastembed load.
+        embedding_status = read_embedding_status() if _status_path is None else read_embedding_status(_status_path)
+
+        # 3. DB probe — only when the DB file exists; a missing DB is not a fault
+        # (fresh install). conn=None here means the connection failed (dir/WAL
+        # unwritable), which probe_db correctly classifies as a persist fault.
+        db_probe = probe_db(conn) if db_available else None
+
+        # 4. Compute active alert keys and human-readable reasons.
+        active_keys: set[str] = set()
+        fault_reason = ""
+        embedding_reason = ""
+
+        if not fs_result.ok:
+            active_keys.add(ALERT_CANT_PERSIST)
+            fault_reason = fs_result.reason
+
+        if db_probe is not None and not db_probe.ok:
+            active_keys.add(ALERT_CANT_PERSIST)
+            # Prefer the FS reason (more actionable) when both probes fail.
+            if not fault_reason:
+                fault_reason = db_probe.reason
+
+        if embedding_status is not None:
+            active_keys.add(ALERT_EMBEDDINGS_FAILING)
+            # Pass the raw reason code; build_alert_block translates it to prose
+            # (the mapping lives in health.py beside the REASON_* constants).
+            embedding_reason = embedding_status.get("reason", "")
+
+        # 5. Evaluate snooze ledger: fire / suppress / auto-clear.
+        # load_settings() always carries alert_snooze_hours from DEFAULT_SETTINGS;
+        # fall back to the canonical default only for sparse (test) settings dicts.
+        snooze_hours = float(settings.get("alert_snooze_hours", DEFAULT_SETTINGS["alert_snooze_hours"]))
+        keys_to_fire = (
+            evaluate_alerts(active_keys, snooze_hours)
+            if _snooze_path is None
+            else evaluate_alerts(active_keys, snooze_hours, _snooze_path)
+        )
+
+        # 6. Build one combined block.
+        return build_alert_block(
+            keys_to_fire,
+            fault_reason=fault_reason,
+            embedding_reason=embedding_reason,
+        )
+
+    except Exception:
+        # Deliberately broad: this optional alert must never break the SessionStart
+        # hook or drop the main context injection. Log best-effort (no-op unless
+        # logging_enabled) so the failure isn't silently lost.
+        logging.getLogger(LOGGER_NAME).exception("proactive alert block failed")
+        return ""
 
 
 def _pending_question_block(sessions: list[dict], cwd: str) -> str:
@@ -446,33 +564,72 @@ def main():
     # an explicit "" must stay "" so the source gate below still rejects it.
     source = hook_input.source if hook_input.source is not None else "startup"
 
-    # Only inject on fresh sessions
+    # Only SessionStart events get proactive alerts or context injection.
     if source not in ("startup", "clear"):
         _emit_empty()
         return
 
-    # Gate: require onboarding to be completed before injecting context
+    # ── DB connection — opened early for the DB probe ──────────────────────────
+    # We attempt the connection here so probe_db has a live conn to work with.
+    # A connection failure (dir/WAL unwritable) leaves conn=None; probe_db(None)
+    # correctly classifies that as a persist fault.
+    # The db_path.exists() guard prevents creating a fresh DB on a first-run
+    # install where the DB hasn't been initialised yet (not a fault condition).
+    db_path = get_db_path(settings)
+    db_available = db_path.exists()
+    conn: sqlite3.Connection | None = None
+    if db_available:
+        try:
+            conn = get_db_connection(settings)
+        except Exception:
+            # conn stays None; DB probe will report this as a persist fault.
+            logger.debug("DB connection failed — DB probe will report fault")
+
+    # ── Proactive alert evaluation ──────────────────────────────────────────────
+    # Must run before ALL early-return gates so alerts fire even when sessions is
+    # empty, the DB is inaccessible, or onboarding is incomplete.
+    proactive_block = _proactive_alert_block(settings, conn, db_available)
+
+    # ── Gate: onboarding incomplete ────────────────────────────────────────────
     config = load_config()
     if not config.get("onboarding_completed"):
-        _emit_empty()
+        # The proactive write-failure alert (if active) still surfaces here:
+        # it explains why onboarding config.json can't be saved. onboarding.py
+        # fires as a separate hook with its own injection; if both would appear,
+        # the write-failure alert wins in this hook (it's the cause of the blockage).
+        if conn is not None:
+            conn.close()
+        _emit_with_proactive(proactive_block)
         return
 
+    # ── Gate: context injection disabled ───────────────────────────────────────
     if not settings.get("auto_inject_context", True):
         logger.info("Context injection disabled by settings")
-        _emit_empty()
+        if conn is not None:
+            conn.close()
+        _emit_with_proactive(proactive_block)
         return
 
+    # ── Gate: must have cwd + session_id to inject session context ─────────────
     if not cwd or not session_id:
-        _emit_empty()
+        if conn is not None:
+            conn.close()
+        _emit_with_proactive(proactive_block)
         return
 
-    db_path = get_db_path(settings)
-    if not db_path.exists():
-        _emit_empty()
+    # ── Gate: DB must exist for context injection ───────────────────────────────
+    if not db_available:
+        _emit_with_proactive(proactive_block)
         return
 
+    # ── Gate: DB connection must be open for context injection ──────────────────
+    if conn is None:
+        # Connection failed earlier; proactive alert already captures this fault.
+        _emit_with_proactive(proactive_block)
+        return
+
+    # ── Context injection ───────────────────────────────────────────────────────
     try:
-        conn = get_db_connection(settings)
         project_key = get_project_key(cwd)
         max_sessions = settings.get("max_context_sessions", 2)
         sessions = select_sessions(
@@ -484,15 +641,14 @@ def main():
             db_path=db_path,
             cwd=cwd,
         )
-        conn.close()
 
         if not sessions:
-            _emit_empty()
+            _emit_with_proactive(proactive_block)
             return
 
         context = build_context(sessions)
         if not context:
-            _emit_empty()
+            _emit_with_proactive(proactive_block)
             return
 
         logger.info("Injecting context from %s session(s) for project %s", len(sessions), project_key)
@@ -513,12 +669,16 @@ def main():
             "`recall-conversations` skill rather than guessing."
         )
 
-        # Wrap in directive + origin block + (optional pending-question warning)
-        # + session content. The warning goes high: an unresolved decision is the
-        # highest-signal thing to recover, and earlier tokens get more attention.
+        # Assemble: directive + proactive (if any) + origin + pending + context.
+        # The directive is first (it tells Claude how to read the rest); the
+        # proactive block immediately follows it, ahead of origin / pending /
+        # prior-session content (highest-attention position for the alert).
         origin = build_origin_block(source, sessions)
         pending = _pending_question_block(sessions, cwd)
-        full_context = f"{directive}\n\n{origin}\n\n{pending}{context}"
+        if proactive_block:
+            full_context = f"{directive}\n\n{proactive_block}\n\n{origin}\n\n{pending}{context}"
+        else:
+            full_context = f"{directive}\n\n{origin}\n\n{pending}{context}"
 
         output = {
             "hookSpecificOutput": {
@@ -530,9 +690,11 @@ def main():
 
     except Exception as e:
         logger.error("Context injection error: %s", e)
-        # Don't block session start on errors
-        _emit_empty()
+        # Don't block session start on errors; proactive alert (if any) still surfaces.
+        _emit_with_proactive(proactive_block)
         sys.exit(0)
+    finally:
+        conn.close()
 
 
 if __name__ == "__main__":

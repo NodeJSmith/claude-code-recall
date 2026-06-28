@@ -18,6 +18,7 @@ from ccrecall.formatting import apply_scores, format_snippet_json, format_snippe
 from ccrecall.recent_chats import get_recent_sessions
 from ccrecall.schema import SCHEMA, SCHEMA_CORE, detect_fts_support
 from ccrecall.search_conversations import (
+    _compute_caveat,
     _dedup_by_session,
     _get_vec_chunk_ids,
     _hydrate_cards,
@@ -1614,3 +1615,204 @@ class TestSearchMessages:
         assert "User:" in md
         assert "Asst:" in md
         conn.close()
+
+
+# Reactive coverage caveat
+
+
+class TestRecallCaveat:
+    """Reactive caveat appended to recall output when embeddings are unavailable or coverage is partial.
+
+    Caveat present when vec unavailable or coverage < threshold; absent when healthy.
+    A failure computing the caveat degrades to no caveat and never breaks recall.
+    total == 0 does not crash.
+    """
+
+    def test_caveat_when_vec_unavailable(self):
+        """_compute_caveat returns a string when chunk_vec is not queryable (no vec extension)."""
+        conn = sqlite3.connect(":memory:")
+        # No chunk_vec table → chunk_vec_queryable returns False → caveat expected
+        caveat = _compute_caveat(conn)
+        assert caveat is not None
+        assert "unavailable" in caveat.lower()
+        conn.close()
+
+    def test_caveat_when_coverage_below_threshold(self):
+        """_compute_caveat returns a string when branch coverage is below RECALL_CAVEAT_COVERAGE_THRESHOLD."""
+        conn = sqlite3.connect(":memory:")
+        conn.executescript(SCHEMA)
+        conn.commit()
+        cursor = conn.cursor()
+        cursor.execute("INSERT INTO projects (path, key, name) VALUES ('/p', '-p', 'p')")
+        proj_id = cursor.lastrowid
+        # Embedded branch (watermark set)
+        cursor.execute("INSERT INTO sessions (uuid, project_id) VALUES ('s1', ?)", (proj_id,))
+        s1 = cursor.lastrowid
+        cursor.execute(
+            "INSERT INTO branches (session_id, leaf_uuid, is_active, embedding_version, embedding_model)"
+            " VALUES (?, 'l1', 1, ?, ?)",
+            (s1, EMBEDDING_VERSION, EMBEDDING_MODEL),
+        )
+        b1 = cursor.lastrowid
+        cursor.execute(
+            "INSERT INTO messages (session_id, uuid, role, content, timestamp) VALUES (?, 'm1', 'user', 'x', '2025-01-01T00:00:00Z')",
+            (s1,),
+        )
+        m1 = cursor.lastrowid
+        cursor.execute("INSERT INTO branch_messages VALUES (?, ?)", (b1, m1))
+        # Un-embedded branch (NULL watermark)
+        cursor.execute("INSERT INTO sessions (uuid, project_id) VALUES ('s2', ?)", (proj_id,))
+        s2 = cursor.lastrowid
+        cursor.execute(
+            "INSERT INTO branches (session_id, leaf_uuid, is_active) VALUES (?, 'l2', 1)",
+            (s2,),
+        )
+        b2 = cursor.lastrowid
+        cursor.execute(
+            "INSERT INTO messages (session_id, uuid, role, content, timestamp) VALUES (?, 'm2', 'user', 'y', '2025-01-01T00:00:00Z')",
+            (s2,),
+        )
+        m2 = cursor.lastrowid
+        cursor.execute("INSERT INTO branch_messages VALUES (?, ?)", (b2, m2))
+        conn.commit()
+
+        with patch("ccrecall.search_conversations.chunk_vec_queryable", return_value=True):
+            caveat = _compute_caveat(conn)
+
+        assert caveat is not None
+        assert "partial" in caveat.lower()
+        conn.close()
+
+    def test_no_caveat_when_coverage_at_threshold(self):
+        """_compute_caveat returns None when vec is available and all branches are embedded (100% >= 95%)."""
+        conn = sqlite3.connect(":memory:")
+        conn.executescript(SCHEMA)
+        conn.commit()
+        cursor = conn.cursor()
+        cursor.execute("INSERT INTO projects (path, key, name) VALUES ('/p', '-p', 'p')")
+        proj_id = cursor.lastrowid
+        cursor.execute("INSERT INTO sessions (uuid, project_id) VALUES ('s1', ?)", (proj_id,))
+        s1 = cursor.lastrowid
+        cursor.execute(
+            "INSERT INTO branches (session_id, leaf_uuid, is_active, embedding_version, embedding_model)"
+            " VALUES (?, 'l1', 1, ?, ?)",
+            (s1, EMBEDDING_VERSION, EMBEDDING_MODEL),
+        )
+        b1 = cursor.lastrowid
+        cursor.execute(
+            "INSERT INTO messages (session_id, uuid, role, content, timestamp) VALUES (?, 'm1', 'user', 'x', '2025-01-01T00:00:00Z')",
+            (s1,),
+        )
+        m1 = cursor.lastrowid
+        cursor.execute("INSERT INTO branch_messages VALUES (?, ?)", (b1, m1))
+        conn.commit()
+
+        with patch("ccrecall.search_conversations.chunk_vec_queryable", return_value=True):
+            caveat = _compute_caveat(conn)
+
+        assert caveat is None
+        conn.close()
+
+    def test_no_crash_when_total_zero(self):
+        """_compute_caveat returns None (no crash) when there are no embeddable branches."""
+        conn = sqlite3.connect(":memory:")
+        conn.executescript(SCHEMA)
+        conn.commit()
+        # Empty DB: no branches → total = 0
+
+        with patch("ccrecall.search_conversations.chunk_vec_queryable", return_value=True):
+            caveat = _compute_caveat(conn)
+
+        assert caveat is None
+        conn.close()
+
+    def test_caveat_degrades_on_error(self):
+        """_compute_caveat returns None (no exception) when coverage computation fails."""
+        conn = sqlite3.connect(":memory:")
+        with (
+            patch("ccrecall.search_conversations.chunk_vec_queryable", return_value=True),
+            patch(
+                "ccrecall.search_conversations.branch_embedding_coverage",
+                side_effect=RuntimeError("db gone"),
+            ),
+        ):
+            caveat = _compute_caveat(conn)
+        assert caveat is None
+        conn.close()
+
+    def test_run_json_includes_caveat_field_when_unavailable(self, tmp_path, capsys):
+        """run() in JSON mode includes 'caveat' string field when embeddings are unavailable."""
+        db_path = tmp_path / "test.db"
+        c = sqlite3.connect(str(db_path))
+        c.executescript(SCHEMA_CORE)
+        c.commit()
+        c.close()
+
+        with (
+            patch("ccrecall.search_conversations.search_sessions", return_value=([], False)),
+            patch(
+                "ccrecall.search_conversations._compute_caveat",
+                return_value="embeddings unavailable — keyword-only results",
+            ),
+        ):
+            run(query="test", output_format="json", db=db_path)
+
+        out = json.loads(capsys.readouterr().out)
+        assert "caveat" in out
+        assert out["caveat"] == "embeddings unavailable — keyword-only results"
+
+    def test_run_json_caveat_null_when_healthy(self, tmp_path, capsys):
+        """run() in JSON mode has 'caveat': null when embeddings are healthy."""
+        db_path = tmp_path / "test.db"
+        c = sqlite3.connect(str(db_path))
+        c.executescript(SCHEMA_CORE)
+        c.commit()
+        c.close()
+
+        with (
+            patch("ccrecall.search_conversations.search_sessions", return_value=([], False)),
+            patch("ccrecall.search_conversations._compute_caveat", return_value=None),
+        ):
+            run(query="test", output_format="json", db=db_path)
+
+        out = json.loads(capsys.readouterr().out)
+        assert "caveat" in out
+        assert out["caveat"] is None
+
+    def test_run_markdown_appends_caveat_when_unavailable(self, tmp_path, capsys):
+        """run() in markdown mode appends the caveat when embeddings are unavailable."""
+        db_path = tmp_path / "test.db"
+        c = sqlite3.connect(str(db_path))
+        c.executescript(SCHEMA_CORE)
+        c.commit()
+        c.close()
+
+        with (
+            patch("ccrecall.search_conversations.search_sessions", return_value=([], False)),
+            patch(
+                "ccrecall.search_conversations._compute_caveat",
+                return_value="embeddings unavailable — keyword-only results",
+            ),
+        ):
+            run(query="test", output_format="markdown", db=db_path)
+
+        out = capsys.readouterr().out
+        assert "embeddings unavailable" in out
+
+    def test_run_markdown_no_caveat_when_healthy(self, tmp_path, capsys):
+        """run() in markdown mode appends nothing when embeddings are healthy."""
+        db_path = tmp_path / "test.db"
+        c = sqlite3.connect(str(db_path))
+        c.executescript(SCHEMA_CORE)
+        c.commit()
+        c.close()
+
+        with (
+            patch("ccrecall.search_conversations.search_sessions", return_value=([], False)),
+            patch("ccrecall.search_conversations._compute_caveat", return_value=None),
+        ):
+            run(query="test", output_format="markdown", db=db_path)
+
+        out = capsys.readouterr().out
+        assert "unavailable" not in out
+        assert "partial" not in out

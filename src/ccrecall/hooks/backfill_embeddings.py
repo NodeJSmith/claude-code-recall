@@ -40,6 +40,12 @@ from ccrecall.embeddings import (
     EMBEDDING_VERSION,
     model_available,
 )
+from ccrecall.health import (
+    REASON_MODEL_UNAVAILABLE,
+    REASON_VEC_UNAVAILABLE,
+    clear_embedding_failure,
+    record_embedding_failure,
+)
 from ccrecall.session_ops import embed_branch_chunks
 
 BATCH_SIZE = 20
@@ -292,6 +298,8 @@ def run(
     # model_available() warms the singleton session on success — no extra cost.
     # Pass --threads here since this is the call that constructs the session.
     if not model_available(threads=threads):
+        with contextlib.suppress(Exception):  # best-effort; sidecar write must not affect exit behavior
+            record_embedding_failure(reason=REASON_MODEL_UNAVAILABLE)
         logger.error("Backfill embeddings: model not available, aborting (no rows marked)")
         print(
             "ccrecall backfill embeddings: model not available, aborting (no rows marked)",
@@ -316,6 +324,8 @@ def run(
     # creates only when sqlite-vec loaded. Without this guard the queries below
     # crash with "no such table: chunk_vec" instead of exiting cleanly.
     if not chunk_vec_queryable(conn):
+        with contextlib.suppress(Exception):  # best-effort; sidecar write must not affect exit behavior
+            record_embedding_failure(reason=REASON_VEC_UNAVAILABLE)
         logger.error("Backfill embeddings: sqlite-vec unavailable, aborting (no rows marked)")
         print(
             "ccrecall backfill embeddings: sqlite-vec unavailable, aborting (no rows marked)",
@@ -487,4 +497,6 @@ def run(
             f"in {format_duration(elapsed)}",
             file=sys.stderr,
         )
+    with contextlib.suppress(Exception):  # best-effort; sidecar clear must not affect exit behavior
+        clear_embedding_failure()
     return EXIT_OK

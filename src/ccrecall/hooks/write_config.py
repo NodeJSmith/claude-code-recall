@@ -6,11 +6,8 @@ Atomic write via tmp+replace to prevent partial writes.
 
 import contextlib
 import json
-import os
-import tempfile
-from pathlib import Path
 
-from ccrecall.db import CONFIG_PATH, CURRENT_ONBOARDING_VERSION, DEFAULT_SETTINGS, ensure_parent_dir
+from ccrecall.db import CONFIG_PATH, CURRENT_ONBOARDING_VERSION, DEFAULT_SETTINGS, atomic_write_json
 
 
 def run(*, defaults: bool = False, auto_inject_context: bool | None = None) -> None:
@@ -37,15 +34,5 @@ def run(*, defaults: bool = False, auto_inject_context: bool | None = None) -> N
     config["onboarding_completed"] = True
     config["onboarding_version"] = CURRENT_ONBOARDING_VERSION
 
-    # Atomic write
-    ensure_parent_dir(CONFIG_PATH)
-    fd, tmp_path = tempfile.mkstemp(dir=CONFIG_PATH.parent, suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w") as fh:
-            fh.write(json.dumps(config, indent=2) + "\n")
-        Path(tmp_path).replace(CONFIG_PATH)
-    except Exception:
-        Path(tmp_path).unlink(missing_ok=True)
-        raise
-
+    atomic_write_json(CONFIG_PATH, config)
     print(f"Config saved to {CONFIG_PATH}")

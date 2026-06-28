@@ -23,6 +23,7 @@ from ccrecall.db import (
     LOG_BACKUP_COUNT,
     LOG_MAX_BYTES,
     PID_FILE_MODE,
+    chunk_vec_queryable,
     ensure_parent_dir,
     get_db_connection,
     load_settings,
@@ -32,6 +33,7 @@ from ccrecall.db import (
 )
 from ccrecall.embeddings import is_model_cached_on_disk
 from ccrecall.formatting import extract_project_name, normalize_cwd
+from ccrecall.health import REASON_VEC_UNAVAILABLE, clear_embedding_failure, record_embedding_failure
 from ccrecall.models import HookInput
 from ccrecall.session_ops import sync_session
 
@@ -228,6 +230,18 @@ def run(input_file: Path | None = None) -> None:
             if project_dir.name == "subagents":
                 project_dir = project_dir.parent.parent
 
+            # Embedding capability check: sqlite-vec availability determines whether
+            # embedding can run. Record a failure on unavailability; clear on success.
+            # Only the vec check is accessible here — model failures in sync_current
+            # are silently swallowed by session_ops (contextlib.suppress) and are
+            # detected authoritatively by backfill_embeddings instead.
+            # Both calls are best-effort: a sidecar write failure must never affect
+            # the hook's output or exit behavior.
+            _vec_ok = chunk_vec_queryable(conn)
+            if not _vec_ok:
+                with contextlib.suppress(Exception):  # best-effort; must not affect hook behavior
+                    record_embedding_failure(reason=REASON_VEC_UNAVAILABLE)
+
             # Sync path: write import_log with NULL file_hash as a "synced" marker
             new_messages = sync_session(
                 conn,
@@ -241,6 +255,13 @@ def run(input_file: Path | None = None) -> None:
 
             if new_messages > 0:
                 logger.info("Synced %s new message(s) from session %s", new_messages, session_id[:8])
+
+            # Clear the embedding failure sidecar on a clean sync pass.
+            # Only when vec was available — if it wasn't, we already recorded above
+            # and must not clear until the next run where embedding can actually run.
+            if _vec_ok:
+                with contextlib.suppress(Exception):  # best-effort; must not affect hook behavior
+                    clear_embedding_failure()
 
             # Output for hook (continue = True means don't block)
             output = {"continue": True}
