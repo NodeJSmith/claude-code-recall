@@ -295,7 +295,7 @@ class TestFormatMarkdownSession:
 # Fixtures
 
 
-def _make_card(score_raw=0.03, score=0.87, topic="some topic", disposition="IN_PROGRESS"):
+def _make_card(score_raw=0.03, score=0.87, topic="some topic"):
     """Return a minimal valid Track A card dict."""
     return {
         "score": score,
@@ -307,7 +307,6 @@ def _make_card(score_raw=0.03, score=0.87, topic="some topic", disposition="IN_P
         "started_at": "2026-06-25T07:30:00Z",
         "ended_at": "2026-06-25T13:09:42Z",
         "topic": topic,
-        "disposition": disposition,
         "exchange_count": 41,
         "files_modified": ["src/ccrecall/search_conversations.py", "src/ccrecall/formatting.py"],
         "commits": ["chore(main): release 0.11.1"],
@@ -354,10 +353,9 @@ class TestFormatCardMarkdown:
         md = format_card_markdown(card)
         assert "Topic:  redesign search result format" in md
 
-    def test_status_line_with_disposition(self):
-        card = _make_card(disposition="IN_PROGRESS")
+    def test_counts_line(self):
+        card = _make_card()
         md = format_card_markdown(card)
-        assert "Status: IN_PROGRESS" in md
         assert "41 exchanges" in md
         assert "2 files" in md
         assert "1 commits" in md
@@ -438,14 +436,6 @@ class TestFormatCardMarkdown:
         assert "Topic:" in md
         assert "None" not in md
 
-    def test_uncached_branch_no_disposition(self):
-        """Card with disposition=None renders without disposition in Status, no crash."""
-        card = _make_card(disposition=None)
-        md = format_card_markdown(card)
-        assert "Status:" in md
-        assert "None" not in md
-        assert "IN_PROGRESS" not in md
-
     def test_does_not_mutate_input(self):
         """Renderer does not modify the input dict."""
         card = _make_card()
@@ -471,7 +461,6 @@ class TestFormatCardJson:
             "started_at",
             "ended_at",
             "topic",
-            "disposition",
             "exchange_count",
             "files_modified",
             "commits",

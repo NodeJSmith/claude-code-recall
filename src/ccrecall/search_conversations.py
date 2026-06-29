@@ -370,7 +370,7 @@ def _hydrate_cards(
 ) -> list[dict]:
     """Build Track A session-summary card dicts for an ordered list of branch IDs.
 
-    Reads context_summary_json (topic/disposition) and branch/session/project join
+    Reads context_summary_json (topic) and branch/session/project join
     columns. Does NOT call fetch_branch_messages — A renders from summary data only
     (no full transcript hydration).
 
@@ -440,17 +440,15 @@ def _hydrate_cards(
             ) = row
             tool_counts_json = None
 
-        # Prefer join columns for list metadata; parse summary for topic/disposition
+        # Prefer join columns for list metadata; parse summary for topic
         files_modified: list = decode_json_column(files_json, [])
         commits: list = decode_json_column(commits_json, [])
         tool_counts: dict = decode_json_column(tool_counts_json, {}) if has_tool_counts else {}
 
         topic: str | None = None
-        disposition: str | None = None
         summary = decode_json_column(summary_json, {})
         if summary:
             topic = summary.get("topic") or None
-            disposition = summary.get("disposition") or None
 
         # Graceful degrade: no context_summary_json → first user message as topic
         if not topic:
@@ -478,7 +476,6 @@ def _hydrate_cards(
                 "started_at": started_at,
                 "ended_at": ended_at,
                 "topic": topic,
-                "disposition": disposition,
                 "exchange_count": exchange_count or 0,
                 "files_modified": files_modified,
                 "commits": commits,
