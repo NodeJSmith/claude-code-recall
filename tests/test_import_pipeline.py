@@ -701,6 +701,55 @@ class TestEmptyBranchGuardTightened:
             temp_path.unlink()
 
 
+class TestIsMetaFiltering:
+    """isMeta user entries without origin must not be stored as messages.
+
+    Pins the filter that sync_session applies when deriving the messages list
+    from a single-pass parse — isMeta=true entries without an origin field
+    (e.g. session metadata injected by the harness) are excluded from storage,
+    matching the old parse_jsonl_file behavior.
+    """
+
+    def test_ismeta_without_origin_excluded(self, memory_db, project_id):
+        """multi_rewind.jsonl has one isMeta=true user entry without origin; it must not be stored."""
+        fixture_file = FIXTURE_DIR / "multi_rewind.jsonl"
+        import_session(memory_db, fixture_file, project_id)
+
+        cursor = memory_db.cursor()
+        cursor.execute(
+            """
+            SELECT m.uuid, m.content FROM messages m
+            JOIN sessions s ON m.session_id = s.id
+            WHERE s.project_id = ? AND m.role = 'user'
+        """,
+            (project_id,),
+        )
+        user_messages = cursor.fetchall()
+        ismeta_uuid = "d91829d6-dc27-44b1-a6ac-cb4b699a1b11"
+        stored_uuids = {row[0] for row in user_messages}
+        assert ismeta_uuid not in stored_uuids, (
+            f"isMeta=true user entry without origin must not be stored as a message; "
+            f"found uuid {ismeta_uuid} in stored messages"
+        )
+
+    def test_ismeta_with_origin_included(self, memory_db, project_id):
+        """channel_telegram.jsonl has isMeta=true entries WITH origin; they must be stored."""
+        fixture_file = FIXTURE_DIR / "channel_telegram.jsonl"
+        import_session(memory_db, fixture_file, project_id)
+
+        cursor = memory_db.cursor()
+        cursor.execute(
+            """
+            SELECT m.uuid FROM messages m
+            JOIN sessions s ON m.session_id = s.id
+            WHERE s.project_id = ? AND m.role = 'user'
+        """,
+            (project_id,),
+        )
+        user_messages = cursor.fetchall()
+        assert len(user_messages) > 0, "isMeta=true user entries with origin should be stored"
+
+
 class TestPrintStatsEmbeddingCoverage:
     """`ccrecall stats` reports honest branch-grain embedding coverage."""
 

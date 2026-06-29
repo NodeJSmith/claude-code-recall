@@ -41,7 +41,6 @@ from ccrecall.parsing import (
     extract_session_uuid,
     find_all_branches,
     parse_all_with_uuids,
-    parse_jsonl_file,
 )
 from ccrecall.project_ops import upsert_project
 from ccrecall.summarizer import SUMMARY_VERSION, build_exchange_pairs, compute_context_summary
@@ -683,7 +682,7 @@ def sync_session(
     if should_skip:
         return -1
 
-    # Parse the JSONL
+    # Parse the JSONL — single pass; derive messages by filtering to user/assistant.
     all_entries = list(parse_all_with_uuids(filepath))
     if not all_entries:
         return 0
@@ -692,7 +691,11 @@ def sync_session(
     if not branches:
         return 0
 
-    messages = list(parse_jsonl_file(filepath))
+    messages = [
+        e
+        for e in all_entries
+        if e.get("type") in ("user", "assistant") and not (e.get("isMeta") and not e.get("origin"))
+    ]
     if not messages:
         return 0
 
