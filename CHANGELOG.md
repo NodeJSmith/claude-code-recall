@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.13.1](https://github.com/NodeJSmith/claude-code-recall/compare/v0.13.0...v0.13.1) (2026-06-29)
+
+
+### Bug Fixes
+
+* remove incorrect "IN_PROGRESS" status labels — 57% of sessions were falsely labeled because the heuristic defaulted to in-progress for any session not matching narrow completion patterns ([#46](https://github.com/NodeJSmith/claude-code-recall/issues/46)) ([4020953](https://github.com/NodeJSmith/claude-code-recall/commit/4020953fa801e2476d8811d2f9f0c54608f7b1de))
+
 ## [0.13.0](https://github.com/NodeJSmith/claude-code-recall/compare/v0.12.0...v0.13.0) (2026-06-28)
 
 
