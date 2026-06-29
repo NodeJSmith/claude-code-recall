@@ -11,13 +11,10 @@ from ccrecall.db import CONTENT_ERROR_VERSION
 from ccrecall.hooks import backfill_summaries, memory_setup
 from ccrecall.schema import SCHEMA
 from ccrecall.summarizer import (
-    DISPOSITION_ABANDONED,
-    DISPOSITION_COMPLETED,
-    DISPOSITION_IN_PROGRESS,
+    SUMMARY_VERSION,
     build_context_summary_json,
     build_exchange_pairs,
     compute_context_summary,
-    detect_disposition,
     render_context_summary,
     truncate_mid,
 )
@@ -163,7 +160,7 @@ class TestBuildContextSummaryJson:
         ]
         result = build_context_summary_json(branch_row, messages)
 
-        assert result["version"] == 3
+        assert result["version"] == 4
         assert result["topic"] == "Fix the bug in main.py"
         assert len(result["first_exchanges"]) == 2
         assert result["first_exchanges"][0]["user"] == "Fix the bug in main.py"
@@ -436,7 +433,7 @@ class TestComputeContextSummary:
         assert "/ccrecall:ccr-recall" in md
 
         parsed = json.loads(json_str)
-        assert parsed["version"] == 3
+        assert parsed["version"] == 4
         assert parsed["topic"] == "How do I fix the parser bug?"
         assert parsed["metadata"]["git_branch"] == "main"
         assert len(parsed["last_exchanges"]) == 3  # Short session (3 exchanges, <=8), all in last
@@ -448,81 +445,6 @@ class TestComputeContextSummary:
         md, json_str = compute_context_summary(cursor, 99999)
         assert md == ""
         assert json_str == ""
-
-
-class TestDetectDispositionWithCommits:
-    """Tests for the improved detect_disposition() with commits parameter."""
-
-    def _make_exchanges(self, count: int, last_user: str = "ok") -> list[dict]:
-        exchanges = [{"user": f"Q{i}", "assistant": f"A{i}", "timestamp": f"t{i}"} for i in range(count - 1)]
-        exchanges.append({"user": last_user, "assistant": "Done.", "timestamp": "t_last"})
-        return exchanges
-
-    def test_detect_disposition_completed_with_commits(self):
-        """Non-empty commits list returns COMPLETED regardless of exchange content."""
-        exchanges = [{"user": "start", "assistant": "working...", "timestamp": "t0"}]
-        result = detect_disposition(exchanges, commits=["fix: resolve issue #42"])
-        assert result == DISPOSITION_COMPLETED
-
-    def test_detect_disposition_completed_with_multiple_commits(self):
-        """Multiple commits still return COMPLETED."""
-        exchanges = [{"user": "what now?", "assistant": "no idea", "timestamp": "t0"}]
-        result = detect_disposition(exchanges, commits=["feat: add thing", "fix: bug"])
-        assert result == DISPOSITION_COMPLETED
-
-    def test_detect_disposition_completed_with_text_only(self):
-        """Existing text heuristics still work when commits is None (or empty)."""
-        exchanges = [
-            {
-                "user": "Run the tests",
-                "assistant": "All tests pass.",
-                "timestamp": "t0",
-            },
-            {"user": "ok", "assistant": "", "timestamp": "t1"},
-        ]
-        result = detect_disposition(exchanges, commits=None)
-        assert result == DISPOSITION_COMPLETED
-
-    def test_detect_disposition_completed_with_empty_commits(self):
-        """Empty commits list does not trigger COMPLETED — falls through to text heuristics."""
-        exchanges = [
-            {
-                "user": "What should I do?",
-                "assistant": "Keep going.",
-                "timestamp": "t0",
-            },
-        ]
-        result = detect_disposition(exchanges, commits=[])
-        assert result == DISPOSITION_IN_PROGRESS
-
-    def test_detect_disposition_abandoned_replaces_interrupted(self):
-        """Zero-exchange sessions return ABANDONED (not INTERRUPTED)."""
-        result = detect_disposition([])
-        assert result == DISPOSITION_ABANDONED
-        # Confirm INTERRUPTED is not returned
-        assert result != "INTERRUPTED"
-
-    def test_detect_disposition_abandoned_no_user_followup(self):
-        """Final exchange with no user reply AND >2 exchanges returns ABANDONED."""
-        # Build exchanges where the last user message is empty (assistant replied, no followup)
-        exchanges = [
-            {"user": "Q1", "assistant": "A1", "timestamp": "t0"},
-            {"user": "Q2", "assistant": "A2", "timestamp": "t1"},
-            {"user": "Q3", "assistant": "Final answer here.", "timestamp": "t2"},
-        ]
-        # Simulate: last exchange has assistant content but no user reply after
-        # We can test this by checking disposition of a last exchange where user="" and assistant is non-empty
-        exchanges_with_no_reply = [*exchanges[:2], {"user": "", "assistant": "No followup.", "timestamp": "t3"}]
-        result = detect_disposition(exchanges_with_no_reply)
-        assert result == DISPOSITION_ABANDONED
-
-    def test_detect_disposition_not_abandoned_for_short_sessions(self):
-        """Sessions with <=2 exchanges are not classified as ABANDONED when no user followup."""
-        # Only 1 exchange — too short for ABANDONED heuristic
-        exchanges = [{"user": "", "assistant": "Some response.", "timestamp": "t0"}]
-        result = detect_disposition(exchanges)
-        # Should not be ABANDONED (<=2 exchanges condition not met)
-        assert result != DISPOSITION_ABANDONED
 
 
 class TestBuildContextSummaryJsonTruncation:
@@ -564,19 +486,19 @@ class TestBuildContextSummaryJsonTruncation:
         # With 1 short exchange of truncated text, should be well under 50KB
         assert json_size < 50_000, f"JSON size {json_size} exceeds 50KB limit"
 
-    def test_version_is_3(self):
-        """build_context_summary_json returns version 3."""
+    def test_version_is_current(self):
+        """build_context_summary_json returns the current SUMMARY_VERSION."""
         branch_row = {}
         messages = [
             {"role": "user", "content": "Hello", "timestamp": "t1"},
             {"role": "assistant", "content": "Hi", "timestamp": "t2"},
         ]
         result = build_context_summary_json(branch_row, messages)
-        assert result["version"] == 3
+        assert result["version"] == 4
 
 
 class TestNeedsBackfillVersionBump:
-    """Test that the backfill threshold is 3 (not 2) in both backfill_summaries and memory_setup."""
+    """Test that the backfill threshold matches SUMMARY_VERSION in both backfill_summaries and memory_setup."""
 
     def _make_db_with_branch(self, summary_version: int) -> sqlite3.Connection:
         """Create an in-memory DB with one branch at the given summary_version."""
@@ -602,29 +524,34 @@ class TestNeedsBackfillVersionBump:
         conn.commit()
         return conn
 
-    def test_needs_backfill_version_bump_query(self):
-        """Branches with summary_version=2 should be picked up by the < 3 backfill query."""
-        conn = self._make_db_with_branch(summary_version=2)
+    def test_needs_backfill_stale_version_triggered(self):
+        """Branches with summary_version below SUMMARY_VERSION are picked up by the backfill query."""
+        conn = self._make_db_with_branch(summary_version=SUMMARY_VERSION - 1)
         cursor = conn.cursor()
-        # This is the query used by both backfill_summaries.py and memory_setup.py
-        cursor.execute("SELECT COUNT(*) FROM branches WHERE summary_version IS NULL OR summary_version < 3")
+        cursor.execute(
+            "SELECT COUNT(*) FROM branches WHERE summary_version IS NULL OR summary_version < ?",
+            (SUMMARY_VERSION,),
+        )
         count = cursor.fetchone()[0]
-        assert count == 1, "summary_version=2 branches must be detected by the < 3 backfill query"
+        assert count == 1, "stale branches must be detected by the backfill query"
         conn.close()
 
-    def test_needs_backfill_version_3_not_triggered(self):
-        """Branches with summary_version=3 should NOT be picked up by the < 3 backfill query."""
-        conn = self._make_db_with_branch(summary_version=3)
+    def test_needs_backfill_current_version_not_triggered(self):
+        """Branches at SUMMARY_VERSION are NOT picked up by the backfill query."""
+        conn = self._make_db_with_branch(summary_version=SUMMARY_VERSION)
         cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM branches WHERE summary_version IS NULL OR summary_version < 3")
+        cursor.execute(
+            "SELECT COUNT(*) FROM branches WHERE summary_version IS NULL OR summary_version < ?",
+            (SUMMARY_VERSION,),
+        )
         count = cursor.fetchone()[0]
-        assert count == 0, "summary_version=3 branches must NOT be detected by the < 3 backfill query"
+        assert count == 0, "current-version branches must NOT be detected by the backfill query"
         conn.close()
 
     def test_backfill_summaries_uses_version_constants(self):
         """backfill_summaries ties its threshold/sentinel to the shared constants.
 
-        SUMMARY_VERSION is the canonical 3 and CONTENT_ERROR_VERSION the -1
+        SUMMARY_VERSION is the canonical 4 and CONTENT_ERROR_VERSION the -1
         sentinel — using the constants (not stale literals) keeps a future
         version bump from silently desyncing this hook.
         """

@@ -51,7 +51,7 @@ ccrecall search --query "keyword"
 ```
 ## 0.87  ccrecall · review-format · 2026-06-25
 Topic:  redesign search result format — two-entrypoint split
-Status: IN_PROGRESS · 41 exchanges · 2 files · 1 commits
+41 exchanges · 2 files · 1 commits
 Handle: ef098861   → ccrecall tail ef098861
 ```
 
@@ -69,7 +69,7 @@ The score prefix is omitted from the heading when only one result is returned or
 (keyword fallback — unranked, ordered by recency)
 ```
 
-When a branch has no cached summary (`context_summary_json`), the card falls back to the first user message as the topic and omits `disposition` from the Status line — the card still renders and the command still exits 0.
+When a branch has no cached summary (`context_summary_json`), the card falls back to the first user message as the topic — the card still renders and the command still exits 0.
 
 **JSON (`ccrecall --json search -q "keyword"`):**
 
@@ -89,7 +89,6 @@ When a branch has no cached summary (`context_summary_json`), the card falls bac
       "started_at": "2026-06-25T07:30:00Z",
       "ended_at": "2026-06-25T13:09:42Z",
       "topic": "redesign search result format — two-entrypoint split",
-      "disposition": "IN_PROGRESS",
       "exchange_count": 41,
       "files_modified": ["src/ccrecall/search_conversations.py", "src/ccrecall/formatting.py"],
       "commits": ["docs: update tool reference for cards and snippets"],

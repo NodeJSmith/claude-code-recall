@@ -1003,10 +1003,10 @@ class TestExceptionNarrowing:
 
 
 class TestCardFields:
-    """_hydrate_cards must produce the output contract fields (session_uuid, handle, topic, disposition)."""
+    """_hydrate_cards must produce the output contract fields (session_uuid, handle, topic)."""
 
     def _seed_with_summary(self, conn):
-        """Seed a branch with context_summary_json carrying topic + disposition."""
+        """Seed a branch with context_summary_json carrying topic."""
         cursor = conn.cursor()
         cursor.execute(
             "INSERT INTO projects (path, key, name) VALUES (?, ?, ?)",
@@ -1022,7 +1022,6 @@ class TestCardFields:
             {
                 "version": 1,
                 "topic": "Debugging a pytest fixture",
-                "disposition": "shipped",
                 "first_exchanges": [],
                 "last_exchanges": [],
                 "metadata": {"exchange_count": 4, "files_modified": ["a.py"], "commits": ["abc123"], "tool_counts": {}},
@@ -1057,7 +1056,7 @@ class TestCardFields:
         return branch_id
 
     def test_card_fields_from_context_summary_json(self):
-        """Cards include session_uuid, handle, topic, disposition from context_summary_json."""
+        """Cards include session_uuid, handle, topic from context_summary_json."""
         conn = sqlite3.connect(":memory:")
         conn.executescript(SCHEMA)
         conn.commit()
@@ -1070,7 +1069,6 @@ class TestCardFields:
         assert card["session_uuid"] == "cf-sess-uuid"
         assert card["handle"] == "cf-sess-"  # first 8 chars of "cf-sess-uuid"
         assert card["topic"] == "Debugging a pytest fixture"
-        assert card["disposition"] == "shipped"
         assert card["exchange_count"] == 4
         assert card["git_branch"] == "main"
         assert card["project"] == "cf"
@@ -1103,8 +1101,6 @@ class TestCardFields:
         # Graceful degrade: topic from first user message
         assert card["topic"] is not None
         assert "deadline" in card["topic"].lower()
-        # No context_summary_json → disposition is None
-        assert card["disposition"] is None
         conn.close()
 
     def test_keyword_only_flag_ranked_by_rung(self, search_db):
@@ -1203,7 +1199,6 @@ class TestVerboseCardMarkdown:
             "git_branch": "main",
             "ended_at": "2025-06-01T10:00:00Z",
             "topic": "Wiring verbose",
-            "disposition": "shipped",
             "exchange_count": 4,
             "files_modified": ["a.py", "b.py"],
             "commits": ["abc123"],

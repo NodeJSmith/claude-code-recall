@@ -25,7 +25,6 @@ from ccrecall.hooks.memory_context import (
 )
 from ccrecall.summarizer import (
     build_exchange_pairs,
-    detect_disposition,
     render_context_summary,
 )
 
@@ -705,11 +704,9 @@ class TestBuildFallbackContext:
         # Build the same thing via render_context_summary directly
         exchanges = build_exchange_pairs(messages)
         topic = exchanges[0]["user"][:TOPIC_PREVIEW_MAX_CHARS] if exchanges else ""
-        disposition = detect_disposition(exchanges, commits=commits)
         summary_json = {
-            "version": 3,
+            "version": 4,
             "topic": topic,
-            "disposition": disposition,
             "first_exchanges": [
                 {
                     "user": ex["user"],
