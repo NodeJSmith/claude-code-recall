@@ -7,8 +7,11 @@ v3 schema: messages stored once per session, branches as separate index.
 """
 
 import contextlib
+import ctypes
+import gc
 import hashlib
 import sqlite3
+import sys
 from pathlib import Path
 
 from ccrecall.db import (
@@ -241,9 +244,17 @@ def _run(
     total_messages = 0
     total_skipped = 0
 
-    # get_db_connection applies the schema on open; closing() releases the connection
-    # on every exit path (missing-project, normal completion).
-    with contextlib.closing(get_db_connection(settings, load_vec=True)) as conn:
+    # load_vec=False: skip embedding model + sqlite-vec during bulk import to avoid
+    # ~200MB+ baseline RSS. Embeddings are backfilled separately via `ccrecall backfill embeddings`.
+    with contextlib.closing(get_db_connection(settings, load_vec=False)) as conn:
+        # Resolve libc once for malloc_trim in the GC loop below.
+        # gc.collect() frees Python objects; malloc_trim() releases freed glibc arena
+        # pages back to the OS (without it, RSS grows monotonically).
+        libc: ctypes.CDLL | None = None
+        if sys.platform == "linux":
+            with contextlib.suppress(OSError):
+                libc = ctypes.CDLL("libc.so.6")
+
         if project:
             project_dir = projects_dir / project
             if not project_dir.exists():
@@ -269,6 +280,10 @@ def _run(
 
                 if sessions > 0 or messages > 0:
                     print(f"Imported {project_dir.name}: {sessions} branches, {messages} messages")
+
+                gc.collect()
+                if libc is not None:
+                    libc.malloc_trim(0)
 
     logger.info("Import complete: %s branches, %s messages", total_sessions, total_messages)
     print(f"\nTotal: {total_sessions} branches, {total_messages} messages imported ({total_skipped} unchanged)")
