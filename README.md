@@ -192,7 +192,8 @@ Onboarding sets `auto_inject_context`. The remaining settings are tunable by edi
 | `auto_inject_context` | bool | `true` | Inject a summary of your previous session at session start. |
 | `max_context_sessions` | int | `2` | How many recent sessions to include in that injected context. |
 | `exclude_projects` | list[str] | `[]` | Project names to skip when **storing** conversations — excluded projects are not imported or synced. Matched against the project's directory name. This is write-side only: it prevents new data from being indexed; it does not remove or hide conversations already stored before the project was excluded. |
-| `logging_enabled` | bool | `false` | Write hook diagnostics (including swallowed hook exceptions) to `~/.ccrecall/ccrecall.log`. Useful for troubleshooting a misbehaving hook. |
+| `logging_enabled` | bool | `true` | Write hook diagnostics (including swallowed hook exceptions) to `~/.ccrecall/ccrecall.log`. Set to `false` to suppress the log. |
+| `log_level` | str | `"INFO"` | Logging verbosity when `logging_enabled` is true. Accepts standard Python level names: `DEBUG`, `INFO`, `WARNING`, `ERROR`. |
 
 ## Database
 
