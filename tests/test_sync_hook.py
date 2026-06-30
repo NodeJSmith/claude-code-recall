@@ -117,7 +117,7 @@ class TestSyncSessionCreatesBranches:
             assert row is not None
             summary, version = row
             assert summary, "Active branch should have context_summary"
-            assert version == 3, "summary_version should be 3 after sync"
+            assert version == 4, "summary_version should be 4 after sync"
             assert "### Session:" in summary
             assert "/ccrecall:ccr-recall" in summary
 

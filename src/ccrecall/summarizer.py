@@ -15,7 +15,7 @@ from ccrecall.serialization import decode_json_field
 
 # Schema version stamped on each generated summary. Bumped when the JSON shape
 # or extraction logic changes so the backfill path can detect stale summaries.
-SUMMARY_VERSION = 3
+SUMMARY_VERSION = 4
 
 # Truncation limits
 _FRONT_CHARS = 300
@@ -44,81 +44,12 @@ _MAX_TOOLS_SHOWN = 8
 # Compact file-basename previews (gap summary and footer).
 _MAX_FILE_PREVIEW = 3
 
-# Session disposition values stamped into the summary JSON.
-DISPOSITION_COMPLETED = "COMPLETED"
-DISPOSITION_IN_PROGRESS = "IN_PROGRESS"
-DISPOSITION_ABANDONED = "ABANDONED"
-
-# A trailing user message at or below this length counts as a brief sign-off
-# (not a substantive new turn) when classifying disposition.
-_SHORT_USER_REPLY_MAX_CHARS = 30
-# An ABANDONED classification requires more than this many exchanges — a session
-# with fewer that lacks a final user reply is normal, not abandoned.
-_ABANDONED_MIN_EXCHANGES = 2
-
-# Session disposition patterns
-_COMPLETION_RE = re.compile(
-    r"(?:done|pushed|merged|all (?:tests? )?pass|completed|finished|shipped|deployed|"
-    r"PR #?\d+|commit(?:ted)?|changes? (?:are )?live)",
-    re.IGNORECASE,
-)
-_SHORT_CONFIRM_RE = re.compile(
-    r"^(?:y(?:a|ep|es)?|thanks?|(?:looks? )?good|nice|perfect|great|ok|lgtm|k)\s*[.!]?$",
-    re.IGNORECASE,
-)
-_NEW_INSTRUCTION_RE = re.compile(r"^(?:now |next |also |can you |let\'?s |please |I (?:want|need) )", re.IGNORECASE)
-
 
 def truncate_mid(text: str, front: int = _FRONT_CHARS, back: int = _BACK_CHARS) -> str:
     """Mid-truncate text, keeping front and back portions."""
     if not text or len(text) <= front + back + _TRUNCATE_MARGIN:
         return text
     return text[:front] + "\n[... truncated ...]\n" + text[-back:]
-
-
-def detect_disposition(exchanges: list[dict], commits: list[str] | None = None) -> str:
-    """Classify session ending as COMPLETED, IN_PROGRESS, or ABANDONED.
-
-    Heuristics based on the final exchange pair and commit metadata:
-    - COMPLETED: non-empty commits list (work shipped), or assistant uses completion
-      language and user confirms briefly
-    - ABANDONED: final exchange has an assistant response but no subsequent user
-      message, AND the session has more than 2 exchanges
-    - IN_PROGRESS: user gives a new instruction as their last message, or default
-    """
-    # Non-empty commits list is a strong COMPLETED signal — a commit was made
-    if commits:
-        return DISPOSITION_COMPLETED
-
-    if not exchanges:
-        return DISPOSITION_ABANDONED
-
-    last = exchanges[-1]
-    last_user = last.get("user", "").strip()
-    last_asst = last.get("assistant", "").strip()
-
-    # If user's last message is a new instruction, work is in progress
-    if _NEW_INSTRUCTION_RE.search(last_user):
-        return DISPOSITION_IN_PROGRESS
-
-    # If assistant used completion language and user confirmed briefly
-    if _COMPLETION_RE.search(last_asst) and _SHORT_CONFIRM_RE.match(last_user):
-        return DISPOSITION_COMPLETED
-
-    # If assistant used completion language (even without user confirm — session may have ended)
-    if _COMPLETION_RE.search(last_asst) and len(last_user) < _SHORT_USER_REPLY_MAX_CHARS:
-        return DISPOSITION_COMPLETED
-
-    # If user confirmed briefly (likely accepting the work)
-    if _SHORT_CONFIRM_RE.match(last_user):
-        return DISPOSITION_COMPLETED
-
-    # ABANDONED: assistant responded but no subsequent user message, and the session
-    # has more than _ABANDONED_MIN_EXCHANGES (short sessions without a reply are normal)
-    if last_asst and not last_user and len(exchanges) > _ABANDONED_MIN_EXCHANGES:
-        return DISPOSITION_ABANDONED
-
-    return DISPOSITION_IN_PROGRESS
 
 
 def build_exchange_pairs(messages: list[dict]) -> list[dict]:
@@ -201,8 +132,6 @@ def build_context_summary_json(branch_row: dict, messages: list[dict]) -> dict:
     commits = decode_json_field(branch_row.get("commits"), [])
     tool_counts = decode_json_field(branch_row.get("tool_counts"), {})
 
-    disposition = detect_disposition(exchanges, commits=commits)
-
     # First exchanges — truncate exchange text to bound JSON size
     first_exchanges = [
         {
@@ -237,7 +166,6 @@ def build_context_summary_json(branch_row: dict, messages: list[dict]) -> dict:
     return {
         "version": SUMMARY_VERSION,
         "topic": topic,
-        "disposition": disposition,
         "first_exchanges": first_exchanges,
         "last_exchanges": last_exchanges,
         "metadata": {
@@ -296,16 +224,9 @@ def render_context_summary(summary_json: dict) -> str:
         header += f" (branch: {branch})"
     lines.append(header + "\n")
 
-    # Topic and disposition
     topic = summary_json.get("topic", "")
-    disposition = summary_json.get("disposition", "")
-    if topic or disposition:
-        parts = []
-        if topic:
-            parts.append(f"**Topic:** {topic}")
-        if disposition:
-            parts.append(f"**Status:** {disposition}")
-        lines.append(" | ".join(parts))
+    if topic:
+        lines.append(f"**Topic:** {topic}")
         lines.append("")
 
     # Metadata: files, commits, tools

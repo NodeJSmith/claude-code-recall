@@ -75,7 +75,7 @@ class TestSyncSessionCreatesBranches:
         row = cursor.fetchone()
         assert row is not None
         assert row[0], "Context summary should be populated"
-        assert row[1] == 3, "summary_version should be 3"
+        assert row[1] == 4, "summary_version should be 4"
 
     def test_no_has_tool_use_in_insert(self, memory_db):
         """has_tool_use and tool_summary columns should NOT be in the INSERT column list in session_ops.

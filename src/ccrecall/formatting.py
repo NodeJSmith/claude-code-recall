@@ -198,7 +198,7 @@ def apply_scores(results: list[dict], ranked: bool) -> list[dict]:
 # Contract markdown template:
 #   ## {score:.2f}  {project} · {git_branch} · {ended_date}
 #   Topic:  {topic}
-#   Status: {disposition} · {exchange_count} exchanges · {n_files} files · {n_commits} commits
+#   {exchange_count} exchanges · {n_files} files · {n_commits} commits
 #   Handle: {handle}   → ccrecall tail {handle}
 
 _TOPIC_FALLBACK = "(topic unavailable)"
@@ -231,18 +231,14 @@ def format_card_markdown(card: dict, verbose: bool = False) -> str:
     n_files = len(files_modified)
     n_commits = len(commits)
 
-    disposition = card.get("disposition")
-    if disposition:
-        status = f"Status: {disposition} · {exchange_count} exchanges · {n_files} files · {n_commits} commits"
-    else:
-        status = f"Status: {exchange_count} exchanges · {n_files} files · {n_commits} commits"
+    counts = f"{exchange_count} exchanges · {n_files} files · {n_commits} commits"
 
     handle = card.get("handle", "")
 
     lines = [
         heading,
         f"Topic:  {topic}",
-        status,
+        counts,
         f"Handle: {handle}   → ccrecall tail {handle}",
     ]
 
@@ -281,7 +277,6 @@ def format_card_json(card: dict) -> dict:
         "started_at": card.get("started_at"),
         "ended_at": card.get("ended_at"),
         "topic": card.get("topic"),
-        "disposition": card.get("disposition"),
         "exchange_count": card.get("exchange_count") or 0,
         "files_modified": list(card.get("files_modified") or []),
         "commits": list(card.get("commits") or []),

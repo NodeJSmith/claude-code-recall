@@ -27,7 +27,7 @@ ccrecall recent --n 3
 ```bash
 ccrecall search --query "keyword"
 ```
-Each card carries a relevance `score` (normalized 0–1; `null` for a single result or the unranked LIKE path), `project`, `git_branch`, date, `topic`, `disposition`, exchange/file/commit counts, and a `handle`. The JSON envelope includes a `ranked` field (`false` on the LIKE-only fallback). To read the full session, use `ccrecall tail <handle>`.
+Each card carries a relevance `score` (normalized 0–1; `null` for a single result or the unranked LIKE path), `project`, `git_branch`, date, `topic`, exchange/file/commit counts, and a `handle`. The JSON envelope includes a `ranked` field (`false` on the LIKE-only fallback). To read the full session, use `ccrecall tail <handle>`.
 
 **search_conversations.py / Entrypoint B** — search matched exchanges, returns **bounded snippets**:
 ```bash
