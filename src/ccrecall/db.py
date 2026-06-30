@@ -56,7 +56,8 @@ DEFAULT_SETTINGS = {
     "auto_inject_context": True,
     "max_context_sessions": 2,
     "exclude_projects": [],
-    "logging_enabled": False,
+    "logging_enabled": True,
+    "log_level": "INFO",
     "alert_snooze_hours": 24,
 }
 
@@ -415,7 +416,8 @@ def setup_logging(settings: dict | None = None) -> logging.Logger:
     formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
     handler.setFormatter(formatter)
     logger.addHandler(handler)
-    logger.setLevel(logging.INFO)
+    level_name = settings.get("log_level", "INFO")
+    logger.setLevel(getattr(logging, level_name.upper(), logging.INFO))
 
     return logger
 

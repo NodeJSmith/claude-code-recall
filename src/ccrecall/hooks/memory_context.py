@@ -583,7 +583,7 @@ def main():
             conn = get_db_connection(settings)
         except Exception:
             # conn stays None; DB probe will report this as a persist fault.
-            logger.debug("DB connection failed — DB probe will report fault")
+            logger.warning("DB connection failed — DB probe will report fault")
 
     # ── Proactive alert evaluation ──────────────────────────────────────────────
     # Must run before ALL early-return gates so alerts fire even when sessions is
