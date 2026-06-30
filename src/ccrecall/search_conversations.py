@@ -558,7 +558,7 @@ def search_sessions(
                 pre_rollup = len(chunk_results)
                 post_rollup = len(ordered_ids)
                 ratio = pre_rollup / max(post_rollup, 1)
-                _logger.debug(
+                _logger.info(
                     "search under-fill: %d chunks → %d sessions (collapse ratio %.1f); "
                     "consider increasing CHUNK_COLLAPSE_FACTOR",
                     pre_rollup,

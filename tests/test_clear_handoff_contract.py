@@ -31,26 +31,28 @@ _find_cleared_from_session_uuid = _memory_context._find_cleared_from_session_uui
 # Helpers
 
 
-def _run_handoff_main(tmp_path: Path, payload: dict) -> Path:
+def _run_handoff_main(tmp_path: Path, payload: dict | str) -> tuple[Path, str]:
     """
     Run clear-handoff.main() with a fake db_path under tmp_path and the given
-    payload piped through stdin. Returns the handoff_path.
+    payload piped through stdin. Returns (handoff_path, captured_stdout).
     """
     fake_db = tmp_path / "conversations.db"
     handoff_path = tmp_path / "clear-handoff.json"
 
     fake_settings = {"db_path": str(fake_db)}
 
-    stdin_data = json.dumps(payload)
+    stdin_data = payload if isinstance(payload, str) else json.dumps(payload)
+    stdout_capture = io.StringIO()
 
     with (
         patch.object(sys, "stdin", io.StringIO(stdin_data)),
+        patch.object(sys, "stdout", stdout_capture),
         patch.object(_clear_handoff, "load_settings", return_value=fake_settings),
         patch.object(_clear_handoff, "get_db_path", return_value=fake_db),
     ):
         _clear_handoff.main()
 
-    return handoff_path
+    return handoff_path, stdout_capture.getvalue()
 
 
 # clear-handoff.py contract tests
@@ -59,7 +61,7 @@ def _run_handoff_main(tmp_path: Path, payload: dict) -> Path:
 class TestClearHandoffWriter:
     def test_writes_file_on_clear(self, tmp_path):
         """Contract 1+2+3: writes file with correct keys when end_reason=clear."""
-        hp = _run_handoff_main(
+        hp, _ = _run_handoff_main(
             tmp_path,
             {
                 "end_reason": "clear",
@@ -76,18 +78,18 @@ class TestClearHandoffWriter:
 
     def test_does_not_write_missing_session_id(self, tmp_path):
         """Contract 2: skips write when session_id is absent."""
-        hp = _run_handoff_main(tmp_path, {"end_reason": "clear", "cwd": "/some/project"})
+        hp, _ = _run_handoff_main(tmp_path, {"end_reason": "clear", "cwd": "/some/project"})
         assert not hp.exists()
 
     def test_does_not_write_missing_cwd(self, tmp_path):
         """Contract 2: skips write when cwd is absent."""
-        hp = _run_handoff_main(tmp_path, {"end_reason": "clear", "session_id": "abc-123"})
+        hp, _ = _run_handoff_main(tmp_path, {"end_reason": "clear", "session_id": "abc-123"})
         assert not hp.exists()
 
     @pytest.mark.parametrize("end_reason", ["interrupt", "crash", "CLEAR", None])
     def test_does_not_write_for_other_reasons(self, tmp_path, end_reason):
         """Contract 1: only end_reason='clear' (exact, case-sensitive) triggers write."""
-        hp = _run_handoff_main(
+        hp, _ = _run_handoff_main(
             tmp_path,
             {
                 "end_reason": end_reason,
@@ -99,14 +101,38 @@ class TestClearHandoffWriter:
 
     def test_does_not_write_on_invalid_json(self, tmp_path):
         """Gracefully ignores malformed stdin."""
-        fake_db = tmp_path / "conversations.db"
-        with (
-            patch.object(sys, "stdin", io.StringIO("not-json")),
-            patch.object(_clear_handoff, "load_settings", return_value={"db_path": str(fake_db)}),
-            patch.object(_clear_handoff, "get_db_path", return_value=fake_db),
-        ):
-            _clear_handoff.main()
-        assert not (tmp_path / "clear-handoff.json").exists()
+        hp, _ = _run_handoff_main(tmp_path, "not-json")
+        assert not hp.exists()
+
+
+class TestClearHandoffStdout:
+    """Hook must always print valid JSON to stdout for the harness."""
+
+    def test_stdout_on_successful_write(self, tmp_path):
+        _, stdout = _run_handoff_main(
+            tmp_path,
+            {"end_reason": "clear", "session_id": "abc-123", "cwd": "/some/project"},
+        )
+        assert json.loads(stdout) == {}
+
+    def test_stdout_on_non_clear_reason(self, tmp_path):
+        _, stdout = _run_handoff_main(
+            tmp_path,
+            {"end_reason": "interrupt", "session_id": "abc-123", "cwd": "/some/project"},
+        )
+        assert json.loads(stdout) == {}
+
+    def test_stdout_on_invalid_json(self, tmp_path):
+        _, stdout = _run_handoff_main(tmp_path, "not-json")
+        assert json.loads(stdout) == {}
+
+    def test_stdout_on_empty_stdin(self, tmp_path):
+        _, stdout = _run_handoff_main(tmp_path, "")
+        assert json.loads(stdout) == {}
+
+    def test_stdout_on_missing_fields(self, tmp_path):
+        _, stdout = _run_handoff_main(tmp_path, {"end_reason": "clear"})
+        assert json.loads(stdout) == {}
 
 
 # _find_cleared_from_session_uuid contract tests

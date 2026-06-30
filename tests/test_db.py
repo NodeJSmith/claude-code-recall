@@ -86,7 +86,8 @@ class TestLoadSettings:
     def test_default_values(self):
         assert DEFAULT_SETTINGS["auto_inject_context"] is True
         assert DEFAULT_SETTINGS["max_context_sessions"] == 2
-        assert DEFAULT_SETTINGS["logging_enabled"] is False
+        assert DEFAULT_SETTINGS["logging_enabled"] is True
+        assert DEFAULT_SETTINGS["log_level"] == "INFO"
         assert isinstance(DEFAULT_SETTINGS["exclude_projects"], list)
         assert DEFAULT_SETTINGS["alert_snooze_hours"] == 24
 
@@ -215,7 +216,7 @@ class TestLoadSettingsWithConfig:
         result = load_settings()
         assert result["auto_inject_context"] is False
         assert result["max_context_sessions"] == 5
-        assert result["logging_enabled"] is False  # unchanged default
+        assert result["logging_enabled"] is True  # unchanged default
 
     def test_alert_snooze_hours_override_and_default(self, tmp_path, monkeypatch):
         """The snooze window changes when alert_snooze_hours is set in config;
@@ -234,11 +235,11 @@ class TestLoadSettingsWithConfig:
     def test_logging_enabled_and_exclude_projects_honored(self, tmp_path, monkeypatch):
         """logging_enabled and exclude_projects are user-overridable from config.json."""
         cfg = tmp_path / "config.json"
-        cfg.write_text(json.dumps({"logging_enabled": True, "exclude_projects": ["work-secret"]}))
+        cfg.write_text(json.dumps({"logging_enabled": False, "exclude_projects": ["work-secret"]}))
         monkeypatch.setattr("ccrecall.db.CONFIG_PATH", cfg)
 
         result = load_settings()
-        assert result["logging_enabled"] is True
+        assert result["logging_enabled"] is False
         assert result["exclude_projects"] == ["work-secret"]
 
     def test_missing_config_returns_defaults(self, tmp_path, monkeypatch):
