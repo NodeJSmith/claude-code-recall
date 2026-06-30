@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.13.3](https://github.com/NodeJSmith/claude-code-recall/compare/v0.13.2...v0.13.3) (2026-06-30)
+
+
+### Bug Fixes
+
+* clear-handoff hook missing stdout and improve logging defaults ([#51](https://github.com/NodeJSmith/claude-code-recall/issues/51)) ([954fc97](https://github.com/NodeJSmith/claude-code-recall/commit/954fc972ca5c30c4a37f5e2c573f714e6a18c192))
+
 ## [0.13.2](https://github.com/NodeJSmith/claude-code-recall/compare/v0.13.1...v0.13.2) (2026-06-30)
 
 
