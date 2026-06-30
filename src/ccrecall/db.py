@@ -401,7 +401,7 @@ def setup_logging(settings: dict | None = None) -> logging.Logger:
     logger = logging.getLogger(LOGGER_NAME)
     logger.handlers.clear()
 
-    if not settings or not settings.get("logging_enabled", False):
+    if not settings or not settings.get("logging_enabled", True):
         logger.addHandler(logging.NullHandler())
         return logger
 
