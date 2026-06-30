@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.13.2](https://github.com/NodeJSmith/claude-code-recall/compare/v0.13.1...v0.13.2) (2026-06-30)
+
+
+### Bug Fixes
+
+* prevent OOM on first import of large project directories ([#49](https://github.com/NodeJSmith/claude-code-recall/issues/49)) ([3f5fc9f](https://github.com/NodeJSmith/claude-code-recall/commit/3f5fc9ffcb56ba0191396adcb842e39411afabf6)), closes [#48](https://github.com/NodeJSmith/claude-code-recall/issues/48)
+
 ## [0.13.1](https://github.com/NodeJSmith/claude-code-recall/compare/v0.13.0...v0.13.1) (2026-06-29)
 
 
