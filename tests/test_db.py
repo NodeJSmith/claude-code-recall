@@ -720,6 +720,23 @@ class TestSchemaVersioning:
 
             assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
 
+    def test_v2_migration_is_reentrant(self, tmp_path):
+        """Re-running the v2 migration (a second get_connection call) is a no-op."""
+        db_path = tmp_path / "v1_reentrant.db"
+        _seed_v1_db_with_orphan_messages(db_path)
+
+        with get_connection(settings={"db_path": str(db_path)}) as conn:
+            first_version = conn.execute("PRAGMA user_version").fetchone()[0]
+            first_cols = {row[1] for row in conn.execute("PRAGMA table_info(branches)").fetchall()}
+
+        with get_connection(settings={"db_path": str(db_path)}) as conn:
+            second_version = conn.execute("PRAGMA user_version").fetchone()[0]
+            second_cols = {row[1] for row in conn.execute("PRAGMA table_info(branches)").fetchall()}
+
+        assert first_version == second_version == 2
+        assert "fork_point_uuid" not in first_cols
+        assert first_cols == second_cols
+
     def test_migration_from_v0_purges_dead_branches_and_rebuilds(self, tmp_path):
         """A v0 DB seeded with a churn (inactive) branch row is cleaned on first connection.
 
