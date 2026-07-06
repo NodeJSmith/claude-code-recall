@@ -1,7 +1,7 @@
 ---
 task_id: "T06"
 title: "Update documentation and close stale issues"
-status: "planned"
+status: "done"
 depends_on: ["T01", "T02", "T03", "T04", "T05"]
 implements: ["FR#8", "AC#9"]
 ---
