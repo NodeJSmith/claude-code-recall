@@ -1,7 +1,7 @@
 ---
 task_id: "T03"
 title: "Split session_ops.py into focused modules"
-status: "planned"
+status: "done"
 depends_on: ["T02"]
 implements: ["FR#1", "AC#1", "AC#2", "AC#3"]
 ---

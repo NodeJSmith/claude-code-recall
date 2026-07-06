@@ -32,6 +32,7 @@ from ccrecall.db import (
     fetch_branch_messages,
     get_connection,
 )
+from ccrecall.embed_ops import embed_branch_chunks
 from ccrecall.embeddings import (
     DEFAULT_EMBED_THREADS,
     EMBEDDING_MODEL,
@@ -44,7 +45,6 @@ from ccrecall.health import (
     clear_embedding_failure,
     record_embedding_failure,
 )
-from ccrecall.session_ops import embed_branch_chunks
 
 BATCH_SIZE = 20
 BACKFILL_BATCH_DELAY_SECONDS = 0.05
