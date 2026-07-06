@@ -135,7 +135,7 @@ def run_status(
                 return EXIT_ABORT
             counts = count_status(conn.cursor(), days)
     except (sqlite3.Error, OSError) as e:
-        logger.error("Backfill status: aborted: %s", e)
+        logger.exception("Backfill status: aborted")
         print(f"ccrecall backfill embeddings: aborted: {e}", file=sys.stderr)
         return EXIT_ABORT
 

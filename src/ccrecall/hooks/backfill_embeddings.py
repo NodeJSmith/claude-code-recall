@@ -210,7 +210,7 @@ def run(
                             cursor.execute(f"RELEASE SAVEPOINT {_SAVEPOINT_NAME}")
                             total_updated += 1
                             total_inferences += embedded
-                        except (ValueError, OverflowError, UnicodeError) as e:
+                        except (ValueError, OverflowError, UnicodeError):
                             cursor.execute(f"ROLLBACK TO SAVEPOINT {_SAVEPOINT_NAME}")
                             cursor.execute(f"RELEASE SAVEPOINT {_SAVEPOINT_NAME}")
                             # Per-row content error: mark sentinel so this row is skipped next run.
@@ -218,14 +218,14 @@ def run(
                                 "UPDATE branches SET embedding_version = ? WHERE id = ?",
                                 (CONTENT_ERROR_VERSION, branch_id),
                             )
-                            logger.error("%s: branch %s failed: %s", _LOG_PREFIX, branch_id, e)
-                except Exception as e:
+                            logger.exception("%s: branch %s failed", _LOG_PREFIX, branch_id)
+                except Exception:
                     # Infra/session failure (e.g. ONNX session crash, sqlite3.Error on
                     # fetch_branch_messages, OOM): abort without marking the content-error
                     # sentinel. Any committed partial state (a pre-delete + cleared watermark
                     # from an interrupted row) is recovered by the heal clause / watermark-
                     # stale predicate on the next run; affected rows stay eligible.
-                    logger.error("%s: session failure, aborting: %s", _LOG_PREFIX, e)
+                    logger.exception("%s: session failure, aborting", _LOG_PREFIX)
                     conn.commit()
                     return EXIT_ABORT
 
@@ -249,7 +249,7 @@ def run(
 
                 time.sleep(BACKFILL_BATCH_DELAY_SECONDS)
     except (sqlite3.Error, OSError) as e:
-        logger.error("%s: aborted: %s", _LOG_PREFIX, e)
+        logger.exception("%s: aborted", _LOG_PREFIX)
         print(
             f"{_PRINT_PREFIX}: aborted: {e}",
             file=sys.stderr,

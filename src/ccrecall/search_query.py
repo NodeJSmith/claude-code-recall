@@ -30,8 +30,7 @@ def sanitize_fts_term(term: str) -> str:
     # Remove FTS keywords: NEAR, AND, OR, NOT (case-insensitive)
     sanitized = re.sub(r"\b(NEAR|AND|OR|NOT)\b", "", sanitized, flags=re.IGNORECASE)
     # Collapse whitespace and strip
-    sanitized = re.sub(r"\s+", " ", sanitized).strip()
-    return sanitized
+    return re.sub(r"\s+", " ", sanitized).strip()
 
 
 def scope_filter_clause(

@@ -287,7 +287,7 @@ def _last_event_timestamp(path: Path) -> str:
             latest = ts
     if latest is not None:
         return latest
-    return Instant.from_timestamp(path.stat().st_mtime).format_iso()
+    return Instant.from_timestamp(path.stat().st_mtime).format_iso(unit="millisecond")
 
 
 def list_transcripts(pdir: Path) -> list[Path]:

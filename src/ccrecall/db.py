@@ -298,10 +298,10 @@ def _migrate_to_v1(conn: sqlite3.Connection) -> None:
        standard create-copy-drop-rename sequence. That drop also takes every
        trigger and index defined on the old table with it — including the
        live `branches_fts` sync triggers and the `idx_branches_*` indexes —
-       so both are re-created below via individual `conn.execute` calls, not
-       `conn.executescript` (which implicitly commits, ending this
-       transaction early and leaving the final version bump with nothing to
-       commit). `branches_fts` content itself is untouched — ids survive the
+       so both are re-created by `_recreate_branches_indexes_and_fts`
+       (called below), not via `conn.executescript` (which implicitly
+       commits, ending this transaction early and leaving the final version
+       bump with nothing to commit). `branches_fts` content itself is untouched — ids survive the
        `INSERT INTO branches_new SELECT * FROM branches` copy — only its
        sync triggers need re-creating.
 
@@ -370,8 +370,9 @@ def _migrate_to_v2(conn: sqlite3.Connection) -> None:
        undo the v1 invariant (CLAUDE.md invariant #4). DROP TABLE takes every
        trigger and index defined on the old `branches` with it — including
        the live `branches_fts` sync triggers and the `idx_branches_*`
-       indexes — so both are re-created below via individual `conn.execute`
-       calls, matching v1's approach. `branches_fts` content itself is
+       indexes — so both are re-created by
+       `_recreate_branches_indexes_and_fts` (called below), matching
+       v1's approach. `branches_fts` content itself is
        untouched — ids survive the column-list copy — only its sync triggers
        need re-creating.
 
