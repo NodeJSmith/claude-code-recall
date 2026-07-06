@@ -4,6 +4,8 @@ import json
 import sqlite3
 import subprocess
 import sys
+import threading
+import time
 from typing import ClassVar
 from unittest.mock import patch
 
@@ -26,7 +28,7 @@ from ccrecall.db import (
     vec_available,
 )
 from ccrecall.embeddings import EMBEDDING_DIM, EMBEDDING_MODEL, EMBEDDING_VERSION
-from ccrecall.schema import SCHEMA, detect_fts_support
+from ccrecall.schema import SCHEMA, SCHEMA_CORE, SCHEMA_FTS5, detect_fts_support
 
 
 class TestSchemaCreation:
@@ -45,11 +47,12 @@ class TestSchemaCreation:
         assert expected.issubset(tables)
 
     def test_fts_tables_exist(self, memory_db):
+        """messages_fts was removed as a dead index; branches_fts is the live keyword index."""
         cursor = memory_db.cursor()
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE '%_fts%'")
         fts_tables = {row[0] for row in cursor.fetchall()}
-        assert "messages_fts" in fts_tables
         assert "branches_fts" in fts_tables
+        assert "messages_fts" not in fts_tables
 
     def test_schema_idempotent(self, memory_db):
         """Applying schema twice should not raise."""
@@ -529,6 +532,292 @@ class TestGetConnectionContextManager:
             conn.execute("SELECT 1")
 
 
+def _seed_v0_db_with_dead_branches(db_path) -> None:
+    """Build a pre-migration (v0) conversation DB matching a real upgrade DB's shape.
+
+    Uses SCHEMA_CORE plus the FTS5 schema as it looked before this migration
+    (messages_fts and its messages_ai/ad/au triggers — since removed from
+    schema.py but still present on disk for anyone upgrading from before this
+    change). Seeds one active and one inactive ("churn") branch for the same
+    session, each wired to a branch_messages row and a chunks row — the exact
+    shape the v1 migration must delete, and the exact shape the old
+    UNIQUE(session_id, leaf_uuid) constraint used to allow that the new
+    UNIQUE(session_id) constraint no longer does.
+    """
+    pre_migration_fts5 = (
+        """
+        CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+          content, content=messages, content_rowid=id, tokenize='porter unicode61'
+        );
+        CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
+          INSERT INTO messages_fts(rowid, content) VALUES (new.id, new.content);
+        END;
+        CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
+          INSERT INTO messages_fts(messages_fts, rowid, content) VALUES('delete', old.id, old.content);
+        END;
+        CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
+          INSERT INTO messages_fts(messages_fts, rowid, content) VALUES('delete', old.id, old.content);
+          INSERT INTO messages_fts(rowid, content) VALUES (new.id, new.content);
+        END;
+        """
+        + SCHEMA_FTS5
+    )
+
+    conn = sqlite3.connect(db_path)
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.executescript(SCHEMA_CORE)
+    conn.executescript(pre_migration_fts5)
+    conn.commit()
+
+    conn.execute("INSERT INTO projects (path, key, name) VALUES ('/p-v0', '-p-v0', 'p-v0')")
+    proj_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    conn.execute("INSERT INTO sessions (uuid, project_id) VALUES ('sess-v0', ?)", (proj_id,))
+    sess_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+    conn.execute("INSERT INTO branches (session_id, leaf_uuid, is_active) VALUES (?, 'leaf-active', 1)", (sess_id,))
+    active_branch_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    conn.execute("INSERT INTO branches (session_id, leaf_uuid, is_active) VALUES (?, 'leaf-churn', 0)", (sess_id,))
+    inactive_branch_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+    conn.execute(
+        "INSERT INTO messages (session_id, uuid, role, content) VALUES (?, 'msg-v0', 'user', 'hi')", (sess_id,)
+    )
+    msg_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+    conn.execute("INSERT INTO branch_messages (branch_id, message_id) VALUES (?, ?)", (active_branch_id, msg_id))
+    conn.execute("INSERT INTO branch_messages (branch_id, message_id) VALUES (?, ?)", (inactive_branch_id, msg_id))
+
+    conn.execute(
+        "INSERT INTO chunks (branch_id, exchange_index, content_hash) VALUES (?, 0, 'hash-active')",
+        (active_branch_id,),
+    )
+    conn.execute(
+        "INSERT INTO chunks (branch_id, exchange_index, content_hash) VALUES (?, 0, 'hash-inactive')",
+        (inactive_branch_id,),
+    )
+
+    conn.commit()
+    conn.close()
+
+
+def _seed_v0_db_with_dead_branch_chunk_vec(db_path) -> None:
+    """Extend _seed_v0_db_with_dead_branches with a real vec-loaded chunk_vec row.
+
+    Mirrors production usage: an embedding write connection (load_vec=True)
+    creates chunk_vec and its cascade triggers (branches_chunks_ad,
+    chunks_vec_ad) and writes a real vector for the dead branch's chunk. Those
+    triggers persist on disk regardless of which connection created them, so a
+    later non-vec connection (load_vec=False — the mainline path for most CLI
+    commands and non-embedding hooks) reopening this DB must still purge the
+    dead branch/chunk/chunk_vec rows correctly instead of crashing with
+    "no such module: vec0" when the purge's DELETE fires the cascade.
+    """
+    _seed_v0_db_with_dead_branches(db_path)
+
+    conn = sqlite3.connect(db_path)
+    conn.enable_load_extension(True)
+    sqlite_vec.load(conn)
+    conn.enable_load_extension(False)
+    conn.execute(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS chunk_vec"
+        f" USING vec0(chunk_id INTEGER PRIMARY KEY, embedding float[{EMBEDDING_DIM}])"
+    )
+    conn.execute(
+        "CREATE TRIGGER IF NOT EXISTS branches_chunks_ad"
+        " AFTER DELETE ON branches"
+        " BEGIN DELETE FROM chunks WHERE branch_id = OLD.id; END"
+    )
+    conn.execute(
+        "CREATE TRIGGER IF NOT EXISTS chunks_vec_ad"
+        " AFTER DELETE ON chunks"
+        " BEGIN DELETE FROM chunk_vec WHERE chunk_id = OLD.id; END"
+    )
+    inactive_chunk_id = conn.execute("SELECT id FROM chunks WHERE content_hash = 'hash-inactive'").fetchone()[0]
+    conn.execute(
+        "INSERT INTO chunk_vec(chunk_id, embedding) VALUES (?, ?)",
+        (inactive_chunk_id, sqlite_vec.serialize_float32([0.1] * EMBEDDING_DIM)),
+    )
+    conn.commit()
+    conn.close()
+
+
+class TestSchemaVersioning:
+    """PRAGMA user_version schema versioning and the v1 dead-branch migration."""
+
+    def test_fresh_db_user_version_matches_schema_version(self, tmp_path):
+        """A freshly created DB is stamped with SCHEMA_VERSION on first connection."""
+        db_path = tmp_path / "fresh.db"
+        with get_connection(settings={"db_path": str(db_path)}) as conn:
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == db_module.SCHEMA_VERSION
+
+    def test_migration_from_v0_purges_dead_branches_and_rebuilds(self, tmp_path):
+        """A v0 DB seeded with a churn (inactive) branch row is cleaned on first connection.
+
+        Covers dead branch rows purged in FK-safe order, messages_fts dropped
+        while branches_fts is preserved and still trigger-synced, and the
+        UNIQUE(session_id, leaf_uuid) -> UNIQUE(session_id) constraint change
+        from the branches table rebuild.
+        """
+        db_path = tmp_path / "legacy.db"
+        _seed_v0_db_with_dead_branches(db_path)
+
+        with get_connection(settings={"db_path": str(db_path)}) as conn:
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == db_module.SCHEMA_VERSION
+
+            assert conn.execute("SELECT COUNT(*) FROM branches WHERE is_active = 0").fetchone()[0] == 0
+            assert conn.execute("SELECT COUNT(*) FROM branches WHERE is_active = 1").fetchone()[0] == 1
+            assert conn.execute("SELECT COUNT(*) FROM branch_messages").fetchone()[0] == 1
+            assert conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0] == 1
+
+            tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+            assert "messages_fts" not in tables
+            assert "branches_fts" in tables
+
+            # branches_fts sync triggers were re-created after the rebuild — an
+            # UPDATE must still land in the FTS index.
+            conn.execute("UPDATE branches SET aggregated_content = 'hello world' WHERE is_active = 1")
+            match = conn.execute("SELECT rowid FROM branches_fts WHERE branches_fts MATCH 'hello'").fetchall()
+            assert len(match) == 1
+
+            # UNIQUE(session_id) now rejects a second row for the same session —
+            # the old UNIQUE(session_id, leaf_uuid) would have allowed this.
+            sess_id = conn.execute("SELECT session_id FROM branches WHERE is_active = 1").fetchone()[0]
+            with pytest.raises(sqlite3.IntegrityError, match="UNIQUE constraint failed"):
+                conn.execute(
+                    "INSERT INTO branches (session_id, leaf_uuid, is_active) VALUES (?, 'dup-leaf', 1)",
+                    (sess_id,),
+                )
+
+            assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+
+    @pytest.mark.skipif(not _VEC_AVAILABLE, reason="sqlite-vec not available in this environment")
+    def test_migration_purges_orphaned_chunk_vec_without_crashing(self, tmp_path):
+        """The mainline load_vec=False migration path must not crash on a real upgrade DB.
+
+        Regression test for a reproduced CRITICAL bug: a DB that already has a
+        vec-loaded chunk_vec row + chunks_vec_ad cascade trigger for a dead
+        branch's chunk (the exact population the v1 migration exists to purge)
+        used to raise `sqlite3.OperationalError: no such module: vec0` the
+        first time a non-vec connection (get_connection's default,
+        load_vec=False — most CLI commands and non-embedding hooks) reopened
+        it, because the purge's DELETE fired the on-disk cascade trigger
+        without vec0 registered on that connection.
+        """
+        db_path = tmp_path / "legacy_with_vec.db"
+        _seed_v0_db_with_dead_branch_chunk_vec(db_path)
+
+        with get_connection(settings={"db_path": str(db_path)}, load_vec=False) as conn:
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == db_module.SCHEMA_VERSION
+            assert conn.execute("SELECT COUNT(*) FROM branches WHERE is_active = 0").fetchone()[0] == 0
+            assert conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0] == 1
+            # The dead chunk's chunk_vec row is orphaned by the purge — it must
+            # be cleaned up too, not just left dangling or erroring.
+            assert conn.execute("SELECT COUNT(*) FROM chunk_vec").fetchone()[0] == 0
+
+    def test_migration_is_reentrant(self, tmp_path):
+        """Re-running the migration (a second get_connection call) is a no-op."""
+        db_path = tmp_path / "legacy_reentrant.db"
+        _seed_v0_db_with_dead_branches(db_path)
+
+        with get_connection(settings={"db_path": str(db_path)}) as conn:
+            first_version = conn.execute("PRAGMA user_version").fetchone()[0]
+            first_active = conn.execute("SELECT COUNT(*) FROM branches WHERE is_active = 1").fetchone()[0]
+
+        with get_connection(settings={"db_path": str(db_path)}) as conn:
+            second_version = conn.execute("PRAGMA user_version").fetchone()[0]
+            second_active = conn.execute("SELECT COUNT(*) FROM branches WHERE is_active = 1").fetchone()[0]
+
+        assert first_version == second_version == db_module.SCHEMA_VERSION
+        assert first_active == second_active == 1
+
+    def test_migration_toctou_race_runs_migration_once(self, tmp_path):
+        """Two connections racing to open the same v0 DB must not both migrate.
+
+        Regression test for a reproduced TOCTOU: the pre-fix code read
+        `PRAGMA user_version` once *before* acquiring BEGIN IMMEDIATE, so a
+        second connection blocked waiting for the write lock would still act
+        on that stale, unmigrated read once the lock was granted — re-running
+        _migrate_to_v1 after the first connection had already committed the
+        migration. The fix (db.py:389-390) re-reads user_version under the
+        lock before deciding whether to migrate. This test forces the race
+        with an artificial delay inside a patched _migrate_to_v1 and asserts
+        it runs exactly once even when two threads open the same v0 DB
+        concurrently.
+        """
+        db_path = tmp_path / "legacy_race.db"
+        _seed_v0_db_with_dead_branches(db_path)
+
+        # Stamp the file as WAL up front so both threads' own journal_mode=WAL
+        # pragma (in apply_base_pragmas) is a same-mode no-op rather than a
+        # second, unrelated lock race over the mode switch itself — this test
+        # targets the user_version re-read race in _apply_migrations, not
+        # first-time WAL conversion.
+        warmup = sqlite3.connect(db_path)
+        db_module.apply_base_pragmas(warmup)
+        warmup.close()
+
+        call_count = 0
+        count_lock = threading.Lock()
+        original_migrate = db_module._migrate_to_v1
+
+        def slow_migrate(conn):
+            nonlocal call_count
+            with count_lock:
+                call_count += 1
+            time.sleep(0.2)
+            original_migrate(conn)
+
+        barrier = threading.Barrier(2)
+        errors: list[Exception] = []
+
+        def open_connection():
+            try:
+                barrier.wait()
+                with get_connection(settings={"db_path": str(db_path)}) as conn:
+                    conn.execute("SELECT 1")
+            except Exception as exc:
+                errors.append(exc)
+
+        with patch.object(db_module, "_migrate_to_v1", side_effect=slow_migrate):
+            threads = [threading.Thread(target=open_connection) for _ in range(2)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=5)
+
+        assert not errors, f"unexpected errors in racing threads: {errors}"
+        assert call_count == 1
+
+    @pytest.mark.skipif(not _VEC_AVAILABLE, reason="sqlite-vec not available in this environment")
+    def test_vec_self_heal_runs_outside_version_gate(self, tmp_path):
+        """_ensure_vec_schema's self-heal runs on every vec-loaded connection, not just when migrating.
+
+        Once a DB is already at SCHEMA_VERSION, _apply_migrations is a no-op on
+        every later connection. Dropping chunk_vec directly (bypassing
+        get_connection) after the first vec-loaded connection simulates the
+        kind of drift _ensure_vec_schema heals (e.g. a stale embedding
+        dimension). A second vec-loaded connection must still recreate it even
+        though no migration ran — proving the self-heal isn't gated by the
+        version check.
+        """
+        db_path = tmp_path / "selfheal.db"
+        with get_connection(settings={"db_path": str(db_path)}, load_vec=True) as conn:
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == db_module.SCHEMA_VERSION
+            assert db_module.chunk_vec_queryable(conn)
+
+        raw = sqlite3.connect(db_path)
+        raw.enable_load_extension(True)
+        sqlite_vec.load(raw)
+        raw.enable_load_extension(False)
+        raw.execute("DROP TABLE chunk_vec")
+        raw.commit()
+        raw.close()
+
+        with get_connection(settings={"db_path": str(db_path)}, load_vec=True) as conn:
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == db_module.SCHEMA_VERSION
+            assert db_module.chunk_vec_queryable(conn), "chunk_vec must be re-created by the self-heal, not migration"
+
+
 class TestSchemaEquivalencePin:
     """Characterization pin — guards the migrations squash to v6 baseline.
 
@@ -540,10 +829,12 @@ class TestSchemaEquivalencePin:
 
     Exclusion rule: we exclude from the snapshot any table whose name contains
     '_fts_' (those are FTS5 shadow tables auto-created alongside the virtual FTS
-    tables — e.g. messages_fts_data, branches_fts_idx) plus token_snapshots (owned
-    solely by token_schema.py; the conversation DB no longer creates it) and
-    sqlite_* internals.  The FTS virtual tables themselves (messages_fts,
-    branches_fts) do NOT contain '_fts_' so they ARE included.
+    tables — e.g. branches_fts_idx) plus token_snapshots (owned solely by
+    token_schema.py; the conversation DB no longer creates it) and sqlite_*
+    internals.  The FTS virtual table itself (branches_fts) does NOT contain
+    '_fts_' so it IS included. messages_fts is gone entirely (dropped by the
+    version-1 migration and removed from schema.py) so it is absent from both
+    the table set and the exclusion rule.
     """
 
     # Expected schema captured from the production SCHEMA_CORE + SCHEMA_FTS5 output.
@@ -557,7 +848,6 @@ class TestSchemaEquivalencePin:
         "chunks",
         "import_log",
         "messages",
-        "messages_fts",
         "projects",
         "sessions",
     ]
@@ -625,9 +915,6 @@ class TestSchemaEquivalencePin:
             (10, "is_notification", "INTEGER", 0, "0", 0),
             (11, "origin", "TEXT", 0, None, 0),
         ],
-        "messages_fts": [
-            (0, "content", "", 0, None, 0),
-        ],
         "projects": [
             (0, "id", "INTEGER", 0, None, 1),
             (1, "path", "TEXT", 1, None, 0),
@@ -675,9 +962,9 @@ class TestSchemaEquivalencePin:
             cursor = conn.cursor()
 
             # Tables: exclude token_snapshots, sqlite_* internals, and FTS shadow tables
-            # (shadow tables contain '_fts_' in their name, e.g. messages_fts_data).
-            # The FTS virtual tables (messages_fts, branches_fts) do NOT match '_fts_%'
-            # so they are correctly included.
+            # (shadow tables contain '_fts_' in their name, e.g. branches_fts_idx).
+            # The branches_fts virtual table does NOT match '_fts_%' so it is
+            # correctly included. messages_fts no longer exists.
             cursor.execute("""
                 SELECT name FROM sqlite_master
                 WHERE type='table'

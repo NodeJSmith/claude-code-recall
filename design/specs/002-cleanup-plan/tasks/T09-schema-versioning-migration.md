@@ -1,7 +1,7 @@
 ---
 task_id: "T09"
 title: "Add schema versioning and run dead-branch migration"
-status: "planned"
+status: "done"
 depends_on: ["T06", "T07"]
 implements: ["FR#7", "FR#14", "FR#15", "FR#17", "AC#5", "AC#10"]
 ---

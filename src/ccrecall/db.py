@@ -19,6 +19,10 @@ from ccrecall.schema import SCHEMA_CORE, SCHEMA_FTS4, SCHEMA_FTS5, detect_fts_su
 # Default paths
 DEFAULT_PROJECTS_DIR = Path.home() / ".claude" / "projects"
 
+# Current schema version. Bump when adding a migration and wire the new DDL
+# delta into _apply_migrations (see _migrate_to_v1 for the version-1 shape).
+SCHEMA_VERSION = 1
+
 # Shared SQL predicate for "branches that are candidates to embed": active
 # leaves (the query path only returns is_active=1) with a usable summary. This
 # is the single source of truth for the embedding universe — build_selection()
@@ -231,6 +235,175 @@ def _ensure_vec_schema(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_to_v1(conn: sqlite3.Connection) -> None:
+    """Version-1 migration: purge dead branch rows, drop messages_fts, rebuild branches.
+
+    Runs inside the caller's BEGIN IMMEDIATE transaction (_apply_migrations).
+
+    1. Delete `is_active = 0` branches and dependents in FK-safe order
+       (branch_messages, then chunks — the vec cascade trigger, when present,
+       handles chunk_vec — then branches) *before* the rebuild in step 3, or
+       leftover duplicate session_id values would violate its new UNIQUE.
+    2. Drop `messages_fts` and its messages_ai/ad/au triggers. A real upgrade
+       DB may still carry these triggers even though their definitions are
+       already gone from schema.py; a dangling trigger referencing the
+       just-dropped table breaks the ALTER TABLE RENAME in step 3 (SQLite
+       revalidates every trigger body during a rename).
+    3. Rebuild `branches` to change `UNIQUE(session_id, leaf_uuid)` to
+       `UNIQUE(session_id)` — SQLite has no DROP CONSTRAINT, so this is the
+       standard create-copy-drop-rename sequence. That drop also takes every
+       trigger and index defined on the old table with it — including the
+       live `branches_fts` sync triggers and the `idx_branches_*` indexes —
+       so both are re-created below via individual `conn.execute` calls, not
+       `conn.executescript` (which implicitly commits, ending this
+       transaction early and leaving the final version bump with nothing to
+       commit). `branches_fts` content itself is untouched — ids survive the
+       `INSERT INTO branches_new SELECT * FROM branches` copy — only its
+       sync triggers need re-creating.
+
+    Table rebuilds where another table holds a foreign key to the table being
+    dropped require `PRAGMA foreign_keys = OFF` for the whole connection —
+    the caller (_apply_migrations) sets this outside any transaction, since
+    toggling it here would be a no-op once a transaction is open.
+    """
+    conn.execute("DELETE FROM branch_messages WHERE branch_id IN (SELECT id FROM branches WHERE is_active = 0)")
+    conn.execute("DELETE FROM chunks WHERE branch_id IN (SELECT id FROM branches WHERE is_active = 0)")
+    conn.execute("DELETE FROM branches WHERE is_active = 0")
+
+    conn.execute("DROP TRIGGER IF EXISTS messages_ai")
+    conn.execute("DROP TRIGGER IF EXISTS messages_ad")
+    conn.execute("DROP TRIGGER IF EXISTS messages_au")
+    conn.execute("DROP TABLE IF EXISTS messages_fts")
+
+    conn.execute("""
+        CREATE TABLE branches_new (
+          id INTEGER PRIMARY KEY,
+          session_id INTEGER NOT NULL REFERENCES sessions(id),
+          leaf_uuid TEXT NOT NULL,
+          fork_point_uuid TEXT,
+          is_active INTEGER DEFAULT 1,
+          started_at DATETIME,
+          ended_at DATETIME,
+          exchange_count INTEGER DEFAULT 0,
+          files_modified TEXT,
+          commits TEXT,
+          tool_counts TEXT,
+          aggregated_content TEXT,
+          context_summary TEXT,
+          context_summary_json TEXT,
+          summary_version INTEGER DEFAULT 0,
+          embedding_version INTEGER DEFAULT 0,
+          embedding_model TEXT,
+          summary_version_at_embed INTEGER,
+          UNIQUE(session_id)
+        )
+    """)
+    conn.execute("INSERT INTO branches_new SELECT * FROM branches")
+    conn.execute("DROP TABLE branches")
+    conn.execute("ALTER TABLE branches_new RENAME TO branches")
+
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_branches_session ON branches(session_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_branches_active ON branches(is_active)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_branches_summary_version ON branches(summary_version)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_branches_embedding_version ON branches(embedding_version)")
+
+    fts = detect_fts_support(conn)
+    if fts == "fts5":
+        conn.execute(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS branches_fts USING fts5("
+            "aggregated_content, content=branches, content_rowid=id, tokenize='porter unicode61')"
+        )
+    elif fts == "fts4":
+        conn.execute(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS branches_fts USING fts4("
+            "aggregated_content, content=branches, tokenize=porter)"
+        )
+    if fts in ("fts5", "fts4"):
+        # Trigger bodies are identical across the FTS5/FTS4 variants (only the
+        # CREATE VIRTUAL TABLE statement above differs) — one copy suffices.
+        conn.execute(
+            "CREATE TRIGGER IF NOT EXISTS branches_ai AFTER INSERT ON branches BEGIN"
+            " INSERT INTO branches_fts(rowid, aggregated_content) VALUES (new.id, new.aggregated_content); END"
+        )
+        conn.execute(
+            "CREATE TRIGGER IF NOT EXISTS branches_ad AFTER DELETE ON branches BEGIN"
+            " INSERT INTO branches_fts(branches_fts, rowid, aggregated_content)"
+            " VALUES('delete', old.id, old.aggregated_content); END"
+        )
+        conn.execute(
+            "CREATE TRIGGER IF NOT EXISTS branches_au AFTER UPDATE ON branches BEGIN"
+            " INSERT INTO branches_fts(branches_fts, rowid, aggregated_content)"
+            " VALUES('delete', old.id, old.aggregated_content);"
+            " INSERT INTO branches_fts(rowid, aggregated_content) VALUES (new.id, new.aggregated_content); END"
+        )
+
+
+def _apply_migrations(conn: sqlite3.Connection) -> None:
+    """Apply version-gated schema migrations up to SCHEMA_VERSION, atomically.
+
+    Must run after SCHEMA_CORE/FTS creation (their CREATE TABLE/TRIGGER IF NOT
+    EXISTS statements are always safe to re-run) and before _ensure_vec_schema
+    — the vec self-heal checks stay outside the version gate, running on
+    every vec-loaded connection regardless of schema version.
+
+    On a fresh install user_version starts at 0 and every migration DML step
+    is a no-op against the schema just created. On failure the whole thing
+    rolls back, user_version stays at its prior value, and the next
+    connection retries from scratch — every step is written to tolerate that.
+
+    A real upgrade DB (any installation with prior chunk-embedding activity)
+    already carries the chunks_vec_ad cascade trigger on disk regardless of
+    whether *this* connection asked for load_vec — CREATE TRIGGER persists
+    independently of which connection loaded the vec0 module. _migrate_to_v1's
+    purge deletes from branches/chunks, which fires that trigger's
+    ``DELETE FROM chunk_vec``; without vec0 registered on this connection that
+    raises ``sqlite3.OperationalError: no such module: vec0`` and crashes the
+    (usually load_vec=False) caller. Loading vec here — before the purge, and
+    only once migration is confirmed necessary — registers vec0 so the cascade
+    can fire, with the side benefit of correctly purging the now-orphaned
+    chunk_vec rows for deleted chunks instead of erroring. A no-op when
+    sqlite-vec isn't installed/loadable at all (vec_available fails closed),
+    which matches the case where chunk_vec/its cascade trigger were never
+    created in the first place.
+
+    foreign_keys is toggled OFF for the duration: the branches rebuild in
+    _migrate_to_v1 drops and recreates a table that branch_messages and
+    chunks reference via foreign key, and SQLite only allows that when
+    enforcement is disabled *outside* any transaction (toggling mid-
+    transaction is a no-op, and leaving it on fails the COMMIT with a
+    foreign-key error even though ``PRAGMA foreign_key_check`` reports no
+    violations — see sqlite.org/lang_altertable.html). Restored in
+    ``finally`` on every path so foreign_keys is ON whenever this returns.
+    """
+    current = conn.execute("PRAGMA user_version").fetchone()[0]
+    if current >= SCHEMA_VERSION:
+        return
+    conn.execute("PRAGMA foreign_keys = OFF")
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            # Re-read under the write lock: another connection may have raced
+            # this one to BEGIN IMMEDIATE and already committed the migration
+            # while this connection was blocked waiting for the lock — the
+            # `current` read above happened before the lock was held.
+            current = conn.execute("PRAGMA user_version").fetchone()[0]
+            if current < SCHEMA_VERSION:
+                if current < 1:
+                    # Load vec only now that migration is confirmed necessary
+                    # under the lock — enable_load_extension/sqlite_vec.load
+                    # are C-API calls, not SQL, so they are unaffected by
+                    # transaction state and safe to call here.
+                    vec_available(conn)
+                    _migrate_to_v1(conn)
+                conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+    finally:
+        conn.execute("PRAGMA foreign_keys = ON")
+
+
 def _open_connection(settings: dict | None = None, load_vec: bool = False) -> sqlite3.Connection:
     """Open a raw database connection, initializing the schema on first use (idempotent).
 
@@ -258,6 +431,11 @@ def _open_connection(settings: dict | None = None, load_vec: bool = False) -> sq
     elif fts == "fts4":
         conn.executescript(SCHEMA_FTS4)
     conn.commit()
+
+    # Version-gated schema migrations run after the idempotent schema creation
+    # above (tables must exist before migration DML runs) and before the vec
+    # self-heal below (which is not version-gated — see _apply_migrations).
+    _apply_migrations(conn)
 
     if load_vec and vec_available(conn):
         # First and only place the vec extension is loaded for this connection.
