@@ -1,7 +1,7 @@
 # Design: ccrecall Productionization Cleanup
 
 **Date:** 2026-07-05
-**Status:** approved
+**Status:** archived
 **Scope-mode:** hold
 
 ## Problem
