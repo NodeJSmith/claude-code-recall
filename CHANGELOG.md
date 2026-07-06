@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.13.4](https://github.com/NodeJSmith/claude-code-recall/compare/v0.13.3...v0.13.4) (2026-07-06)
+
+
+### Refactoring
+
+* delete dead subsystems, split db.py, restructure search ([#54](https://github.com/NodeJSmith/claude-code-recall/issues/54)) ([e01e536](https://github.com/NodeJSmith/claude-code-recall/commit/e01e53603488de571ed8fec58dab51fe4fafa52f))
+* split oversized modules, fix tail sort, drop dead column ([#56](https://github.com/NodeJSmith/claude-code-recall/issues/56)) ([0b2bb23](https://github.com/NodeJSmith/claude-code-recall/commit/0b2bb2334fd54d3aefa3c8b001d88e06dd35267b))
+
 ## [0.13.3](https://github.com/NodeJSmith/claude-code-recall/compare/v0.13.2...v0.13.3) (2026-06-30)
 
 
