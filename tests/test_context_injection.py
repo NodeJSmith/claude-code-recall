@@ -16,13 +16,13 @@ from ccrecall.health import (
     probe_db,
     record_embedding_failure,
 )
-from ccrecall.hooks.memory_context import (
+from ccrecall.hooks.context_alerts import proactive_alert_block
+from ccrecall.hooks.context_rendering import (
     TOPIC_PREVIEW_MAX_CHARS,
     _build_fallback_context,
-    _proactive_alert_block,
     build_context,
-    select_sessions,
 )
+from ccrecall.hooks.session_selection import select_sessions
 from ccrecall.summarizer import (
     build_exchange_pairs,
     render_context_summary,
@@ -753,7 +753,7 @@ class TestBuildFallbackContext:
 class TestProactiveAlerts:
     """Tests for proactive health-alert injection in the SessionStart hook.
 
-    Each test calls _proactive_alert_block() directly with injected sidecar paths
+    Each test calls proactive_alert_block() directly with injected sidecar paths
     so the real ~/.ccrecall/ directory is never touched.
     """
 
@@ -802,7 +802,7 @@ class TestProactiveAlerts:
         unwritable.chmod(0o555)
 
         try:
-            block = _proactive_alert_block(
+            block = proactive_alert_block(
                 self._settings(),
                 conn=None,
                 db_available=False,
@@ -818,7 +818,7 @@ class TestProactiveAlerts:
 
     def test_ac1_block_fires_when_db_available_but_connection_failed(self, tmp_path):
         """When DB exists but connection fails, probe_db(None) fires the cant-persist alert."""
-        block = _proactive_alert_block(
+        block = proactive_alert_block(
             self._settings(),
             conn=None,  # connection failed
             db_available=True,  # but DB file exists → probe is invoked with None
@@ -863,7 +863,7 @@ class TestProactiveAlerts:
             except Exception:
                 conn = None
 
-            block = _proactive_alert_block(
+            block = proactive_alert_block(
                 self._settings(),
                 conn=conn,
                 db_available=True,  # file exists; connect failed → probe_db(None)
@@ -918,7 +918,7 @@ class TestProactiveAlerts:
         status_path = tmp_path / "embedding-status.json"
         record_embedding_failure(REASON_VEC_UNAVAILABLE, path=status_path)
 
-        block = _proactive_alert_block(
+        block = proactive_alert_block(
             self._settings(),
             conn=None,
             db_available=False,
@@ -941,7 +941,7 @@ class TestProactiveAlerts:
         status_path = tmp_path / "embedding-status.json"
         record_embedding_failure(REASON_MODEL_UNAVAILABLE, path=status_path)
 
-        block = _proactive_alert_block(
+        block = proactive_alert_block(
             self._settings(),
             conn=None,
             db_available=False,
@@ -965,7 +965,7 @@ class TestProactiveAlerts:
         record_embedding_failure(REASON_VEC_UNAVAILABLE, path=status_path)
 
         try:
-            block = _proactive_alert_block(
+            block = proactive_alert_block(
                 self._settings(),
                 conn=None,
                 db_available=False,
@@ -990,10 +990,10 @@ class TestProactiveAlerts:
         def _explode(**_kwargs):
             raise RuntimeError("injected test failure")
 
-        # Patch inside memory_context's namespace (imported from health)
-        monkeypatch.setattr("ccrecall.hooks.memory_context.probe_filesystem", _explode)
+        # Patch inside context_alerts's namespace (imported from health)
+        monkeypatch.setattr("ccrecall.hooks.context_alerts.probe_filesystem", _explode)
 
-        block = _proactive_alert_block(
+        block = proactive_alert_block(
             self._settings(),
             conn=None,
             db_available=False,
@@ -1018,7 +1018,7 @@ class TestProactiveAlerts:
 
         # Step 1: record an embedding failure → alert fires
         record_embedding_failure(REASON_VEC_UNAVAILABLE, path=status_path)
-        block1 = _proactive_alert_block(
+        block1 = proactive_alert_block(
             self._settings(),
             conn=None,
             db_available=False,
@@ -1034,7 +1034,7 @@ class TestProactiveAlerts:
         assert not status_path.exists()
 
         # Step 3: next session — no active conditions → no block, ledger reset
-        block2 = _proactive_alert_block(
+        block2 = proactive_alert_block(
             self._settings(),
             conn=None,
             db_available=False,
@@ -1063,7 +1063,7 @@ class TestProactiveAlerts:
         record_embedding_failure(REASON_VEC_UNAVAILABLE, path=status_path)
         snooze_path = tmp_path / "snooze.json"
 
-        block = _proactive_alert_block(
+        block = proactive_alert_block(
             self._settings(),
             conn=None,
             db_available=False,
@@ -1076,7 +1076,7 @@ class TestProactiveAlerts:
 
     def test_healthy_system_no_proactive_block(self, tmp_path):
         """With no faults and no embedding failure, proactive block is empty."""
-        block = _proactive_alert_block(
+        block = proactive_alert_block(
             self._settings(),
             conn=None,
             db_available=False,

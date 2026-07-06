@@ -1,7 +1,7 @@
 ---
 task_id: "T04"
 title: "Split memory_context.py into focused modules"
-status: "planned"
+status: "done"
 depends_on: []
 implements: ["FR#2", "AC#1", "AC#2", "AC#3"]
 ---
