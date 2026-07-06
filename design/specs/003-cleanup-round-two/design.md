@@ -1,7 +1,7 @@
 # Design: Productionization Cleanup Round Two
 
 **Date:** 2026-07-06
-**Status:** approved
+**Status:** archived
 **Scope-mode:** hold
 
 ## Problem
