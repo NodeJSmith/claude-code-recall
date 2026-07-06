@@ -1,7 +1,7 @@
 ---
 task_id: "T05"
 title: "Wrap get_connection as context manager and migrate source callers"
-status: "planned"
+status: "done"
 depends_on: ["T04"]
 implements: ["FR#16", "AC#11"]
 ---

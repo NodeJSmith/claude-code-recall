@@ -18,7 +18,7 @@ from ccrecall.db import (
     branch_embedding_coverage,
     chunk_vec_queryable,
     escape_like,
-    get_db_connection,
+    get_connection,
     parse_project_filter,
     resolve_db_settings,
 )
@@ -716,17 +716,15 @@ def run_messages(
     settings = resolve_db_settings(db)
 
     try:
-        conn = get_db_connection(settings, load_vec=True)
-
-        snippets, ranked = search_messages(
-            conn,
-            query=query,
-            max_results=max_results,
-            projects=projects,
-            session_id=session,
-            path=path,
-        )
-        conn.close()
+        with get_connection(settings, load_vec=True) as conn:
+            snippets, ranked = search_messages(
+                conn,
+                query=query,
+                max_results=max_results,
+                projects=projects,
+                session_id=session,
+                path=path,
+            )
 
         if output_format == "json":
             json_snippets = [format_snippet_json(s) for s in snippets]
@@ -747,40 +745,37 @@ def run_messages(
 def print_status(settings: dict | None) -> None:
     """Print diagnostic status and exit 0."""
     # Open one connection with vec loaded; chunk_vec_queryable probes whether
-    # the vec table is usable — get_db_connection already loaded the extension
+    # the vec table is usable — get_connection already loaded the extension
     # iff it could, so the table-existence probe is sufficient.
     try:
-        conn = get_db_connection(settings, load_vec=True)
-        is_vec = chunk_vec_queryable(conn)
+        with get_connection(settings, load_vec=True) as conn:
+            is_vec = chunk_vec_queryable(conn)
+            print(f"vec extension: {'yes' if is_vec else 'no'}")
+
+            # Model: name + whether the embedding stack imports. Deliberately does
+            # not call model_available() — that constructs the fastembed model and
+            # would download it (~120 MB) on a cold cache, which a read-only status
+            # must not do.
+            print(f"model: {EMBEDDING_MODEL} (deps {'available' if DEPS_AVAILABLE else 'missing'})")
+
+            # Chunk coverage (current-version chunks / total chunks) and branch watermark
+            try:
+                total_chunks = conn.execute("SELECT count(*) FROM chunks").fetchone()[0]
+                current_chunks = conn.execute(
+                    "SELECT count(*) FROM chunks WHERE embedding_version = ? AND embedding_model = ?",
+                    (EMBEDDING_VERSION, EMBEDDING_MODEL),
+                ).fetchone()[0]
+                print(f"chunk coverage: {current_chunks}/{total_chunks} chunks at current version")
+
+                # Branch watermark: branches whose every current exchange is embedded.
+                embedded_branches, total_branches = branch_embedding_coverage(conn)
+                print(f"embedded branches: {embedded_branches}/{total_branches} (watermark)")
+            except sqlite3.Error as e:
+                print(f"chunk coverage: error ({e})")
+                print(f"embedded branches: error ({e})")
     except (sqlite3.Error, OSError):
-        conn = None
-        is_vec = False
-    print(f"vec extension: {'yes' if is_vec else 'no'}")
-
-    # Model: name + whether the embedding stack imports. Deliberately does not
-    # call model_available() — that constructs the fastembed model and would
-    # download it (~120 MB) on a cold cache, which a read-only status must not do.
-    print(f"model: {EMBEDDING_MODEL} (deps {'available' if DEPS_AVAILABLE else 'missing'})")
-
-    # Chunk coverage (current-version chunks / total chunks) and branch watermark
-    if conn is not None:
-        try:
-            total_chunks = conn.execute("SELECT count(*) FROM chunks").fetchone()[0]
-            current_chunks = conn.execute(
-                "SELECT count(*) FROM chunks WHERE embedding_version = ? AND embedding_model = ?",
-                (EMBEDDING_VERSION, EMBEDDING_MODEL),
-            ).fetchone()[0]
-            print(f"chunk coverage: {current_chunks}/{total_chunks} chunks at current version")
-
-            # Branch watermark: branches whose every current exchange is embedded.
-            embedded_branches, total_branches = branch_embedding_coverage(conn)
-            print(f"embedded branches: {embedded_branches}/{total_branches} (watermark)")
-        except sqlite3.Error as e:
-            print(f"chunk coverage: error ({e})")
-            print(f"embedded branches: error ({e})")
-        finally:
-            conn.close()
-    else:
+        print("vec extension: no")
+        print(f"model: {EMBEDDING_MODEL} (deps {'available' if DEPS_AVAILABLE else 'missing'})")
         print("chunk coverage: error (could not open database)")
         print("embedded branches: error (could not open database)")
 
@@ -842,21 +837,20 @@ def run(
     assert query is not None  # noqa: S101 — type-checker narrowing; the real guard is the exit above
 
     try:
-        conn = get_db_connection(settings, load_vec=True)
-        fts_level = detect_fts_support(conn)
+        with get_connection(settings, load_vec=True) as conn:
+            fts_level = detect_fts_support(conn)
 
-        cards, ranked = search_sessions(
-            conn,
-            query=query,
-            fts_level=fts_level,
-            max_results=max_results,
-            projects=projects,
-            session_id=session,
-            path=path,
-            keyword_only=keyword_only,
-        )
-        caveat = _compute_caveat(conn)
-        conn.close()
+            cards, ranked = search_sessions(
+                conn,
+                query=query,
+                fts_level=fts_level,
+                max_results=max_results,
+                projects=projects,
+                session_id=session,
+                path=path,
+                keyword_only=keyword_only,
+            )
+            caveat = _compute_caveat(conn)
 
         if output_format == "json":
             json_cards = [format_card_json(c) for c in cards]

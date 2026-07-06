@@ -19,7 +19,7 @@ from ccrecall.config import (
     log_hook_exception,
     pid_file_path,
 )
-from ccrecall.db import CONTENT_ERROR_VERSION, get_db_connection
+from ccrecall.db import CONTENT_ERROR_VERSION, get_connection
 from ccrecall.hooks import backfill_summaries, import_conversations
 from ccrecall.hooks.warm_model import PID_KEY as WARM_MODEL_PID_KEY
 from ccrecall.summarizer import SUMMARY_VERSION
@@ -80,11 +80,10 @@ def _needs_reimport(settings: dict | None = None) -> bool:
     NULL file_hash is written by the normal sync path when file_hash is unavailable.
     """
     try:
-        conn = get_db_connection(settings)
-        cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM import_log WHERE file_hash IS NULL")
-        count = cursor.fetchone()[0]
-        conn.close()
+        with get_connection(settings) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM import_log WHERE file_hash IS NULL")
+            count = cursor.fetchone()[0]
         return count > 0
     except (sqlite3.Error, OSError):
         return False
@@ -93,20 +92,18 @@ def _needs_reimport(settings: dict | None = None) -> bool:
 def _needs_backfill(settings: dict | None = None) -> bool:
     """Check if any branches need summary backfill. Returns False on any error."""
     try:
-        conn = get_db_connection(settings)
-        cursor = conn.cursor()
-        cursor.execute("PRAGMA table_info(branches)")
-        cols = {row[1] for row in cursor.fetchall()}
-        if "summary_version" not in cols:
-            conn.close()
-            return False
-        cursor.execute(
-            "SELECT COUNT(*) FROM branches WHERE summary_version IS NULL"
-            " OR (summary_version < ? AND summary_version != ?)",
-            (SUMMARY_VERSION, CONTENT_ERROR_VERSION),
-        )
-        count = cursor.fetchone()[0]
-        conn.close()
+        with get_connection(settings) as conn:
+            cursor = conn.cursor()
+            cursor.execute("PRAGMA table_info(branches)")
+            cols = {row[1] for row in cursor.fetchall()}
+            if "summary_version" not in cols:
+                return False
+            cursor.execute(
+                "SELECT COUNT(*) FROM branches WHERE summary_version IS NULL"
+                " OR (summary_version < ? AND summary_version != ?)",
+                (SUMMARY_VERSION, CONTENT_ERROR_VERSION),
+            )
+            count = cursor.fetchone()[0]
         return count > 0
     except (sqlite3.Error, OSError):
         return False

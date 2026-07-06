@@ -22,6 +22,7 @@ from ccrecall.config import (
 )
 from ccrecall.db import (
     fetch_branch_messages,
+    get_connection,
     get_db_connection,
     vec_available,
 )
@@ -494,6 +495,42 @@ class TestLoadVecParameter:
         count = conn.execute("SELECT COUNT(*) FROM branches").fetchone()[0]
         assert count == 0
         conn.close()
+
+
+class TestGetConnectionContextManager:
+    """get_connection() as a context manager — commit-on-success, rollback/close-on-exception."""
+
+    def test_connection_closed_on_exception(self, tmp_path):
+        """A connection opened via get_connection() is closed even when the with-block raises.
+
+        Characterizes the sync_current.py leak this context manager fixes: the
+        raw get_db_connection() pattern left the connection open (and any
+        in-progress write uncommitted) whenever the caller's work raised before
+        reaching an explicit conn.close(). get_connection() must close on every
+        exit path, exception included.
+        """
+        db_path = tmp_path / "test.db"
+        conn_holder: dict = {}
+
+        def _raise_inside_with():
+            with get_connection({"db_path": str(db_path)}) as conn:
+                conn_holder["conn"] = conn
+                conn.execute("SELECT 1")
+                raise ValueError("simulate failure")
+
+        with pytest.raises(ValueError, match="simulate failure"):
+            _raise_inside_with()
+
+        with pytest.raises(sqlite3.ProgrammingError):
+            conn_holder["conn"].execute("SELECT 1")
+
+    def test_connection_closed_on_success(self, tmp_path):
+        """A connection opened via get_connection() is committed and closed on normal exit."""
+        db_path = tmp_path / "test.db"
+        with get_connection({"db_path": str(db_path)}) as conn:
+            conn.execute("SELECT 1")
+        with pytest.raises(sqlite3.ProgrammingError):
+            conn.execute("SELECT 1")
 
 
 class TestSchemaEquivalencePin:

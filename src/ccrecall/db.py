@@ -231,15 +231,19 @@ def _ensure_vec_schema(conn: sqlite3.Connection) -> None:
     )
 
 
-def get_db_connection(settings: dict | None = None, load_vec: bool = False) -> sqlite3.Connection:
-    """Get database connection, initializing the schema on first use (idempotent).
+def _open_connection(settings: dict | None = None, load_vec: bool = False) -> sqlite3.Connection:
+    """Open a raw database connection, initializing the schema on first use (idempotent).
 
     Uses the settings-based db_path when provided and applies the base pragmas for
     concurrent-safe access. When ``load_vec`` is True, loads the sqlite-vec extension
     and raises busy_timeout to VEC_BUSY_TIMEOUT_MS — use it for connections that query
     or write chunk_vec (search, write path, backfill). Default False keeps
-    the extension unloaded, cheaper for recent-chats, token analytics, and setup paths
-    that never touch the vec tables.
+    the extension unloaded, cheaper for recent-chats and setup paths that never
+    touch the vec tables.
+
+    Callers should not use this directly — use ``get_connection`` (the
+    context-manager wrapper) instead, which guarantees the connection is
+    committed on success, rolled back on exception, and always closed.
     """
     db_path = get_db_path(settings)
     ensure_parent_dir(db_path)
@@ -265,6 +269,30 @@ def get_db_connection(settings: dict | None = None, load_vec: bool = False) -> s
         conn.execute(f"PRAGMA busy_timeout = {VEC_BUSY_TIMEOUT_MS}")
 
     return conn
+
+
+@contextlib.contextmanager
+def get_connection(settings: dict | None = None, load_vec: bool = False):
+    """Get a database connection as a context manager: commit-on-success, rollback-on-exception, always-close.
+
+    Use as ``with get_connection(settings) as conn:``. On normal exit from the
+    ``with`` block, the connection is committed then closed. On an exception
+    propagating out of the block, the connection is rolled back (so partial
+    work isn't silently persisted) then closed, and the exception re-raises.
+    Either way the connection is guaranteed to be closed — this replaces the
+    old raw-connection pattern (``conn = _open_connection(...)``, previously
+    a public helper of the same name) that leaked the connection whenever the
+    caller's work raised before reaching an explicit ``conn.close()``.
+    """
+    conn = _open_connection(settings, load_vec)
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def branch_embedding_coverage(conn: sqlite3.Connection) -> tuple[int, int]:
