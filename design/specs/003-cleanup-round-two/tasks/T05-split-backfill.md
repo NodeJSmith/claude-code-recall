@@ -1,7 +1,7 @@
 ---
 task_id: "T05"
 title: "Split backfill_embeddings.py into focused modules"
-status: "planned"
+status: "done"
 depends_on: ["T03"]
 implements: ["FR#3", "AC#1", "AC#2", "AC#3"]
 ---

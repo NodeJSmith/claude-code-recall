@@ -14,245 +14,38 @@ Two-level failure distinction:
 Built to run unattended (systemd timer): `--status [--json]` reports progress
 without embedding, progress lines carry elapsed/ETA, and abort paths exit
 non-zero so the scheduler sees the failure.
+
+Query construction/constants live in `backfill_query.py`; status reporting
+lives in `backfill_status.py`. This module keeps only the `run()` orchestrator.
 """
 
 import contextlib
 import json
-import logging
 import os
 import sqlite3
 import sys
 import time
 
-from ccrecall.config import load_settings, remove_pid_file, setup_logging
-from ccrecall.db import (
-    CHUNK_EMBEDDABLE_BRANCH_FILTER,
-    CONTENT_ERROR_VERSION,
-    chunk_vec_queryable,
-    fetch_branch_messages,
-    get_connection,
-)
+from ccrecall.config import load_settings, setup_logging
+from ccrecall.db import CONTENT_ERROR_VERSION, chunk_vec_queryable, fetch_branch_messages, get_connection
 from ccrecall.embed_ops import embed_branch_chunks
-from ccrecall.embeddings import (
-    DEFAULT_EMBED_THREADS,
-    EMBEDDING_MODEL,
-    EMBEDDING_VERSION,
-    model_available,
-)
+from ccrecall.embeddings import DEFAULT_EMBED_THREADS, EMBEDDING_MODEL, EMBEDDING_VERSION, model_available
 from ccrecall.health import (
     REASON_MODEL_UNAVAILABLE,
     REASON_VEC_UNAVAILABLE,
     clear_embedding_failure,
     record_embedding_failure,
 )
-
-BATCH_SIZE = 20
-BACKFILL_BATCH_DELAY_SECONDS = 0.05
-DEFAULT_PROGRESS_EVERY = BATCH_SIZE
-
-# Lower scheduling priority for this background CPU job so interactive work wins.
-BACKFILL_NICE_LEVEL = 10
-
-EXIT_OK = 0
-EXIT_ABORT = 1
-
-# PID key for the self-concurrency guard (this command is manual-only, never
-# auto-spawned; the marker is cleaned up by the CLI command on exit).
-PID_KEY = "ccrecall-backfill-embeddings"
-
-
-def cleanup_pid() -> None:
-    """Remove the self-concurrency PID marker (no-op if absent)."""
-    remove_pid_file(PID_KEY)
-
-
-def days_modifier(days: int) -> str:
-    """SQLite datetime() modifier for an N-day lookback (days=7 -> '-7 days').
-
-    Single source of truth for the --days recency bound so build_selection()
-    (eligibility) and count_status() (progress) can't construct it differently.
-    """
-    return f"-{days} days"
-
-
-def build_selection(days: int | None) -> tuple[str, list]:
-    """Return the shared WHERE clause + params for eligible-branch selection (chunk path).
-
-    Eligible = CHUNK_EMBEDDABLE branch (active leaf with at least one message),
-    not the content-error sentinel (-1), and needing a chunk embed:
-    - watermark-stale: embedding_version IS NULL or below EMBEDDING_VERSION or
-      wrong model — this includes version-stale chunks the write path skips;
-      the backfill owns their re-embed.
-    - heal clause: EXISTS a chunks row without a chunk_vec — catches crash
-      victims and post-drop orphans the watermark can't see (design C1).
-
-    summary_version_at_embed is dropped from the predicate: chunk staleness is
-    driven by content_hash + EMBEDDING_VERSION, not the summary version.
-
-    Optional recency bound on ended_at via --days; NULL ended_at is excluded
-    (SQLite NULL > x is false). Returns a SQL fragment for
-    f"... FROM branches {where}".
-    """
-    where = f"""
-        WHERE {CHUNK_EMBEDDABLE_BRANCH_FILTER}
-          AND embedding_version IS NOT {CONTENT_ERROR_VERSION}
-          AND (
-            embedding_version IS NULL
-            OR embedding_version < ?
-            OR embedding_model IS NOT ?
-            OR EXISTS (
-              SELECT 1 FROM chunks c
-              WHERE c.branch_id = branches.id
-                AND NOT EXISTS (SELECT 1 FROM chunk_vec WHERE chunk_id = c.id)
-            )
-          )
-    """
-    params: list = [EMBEDDING_VERSION, EMBEDDING_MODEL]
-    if days is not None:
-        where += "          AND ended_at > datetime('now', ?)\n"
-        params.append(days_modifier(days))
-    return where, params
-
-
-def count_status(cursor: sqlite3.Cursor, days: int | None) -> dict[str, int]:
-    """Count backfill progress without doing any work.
-
-    universe          = chunks belonging to CHUNK_EMBEDDABLE branches.
-    done              = chunks with a current-version chunk_vec row.
-    total_branches    = all CHUNK_EMBEDDABLE branches — the honest coverage
-                        denominator (branch count).
-    embedded_branches = embeddable branches that are neither pending nor errored.
-    eligible          = branches still needing work (build_selection predicate).
-    errored           = branches marked with the content-error sentinel.
-
-    universe/done are chunk-grain; the rest are branch-grain. Branch grain is
-    the honest coverage signal: a never-chunked branch contributes 0 to
-    universe but 1 to total_branches, so the backlog can't hide in the
-    denominator (the misleading "100% embedded, N remaining" report).
-
-    The optional --days recency bound is applied consistently to all queries.
-    """
-    recency_joined = ""  # for chunk JOIN branches queries
-    recency_branch = ""  # for branches-only queries
-    recency_params: list = []
-    if days is not None:
-        recency_joined = " AND branches.ended_at > datetime('now', ?)"
-        recency_branch = " AND ended_at > datetime('now', ?)"
-        recency_params = [days_modifier(days)]
-
-    # universe: total chunks belonging to CHUNK_EMBEDDABLE branches
-    cursor.execute(
-        f"""
-        SELECT COUNT(*) FROM chunks
-        JOIN branches ON chunks.branch_id = branches.id
-        WHERE {CHUNK_EMBEDDABLE_BRANCH_FILTER}{recency_joined}
-        """,
-        recency_params,
-    )
-    universe = cursor.fetchone()[0]
-
-    # done: chunks with a current-version embedding AND an existing chunk_vec row
-    cursor.execute(
-        f"""
-        SELECT COUNT(*) FROM chunks
-        JOIN branches ON chunks.branch_id = branches.id
-        WHERE {CHUNK_EMBEDDABLE_BRANCH_FILTER}
-          AND chunks.embedding_version = ?
-          AND chunks.embedding_model = ?
-          AND EXISTS (SELECT 1 FROM chunk_vec WHERE chunk_id = chunks.id){recency_joined}
-        """,
-        [EMBEDDING_VERSION, EMBEDDING_MODEL, *recency_params],
-    )
-    done = cursor.fetchone()[0]
-
-    # errored: branches at the content-error sentinel
-    cursor.execute(
-        f"""
-        SELECT COUNT(*) FROM branches
-        WHERE {CHUNK_EMBEDDABLE_BRANCH_FILTER}
-          AND embedding_version IS {CONTENT_ERROR_VERSION}{recency_branch}
-        """,
-        recency_params,
-    )
-    errored = cursor.fetchone()[0]
-
-    # eligible: branches that build_selection would include (branch count)
-    where, params = build_selection(days)
-    cursor.execute(f"SELECT COUNT(*) FROM branches {where}", params)
-    eligible = cursor.fetchone()[0]
-
-    # total_branches: every embeddable branch (branch grain). embedded =
-    # total - eligible - errored: a branch is one of embedded / eligible /
-    # errored, and eligible/errored are disjoint (build_selection excludes the
-    # error sentinel). Note this is stricter than the watermark count in
-    # db.branch_embedding_coverage(): build_selection's heal clause counts a
-    # watermark-current branch with a missing chunk_vec row as eligible, so on a
-    # DB with orphaned vectors `--status` reports fewer embedded than `stats`.
-    cursor.execute(
-        f"SELECT COUNT(*) FROM branches WHERE {CHUNK_EMBEDDABLE_BRANCH_FILTER}{recency_branch}",
-        recency_params,
-    )
-    total_branches = cursor.fetchone()[0]
-
-    return {
-        # universe/done are chunk-grain, kept for back-compat with older
-        # --status --json consumers; total_branches/embedded_branches are the
-        # honest branch-grain coverage.
-        "universe": universe,
-        "done": done,
-        "eligible": eligible,
-        "errored": errored,
-        "total_branches": total_branches,
-        "embedded_branches": total_branches - eligible - errored,
-    }
-
-
-def format_duration(seconds: float) -> str:
-    """Compact human duration: '45s', '12m03s', '1h07m'."""
-    s = int(seconds)
-    if s < 60:
-        return f"{s}s"
-    m, s = divmod(s, 60)
-    if m < 60:
-        return f"{m}m{s:02d}s"
-    h, m = divmod(m, 60)
-    return f"{h}h{m:02d}m"
-
-
-def run_status(
-    *,
-    days: int | None,
-    json_mode: bool,
-    settings: dict | None,
-    logger: logging.Logger,
-) -> int:
-    """Report branch coverage (embedded/total) plus eligible/errored counts (read-only)."""
-    try:
-        with get_connection(settings, load_vec=True) as conn:
-            if not chunk_vec_queryable(conn):
-                logger.error("Backfill status: sqlite-vec unavailable")
-                print("ccrecall backfill embeddings: sqlite-vec unavailable", file=sys.stderr)
-                return EXIT_ABORT
-            counts = count_status(conn.cursor(), days)
-    except (sqlite3.Error, OSError) as e:
-        logger.error("Backfill status: aborted: %s", e)
-        print(f"ccrecall backfill embeddings: aborted: {e}", file=sys.stderr)
-        return EXIT_ABORT
-
-    if json_mode:
-        print(json.dumps({**counts, "days": days}))
-        return EXIT_OK
-
-    total = counts["total_branches"]
-    embedded = counts["embedded_branches"]
-    pct = (embedded / total * 100) if total else 0.0
-    scope = f" (last {days}d)" if days is not None else ""
-    print(f"ccrecall backfill embeddings status{scope}:")
-    print(f"  branches:  {embedded} / {total} embedded  ({pct:.0f}%)")
-    print(f"  remaining: {counts['eligible']} branches")
-    if counts["errored"]:
-        print(f"  errored:   {counts['errored']} branches  (content errors, won't retry)")
-    return EXIT_OK
+from ccrecall.hooks.backfill_query import (
+    BACKFILL_BATCH_DELAY_SECONDS,
+    BACKFILL_NICE_LEVEL,
+    BATCH_SIZE,
+    DEFAULT_PROGRESS_EVERY,
+    EXIT_ABORT,
+    EXIT_OK,
+    build_selection,
+)
+from ccrecall.hooks.backfill_status import format_duration, run_status
 
 
 def run(

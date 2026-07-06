@@ -24,7 +24,8 @@ from ccrecall.db import CONTENT_ERROR_VERSION
 from ccrecall.embed_ops import MAX_WRITE_PATH_EMBEDS_PER_SYNC
 from ccrecall.embeddings import EMBEDDING_DIM, EMBEDDING_MODEL, EMBEDDING_VERSION
 from ccrecall.health import REASON_VEC_UNAVAILABLE
-from ccrecall.hooks.backfill_embeddings import BATCH_SIZE, EXIT_ABORT, EXIT_OK, run
+from ccrecall.hooks.backfill_embeddings import run
+from ccrecall.hooks.backfill_query import BATCH_SIZE, EXIT_ABORT, EXIT_OK
 
 # A fixed EMBEDDING_DIM-dim float vector for stubbing embed_text.
 _FIXED_VEC = [0.001] * EMBEDDING_DIM
@@ -759,7 +760,7 @@ class TestHistoryPreservation:
 def _run_status(conn: sqlite3.Connection, capsys, *, json_mode=False, days=None):
     """Invoke run(status=True, ...) against conn; return captured stdout."""
     with (
-        patch("ccrecall.hooks.backfill_embeddings.get_connection", return_value=_NoCloseConn(conn)),
+        patch("ccrecall.hooks.backfill_status.get_connection", return_value=_NoCloseConn(conn)),
         patch("ccrecall.hooks.backfill_embeddings.load_settings", return_value={}),
     ):
         code = run(status=True, json_mode=json_mode, days=days)
@@ -984,8 +985,8 @@ class TestBackfillEmbeddingStatusRecording:
         record_calls = []
 
         with (
-            patch("ccrecall.hooks.backfill_embeddings.get_connection", return_value=mock_conn),
-            patch("ccrecall.hooks.backfill_embeddings.chunk_vec_queryable", return_value=False),
+            patch("ccrecall.hooks.backfill_status.get_connection", return_value=mock_conn),
+            patch("ccrecall.hooks.backfill_status.chunk_vec_queryable", return_value=False),
             patch("ccrecall.hooks.backfill_embeddings.load_settings", return_value={}),
             patch(
                 "ccrecall.hooks.backfill_embeddings.record_embedding_failure",

@@ -22,6 +22,7 @@ from ccrecall.config import DEFAULT_DB_PATH, load_settings
 from ccrecall.db import DEFAULT_PROJECTS_DIR, get_connection
 from ccrecall.embeddings import DEFAULT_EMBED_THREADS
 from ccrecall.hooks import backfill_embeddings as backfill_embeddings_mod
+from ccrecall.hooks import backfill_query as backfill_query_mod
 from ccrecall.hooks import backfill_summaries as backfill_summaries_mod
 from ccrecall.hooks import import_conversations as import_mod
 from ccrecall.hooks import sync_current as sync_current_mod
@@ -91,7 +92,7 @@ def cmd_import(
 def _count_multi_active_branch_sessions(db: Path) -> int:
     """Return the count of sessions with more than one active branch.
 
-    Session-keyed branch identity (session_ops.upsert_branch) should make this
+    Session-keyed branch identity (branch_ops.upsert_branch) should make this
     always zero going forward — this is a standing invariant check, not an
     expected condition. Read-only: shares no PID lifecycle with import.run().
     """
@@ -144,7 +145,7 @@ def cmd_backfill_embeddings(
     ] = None,
     progress_every: Annotated[
         int, Parameter(help="Print a progress line every N newly embedded branches.")
-    ] = backfill_embeddings_mod.DEFAULT_PROGRESS_EVERY,
+    ] = backfill_query_mod.DEFAULT_PROGRESS_EVERY,
     threads: Annotated[int, Parameter(help="Inference threads.")] = DEFAULT_EMBED_THREADS,
     ctx: CLIContextParam = DEFAULT_CLI_CONTEXT,
 ) -> None:
@@ -161,7 +162,7 @@ def cmd_backfill_embeddings(
     finally:
         # Status is read-only: never disturb a concurrent backfill's PID marker.
         if not status:
-            backfill_embeddings_mod.cleanup_pid()
+            backfill_query_mod.cleanup_pid()
     raise SystemExit(code)
 
 
