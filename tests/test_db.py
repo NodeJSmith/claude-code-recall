@@ -829,10 +829,9 @@ class TestSchemaEquivalencePin:
 
     Exclusion rule: we exclude from the snapshot any table whose name contains
     '_fts_' (those are FTS5 shadow tables auto-created alongside the virtual FTS
-    tables — e.g. branches_fts_idx) plus token_snapshots (owned solely by
-    token_schema.py; the conversation DB no longer creates it) and sqlite_*
-    internals.  The FTS virtual table itself (branches_fts) does NOT contain
-    '_fts_' so it IS included. messages_fts is gone entirely (dropped by the
+    tables — e.g. branches_fts_idx) and sqlite_* internals.  The FTS virtual
+    table itself (branches_fts) does NOT contain '_fts_' so it IS included.
+    messages_fts is gone entirely (dropped by the
     version-1 migration and removed from schema.py) so it is absent from both
     the table set and the exclusion rule.
     """

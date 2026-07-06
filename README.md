@@ -31,19 +31,11 @@ uv tool install ccrecall
 
 That registers the skills and wires the SessionStart / Stop / SessionEnd hooks (`hooks/hooks.json`) — both are auto-discovered from the plugin's directory layout. Reload with `/reload-plugins` if they don't appear immediately.
 
-> Plugin skills are namespaced under the plugin name, so the skills below are invoked as `/ccrecall:ccr-recall`, `/ccrecall:ccr-resume`, and `/ccrecall:ccr-tokens`. The hook commands degrade gracefully — each is guarded by `command -v … || true`, so if the package isn't installed (or isn't yet on PATH) the hook is a silent no-op rather than a broken session.
+> Plugin skills are namespaced under the plugin name, so the skills below are invoked as `/ccrecall:ccr-recall` and `/ccrecall:ccr-resume`. The hook commands degrade gracefully — each is guarded by `command -v … || true`, so if the package isn't installed (or isn't yet on PATH) the hook is a silent no-op rather than a broken session.
 
 ## First-run setup
 
-On your first session after installing, Claude will notice that `~/.ccrecall/config.json` doesn't exist and walk you through a brief onboarding. It asks a single question — **session context injection**: should Claude automatically recall what you were working on last session?
-
-Your choice gets written to `~/.ccrecall/config.json`. You can edit that file directly at any time to change settings.
-
-To skip the walkthrough and use recommended defaults immediately:
-
-```bash
-ccrecall write-config --defaults
-```
+No manual setup is needed. On the first session after installing, ccrecall silently creates `~/.ccrecall/config.json` with recommended defaults. You can edit that file directly at any time to change settings.
 
 ## Semantic search
 
@@ -109,7 +101,6 @@ When either condition holds, the next session injects a short alert for Claude t
 |---|---|---|
 | `/ccr-recall` | "what did we discuss", "continue where we left off", "search my conversations" | Lets Claude search or browse your past sessions on demand |
 | `/ccr-resume` | "pick up where we left off after /clear", a stop, or an unanswered question | Reconstructs the prior session's intent from its transcript tail and surfaces any unresolved decision |
-| `/ccr-tokens` | "analyze Claude token usage", "how much am I spending on Claude" | Full cost + workflow analytics report with an interactive HTML dashboard |
 
 ## Entry points
 
@@ -120,7 +111,6 @@ These are wired by the plugin's `hooks/hooks.json` and fire on their respective 
 | Entry point | Event | What it does |
 |---|---|---|
 | `ccrecall-setup` | SessionStart | Creates `~/.ccrecall/` if needed, opens the DB to apply any pending migrations, then spawns `ccrecall import` and `ccrecall backfill summaries` as background processes |
-| `ccrecall-onboarding` | SessionStart (startup only) | One-time first-run onboarding. Injects setup instructions into Claude's context if `config.json` is missing or onboarding hasn't been completed. Silent no-op after that |
 | `ccrecall-context` | SessionStart (startup + clear) | Injects a summary of your most recent session into Claude's context so it knows what you were working on. On `/clear`, reads a handoff file to link directly to the session you just cleared from |
 | `ccrecall-clear-handoff` | SessionEnd (clear only) | Writes a small handoff file so the next session start knows which session to link to after a `/clear`. Without this, context injection falls back to a "most recent session" heuristic |
 | `ccrecall-sync` | Stop | Syncs the current session to the DB in a detached background process. Runs on every session end |
@@ -134,7 +124,6 @@ These are wired by the plugin's `hooks/hooks.json` and fire on their respective 
 | `ccrecall sync-current` | Syncs a single session file to the DB. Called by `ccrecall-sync` with the session ID from stdin |
 | `ccrecall import` | Full import of all JSONL files in `~/.claude/projects/`. Skips files that haven't changed since last import (file hash check). Run on first install and whenever new sessions need backfilling |
 | `ccrecall backfill summaries` | Generates context summaries for any DB branches that don't have one yet. Runs in the background after `ccrecall-setup` |
-| `ccrecall write-config` | Writes `~/.ccrecall/config.json`. Called by Claude during onboarding to persist your settings choices. You can also call it directly — run `ccrecall write-config --help` for flags |
 
 ### Skill CLIs (called from skill files — can also be used directly)
 
@@ -146,7 +135,6 @@ These are the `ccrecall` subcommands the `/ccr-*` skills invoke. You can run the
 | `ccrecall search` | Searches sessions by keyword fused with vector similarity (FTS5 → FTS4 → LIKE fallback, RRF-fused with jina embeddings when available). Used by `/ccr-recall` |
 | `ccrecall tail` | Reads the tail of a prior session's transcript to recover the last instruction and any unanswered question. Used by `/ccr-resume` |
 | `ccrecall backfill embeddings` | Opt-in seeding of embeddings for historical active-leaf branches (jina-v2-small-en via fastembed). Not auto-spawned. Supports `--days N` / `--limit N` / `--threads N`; throttled via `nice` + a single inference thread by default. Resumable |
-| `ccrecall tokens` | Parses JSONL files for token usage analytics — cost, cache hits, model mix, skill/agent/hook patterns. Populates analytics tables and builds `~/.ccrecall/dashboard.html`. Used by `/ccr-tokens` |
 
 ## Data flow
 
@@ -168,24 +156,13 @@ Session starts
   │         └─ embeds each new active leaf via jina if model available
   │    └─ ccrecall backfill summaries (background, if summaries missing)
   │    └─ (embedding backfill is NOT auto-spawned — opt-in via ccrecall backfill embeddings)
-  ├─ ccrecall-onboarding (SessionStart, startup only — one-time)
   └─ ccrecall-context (SessionStart, startup + clear)
        └─ injects last session summary into Claude's context
 ```
 
 ## Config file
 
-`~/.ccrecall/config.json` — written by `ccrecall write-config` during onboarding:
-
-```json
-{
-  "onboarding_completed": true,
-  "onboarding_version": 1,
-  "auto_inject_context": true
-}
-```
-
-Onboarding sets `auto_inject_context`. The remaining settings are tunable by editing `config.json` directly:
+`~/.ccrecall/config.json` — created automatically on first run with these defaults:
 
 | Key | Type | Default | Effect |
 |---|---|---|---|
@@ -194,6 +171,7 @@ Onboarding sets `auto_inject_context`. The remaining settings are tunable by edi
 | `exclude_projects` | list[str] | `[]` | Project names to skip when **storing** conversations — excluded projects are not imported or synced. Matched against the project's directory name. This is write-side only: it prevents new data from being indexed; it does not remove or hide conversations already stored before the project was excluded. |
 | `logging_enabled` | bool | `true` | Write hook diagnostics (including swallowed hook exceptions) to `~/.ccrecall/ccrecall.log`. Set to `false` to suppress the log. |
 | `log_level` | str | `"INFO"` | Logging verbosity when `logging_enabled` is true. Accepts standard Python level names: `DEBUG`, `INFO`, `WARNING`, `ERROR`. |
+| `alert_snooze_hours` | int | `24` | After surfacing an alert (unwritable DB, embedding failure), suppress the same alert for this many hours. |
 
 ## Database
 
@@ -204,8 +182,8 @@ Onboarding sets `auto_inject_context`. The remaining settings are tunable by edi
 - `messages` — all messages, stored once per session regardless of branch
 - `branch_messages` — join table linking messages to branches
 - `import_log` — tracks which JSONL files have been imported and their hashes
-- `branch_vec` — vec0 virtual table (sqlite-vec) storing 512-dim jina embeddings for each branch, used for KNN search
-- `token_snapshots`, `turns`, `turn_tool_calls`, `session_metrics` — analytics tables populated by `ccrecall tokens`
+- `chunks` — one row per exchange (user turn + following assistant turns), carrying bounded display text and embedding bookkeeping
+- `chunk_vec` — sqlite-vec virtual table storing 512-dim jina embeddings keyed by chunk rowid, used for KNN search
 
 ## Development
 

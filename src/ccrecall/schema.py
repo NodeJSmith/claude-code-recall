@@ -7,7 +7,6 @@ This module has no ccrecall dependencies — only the stdlib sqlite3 module.
 
 import sqlite3
 
-# Database schema — v3: messages stored once, branches as separate index
 # Split into core (tables/indexes) and FTS variants for compatibility
 SCHEMA_CORE = """
 -- Projects table (derived from directory structure)
