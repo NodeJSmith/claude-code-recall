@@ -1,6 +1,6 @@
 """Tests for sanitize_fts_term — FTS injection prevention."""
 
-from ccrecall.content import sanitize_fts_term
+from ccrecall.search_query import sanitize_fts_term
 
 
 class TestSanitizeFtsTerm:

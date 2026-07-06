@@ -45,15 +45,15 @@ def parse_jsonl_file(filepath: Path) -> Generator[dict, None, None]:
             if not line:
                 continue
             try:
-                obj = json.loads(line)
+                entry = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if not is_valid_entry(obj):
+            if not is_valid_entry(entry):
                 continue
-            if obj.get("isMeta") and not obj.get("origin"):
+            if entry.get("isMeta") and not entry.get("origin"):
                 continue
-            if obj.get("type") in ("user", "assistant"):
-                yield obj
+            if entry.get("type") in ("user", "assistant"):
+                yield entry
 
 
 def parse_lines_with_uuids(lines: Iterable[str]) -> Generator[dict, None, None]:
@@ -66,13 +66,13 @@ def parse_lines_with_uuids(lines: Iterable[str]) -> Generator[dict, None, None]:
         if not line:
             continue
         try:
-            obj = json.loads(line)
+            entry = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if not is_valid_entry(obj):
+        if not is_valid_entry(entry):
             continue
-        if obj.get("uuid"):
-            yield obj
+        if entry.get("uuid"):
+            yield entry
 
 
 def parse_all_with_uuids(filepath: Path) -> Generator[dict, None, None]:
@@ -117,9 +117,6 @@ def find_all_branches(all_entries: list[dict]) -> list[dict]:
       - leaf_uuid: UUID of the last message in this branch
       - uuids: set of all UUIDs on this branch path
       - is_active: always True
-      - fork_point_uuid: always None (abandoned-fork tracking was removed —
-        session identity is now session-keyed, not leaf_uuid-keyed, so there
-        is no longer a reason to detect or persist rewound/abandoned forks)
 
     Algorithm: trace from the latest message back to the root via parentUuid.
     """
@@ -149,7 +146,6 @@ def find_all_branches(all_entries: list[dict]) -> list[dict]:
             "leaf_uuid": latest["uuid"],
             "uuids": active_uuids,
             "is_active": True,
-            "fork_point_uuid": None,
         }
     ]
 

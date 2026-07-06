@@ -4,10 +4,12 @@ import json
 import os
 
 from ccrecall.session_tail import (
+    _last_event_timestamp,
     build_tail,
     find_pending_question,
     format_pending_block,
     last_typed_instruction,
+    list_transcripts,
     load_tail_entries,
     resolve_target,
     transcript_dir,
@@ -219,17 +221,24 @@ class TestTranscriptDir:
 
 
 class TestResolveTarget:
-    def _write(self, path, stem):
+    def _write(self, path, stem, timestamp=None):
         f = path / f"{stem}.jsonl"
-        f.write_text(json.dumps({"type": "user", "uuid": "u", "message": {}}) + "\n")
+        entry = {"type": "user", "uuid": "u", "message": {}}
+        if timestamp:
+            entry["timestamp"] = timestamp
+        f.write_text(json.dumps(entry) + "\n")
         return f
 
     def test_picks_second_newest(self, tmp_path):
-        older = self._write(tmp_path, "older")
-        newer = self._write(tmp_path, "newer")  # current/live session
-        os.utime(older, (1000, 1000))
-        os.utime(newer, (2000, 2000))
-        assert resolve_target(tmp_path, None) == older
+        # mtimes are set OPPOSITE to the JSONL timestamps — proves ordering
+        # follows the timestamp field, not the filesystem mtime (issue #45).
+        a = self._write(tmp_path, "a", timestamp="2024-01-01T00:00:00Z")  # earlier event, newer mtime
+        b = self._write(tmp_path, "b", timestamp="2024-06-01T00:00:00Z")  # later event, older mtime
+        os.utime(a, (2000, 2000))
+        os.utime(b, (1000, 1000))
+        # b has the latest timestamp, so it's treated as the current/live
+        # session; a (earlier timestamp) is the prior session returned.
+        assert resolve_target(tmp_path, None) == a
 
     def test_selector_substring(self, tmp_path):
         self._write(tmp_path, "aaaa-1111")
@@ -239,6 +248,42 @@ class TestResolveTarget:
     def test_single_session_returns_none(self, tmp_path):
         self._write(tmp_path, "only")
         assert resolve_target(tmp_path, None) is None
+
+
+class TestLastEventTimestampFallback:
+    def test_no_parseable_timestamp_falls_back_to_mtime(self, tmp_path):
+        # Neither entry has a "timestamp" field at all, so the mtime fallback
+        # must produce an ISO string that participates correctly in ordering.
+        no_ts = tmp_path / "no-ts.jsonl"
+        no_ts.write_text(json.dumps({"type": "something"}) + "\n" + json.dumps({"type": "other"}) + "\n")
+        has_ts = tmp_path / "has-ts.jsonl"
+        has_ts.write_text(json.dumps({"type": "user", "timestamp": "2024-01-01T00:00:00Z"}) + "\n")
+
+        # Give the no-timestamp file a newer mtime than the timestamped file's
+        # actual event time, so it should sort first (newest first).
+        os.utime(no_ts, (2000000000, 2000000000))
+        os.utime(has_ts, (1000000000, 1000000000))
+
+        files = list_transcripts(tmp_path)
+        assert files[0] == no_ts
+        assert files[1] == has_ts
+
+        # The fallback value itself is a valid ISO 8601 string derived from mtime.
+        fallback = _last_event_timestamp(no_ts)
+        assert fallback.startswith("2033-")
+
+    def test_corrupt_json_lines_fall_back_to_mtime_without_crashing(self, tmp_path):
+        f = tmp_path / "corrupt.jsonl"
+        # Last ~20 lines are malformed JSON — _last_event_timestamp only scans
+        # the tail window, so a fully-corrupt tail must not crash and must
+        # still fall back to mtime.
+        lines = ["not valid json {{{" for _ in range(20)]
+        f.write_text("\n".join(lines) + "\n")
+        os.utime(f, (1700000000, 1700000000))
+
+        result = _last_event_timestamp(f)
+
+        assert result.startswith("2023-")
 
 
 class TestLoadTailEntries:

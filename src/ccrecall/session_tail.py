@@ -3,7 +3,7 @@
 Powers two things:
   - the ``ccrecall tail`` CLI (invoked by the ccr-resume skill), and
   - the SessionStart context injection's "unresolved decision" warning
-    (``memory_context.py``).
+    (``context_rendering.py``).
 
 The one thing on-disk artifacts can never tell you is whether the prior session
 stopped on a decision the user never made — an AskUserQuestion that was rejected,
@@ -19,9 +19,12 @@ sessions share a DB project key with the base repo — correct for the DB, wrong
 for locating files. So we encode the raw cwd here.
 """
 
+import json
 import sys
 from collections import deque
 from pathlib import Path
+
+from whenever import Instant
 
 from ccrecall.content import (
     extract_text_content,
@@ -36,6 +39,11 @@ from ccrecall.parsing import (
     parse_all_with_uuids,
     parse_lines_with_uuids,
 )
+
+# Lines of transcript tail scanned for the latest event timestamp when ordering
+# sessions — enough to find a timestamp even if the trailing lines are a
+# no-timestamp tool-result burst, without reading a multi-MB file in full.
+_TIMESTAMP_TAIL_LINES = 20
 
 # A genuinely answered AskUserQuestion produces a tool_result whose text begins
 # "Your questions have been answered: …"; we match the stable substring. A
@@ -255,11 +263,38 @@ def format_pending_block(payload: dict, *, for_injection: bool = False) -> str:
     return "\n".join(lines)
 
 
+def _last_event_timestamp(path: Path) -> str:
+    """Latest ``timestamp`` value among a transcript's last lines, ISO 8601 string.
+
+    ISO 8601 strings sort correctly by plain string comparison, so callers can
+    order transcripts with a plain key function. Falls back to the file's mtime
+    (also rendered as an ISO string) when no line in the tail window parses as
+    JSON with a usable timestamp — e.g. a truncated or corrupt transcript.
+    """
+    latest: str | None = None
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        tail_lines = deque(fh, maxlen=_TIMESTAMP_TAIL_LINES)
+    for line in tail_lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        ts = entry.get("timestamp")
+        if ts and (latest is None or ts > latest):
+            latest = ts
+    if latest is not None:
+        return latest
+    return Instant.from_timestamp(path.stat().st_mtime).format_iso(unit="millisecond")
+
+
 def list_transcripts(pdir: Path) -> list[Path]:
     if not pdir.is_dir():
         return []
     files = [p for p in pdir.glob("*.jsonl") if p.is_file()]
-    files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    files.sort(key=_last_event_timestamp, reverse=True)
     return files
 
 
@@ -268,8 +303,9 @@ def resolve_target(pdir: Path, selector: str | None) -> Path | None:
 
     With a selector, match by session-id substring. Without one, assume this runs
     inside the live session (as the ccr-resume skill does): the newest file by
-    mtime is the current session, so the prior session is the second-newest.
-    Invoked outside an active session this is off by one — pass a selector there.
+    last-event timestamp is the current session, so the prior session is the
+    second-newest. Invoked outside an active session this is off by one — pass
+    a selector there.
     """
     sessions = list_transcripts(pdir)
     if not sessions:

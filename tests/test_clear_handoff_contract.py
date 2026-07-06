@@ -1,6 +1,6 @@
 """
 Tests for the SessionEnd handoff contract between clear-handoff.py and
-_find_cleared_from_session_uuid in memory-context.py.
+_find_cleared_from_session_uuid in session_selection.py.
 
 Contract:
   1. clear-handoff.py only writes when end_reason == "clear"
@@ -23,9 +23,10 @@ from unittest.mock import patch
 import pytest
 
 import ccrecall.hooks.clear_handoff as _clear_handoff
-import ccrecall.hooks.memory_context as _memory_context
+import ccrecall.hooks.session_selection as _session_selection
+from ccrecall.hooks.session_selection import HANDOFF_STALE_SECONDS
 
-_find_cleared_from_session_uuid = _memory_context._find_cleared_from_session_uuid
+_find_cleared_from_session_uuid = _session_selection._find_cleared_from_session_uuid
 
 
 # Helpers
@@ -208,7 +209,7 @@ class TestFindClearedFromSessionUuid:
 
     def test_returns_none_on_stale_timestamp(self, tmp_path):
         """Contract 6: timestamp older than 30s → None."""
-        stale = (datetime.now(timezone.utc) - timedelta(seconds=31)).isoformat()
+        stale = (datetime.now(timezone.utc) - timedelta(seconds=HANDOFF_STALE_SECONDS + 1)).isoformat()
         db_path = _write_handoff(
             tmp_path,
             {
@@ -222,7 +223,7 @@ class TestFindClearedFromSessionUuid:
 
     def test_stale_file_is_deleted_on_rejection(self, tmp_path):
         """Stale handoff file must be deleted so it doesn't block future clears."""
-        stale = (datetime.now(timezone.utc) - timedelta(seconds=31)).isoformat()
+        stale = (datetime.now(timezone.utc) - timedelta(seconds=HANDOFF_STALE_SECONDS + 1)).isoformat()
         db_path = _write_handoff(
             tmp_path,
             {
@@ -237,7 +238,7 @@ class TestFindClearedFromSessionUuid:
 
     def test_returns_session_id_on_fresh_timestamp_boundary(self, tmp_path):
         """Timestamp exactly at boundary (29s) is still accepted."""
-        fresh = (datetime.now(timezone.utc) - timedelta(seconds=29)).isoformat()
+        fresh = (datetime.now(timezone.utc) - timedelta(seconds=HANDOFF_STALE_SECONDS - 1)).isoformat()
         db_path = _write_handoff(
             tmp_path,
             {

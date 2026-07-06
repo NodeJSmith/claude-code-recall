@@ -21,7 +21,7 @@ DEFAULT_PROJECTS_DIR = Path.home() / ".claude" / "projects"
 
 # Current schema version. Bump when adding a migration and wire the new DDL
 # delta into _apply_migrations (see _migrate_to_v1 for the version-1 shape).
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 # Shared SQL predicate for "branches that are candidates to embed": active
 # leaves (the query path only returns is_active=1) with a usable summary. This
@@ -192,12 +192,12 @@ def _ensure_vec_schema(conn: sqlite3.Connection) -> None:
     """
     # ── branch_vec teardown (unconditional, not via dimension self-heal) ─
     # Check first so the watermark reset fires only when the table actually existed.
-    bv_existed = (
+    branch_vec_existed = (
         conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='branch_vec'").fetchone() is not None
     )
     conn.execute("DROP TRIGGER IF EXISTS branches_vec_ad")
     conn.execute("DROP TABLE IF EXISTS branch_vec")
-    if bv_existed:
+    if branch_vec_existed:
         # Old embedding_version values referred to branch-level embeddings (now
         # removed); reset to 0 so backfill re-embeds at chunk grain from scratch.
         conn.execute("UPDATE branches SET embedding_version = 0")
@@ -235,6 +235,50 @@ def _ensure_vec_schema(conn: sqlite3.Connection) -> None:
     )
 
 
+def _recreate_branches_indexes_and_fts(conn: sqlite3.Connection) -> None:
+    """Re-create indexes and FTS sync triggers after a branches table rebuild.
+
+    DROP TABLE takes every trigger and index on the old table with it, so both
+    must be re-created after the create-copy-drop-rename sequence. Shared by
+    v1 and v2 migrations (and any future branches rebuild) so the index/trigger
+    set can't drift between migrations.
+    """
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_branches_session ON branches(session_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_branches_active ON branches(is_active)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_branches_summary_version ON branches(summary_version)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_branches_embedding_version ON branches(embedding_version)")
+
+    fts = detect_fts_support(conn)
+    if fts == "fts5":
+        conn.execute(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS branches_fts USING fts5("
+            "aggregated_content, content=branches, content_rowid=id, tokenize='porter unicode61')"
+        )
+    elif fts == "fts4":
+        conn.execute(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS branches_fts USING fts4("
+            "aggregated_content, content=branches, tokenize=porter)"
+        )
+    if fts in ("fts5", "fts4"):
+        # Trigger bodies are identical across the FTS5/FTS4 variants (only the
+        # CREATE VIRTUAL TABLE statement above differs) — one copy suffices.
+        conn.execute(
+            "CREATE TRIGGER IF NOT EXISTS branches_ai AFTER INSERT ON branches BEGIN"
+            " INSERT INTO branches_fts(rowid, aggregated_content) VALUES (new.id, new.aggregated_content); END"
+        )
+        conn.execute(
+            "CREATE TRIGGER IF NOT EXISTS branches_ad AFTER DELETE ON branches BEGIN"
+            " INSERT INTO branches_fts(branches_fts, rowid, aggregated_content)"
+            " VALUES('delete', old.id, old.aggregated_content); END"
+        )
+        conn.execute(
+            "CREATE TRIGGER IF NOT EXISTS branches_au AFTER UPDATE ON branches BEGIN"
+            " INSERT INTO branches_fts(branches_fts, rowid, aggregated_content)"
+            " VALUES('delete', old.id, old.aggregated_content);"
+            " INSERT INTO branches_fts(rowid, aggregated_content) VALUES (new.id, new.aggregated_content); END"
+        )
+
+
 def _migrate_to_v1(conn: sqlite3.Connection) -> None:
     """Version-1 migration: purge dead branch rows, drop messages_fts, rebuild branches.
 
@@ -254,10 +298,10 @@ def _migrate_to_v1(conn: sqlite3.Connection) -> None:
        standard create-copy-drop-rename sequence. That drop also takes every
        trigger and index defined on the old table with it — including the
        live `branches_fts` sync triggers and the `idx_branches_*` indexes —
-       so both are re-created below via individual `conn.execute` calls, not
-       `conn.executescript` (which implicitly commits, ending this
-       transaction early and leaving the final version bump with nothing to
-       commit). `branches_fts` content itself is untouched — ids survive the
+       so both are re-created by `_recreate_branches_indexes_and_fts`
+       (called below), not via `conn.executescript` (which implicitly
+       commits, ending this transaction early and leaving the final version
+       bump with nothing to commit). `branches_fts` content itself is untouched — ids survive the
        `INSERT INTO branches_new SELECT * FROM branches` copy — only its
        sync triggers need re-creating.
 
@@ -302,40 +346,84 @@ def _migrate_to_v1(conn: sqlite3.Connection) -> None:
     conn.execute("DROP TABLE branches")
     conn.execute("ALTER TABLE branches_new RENAME TO branches")
 
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_branches_session ON branches(session_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_branches_active ON branches(is_active)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_branches_summary_version ON branches(summary_version)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_branches_embedding_version ON branches(embedding_version)")
+    _recreate_branches_indexes_and_fts(conn)
 
-    fts = detect_fts_support(conn)
-    if fts == "fts5":
-        conn.execute(
-            "CREATE VIRTUAL TABLE IF NOT EXISTS branches_fts USING fts5("
-            "aggregated_content, content=branches, content_rowid=id, tokenize='porter unicode61')"
+
+def _migrate_to_v2(conn: sqlite3.Connection) -> None:
+    """Version-2 migration: purge orphan messages, drop the dead fork_point_uuid column.
+
+    Runs inside the caller's BEGIN IMMEDIATE transaction (_apply_migrations).
+
+    1. Delete `messages` rows with no `branch_messages` reference. These are
+       messages that were linked only to inactive branches already purged by
+       the v1 migration — `messages` is the parent table here, so there is no
+       FK-safe delete ordering to worry about (unlike the v1 purge).
+    2. Rebuild `branches` without `fork_point_uuid` — SQLite has no DROP
+       COLUMN for this shape change (a UNIQUE constraint is unaffected here,
+       but a stray legacy column is), so this is the same
+       create-copy-drop-rename sequence as v1's rebuild. Explicit column
+       lists on both the CREATE and the INSERT (not `SELECT *`): the source
+       `branches` table still carries `fork_point_uuid` (18 columns) while
+       `branches_new` has 17, so `SELECT *` would raise
+       "table branches_new has 17 columns but 18 values were supplied".
+       `UNIQUE(session_id)` is preserved — dropping it here would silently
+       undo the v1 invariant (CLAUDE.md invariant #4). DROP TABLE takes every
+       trigger and index defined on the old `branches` with it — including
+       the live `branches_fts` sync triggers and the `idx_branches_*`
+       indexes — so both are re-created by
+       `_recreate_branches_indexes_and_fts` (called below), matching
+       v1's approach. `branches_fts` content itself is
+       untouched — ids survive the column-list copy — only its sync triggers
+       need re-creating.
+
+    See `_migrate_to_v1` for the foreign-key-toggle and transaction-boundary
+    rationale shared by both migrations; the caller (_apply_migrations)
+    handles both.
+    """
+    conn.execute("DELETE FROM messages WHERE id NOT IN (SELECT DISTINCT message_id FROM branch_messages)")
+
+    conn.execute("""
+        CREATE TABLE branches_new (
+          id INTEGER PRIMARY KEY,
+          session_id INTEGER NOT NULL REFERENCES sessions(id),
+          leaf_uuid TEXT NOT NULL,
+          is_active INTEGER DEFAULT 1,
+          started_at DATETIME,
+          ended_at DATETIME,
+          exchange_count INTEGER DEFAULT 0,
+          files_modified TEXT,
+          commits TEXT,
+          tool_counts TEXT,
+          aggregated_content TEXT,
+          context_summary TEXT,
+          context_summary_json TEXT,
+          summary_version INTEGER DEFAULT 0,
+          embedding_version INTEGER DEFAULT 0,
+          embedding_model TEXT,
+          summary_version_at_embed INTEGER,
+          UNIQUE(session_id)
         )
-    elif fts == "fts4":
-        conn.execute(
-            "CREATE VIRTUAL TABLE IF NOT EXISTS branches_fts USING fts4("
-            "aggregated_content, content=branches, tokenize=porter)"
+    """)
+    conn.execute("""
+        INSERT INTO branches_new (
+          id, session_id, leaf_uuid, is_active, started_at, ended_at,
+          exchange_count, files_modified, commits, tool_counts,
+          aggregated_content, context_summary, context_summary_json,
+          summary_version, embedding_version, embedding_model,
+          summary_version_at_embed
         )
-    if fts in ("fts5", "fts4"):
-        # Trigger bodies are identical across the FTS5/FTS4 variants (only the
-        # CREATE VIRTUAL TABLE statement above differs) — one copy suffices.
-        conn.execute(
-            "CREATE TRIGGER IF NOT EXISTS branches_ai AFTER INSERT ON branches BEGIN"
-            " INSERT INTO branches_fts(rowid, aggregated_content) VALUES (new.id, new.aggregated_content); END"
-        )
-        conn.execute(
-            "CREATE TRIGGER IF NOT EXISTS branches_ad AFTER DELETE ON branches BEGIN"
-            " INSERT INTO branches_fts(branches_fts, rowid, aggregated_content)"
-            " VALUES('delete', old.id, old.aggregated_content); END"
-        )
-        conn.execute(
-            "CREATE TRIGGER IF NOT EXISTS branches_au AFTER UPDATE ON branches BEGIN"
-            " INSERT INTO branches_fts(branches_fts, rowid, aggregated_content)"
-            " VALUES('delete', old.id, old.aggregated_content);"
-            " INSERT INTO branches_fts(rowid, aggregated_content) VALUES (new.id, new.aggregated_content); END"
-        )
+        SELECT
+          id, session_id, leaf_uuid, is_active, started_at, ended_at,
+          exchange_count, files_modified, commits, tool_counts,
+          aggregated_content, context_summary, context_summary_json,
+          summary_version, embedding_version, embedding_model,
+          summary_version_at_embed
+        FROM branches
+    """)
+    conn.execute("DROP TABLE branches")
+    conn.execute("ALTER TABLE branches_new RENAME TO branches")
+
+    _recreate_branches_indexes_and_fts(conn)
 
 
 def _apply_migrations(conn: sqlite3.Connection) -> None:
@@ -395,6 +483,8 @@ def _apply_migrations(conn: sqlite3.Connection) -> None:
                     # transaction state and safe to call here.
                     vec_available(conn)
                     _migrate_to_v1(conn)
+                if current < 2:
+                    _migrate_to_v2(conn)
                 conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             conn.execute("COMMIT")
         except Exception:
