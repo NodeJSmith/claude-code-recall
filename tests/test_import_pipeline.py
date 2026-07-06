@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from ccrecall.db import get_db_connection
+from ccrecall.db import get_connection
 from ccrecall.embeddings import EMBEDDING_MODEL, EMBEDDING_VERSION
 from ccrecall.hooks.import_conversations import import_project, import_session, print_stats
 
@@ -780,13 +780,12 @@ class TestPrintStatsEmbeddingCoverage:
     def test_reports_partial_coverage(self, tmp_path, capsys):
         """Two of three embeddable branches embedded → '2/3 branches (67%)'."""
         db_path = tmp_path / "stats.db"
-        conn = get_db_connection({"db_path": str(db_path)}, load_vec=False)
-        self._seed_embeddable_branch(conn, 1, embedded=True)
-        self._seed_embeddable_branch(conn, 2, embedded=True)
-        self._seed_embeddable_branch(conn, 3, embedded=False)
-        # An inactive branch must not count toward the embeddable denominator.
-        self._seed_embeddable_branch(conn, 4, embedded=False, is_active=0)
-        conn.close()
+        with get_connection({"db_path": str(db_path)}, load_vec=False) as conn:
+            self._seed_embeddable_branch(conn, 1, embedded=True)
+            self._seed_embeddable_branch(conn, 2, embedded=True)
+            self._seed_embeddable_branch(conn, 3, embedded=False)
+            # An inactive branch must not count toward the embeddable denominator.
+            self._seed_embeddable_branch(conn, 4, embedded=False, is_active=0)
 
         print_stats(db=db_path)
         out = capsys.readouterr().out
@@ -796,8 +795,8 @@ class TestPrintStatsEmbeddingCoverage:
     def test_zero_embeddable_branches(self, tmp_path, capsys):
         """A DB with no embeddable branches reports 0/0 without dividing by zero."""
         db_path = tmp_path / "empty.db"
-        conn = get_db_connection({"db_path": str(db_path)}, load_vec=False)
-        conn.close()
+        with get_connection({"db_path": str(db_path)}, load_vec=False):
+            pass
 
         print_stats(db=db_path)
         out = capsys.readouterr().out

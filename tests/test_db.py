@@ -23,7 +23,6 @@ from ccrecall.config import (
 from ccrecall.db import (
     fetch_branch_messages,
     get_connection,
-    get_db_connection,
     vec_available,
 )
 from ccrecall.embeddings import EMBEDDING_DIM, EMBEDDING_MODEL, EMBEDDING_VERSION
@@ -447,42 +446,40 @@ class TestVecSchema:
 
 
 class TestLoadVecParameter:
-    """get_db_connection(load_vec=...) parameter behavior."""
+    """get_connection(load_vec=...) parameter behavior."""
 
     def test_default_connection_initializes_cleanly(self, tmp_path, monkeypatch):
-        """get_db_connection() with default load_vec=False returns a working connection."""
+        """get_connection() with default load_vec=False returns a working connection."""
         db_file = tmp_path / "conversations.db"
         monkeypatch.setattr(config_module, "DEFAULT_DB_PATH", db_file)
 
-        conn = get_db_connection()
-        # Core tables must exist
-        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
-        assert "branches" in tables
-        assert "sessions" in tables
+        with get_connection() as conn:
+            # Core tables must exist
+            tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+            assert "branches" in tables
+            assert "sessions" in tables
 
-        # Three new columns must exist
-        cols = {row[1] for row in conn.execute("PRAGMA table_info(branches)").fetchall()}
-        assert "embedding_version" in cols
-        assert "embedding_model" in cols
-        assert "summary_version_at_embed" in cols
-        conn.close()
+            # Three new columns must exist
+            cols = {row[1] for row in conn.execute("PRAGMA table_info(branches)").fetchall()}
+            assert "embedding_version" in cols
+            assert "embedding_model" in cols
+            assert "summary_version_at_embed" in cols
 
     @pytest.mark.skipif(not _VEC_AVAILABLE, reason="sqlite-vec not available in this environment")
     def test_load_vec_true_allows_chunk_vec_query(self, tmp_path, monkeypatch):
-        """get_db_connection(load_vec=True) returns a connection that can query chunk_vec."""
+        """get_connection(load_vec=True) returns a connection that can query chunk_vec."""
         db_file = tmp_path / "conversations.db"
         monkeypatch.setattr(config_module, "DEFAULT_DB_PATH", db_file)
 
-        conn = get_db_connection(load_vec=True)
-        # chunk_vec must be queryable (extension loaded, branch_vec absent by teardown)
-        count = conn.execute("SELECT COUNT(*) FROM chunk_vec").fetchone()[0]
-        assert count == 0
-        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
-        assert "branch_vec" not in tables, "branch_vec must be absent after T06 teardown"
-        conn.close()
+        with get_connection(load_vec=True) as conn:
+            # chunk_vec must be queryable (extension loaded, branch_vec absent by teardown)
+            count = conn.execute("SELECT COUNT(*) FROM chunk_vec").fetchone()[0]
+            assert count == 0
+            tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+            assert "branch_vec" not in tables, "branch_vec must be absent after T06 teardown"
 
     def test_load_vec_false_default_does_not_require_extension(self, tmp_path, monkeypatch):
-        """get_db_connection() default path works even on machines where vec is unavailable.
+        """get_connection() default path works even on machines where vec is unavailable.
 
         This test always passes — it verifies the non-load_vec path does not
         touch branch_vec in a way that would require the extension.
@@ -490,11 +487,10 @@ class TestLoadVecParameter:
         db_file = tmp_path / "conversations.db"
         monkeypatch.setattr(config_module, "DEFAULT_DB_PATH", db_file)
 
-        conn = get_db_connection()
-        # Must be able to read branches without touching branch_vec
-        count = conn.execute("SELECT COUNT(*) FROM branches").fetchone()[0]
-        assert count == 0
-        conn.close()
+        with get_connection() as conn:
+            # Must be able to read branches without touching branch_vec
+            count = conn.execute("SELECT COUNT(*) FROM branches").fetchone()[0]
+            assert count == 0
 
 
 class TestGetConnectionContextManager:
@@ -504,7 +500,7 @@ class TestGetConnectionContextManager:
         """A connection opened via get_connection() is closed even when the with-block raises.
 
         Characterizes the sync_current.py leak this context manager fixes: the
-        raw get_db_connection() pattern left the connection open (and any
+        old raw-connection pattern left the connection open (and any
         in-progress write uncommitted) whenever the caller's work raised before
         reaching an explicit conn.close(). get_connection() must close on every
         exit path, exception included.
@@ -537,7 +533,7 @@ class TestSchemaEquivalencePin:
     """Characterization pin — guards the migrations squash to v6 baseline.
 
     This pin captures the schema a fresh conversation DB produces via the
-    production get_db_connection path and asserts it matches an inline expected
+    production get_connection path and asserts it matches an inline expected
     literal.  SCHEMA_CORE now carries the embedding DDL and migrations.py is gone,
     so a fresh DB matches this snapshot exactly — the schema is the v6 baseline
     minus the intentionally-removed token_snapshots table.
@@ -551,7 +547,7 @@ class TestSchemaEquivalencePin:
     """
 
     # Expected schema captured from the production SCHEMA_CORE + SCHEMA_FTS5 output.
-    # token_snapshots is intentionally absent — SCHEMA_CORE and get_db_connection no
+    # token_snapshots is intentionally absent — SCHEMA_CORE and get_connection no
     # longer create it; the exclusion clause keeps this literal stable on legacy DBs
     # that still carry the table.
     EXPECTED_TABLES: ClassVar[list[str]] = [
@@ -671,52 +667,51 @@ class TestSchemaEquivalencePin:
         Only runs when FTS5 is available — mirrors how other test_db.py tests
         guard FTS-specific assertions via detect_fts_support.
         """
-        conn = get_db_connection(settings={"db_path": str(tmp_path / "conv.db")})
-        fts = detect_fts_support(conn)
-        if fts != "fts5":
-            pytest.skip("FTS5 not available in this SQLite build")
+        with get_connection(settings={"db_path": str(tmp_path / "conv.db")}) as conn:
+            fts = detect_fts_support(conn)
+            if fts != "fts5":
+                pytest.skip("FTS5 not available in this SQLite build")
 
-        cursor = conn.cursor()
+            cursor = conn.cursor()
 
-        # Tables: exclude token_snapshots, sqlite_* internals, and FTS shadow tables
-        # (shadow tables contain '_fts_' in their name, e.g. messages_fts_data).
-        # The FTS virtual tables (messages_fts, branches_fts) do NOT match '_fts_%'
-        # so they are correctly included.
-        cursor.execute("""
-            SELECT name FROM sqlite_master
-            WHERE type='table'
-            AND name NOT LIKE 'sqlite_%'
-            AND name != 'token_snapshots'
-            AND name NOT LIKE '%_fts_%'
-            ORDER BY name
-        """)
-        actual_tables = [row[0] for row in cursor.fetchall()]
-        assert actual_tables == self.EXPECTED_TABLES, (
-            f"Table set mismatch.\nExpected: {self.EXPECTED_TABLES}\nActual:   {actual_tables}"
-        )
-
-        # Per-table column info (preserves column order)
-        for tbl in actual_tables:
-            cursor.execute(f"PRAGMA table_info({tbl})")
-            actual_cols = [tuple(row) for row in cursor.fetchall()]
-            assert actual_cols == self.EXPECTED_COLUMNS[tbl], (
-                f"Column mismatch for table '{tbl}'.\nExpected: {self.EXPECTED_COLUMNS[tbl]}\nActual:   {actual_cols}"
+            # Tables: exclude token_snapshots, sqlite_* internals, and FTS shadow tables
+            # (shadow tables contain '_fts_' in their name, e.g. messages_fts_data).
+            # The FTS virtual tables (messages_fts, branches_fts) do NOT match '_fts_%'
+            # so they are correctly included.
+            cursor.execute("""
+                SELECT name FROM sqlite_master
+                WHERE type='table'
+                AND name NOT LIKE 'sqlite_%'
+                AND name != 'token_snapshots'
+                AND name NOT LIKE '%_fts_%'
+                ORDER BY name
+            """)
+            actual_tables = [row[0] for row in cursor.fetchall()]
+            assert actual_tables == self.EXPECTED_TABLES, (
+                f"Table set mismatch.\nExpected: {self.EXPECTED_TABLES}\nActual:   {actual_tables}"
             )
 
-        # idx_* indexes only (skip sqlite auto-indexes and token_snapshots indexes)
-        cursor.execute("""
-            SELECT name FROM sqlite_master
-            WHERE type='index'
-            AND name LIKE 'idx_%'
-            AND name NOT LIKE 'idx_token_%'
-            ORDER BY name
-        """)
-        actual_indexes = [row[0] for row in cursor.fetchall()]
-        assert actual_indexes == self.EXPECTED_IDX_INDEXES, (
-            f"Index set mismatch.\nExpected: {self.EXPECTED_IDX_INDEXES}\nActual:   {actual_indexes}"
-        )
+            # Per-table column info (preserves column order)
+            for tbl in actual_tables:
+                cursor.execute(f"PRAGMA table_info({tbl})")
+                actual_cols = [tuple(row) for row in cursor.fetchall()]
+                assert actual_cols == self.EXPECTED_COLUMNS[tbl], (
+                    f"Column mismatch for table '{tbl}'.\nExpected: {self.EXPECTED_COLUMNS[tbl]}\n"
+                    f"Actual:   {actual_cols}"
+                )
 
-        conn.close()
+            # idx_* indexes only (skip sqlite auto-indexes and token_snapshots indexes)
+            cursor.execute("""
+                SELECT name FROM sqlite_master
+                WHERE type='index'
+                AND name LIKE 'idx_%'
+                AND name NOT LIKE 'idx_token_%'
+                ORDER BY name
+            """)
+            actual_indexes = [row[0] for row in cursor.fetchall()]
+            assert actual_indexes == self.EXPECTED_IDX_INDEXES, (
+                f"Index set mismatch.\nExpected: {self.EXPECTED_IDX_INDEXES}\nActual:   {actual_indexes}"
+            )
 
 
 class TestEmbeddingDDLInSchema:
@@ -762,8 +757,8 @@ class TestEmbeddingDDLInSchema:
 class TestExistingV6DbOpen:
     """Opening a pre-populated v6-style DB succeeds and leaves all rows intact."""
 
-    def test_existing_v6_db_rows_intact_after_get_db_connection(self, tmp_path):
-        """Reopen an existing v6 DB: get_db_connection must not drop or overwrite any table or row."""
+    def test_existing_v6_db_rows_intact_after_get_connection(self, tmp_path):
+        """Reopen an existing v6 DB: get_connection must not drop or overwrite any table or row."""
         db_file = tmp_path / "existing_v6.db"
 
         # Build a DB that looks like an existing v6 conversation DB
@@ -796,15 +791,12 @@ class TestExistingV6DbOpen:
         setup_conn.commit()
         setup_conn.close()
 
-        # Reopen via get_db_connection
-        conn = get_db_connection(settings={"db_path": str(db_file)})
-
-        assert conn.execute("SELECT COUNT(*) FROM projects").fetchone()[0] == 1
-        assert conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 1
-        assert conn.execute("SELECT COUNT(*) FROM branches").fetchone()[0] == 1
-        assert conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 1
-
-        conn.close()
+        # Reopen via get_connection
+        with get_connection(settings={"db_path": str(db_file)}) as conn:
+            assert conn.execute("SELECT COUNT(*) FROM projects").fetchone()[0] == 1
+            assert conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 1
+            assert conn.execute("SELECT COUNT(*) FROM branches").fetchone()[0] == 1
+            assert conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 1
 
 
 # ── chunk schema and persistence helpers ─────────────────────────────────

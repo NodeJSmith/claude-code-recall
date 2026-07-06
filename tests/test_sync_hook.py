@@ -889,7 +889,9 @@ class TestSyncEmbeddingStatusRecording:
         monkeypatch.setattr(sync_current, "get_session_file", lambda *a, **k: session_file)
 
         mock_conn = MagicMock()
-        monkeypatch.setattr(sync_current, "get_db_connection", lambda *a, **k: mock_conn)
+        mock_conn.__enter__.return_value = mock_conn
+        mock_conn.__exit__.return_value = False
+        monkeypatch.setattr(sync_current, "get_connection", lambda *a, **k: mock_conn)
         monkeypatch.setattr(sync_current, "chunk_vec_queryable", lambda conn: vec_queryable)
         monkeypatch.setattr(sync_current, "sync_session", lambda *a, **k: 0)
 

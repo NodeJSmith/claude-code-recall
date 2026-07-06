@@ -1,7 +1,7 @@
 ---
 task_id: "T06"
 title: "Migrate test callers to get_connection"
-status: "planned"
+status: "done"
 depends_on: ["T05"]
 implements: ["FR#16"]
 ---
