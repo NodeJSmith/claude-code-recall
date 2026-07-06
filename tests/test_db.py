@@ -23,7 +23,6 @@ from ccrecall.db import (
 )
 from ccrecall.embeddings import EMBEDDING_DIM, EMBEDDING_MODEL, EMBEDDING_VERSION
 from ccrecall.schema import SCHEMA, detect_fts_support
-from ccrecall.token_schema import ensure_schema as token_ensure_schema
 
 
 class TestSchemaCreation:
@@ -727,28 +726,6 @@ class TestEmbeddingDDLInSchema:
         conn.close()
 
 
-class TestNoTokenSnapshotsOnConversationDb:
-    """A fresh conversation DB has no token_snapshots; the token DB still gets it via ensure_schema."""
-
-    def test_fresh_conversation_db_has_no_token_snapshots(self, tmp_path, monkeypatch):
-        """get_db_connection on a fresh path must not create token_snapshots."""
-        db_file = tmp_path / "conversations.db"
-        monkeypatch.setattr(db_module, "DEFAULT_DB_PATH", db_file)
-
-        conn = get_db_connection(settings={"db_path": str(db_file)})
-        row = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='token_snapshots'").fetchone()
-        conn.close()
-        assert row is None, "fresh conversation DB must not have token_snapshots table"
-
-    def test_token_db_ensure_schema_still_creates_token_snapshots(self, tmp_path):
-        """token_schema.ensure_schema creates token_snapshots on the token-analytics DB."""
-        conn = sqlite3.connect(str(tmp_path / "tokens.db"))
-        token_ensure_schema(conn)
-        row = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='token_snapshots'").fetchone()
-        conn.close()
-        assert row is not None, "ensure_schema must create token_snapshots on the token-analytics DB"
-
-
 class TestExistingV6DbOpen:
     """Opening a pre-populated v6-style DB succeeds and leaves all rows intact."""
 
@@ -782,20 +759,6 @@ class TestExistingV6DbOpen:
         )
         setup_conn.commit()
 
-        # Manually create token_snapshots to simulate the inert legacy table that
-        # exists on pre-squash conversation DBs.  SCHEMA no longer creates it; the
-        # test adds it to verify get_db_connection never drops it.
-        setup_conn.execute("""
-            CREATE TABLE token_snapshots (
-                id INTEGER PRIMARY KEY,
-                session_uuid TEXT UNIQUE NOT NULL,
-                input_tokens INTEGER DEFAULT 0
-            )
-        """)
-        setup_conn.execute(
-            "INSERT INTO token_snapshots (session_uuid, input_tokens) VALUES (?, ?)",
-            ("sess-v6-ac4", 42),
-        )
         setup_conn.execute("PRAGMA user_version = 6")
         setup_conn.commit()
         setup_conn.close()
@@ -807,14 +770,6 @@ class TestExistingV6DbOpen:
         assert conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 1
         assert conn.execute("SELECT COUNT(*) FROM branches").fetchone()[0] == 1
         assert conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 1
-
-        # token_snapshots must still exist and its row must be intact
-        snap_row = conn.execute(
-            "SELECT input_tokens FROM token_snapshots WHERE session_uuid = ?",
-            ("sess-v6-ac4",),
-        ).fetchone()
-        assert snap_row is not None, "token_snapshots table was dropped by get_db_connection"
-        assert snap_row[0] == 42, "token_snapshots row was modified by get_db_connection"
 
         conn.close()
 

@@ -1,6 +1,6 @@
 """
 Conversation-DB schema constants (SCHEMA_CORE/FTS5/FTS4) and FTS capability
-detection. For the token-analytics schema, see ccrecall.token_schema.
+detection.
 
 This module has no ccrecall dependencies — only the stdlib sqlite3 module.
 """

@@ -16,7 +16,6 @@ from ccrecall import legacy as legacy_mod
 from ccrecall import recent_chats as recent_chats_mod
 from ccrecall import search_conversations as search_mod
 from ccrecall import session_tail as session_tail_mod
-from ccrecall import token_dashboard as token_dashboard_mod
 from ccrecall.cli import app, backfill_app
 from ccrecall.cli.context import DEFAULT_CLI_CONTEXT, CLIContextParam
 from ccrecall.db import DEFAULT_DB_PATH, DEFAULT_PROJECTS_DIR
@@ -277,12 +276,6 @@ def cmd_tail(
 ) -> None:
     """Print the tail of a prior session's transcript for fast resume."""
     raise SystemExit(session_tail_mod.run(selector, list_sessions=list_sessions, cwd=cwd, n=n))
-
-
-@app.command(name="tokens")
-def cmd_tokens() -> None:
-    """Ingest token data, refresh the dashboard, and print a slim summary."""
-    token_dashboard_mod.run()
 
 
 @app.command(name="write-config")
