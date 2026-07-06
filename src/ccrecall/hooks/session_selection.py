@@ -1,14 +1,15 @@
 """Session selection algorithm for the SessionStart context hook.
 
 Selection Algorithm (startup):
-  Exclude current session, find most recent substantive (>2 exchanges)
-  plus recent short sessions (2 exchanges) in remaining slots.
+  Exclude current session, find most recent substantive
+  (>SUBSTANTIVE_EXCHANGE_THRESHOLD exchanges) plus recent short sessions
+  in remaining slots.
 
 Selection Algorithm (clear):
   Read handoff file written by SessionEnd hook to hard-link to the exact
-  cleared-from session. If not substantive (≤2 exchanges), append most
-  recent substantive as supplementary. Falls through to startup logic
-  if handoff file is missing, stale, or session not in DB.
+  cleared-from session. If not substantive, append most recent substantive
+  as supplementary. Falls through to startup logic if handoff file is
+  missing, stale, or session not in DB.
 """
 
 import contextlib
@@ -24,6 +25,11 @@ from ccrecall.serialization import decode_json_column
 
 # Reject a clear-handoff written more than this many seconds ago (stale guard).
 HANDOFF_STALE_SECONDS = 30
+
+# Exchange count above which a session is considered "substantive" (rich enough
+# to inject as prior context). Sessions at or below this threshold are "short"
+# and fill remaining slots only after a substantive session is found.
+SUBSTANTIVE_EXCHANGE_THRESHOLD = 2
 
 # Most recent prior branches scanned when picking sessions to inject.
 _CANDIDATE_LIMIT = 20
@@ -84,11 +90,11 @@ _SESSION_BY_UUID_QUERY = """
 
 
 def _find_first_substantive(cursor, project_id: int, exclude_uuid: str) -> dict | None:
-    """Find the most recent substantive session (>2 exchanges), excluding a given uuid."""
+    """Find the most recent substantive session, excluding a given uuid."""
     cursor.execute(_CANDIDATE_QUERY, (project_id, exclude_uuid))
     for row in cursor.fetchall():
         entry = _row_to_entry(row)
-        if entry["exchange_count"] > 2:
+        if entry["exchange_count"] > SUBSTANTIVE_EXCHANGE_THRESHOLD:
             return entry
     return None
 
@@ -139,15 +145,15 @@ def _find_cleared_from_session_uuid(db_path: Path, cwd: str) -> str | None:
     if not handoff_path.exists():
         return None
     try:
-        data = json.loads(handoff_path.read_text(encoding="utf-8"))
+        handoff_data = json.loads(handoff_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         with contextlib.suppress(OSError):
             handoff_path.unlink()
         return None
 
-    session_id = data.get("session_id")
-    handoff_cwd = data.get("cwd")
-    timestamp_str = data.get("timestamp")
+    session_id = handoff_data.get("session_id")
+    handoff_cwd = handoff_data.get("cwd")
+    timestamp_str = handoff_data.get("timestamp")
 
     # Validate before consuming: wrong cwd means this handoff belongs to another session.
     # Normalize both sides so worktree paths (.claude/worktrees/<name>) match the base repo.
@@ -194,7 +200,7 @@ def _select_cleared_sessions(cursor, project_id: int, prev_session_uuid: str, ma
 
     filtered = [cleared_from]
     # If cleared-from is not substantive, add the most recent substantive session.
-    if cleared_from["exchange_count"] <= 2 and max_sessions > 1:
+    if cleared_from["exchange_count"] <= SUBSTANTIVE_EXCHANGE_THRESHOLD and max_sessions > 1:
         supplementary = _find_first_substantive(cursor, project_id, prev_session_uuid)
         if supplementary:
             filtered.append(supplementary)
@@ -247,10 +253,10 @@ def select_sessions(
     for row in candidates:
         entry = _row_to_entry(row)
 
-        if entry["exchange_count"] <= 1:
+        if entry["exchange_count"] < SUBSTANTIVE_EXCHANGE_THRESHOLD:
             continue
 
-        if entry["exchange_count"] == 2:
+        if entry["exchange_count"] == SUBSTANTIVE_EXCHANGE_THRESHOLD:
             short_sessions.append(entry)
             continue
 

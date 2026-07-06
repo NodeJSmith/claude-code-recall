@@ -14,6 +14,11 @@ from ccrecall.embed_ops import embed_branch_chunks, write_branch_summary
 from ccrecall.parsing import build_aggregated_content, compute_branch_metadata, extract_session_metadata
 
 
+def _to_json_or_none(value) -> str | None:
+    """Serialize a non-empty value to JSON, or return None."""
+    return json.dumps(value) if value else None
+
+
 def update_branch_row(
     cursor: sqlite3.Cursor,
     branch_db_id: int,
@@ -169,9 +174,9 @@ def diff_branch_messages(
     to_remove = existing_bm_ids - desired_bm_ids
 
     if to_remove:
-        ph = ",".join("?" * len(to_remove))
+        placeholders = ",".join("?" * len(to_remove))
         cursor.execute(
-            f"DELETE FROM branch_messages WHERE branch_id = ? AND message_id IN ({ph})",
+            f"DELETE FROM branch_messages WHERE branch_id = ? AND message_id IN ({placeholders})",
             (branch_db_id, *to_remove),
         )
     if to_add:
@@ -199,9 +204,9 @@ def sync_branch(
     branch_meta = extract_session_metadata(branch_msgs)
     exchange_count, files, commits, tool_counts = compute_branch_metadata(branch_msgs)
 
-    files_json = json.dumps(files) if files else None
-    commits_json = json.dumps(commits) if commits else None
-    tool_counts_json = json.dumps(tool_counts) if tool_counts else None
+    files_json = _to_json_or_none(files)
+    commits_json = _to_json_or_none(commits)
+    tool_counts_json = _to_json_or_none(tool_counts)
 
     branch_db_id = upsert_branch(
         cursor,

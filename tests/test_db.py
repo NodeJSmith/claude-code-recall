@@ -1154,9 +1154,6 @@ class TestExistingV6DbOpen:
             assert conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 1
 
 
-# ── chunk schema and persistence helpers ─────────────────────────────────
-
-
 class TestChunkSchema:
     """chunks table + chunk_vec virtual table — additive schema additions."""
 

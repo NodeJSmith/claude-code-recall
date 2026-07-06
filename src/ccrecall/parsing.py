@@ -45,15 +45,15 @@ def parse_jsonl_file(filepath: Path) -> Generator[dict, None, None]:
             if not line:
                 continue
             try:
-                obj = json.loads(line)
+                entry = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if not is_valid_entry(obj):
+            if not is_valid_entry(entry):
                 continue
-            if obj.get("isMeta") and not obj.get("origin"):
+            if entry.get("isMeta") and not entry.get("origin"):
                 continue
-            if obj.get("type") in ("user", "assistant"):
-                yield obj
+            if entry.get("type") in ("user", "assistant"):
+                yield entry
 
 
 def parse_lines_with_uuids(lines: Iterable[str]) -> Generator[dict, None, None]:
@@ -66,13 +66,13 @@ def parse_lines_with_uuids(lines: Iterable[str]) -> Generator[dict, None, None]:
         if not line:
             continue
         try:
-            obj = json.loads(line)
+            entry = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if not is_valid_entry(obj):
+        if not is_valid_entry(entry):
             continue
-        if obj.get("uuid"):
-            yield obj
+        if entry.get("uuid"):
+            yield entry
 
 
 def parse_all_with_uuids(filepath: Path) -> Generator[dict, None, None]:

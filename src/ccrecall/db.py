@@ -192,12 +192,12 @@ def _ensure_vec_schema(conn: sqlite3.Connection) -> None:
     """
     # ── branch_vec teardown (unconditional, not via dimension self-heal) ─
     # Check first so the watermark reset fires only when the table actually existed.
-    bv_existed = (
+    branch_vec_existed = (
         conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='branch_vec'").fetchone() is not None
     )
     conn.execute("DROP TRIGGER IF EXISTS branches_vec_ad")
     conn.execute("DROP TABLE IF EXISTS branch_vec")
-    if bv_existed:
+    if branch_vec_existed:
         # Old embedding_version values referred to branch-level embeddings (now
         # removed); reset to 0 so backfill re-embeds at chunk grain from scratch.
         conn.execute("UPDATE branches SET embedding_version = 0")
@@ -233,6 +233,50 @@ def _ensure_vec_schema(conn: sqlite3.Connection) -> None:
         " AFTER DELETE ON chunks"
         " BEGIN DELETE FROM chunk_vec WHERE chunk_id = OLD.id; END"
     )
+
+
+def _recreate_branches_indexes_and_fts(conn: sqlite3.Connection) -> None:
+    """Re-create indexes and FTS sync triggers after a branches table rebuild.
+
+    DROP TABLE takes every trigger and index on the old table with it, so both
+    must be re-created after the create-copy-drop-rename sequence. Shared by
+    v1 and v2 migrations (and any future branches rebuild) so the index/trigger
+    set can't drift between migrations.
+    """
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_branches_session ON branches(session_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_branches_active ON branches(is_active)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_branches_summary_version ON branches(summary_version)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_branches_embedding_version ON branches(embedding_version)")
+
+    fts = detect_fts_support(conn)
+    if fts == "fts5":
+        conn.execute(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS branches_fts USING fts5("
+            "aggregated_content, content=branches, content_rowid=id, tokenize='porter unicode61')"
+        )
+    elif fts == "fts4":
+        conn.execute(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS branches_fts USING fts4("
+            "aggregated_content, content=branches, tokenize=porter)"
+        )
+    if fts in ("fts5", "fts4"):
+        # Trigger bodies are identical across the FTS5/FTS4 variants (only the
+        # CREATE VIRTUAL TABLE statement above differs) — one copy suffices.
+        conn.execute(
+            "CREATE TRIGGER IF NOT EXISTS branches_ai AFTER INSERT ON branches BEGIN"
+            " INSERT INTO branches_fts(rowid, aggregated_content) VALUES (new.id, new.aggregated_content); END"
+        )
+        conn.execute(
+            "CREATE TRIGGER IF NOT EXISTS branches_ad AFTER DELETE ON branches BEGIN"
+            " INSERT INTO branches_fts(branches_fts, rowid, aggregated_content)"
+            " VALUES('delete', old.id, old.aggregated_content); END"
+        )
+        conn.execute(
+            "CREATE TRIGGER IF NOT EXISTS branches_au AFTER UPDATE ON branches BEGIN"
+            " INSERT INTO branches_fts(branches_fts, rowid, aggregated_content)"
+            " VALUES('delete', old.id, old.aggregated_content);"
+            " INSERT INTO branches_fts(rowid, aggregated_content) VALUES (new.id, new.aggregated_content); END"
+        )
 
 
 def _migrate_to_v1(conn: sqlite3.Connection) -> None:
@@ -302,40 +346,7 @@ def _migrate_to_v1(conn: sqlite3.Connection) -> None:
     conn.execute("DROP TABLE branches")
     conn.execute("ALTER TABLE branches_new RENAME TO branches")
 
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_branches_session ON branches(session_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_branches_active ON branches(is_active)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_branches_summary_version ON branches(summary_version)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_branches_embedding_version ON branches(embedding_version)")
-
-    fts = detect_fts_support(conn)
-    if fts == "fts5":
-        conn.execute(
-            "CREATE VIRTUAL TABLE IF NOT EXISTS branches_fts USING fts5("
-            "aggregated_content, content=branches, content_rowid=id, tokenize='porter unicode61')"
-        )
-    elif fts == "fts4":
-        conn.execute(
-            "CREATE VIRTUAL TABLE IF NOT EXISTS branches_fts USING fts4("
-            "aggregated_content, content=branches, tokenize=porter)"
-        )
-    if fts in ("fts5", "fts4"):
-        # Trigger bodies are identical across the FTS5/FTS4 variants (only the
-        # CREATE VIRTUAL TABLE statement above differs) — one copy suffices.
-        conn.execute(
-            "CREATE TRIGGER IF NOT EXISTS branches_ai AFTER INSERT ON branches BEGIN"
-            " INSERT INTO branches_fts(rowid, aggregated_content) VALUES (new.id, new.aggregated_content); END"
-        )
-        conn.execute(
-            "CREATE TRIGGER IF NOT EXISTS branches_ad AFTER DELETE ON branches BEGIN"
-            " INSERT INTO branches_fts(branches_fts, rowid, aggregated_content)"
-            " VALUES('delete', old.id, old.aggregated_content); END"
-        )
-        conn.execute(
-            "CREATE TRIGGER IF NOT EXISTS branches_au AFTER UPDATE ON branches BEGIN"
-            " INSERT INTO branches_fts(branches_fts, rowid, aggregated_content)"
-            " VALUES('delete', old.id, old.aggregated_content);"
-            " INSERT INTO branches_fts(rowid, aggregated_content) VALUES (new.id, new.aggregated_content); END"
-        )
+    _recreate_branches_indexes_and_fts(conn)
 
 
 def _migrate_to_v2(conn: sqlite3.Connection) -> None:
@@ -411,40 +422,7 @@ def _migrate_to_v2(conn: sqlite3.Connection) -> None:
     conn.execute("DROP TABLE branches")
     conn.execute("ALTER TABLE branches_new RENAME TO branches")
 
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_branches_session ON branches(session_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_branches_active ON branches(is_active)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_branches_summary_version ON branches(summary_version)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_branches_embedding_version ON branches(embedding_version)")
-
-    fts = detect_fts_support(conn)
-    if fts == "fts5":
-        conn.execute(
-            "CREATE VIRTUAL TABLE IF NOT EXISTS branches_fts USING fts5("
-            "aggregated_content, content=branches, content_rowid=id, tokenize='porter unicode61')"
-        )
-    elif fts == "fts4":
-        conn.execute(
-            "CREATE VIRTUAL TABLE IF NOT EXISTS branches_fts USING fts4("
-            "aggregated_content, content=branches, tokenize=porter)"
-        )
-    if fts in ("fts5", "fts4"):
-        # Trigger bodies are identical across the FTS5/FTS4 variants (only the
-        # CREATE VIRTUAL TABLE statement above differs) — one copy suffices.
-        conn.execute(
-            "CREATE TRIGGER IF NOT EXISTS branches_ai AFTER INSERT ON branches BEGIN"
-            " INSERT INTO branches_fts(rowid, aggregated_content) VALUES (new.id, new.aggregated_content); END"
-        )
-        conn.execute(
-            "CREATE TRIGGER IF NOT EXISTS branches_ad AFTER DELETE ON branches BEGIN"
-            " INSERT INTO branches_fts(branches_fts, rowid, aggregated_content)"
-            " VALUES('delete', old.id, old.aggregated_content); END"
-        )
-        conn.execute(
-            "CREATE TRIGGER IF NOT EXISTS branches_au AFTER UPDATE ON branches BEGIN"
-            " INSERT INTO branches_fts(branches_fts, rowid, aggregated_content)"
-            " VALUES('delete', old.id, old.aggregated_content);"
-            " INSERT INTO branches_fts(rowid, aggregated_content) VALUES (new.id, new.aggregated_content); END"
-        )
+    _recreate_branches_indexes_and_fts(conn)
 
 
 def _apply_migrations(conn: sqlite3.Connection) -> None:

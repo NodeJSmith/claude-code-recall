@@ -44,7 +44,7 @@ def proactive_alert_block(
     Passes active keys through the snooze ledger (fire / suppress / auto-clear)
     and builds ONE combined block for whatever fires.
 
-    Defensive wrapper: follows the _pending_question_block precedent — any
+    Defensive wrapper: follows the pending_question_block precedent — any
     exception degrades to "" so the hook is never broken and context injection is
     unaffected.
 

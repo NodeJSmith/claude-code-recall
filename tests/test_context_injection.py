@@ -1,4 +1,4 @@
-"""Tests for memory-context.py — session selection and context injection."""
+"""Tests for session selection, context alerts, context rendering, and the memory_context hook."""
 
 import ast
 import importlib.util
@@ -760,8 +760,6 @@ class TestProactiveAlerts:
     def _settings(self) -> dict:
         return {"alert_snooze_hours": 24}
 
-    # ── (f) import inspection ────────────────────────────────────────────
-
     def test_ac10_no_fastembed_on_hook_path(self):
         """health.py (the embedding-alert module) must not import fastembed or onnxruntime.
 
@@ -789,8 +787,6 @@ class TestProactiveAlerts:
 
         for lib in ("fastembed", "onnxruntime", "sqlite_vec"):
             assert lib not in imported, f"health.py imports {lib} — violates AC#10 hot-path invariant"
-
-    # ── (a) dir unwritable → block fires even with no sessions ────────────
 
     def test_ac1_dir_unwritable_no_sessions(self, tmp_path):
         """With dir unwritable, proactive block fires even when there are no sessions.
@@ -830,8 +826,6 @@ class TestProactiveAlerts:
         assert "## ⚠" in block
         # cant_persist alert from DB probe (conn=None)
         assert "cannot" in block.lower() or "persist" in block.lower() or "database" in block.lower()
-
-    # ── (b) DB read-only → block; concurrent lock → no false alert ────────
 
     def test_ac2_db_readonly_block(self, tmp_path):
         """When the DB directory is unwritable, connect fails → probe_db(None) → block.
@@ -908,8 +902,6 @@ class TestProactiveAlerts:
 
         assert result.ok, f"Lock contention must not be a fault: {result.reason}"
 
-    # ── (c) embedding-status sidecar → "embeddings failing" block ─────────
-
     def test_ac3_embedding_status_sidecar(self, tmp_path):
         """Embedding-status sidecar present → 'embeddings failing' block named.
 
@@ -953,8 +945,6 @@ class TestProactiveAlerts:
         assert "## ⚠" in block
         assert "embedding" in block.lower()
 
-    # ── (d) both alerts active → single combined block ─────────────────────
-
     def test_ac7_both_alerts_single_block(self, tmp_path):
         """Both FS fault + embedding failure → exactly one ## ⚠ heading."""
         unwritable = tmp_path / "no-write"
@@ -982,8 +972,6 @@ class TestProactiveAlerts:
         assert "persist" in block.lower() or "write" in block.lower() or "runtime" in block.lower()
         assert "embedding" in block.lower()
 
-    # ── (e) exception in proactive path → "" (hook still works) ───────────
-
     def test_ac9_proactive_exception_degrades_to_empty(self, tmp_path, monkeypatch):
         """Forced exception inside the proactive path → '' (defensive wrap)."""
 
@@ -1003,8 +991,6 @@ class TestProactiveAlerts:
         )
 
         assert block == "", "Defensive wrap must return '' on exception"
-
-    # ── (g) condition clears → no block; snooze record gone ────────────────
 
     def test_ac5_condition_clears_no_block_snooze_reset(self, tmp_path):
         """After condition clears, next session injects no block; snooze record gone.
@@ -1048,8 +1034,6 @@ class TestProactiveAlerts:
         if snooze_path.exists():
             ledger = json.loads(snooze_path.read_text())
             assert ALERT_EMBEDDINGS_FAILING not in ledger, "Snooze entry must be auto-cleared when condition is gone"
-
-    # ── Block heading (ordering is structurally enforced) ──────────────────
 
     def test_proactive_block_has_alert_heading(self, tmp_path):
         """The proactive block leads with the ## ⚠ heading.

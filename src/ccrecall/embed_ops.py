@@ -14,6 +14,13 @@ from ccrecall.embeddings import EMBEDDING_MODEL, EMBEDDING_VERSION, cap_for_embe
 from ccrecall.models import LOGGER_NAME
 from ccrecall.summarizer import SUMMARY_VERSION, build_exchange_pairs, compute_context_summary
 
+# Maximum number of exchanges embedded per sync on the write path. Version-stale
+# chunks (those only needing an EMBEDDING_VERSION bump) are deliberately left to
+# the background backfill — only new or content-changed exchanges are eligible
+# here. This cap bounds the detached sync-current process's worst case even for a
+# first-sync of a long imported session or a rewind with many fresh exchanges.
+MAX_WRITE_PATH_EMBEDS_PER_SYNC = 8
+
 
 def write_branch_summary(cursor: sqlite3.Cursor, branch_db_id: int) -> str | None:
     """Compute and store context summary for a branch; return summary_md or None.
@@ -47,14 +54,6 @@ def write_branch_summary(cursor: sqlite3.Cursor, branch_db_id: int) -> str | Non
         logging.getLogger(LOGGER_NAME).exception("sync: summary write failed for branch %s", branch_db_id)
         summary_md = None
     return summary_md
-
-
-# Maximum number of exchanges embedded per sync on the write path. Version-stale
-# chunks (those only needing an EMBEDDING_VERSION bump) are deliberately left to
-# the background backfill — only new or content-changed exchanges are eligible
-# here. This cap bounds the detached sync-current process's worst case even for a
-# first-sync of a long imported session or a rewind with many fresh exchanges.
-MAX_WRITE_PATH_EMBEDS_PER_SYNC = 8
 
 
 def _stamp_branch_watermark(cursor: sqlite3.Cursor, branch_db_id: int) -> None:
@@ -223,9 +222,9 @@ def embed_branch_chunks(
     # Step 7 — prune: delete chunks whose exchange_index no longer exists.
     # The chunks_vec_ad cascade trigger removes their chunk_vec rows automatically.
     if indices_to_prune:
-        ph = ",".join("?" * len(indices_to_prune))
+        placeholders = ",".join("?" * len(indices_to_prune))
         cursor.execute(
-            f"DELETE FROM chunks WHERE branch_id = ? AND exchange_index IN ({ph})",
+            f"DELETE FROM chunks WHERE branch_id = ? AND exchange_index IN ({placeholders})",
             (branch_db_id, *indices_to_prune),
         )
 

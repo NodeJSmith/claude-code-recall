@@ -3,7 +3,7 @@
 Powers two things:
   - the ``ccrecall tail`` CLI (invoked by the ccr-resume skill), and
   - the SessionStart context injection's "unresolved decision" warning
-    (``memory_context.py``).
+    (``context_rendering.py``).
 
 The one thing on-disk artifacts can never tell you is whether the prior session
 stopped on a decision the user never made — an AskUserQuestion that was rejected,

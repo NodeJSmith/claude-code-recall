@@ -1,4 +1,4 @@
-"""Tests for the shared session_ops module."""
+"""Tests for session sync, branch ops, message ops, and embed ops."""
 
 import contextlib
 import json

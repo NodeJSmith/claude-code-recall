@@ -47,6 +47,10 @@ from ccrecall.hooks.backfill_query import (
 )
 from ccrecall.hooks.backfill_status import format_duration, run_status
 
+_PRINT_PREFIX = "ccrecall backfill embeddings"
+_LOG_PREFIX = "Backfill embeddings"
+_SAVEPOINT_NAME = "row"
+
 
 def run(
     *,
@@ -85,9 +89,9 @@ def run(
     if not model_available(threads=threads):
         with contextlib.suppress(Exception):  # best-effort; sidecar write must not affect exit behavior
             record_embedding_failure(reason=REASON_MODEL_UNAVAILABLE)
-        logger.error("Backfill embeddings: model not available, aborting (no rows marked)")
+        logger.error("%s: model not available, aborting (no rows marked)", _LOG_PREFIX)
         print(
-            "ccrecall backfill embeddings: model not available, aborting (no rows marked)",
+            f"{_PRINT_PREFIX}: model not available, aborting (no rows marked)",
             file=sys.stderr,
         )
         return EXIT_ABORT
@@ -111,9 +115,9 @@ def run(
             if not chunk_vec_queryable(conn):
                 with contextlib.suppress(Exception):  # best-effort; sidecar write must not affect exit behavior
                     record_embedding_failure(reason=REASON_VEC_UNAVAILABLE)
-                logger.error("Backfill embeddings: sqlite-vec unavailable, aborting (no rows marked)")
+                logger.error("%s: sqlite-vec unavailable, aborting (no rows marked)", _LOG_PREFIX)
                 print(
-                    "ccrecall backfill embeddings: sqlite-vec unavailable, aborting (no rows marked)",
+                    f"{_PRINT_PREFIX}: sqlite-vec unavailable, aborting (no rows marked)",
                     file=sys.stderr,
                 )
                 return EXIT_ABORT
@@ -124,9 +128,9 @@ def run(
             if limit is not None:
                 total_eligible = min(total_eligible, limit)
 
-            logger.info("Backfill embeddings: starting, %s branches to embed", total_eligible)
+            logger.info("%s: starting, %s branches to embed", _LOG_PREFIX, total_eligible)
             print(
-                f"ccrecall backfill embeddings: starting, {total_eligible} to embed",
+                f"{_PRINT_PREFIX}: starting, {total_eligible} to embed",
                 file=sys.stderr,
             )
 
@@ -153,10 +157,10 @@ def run(
                 current_ids = [r[0] for r in rows]
                 if current_ids == last_batch_ids:
                     logger.error(
-                        "Backfill embeddings: no progress — same batch re-selected; aborting to avoid infinite loop"
+                        "%s: no progress — same batch re-selected; aborting to avoid infinite loop", _LOG_PREFIX
                     )
                     print(
-                        "ccrecall backfill embeddings: no progress — same batch re-selected, aborting",
+                        f"{_PRINT_PREFIX}: no progress — same batch re-selected, aborting",
                         file=sys.stderr,
                     )
                     return EXIT_ABORT
@@ -169,7 +173,7 @@ def run(
                         # It propagates through the inner except to the outer handler.
                         branch_msgs = fetch_branch_messages(cursor, branch_id, include_notifications=False)
 
-                        cursor.execute("SAVEPOINT row")
+                        cursor.execute(f"SAVEPOINT {_SAVEPOINT_NAME}")
                         try:
                             # Pre-delete stale or missing-vector chunk rows so
                             # embed_branch_chunks sees them as new and re-embeds them.
@@ -203,25 +207,25 @@ def run(
                             embedded = embed_branch_chunks(
                                 cursor, branch_id, branch_msgs, is_active=True, vec_writable=True, max_embeds=None
                             )
-                            cursor.execute("RELEASE SAVEPOINT row")
+                            cursor.execute(f"RELEASE SAVEPOINT {_SAVEPOINT_NAME}")
                             total_updated += 1
                             total_inferences += embedded
                         except (ValueError, OverflowError, UnicodeError) as e:
-                            cursor.execute("ROLLBACK TO SAVEPOINT row")
-                            cursor.execute("RELEASE SAVEPOINT row")
+                            cursor.execute(f"ROLLBACK TO SAVEPOINT {_SAVEPOINT_NAME}")
+                            cursor.execute(f"RELEASE SAVEPOINT {_SAVEPOINT_NAME}")
                             # Per-row content error: mark sentinel so this row is skipped next run.
                             cursor.execute(
                                 "UPDATE branches SET embedding_version = ? WHERE id = ?",
                                 (CONTENT_ERROR_VERSION, branch_id),
                             )
-                            logger.error("Backfill embeddings: branch %s failed: %s", branch_id, e)
+                            logger.error("%s: branch %s failed: %s", _LOG_PREFIX, branch_id, e)
                 except Exception as e:
                     # Infra/session failure (e.g. ONNX session crash, sqlite3.Error on
                     # fetch_branch_messages, OOM): abort without marking the content-error
                     # sentinel. Any committed partial state (a pre-delete + cleared watermark
                     # from an interrupted row) is recovered by the heal clause / watermark-
                     # stale predicate on the next run; affected rows stay eligible.
-                    logger.error("Backfill embeddings: session failure, aborting: %s", e)
+                    logger.error("%s: session failure, aborting: %s", _LOG_PREFIX, e)
                     conn.commit()
                     return EXIT_ABORT
 
@@ -239,15 +243,15 @@ def run(
                         f"{remaining} remaining, "
                         f"{format_duration(elapsed)} elapsed, ETA {eta}"
                     )
-                    logger.info("Backfill embeddings: %s", msg)
-                    print(f"ccrecall backfill embeddings: {msg}", file=sys.stderr)
+                    logger.info("%s: %s", _LOG_PREFIX, msg)
+                    print(f"{_PRINT_PREFIX}: {msg}", file=sys.stderr)
                     last_progress = total_updated
 
                 time.sleep(BACKFILL_BATCH_DELAY_SECONDS)
     except (sqlite3.Error, OSError) as e:
-        logger.error("Backfill embeddings: aborted: %s", e)
+        logger.error("%s: aborted: %s", _LOG_PREFIX, e)
         print(
-            f"ccrecall backfill embeddings: aborted: {e}",
+            f"{_PRINT_PREFIX}: aborted: {e}",
             file=sys.stderr,
         )
         return EXIT_ABORT
@@ -255,7 +259,8 @@ def run(
     elapsed = time.monotonic() - started
     remaining = max(0, total_eligible - total_updated)
     logger.info(
-        "Backfill embeddings complete: %s exchanges across %s branches in %s",
+        "%s complete: %s exchanges across %s branches in %s",
+        _LOG_PREFIX,
         total_inferences,
         total_updated,
         format_duration(elapsed),
@@ -274,7 +279,7 @@ def run(
         )
     else:
         print(
-            f"ccrecall backfill embeddings: complete — "
+            f"{_PRINT_PREFIX}: complete — "
             f"{total_inferences} exchanges across {total_updated} branches "
             f"in {format_duration(elapsed)}",
             file=sys.stderr,
