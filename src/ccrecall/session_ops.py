@@ -211,17 +211,13 @@ def insert_branch_row(
     commits_json: str | None,
     tool_counts_json: str | None,
 ) -> int | None:
-    """INSERT a new branches row; return lastrowid (None only if the INSERT did not run).
-
-    fork_point_uuid is always NULL now — abandoned-fork tracking was removed
-    along with the leaf_uuid-keyed identity it supported.
-    """
+    """INSERT a new branches row; return lastrowid (None only if the INSERT did not run)."""
     cursor.execute(
         """
         INSERT INTO branches
-            (session_id, leaf_uuid, fork_point_uuid, is_active,
+            (session_id, leaf_uuid, is_active,
              started_at, ended_at, exchange_count, files_modified, commits, tool_counts)
-        VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             session_id,

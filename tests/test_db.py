@@ -641,6 +641,48 @@ def _seed_v0_db_with_dead_branch_chunk_vec(db_path) -> None:
     conn.close()
 
 
+def _seed_v1_db_with_orphan_messages(db_path) -> None:
+    """Build a post-v1, pre-v2 DB: fork_point_uuid still present, an orphan message exists.
+
+    Mirrors the exact post-v1 shape the v2 migration must handle:
+    `fork_point_uuid` is still on `branches` (v1 never drops it — only v2's
+    rebuild does), and `messages` carries a row with no `branch_messages`
+    reference (linked only to a branch v1 already deleted) — the exact
+    population v2's orphan purge exists to clean up.
+    """
+    conn = sqlite3.connect(db_path)
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.executescript(SCHEMA_CORE)
+    conn.executescript(SCHEMA_FTS5)
+    conn.execute("PRAGMA user_version = 1")
+    conn.commit()
+
+    conn.execute("INSERT INTO projects (path, key, name) VALUES ('/p-v1', '-p-v1', 'p-v1')")
+    proj_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    conn.execute("INSERT INTO sessions (uuid, project_id) VALUES ('sess-v1', ?)", (proj_id,))
+    sess_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+    conn.execute(
+        "INSERT INTO branches (session_id, leaf_uuid, fork_point_uuid, is_active) VALUES (?, 'leaf-v1', NULL, 1)",
+        (sess_id,),
+    )
+    branch_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+    conn.execute(
+        "INSERT INTO messages (session_id, uuid, role, content) VALUES (?, 'msg-linked', 'user', 'hi')", (sess_id,)
+    )
+    linked_msg_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    conn.execute(
+        "INSERT INTO messages (session_id, uuid, role, content) VALUES (?, 'msg-orphan', 'user', 'orphaned')",
+        (sess_id,),
+    )
+
+    conn.execute("INSERT INTO branch_messages (branch_id, message_id) VALUES (?, ?)", (branch_id, linked_msg_id))
+
+    conn.commit()
+    conn.close()
+
+
 class TestSchemaVersioning:
     """PRAGMA user_version schema versioning and the v1 dead-branch migration."""
 
@@ -649,6 +691,34 @@ class TestSchemaVersioning:
         db_path = tmp_path / "fresh.db"
         with get_connection(settings={"db_path": str(db_path)}) as conn:
             assert conn.execute("PRAGMA user_version").fetchone()[0] == db_module.SCHEMA_VERSION
+
+    def test_fresh_db_has_no_fork_point_uuid_column(self, tmp_path):
+        """A fresh install runs v1 (creates fork_point_uuid) then v2 (drops it) — the column is absent at rest."""
+        db_path = tmp_path / "fresh_v2.db"
+        with get_connection(settings={"db_path": str(db_path)}) as conn:
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == db_module.SCHEMA_VERSION
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(branches)").fetchall()}
+            assert "fork_point_uuid" not in columns
+
+    def test_migration_from_v1_drops_fork_point_uuid_and_purges_orphans(self, tmp_path):
+        """A v1 DB with fork_point_uuid and an orphan message is migrated to v2 on first connection."""
+        db_path = tmp_path / "v1_to_v2.db"
+        _seed_v1_db_with_orphan_messages(db_path)
+
+        with get_connection(settings={"db_path": str(db_path)}) as conn:
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(branches)").fetchall()}
+            assert "fork_point_uuid" not in columns
+
+            orphan_count = conn.execute(
+                "SELECT COUNT(*) FROM messages m"
+                " LEFT JOIN branch_messages bm ON bm.message_id = m.id"
+                " WHERE bm.message_id IS NULL"
+            ).fetchone()[0]
+            assert orphan_count == 0
+
+            assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
 
     def test_migration_from_v0_purges_dead_branches_and_rebuilds(self, tmp_path):
         """A v0 DB seeded with a churn (inactive) branch row is cleaned on first connection.
@@ -861,21 +931,20 @@ class TestSchemaEquivalencePin:
             (0, "id", "INTEGER", 0, None, 1),
             (1, "session_id", "INTEGER", 1, None, 0),
             (2, "leaf_uuid", "TEXT", 1, None, 0),
-            (3, "fork_point_uuid", "TEXT", 0, None, 0),
-            (4, "is_active", "INTEGER", 0, "1", 0),
-            (5, "started_at", "DATETIME", 0, None, 0),
-            (6, "ended_at", "DATETIME", 0, None, 0),
-            (7, "exchange_count", "INTEGER", 0, "0", 0),
-            (8, "files_modified", "TEXT", 0, None, 0),
-            (9, "commits", "TEXT", 0, None, 0),
-            (10, "tool_counts", "TEXT", 0, None, 0),
-            (11, "aggregated_content", "TEXT", 0, None, 0),
-            (12, "context_summary", "TEXT", 0, None, 0),
-            (13, "context_summary_json", "TEXT", 0, None, 0),
-            (14, "summary_version", "INTEGER", 0, "0", 0),
-            (15, "embedding_version", "INTEGER", 0, "0", 0),
-            (16, "embedding_model", "TEXT", 0, None, 0),
-            (17, "summary_version_at_embed", "INTEGER", 0, None, 0),
+            (3, "is_active", "INTEGER", 0, "1", 0),
+            (4, "started_at", "DATETIME", 0, None, 0),
+            (5, "ended_at", "DATETIME", 0, None, 0),
+            (6, "exchange_count", "INTEGER", 0, "0", 0),
+            (7, "files_modified", "TEXT", 0, None, 0),
+            (8, "commits", "TEXT", 0, None, 0),
+            (9, "tool_counts", "TEXT", 0, None, 0),
+            (10, "aggregated_content", "TEXT", 0, None, 0),
+            (11, "context_summary", "TEXT", 0, None, 0),
+            (12, "context_summary_json", "TEXT", 0, None, 0),
+            (13, "summary_version", "INTEGER", 0, "0", 0),
+            (14, "embedding_version", "INTEGER", 0, "0", 0),
+            (15, "embedding_model", "TEXT", 0, None, 0),
+            (16, "summary_version_at_embed", "INTEGER", 0, None, 0),
         ],
         "branches_fts": [
             (0, "aggregated_content", "", 0, None, 0),

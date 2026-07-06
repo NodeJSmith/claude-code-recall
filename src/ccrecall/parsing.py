@@ -117,9 +117,6 @@ def find_all_branches(all_entries: list[dict]) -> list[dict]:
       - leaf_uuid: UUID of the last message in this branch
       - uuids: set of all UUIDs on this branch path
       - is_active: always True
-      - fork_point_uuid: always None (abandoned-fork tracking was removed —
-        session identity is now session-keyed, not leaf_uuid-keyed, so there
-        is no longer a reason to detect or persist rewound/abandoned forks)
 
     Algorithm: trace from the latest message back to the root via parentUuid.
     """
@@ -149,7 +146,6 @@ def find_all_branches(all_entries: list[dict]) -> list[dict]:
             "leaf_uuid": latest["uuid"],
             "uuids": active_uuids,
             "is_active": True,
-            "fork_point_uuid": None,
         }
     ]
 

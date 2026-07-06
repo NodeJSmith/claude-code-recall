@@ -86,12 +86,6 @@ class TestFixtureBranches:
             f"{jsonl_fixture.stem}: expected {expected['active_exchanges']} exchanges, got {exchange_count}"
         )
 
-    def test_active_branch_has_fork_point_none(self, jsonl_fixture):
-        all_entries = list(parse_all_with_uuids(jsonl_fixture))
-        branches = find_all_branches(all_entries)
-        active = [b for b in branches if b["is_active"]][0]
-        assert active["fork_point_uuid"] is None
-
 
 class TestParseJsonlFile:
     def test_filters_non_user_assistant(self, jsonl_fixture):

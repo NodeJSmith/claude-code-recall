@@ -1,7 +1,7 @@
 ---
 task_id: "T02"
 title: "Add v2 schema migration to drop fork_point_uuid and clean orphans"
-status: "planned"
+status: "done"
 depends_on: []
 implements: ["FR#4", "FR#5", "AC#4", "AC#5", "AC#6"]
 ---
