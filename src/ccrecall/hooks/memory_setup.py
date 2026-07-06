@@ -10,17 +10,16 @@ import tempfile
 import time
 from pathlib import Path
 
-from ccrecall.db import (
-    CONTENT_ERROR_VERSION,
+from ccrecall.config import (
     DEFAULT_DB_PATH,
     PID_FILE_MODE,
     SYNC_TEMP_PREFIX,
     ensure_parent_dir,
-    get_db_connection,
     load_settings,
     log_hook_exception,
     pid_file_path,
 )
+from ccrecall.db import CONTENT_ERROR_VERSION, get_db_connection
 from ccrecall.hooks import backfill_summaries, import_conversations
 from ccrecall.hooks.warm_model import PID_KEY as WARM_MODEL_PID_KEY
 from ccrecall.summarizer import SUMMARY_VERSION

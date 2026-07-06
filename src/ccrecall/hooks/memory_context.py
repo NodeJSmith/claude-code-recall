@@ -24,14 +24,14 @@ from pathlib import Path
 from pydantic import ValidationError
 from whenever import Instant
 
-from ccrecall.db import (
+from ccrecall.config import (
     CLEAR_HANDOFF_FILENAME,
     DEFAULT_SETTINGS,
-    get_db_connection,
     get_db_path,
     load_settings,
     setup_logging,
 )
+from ccrecall.db import get_db_connection
 from ccrecall.formatting import (
     format_time_full,
     get_project_key,

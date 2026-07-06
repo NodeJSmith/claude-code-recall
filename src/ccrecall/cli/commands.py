@@ -17,7 +17,8 @@ from ccrecall import search_conversations as search_mod
 from ccrecall import session_tail as session_tail_mod
 from ccrecall.cli import app, backfill_app
 from ccrecall.cli.context import DEFAULT_CLI_CONTEXT, CLIContextParam
-from ccrecall.db import DEFAULT_DB_PATH, DEFAULT_PROJECTS_DIR
+from ccrecall.config import DEFAULT_DB_PATH
+from ccrecall.db import DEFAULT_PROJECTS_DIR
 from ccrecall.embeddings import DEFAULT_EMBED_THREADS
 from ccrecall.hooks import backfill_embeddings as backfill_embeddings_mod
 from ccrecall.hooks import backfill_summaries as backfill_summaries_mod

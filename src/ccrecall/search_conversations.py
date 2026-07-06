@@ -12,9 +12,9 @@ from pathlib import Path
 
 import sqlite_vec
 
+from ccrecall.config import DEFAULT_DB_PATH
 from ccrecall.content import sanitize_fts_term
 from ccrecall.db import (
-    DEFAULT_DB_PATH,
     branch_embedding_coverage,
     chunk_vec_queryable,
     escape_like,

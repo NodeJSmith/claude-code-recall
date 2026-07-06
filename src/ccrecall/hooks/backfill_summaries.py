@@ -7,13 +7,8 @@ with summary_version = -1 to avoid infinite retry.
 
 import sqlite3
 
-from ccrecall.db import (
-    CONTENT_ERROR_VERSION,
-    get_db_connection,
-    load_settings,
-    remove_pid_file,
-    setup_logging,
-)
+from ccrecall.config import load_settings, remove_pid_file, setup_logging
+from ccrecall.db import CONTENT_ERROR_VERSION, get_db_connection
 from ccrecall.summarizer import SUMMARY_VERSION, compute_context_summary
 
 BATCH_SIZE = 50

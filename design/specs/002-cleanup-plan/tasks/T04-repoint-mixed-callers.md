@@ -1,7 +1,7 @@
 ---
 task_id: "T04"
 title: "Repoint mixed callers to config.py"
-status: "planned"
+status: "done"
 depends_on: ["T03"]
 implements: ["AC#7"]
 ---

@@ -14,16 +14,8 @@ import sqlite3
 import sys
 from pathlib import Path
 
-from ccrecall.db import (
-    DEFAULT_DB_PATH,
-    DEFAULT_PROJECTS_DIR,
-    branch_embedding_coverage,
-    get_db_connection,
-    get_db_path,
-    load_settings,
-    remove_pid_file,
-    setup_logging,
-)
+from ccrecall.config import DEFAULT_DB_PATH, get_db_path, load_settings, remove_pid_file, setup_logging
+from ccrecall.db import DEFAULT_PROJECTS_DIR, branch_embedding_coverage, get_db_connection
 from ccrecall.formatting import extract_project_name, normalize_project_key
 from ccrecall.parsing import extract_session_uuid
 from ccrecall.project_ops import upsert_project

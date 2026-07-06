@@ -17,20 +17,18 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from ccrecall.db import (
+from ccrecall.config import (
     DEFAULT_LOG_PATH,
-    DEFAULT_PROJECTS_DIR,
     LOG_BACKUP_COUNT,
     LOG_MAX_BYTES,
     PID_FILE_MODE,
-    chunk_vec_queryable,
     ensure_parent_dir,
-    get_db_connection,
     load_settings,
     pid_file_path,
     remove_pid_file,
     setup_logging,
 )
+from ccrecall.db import DEFAULT_PROJECTS_DIR, chunk_vec_queryable, get_db_connection
 from ccrecall.embeddings import is_model_cached_on_disk
 from ccrecall.formatting import extract_project_name, normalize_cwd
 from ccrecall.health import REASON_VEC_UNAVAILABLE, clear_embedding_failure, record_embedding_failure

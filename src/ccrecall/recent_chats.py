@@ -9,8 +9,8 @@ import sqlite3
 import sys
 from pathlib import Path
 
+from ccrecall.config import DEFAULT_DB_PATH
 from ccrecall.db import (
-    DEFAULT_DB_PATH,
     escape_like,
     fetch_branch_messages,
     get_db_connection,

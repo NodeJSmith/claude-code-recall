@@ -1,10 +1,8 @@
 """Database connection, vec (embedding) operations, and schema-adjacent utilities.
 
 Schema constants live in ccrecall.schema. Paths, config/settings loading, PID
-files, and logging live in ccrecall.config — imported below both for this
-module's own use (get_db_path, ensure_parent_dir, DEFAULT_DB_PATH, ...) and
-re-exported so `from ccrecall.db import ...` keeps working for callers not
-yet repointed to ccrecall.config directly.
+files, and logging live in ccrecall.config — imported below for this module's
+own use (get_db_path, ensure_parent_dir, DEFAULT_DB_PATH, ...).
 """
 
 import contextlib
@@ -13,43 +11,10 @@ from pathlib import Path
 
 import sqlite_vec
 
-from ccrecall.config import (
-    CLEAR_HANDOFF_FILENAME,
-    DEFAULT_DB_PATH,
-    DEFAULT_LOG_PATH,
-    DEFAULT_SETTINGS,
-    LOG_BACKUP_COUNT,
-    LOG_MAX_BYTES,
-    PID_FILE_MODE,
-    SYNC_TEMP_PREFIX,
-    ensure_parent_dir,
-    get_db_path,
-    load_settings,
-    log_hook_exception,
-    pid_file_path,
-    remove_pid_file,
-    setup_logging,
-)
+from ccrecall.config import DEFAULT_DB_PATH, ensure_parent_dir, get_db_path
 from ccrecall.embeddings import EMBEDDING_DIM, EMBEDDING_MODEL, EMBEDDING_VERSION
 from ccrecall.models import BUSY_TIMEOUT_MS
 from ccrecall.schema import SCHEMA_CORE, SCHEMA_FTS4, SCHEMA_FTS5, detect_fts_support
-
-# Re-exported from ccrecall.config for callers not yet repointed there directly
-# (mixed callers landing in a later task). Not used by this module's own code.
-__all__ = [
-    "CLEAR_HANDOFF_FILENAME",
-    "DEFAULT_LOG_PATH",
-    "DEFAULT_SETTINGS",
-    "LOG_BACKUP_COUNT",
-    "LOG_MAX_BYTES",
-    "PID_FILE_MODE",
-    "SYNC_TEMP_PREFIX",
-    "load_settings",
-    "log_hook_exception",
-    "pid_file_path",
-    "remove_pid_file",
-    "setup_logging",
-]
 
 # Default paths
 DEFAULT_PROJECTS_DIR = Path.home() / ".claude" / "projects"

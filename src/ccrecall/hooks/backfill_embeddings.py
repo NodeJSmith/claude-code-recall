@@ -24,15 +24,13 @@ import sqlite3
 import sys
 import time
 
+from ccrecall.config import load_settings, remove_pid_file, setup_logging
 from ccrecall.db import (
     CHUNK_EMBEDDABLE_BRANCH_FILTER,
     CONTENT_ERROR_VERSION,
     chunk_vec_queryable,
     fetch_branch_messages,
     get_db_connection,
-    load_settings,
-    remove_pid_file,
-    setup_logging,
 )
 from ccrecall.embeddings import (
     DEFAULT_EMBED_THREADS,
