@@ -219,17 +219,24 @@ class TestTranscriptDir:
 
 
 class TestResolveTarget:
-    def _write(self, path, stem):
+    def _write(self, path, stem, timestamp=None):
         f = path / f"{stem}.jsonl"
-        f.write_text(json.dumps({"type": "user", "uuid": "u", "message": {}}) + "\n")
+        entry = {"type": "user", "uuid": "u", "message": {}}
+        if timestamp:
+            entry["timestamp"] = timestamp
+        f.write_text(json.dumps(entry) + "\n")
         return f
 
     def test_picks_second_newest(self, tmp_path):
-        older = self._write(tmp_path, "older")
-        newer = self._write(tmp_path, "newer")  # current/live session
-        os.utime(older, (1000, 1000))
-        os.utime(newer, (2000, 2000))
-        assert resolve_target(tmp_path, None) == older
+        # mtimes are set OPPOSITE to the JSONL timestamps — proves ordering
+        # follows the timestamp field, not the filesystem mtime (issue #45).
+        a = self._write(tmp_path, "a", timestamp="2024-01-01T00:00:00Z")  # earlier event, newer mtime
+        b = self._write(tmp_path, "b", timestamp="2024-06-01T00:00:00Z")  # later event, older mtime
+        os.utime(a, (2000, 2000))
+        os.utime(b, (1000, 1000))
+        # b has the latest timestamp, so it's treated as the current/live
+        # session; a (earlier timestamp) is the prior session returned.
+        assert resolve_target(tmp_path, None) == a
 
     def test_selector_substring(self, tmp_path):
         self._write(tmp_path, "aaaa-1111")

@@ -1,7 +1,7 @@
 ---
 task_id: "T01"
 title: "Fix tail mtime bug and relocate sanitize_fts_term"
-status: "planned"
+status: "done"
 depends_on: []
 implements: ["FR#6", "FR#7", "AC#7", "AC#8"]
 ---

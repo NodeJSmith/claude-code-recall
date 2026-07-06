@@ -8,30 +8,6 @@ import re
 MAX_COMMIT_MESSAGE_LEN = 100
 
 
-def sanitize_fts_term(term: str) -> str:
-    """Remove FTS special characters from search term.
-
-    Strips characters that are FTS operators or special syntax:
-    quotes, parentheses, asterisks, and FTS keywords.
-    Hyphens are replaced with spaces so hyphenated identifiers
-    (e.g. 'pytest-mock') match their FTS tokens correctly — the
-    unicode61 tokenizer splits on hyphens, so 'pytest-mock' indexes
-    as two tokens ('pytest', 'mock'). Stripping hyphens entirely
-    would produce 'pytestmock', which matches nothing.
-    Leading hyphens (FTS NOT shorthand) become harmless whitespace.
-    """
-    # Replace hyphens with spaces (handles both identifier separators
-    # and leading NOT-operator hyphens)
-    sanitized = term.replace("-", " ")
-    # Remove remaining FTS operators: quotes, parens, asterisk, caret
-    sanitized = re.sub(r'["\(\)*^]', "", sanitized)
-    # Remove FTS keywords: NEAR, AND, OR, NOT (case-insensitive)
-    sanitized = re.sub(r"\b(NEAR|AND|OR|NOT)\b", "", sanitized, flags=re.IGNORECASE)
-    # Collapse whitespace and strip
-    sanitized = re.sub(r"\s+", " ", sanitized).strip()
-    return sanitized
-
-
 def extract_text_content(content) -> tuple[str, bool, bool, str | None]:
     """
     Extract text from message content.
