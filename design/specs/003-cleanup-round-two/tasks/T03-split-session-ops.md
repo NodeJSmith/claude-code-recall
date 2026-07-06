@@ -16,8 +16,8 @@ Decompose the 744-line `session_ops.py` into five focused modules along natural 
 - create: `src/ccrecall/embed_ops.py`
 - modify: `src/ccrecall/session_ops.py`
 - modify: `src/ccrecall/hooks/backfill_embeddings.py`
-- modify: `src/ccrecall/hooks/sync_current.py`
-- modify: `src/ccrecall/hooks/import_conversations.py`
+- read: `src/ccrecall/hooks/sync_current.py` (imports `sync_session` which stays in session_ops — no edit needed)
+- read: `src/ccrecall/hooks/import_conversations.py` (same — no edit needed)
 - modify: `tests/test_session_ops.py`
 - modify: `tests/test_backfill_embeddings.py`
 - read: `src/ccrecall/db.py` (for import references)
@@ -45,7 +45,7 @@ Read `src/ccrecall/session_ops.py` fully. Extract functions into new modules per
 - `upsert_branch` (lines 241-297)
 - `diff_branch_messages` (lines 300-333)
 - `sync_branch` (lines 573-623)
-- `sync_branch` calls functions in `embed_ops` and `message_ops` — import from those modules
+- `sync_branch` calls `upsert_branch` and `diff_branch_messages` (both in `branch_ops`), plus `write_branch_summary` and `embed_branch_chunks` (both in `embed_ops`), plus `build_aggregated_content` from `parsing.py` and `fetch_branch_messages` from `db.py` — import from `embed_ops` for the summary/embedding calls
 
 **`src/ccrecall/embed_ops.py`** (~240 lines):
 - `write_branch_summary` (lines 335-366)
@@ -82,8 +82,8 @@ In `tests/test_backfill_embeddings.py`:
 Pass plain Python types between the extracted modules — no new dataclasses or custom types crossing boundaries. Functions receive and return the same types they do today.
 
 ## Focus
-- `sync_branch` in `branch_ops.py` will import from both `embed_ops` and `message_ops` — verify no circular imports
-- `embed_branch_chunks` imports `compute_context_summary` from `summarizer.py` and `embed_text` from `embeddings.py` — these stay as-is
+- `sync_branch` in `branch_ops.py` will import from `embed_ops` (for `write_branch_summary` and `embed_branch_chunks`) — verify no circular imports. It does NOT call anything from `message_ops`
+- `write_branch_summary` imports `compute_context_summary` from `summarizer.py`; `embed_branch_chunks` imports `embed_text` from `embeddings.py` and `build_exchange_pairs` from `summarizer.py` — these cross-module imports stay as-is in `embed_ops.py`
 - The `write_branch_summary` function catches `(ValueError, TypeError, KeyError)` for content errors and `sqlite3.Error` for infra errors — preserve this exactly in `embed_ops.py`
 - `sync_session` in the slimmed `session_ops.py` calls functions from all four new modules — trace the call graph to ensure all needed imports are present
 - After this task, no single source file should exceed 400 lines (AC#1)
@@ -91,6 +91,6 @@ Pass plain Python types between the extracted modules — no new dataclasses or 
 
 ## Verify
 - [ ] FR#1: `session_ops.py` is decomposed into 5 focused modules (import_log_ops, message_ops, branch_ops, embed_ops, slimmed session_ops)
-- [ ] AC#1: No created or modified source file exceeds 400 lines
+- [ ] AC#1: No source file created by this task exceeds 400 lines (the 4 new modules + slimmed session_ops.py; `backfill_embeddings.py` remains >400 until T05)
 - [ ] AC#2: `uv run pytest` passes with zero failures
 - [ ] AC#3: `uvx prek run --all-files` passes

@@ -65,7 +65,7 @@ In `tests/test_backfill_embeddings.py`:
 - `cli/commands.py` uses the `backfill_embeddings_mod` alias pattern (imports the module, accesses attributes on it) — need to restructure to either import the new modules or import specific symbols
 - `count_status` calls `build_selection` — this becomes a cross-module call (`backfill_status` → `backfill_query`), which is fine
 - `run_status` calls `count_status` — both are in `backfill_status`, no cross-module call needed
-- `run()` calls `build_selection`, `cleanup_pid`, and references all the constants — these become imports from `backfill_query`
+- `run()` calls `build_selection` and references `BATCH_SIZE`, `BACKFILL_BATCH_DELAY_SECONDS`, `DEFAULT_PROGRESS_EVERY`, `BACKFILL_NICE_LEVEL`, `EXIT_OK`, `EXIT_ABORT`, `PID_KEY` — these become imports from `backfill_query`. Note: `cleanup_pid` is called only from `cli/commands.py`, not from `run()`
 
 ## Verify
 - [ ] FR#3: `backfill_embeddings.py` is decomposed into 3 focused modules (backfill_query, backfill_status, slimmed backfill_embeddings)

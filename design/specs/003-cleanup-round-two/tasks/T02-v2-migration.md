@@ -28,7 +28,7 @@ In `src/ccrecall/db.py`:
 
    a. **Delete orphan messages**: `DELETE FROM messages WHERE id NOT IN (SELECT DISTINCT message_id FROM branch_messages)`. These are messages linked only to inactive branches that v1 already deleted.
 
-   b. **Rebuild branches table** without `fork_point_uuid`: Use an explicit column list (not `SELECT *`). Create `branches_new` with every column from the current schema EXCEPT `fork_point_uuid`. Copy data with a matching explicit SELECT column list. Drop old `branches`. Rename `branches_new` to `branches`. The column list must match what `_migrate_to_v1` produces (18 columns including `fork_point_uuid`) minus `fork_point_uuid` (17 columns). Reference the v1 rebuild at `db.py:283-315` for the exact column order.
+   b. **Rebuild branches table** without `fork_point_uuid`: Use an explicit column list (not `SELECT *`). Create `branches_new` with every column from the current schema EXCEPT `fork_point_uuid`, and preserve the `UNIQUE(session_id)` constraint (a load-bearing invariant from v1 — CLAUDE.md invariant #4 depends on it). Copy data with a matching explicit SELECT column list. Drop old `branches`. Rename `branches_new` to `branches`. The column list must match what `_migrate_to_v1` produces (18 columns including `fork_point_uuid`) minus `fork_point_uuid` (17 columns). Reference the v1 rebuild at `db.py:283-315` for the exact column order and the `UNIQUE(session_id)` placement.
 
    c. **Re-create indexes and FTS triggers** on the rebuilt table — same 4 indexes and FTS sync triggers as v1 (the DROP TABLE auto-drops them). Copy these from v1's existing recreation code.
 
@@ -62,7 +62,7 @@ In `tests/test_parsing.py`:
 - `_apply_migrations` at `db.py:341-404` shows the migration dispatch pattern: `BEGIN IMMEDIATE`, re-read version under lock, run migrations sequentially, set `PRAGMA user_version`, commit
 - The branches table after v1 has columns (from `db.py:279-299`): id, session_id, leaf_uuid, fork_point_uuid, is_active, started_at, ended_at, exchange_count, files_modified, commits, tool_counts, aggregated_content, context_summary, context_summary_json, summary_version, embedding_version, embedding_model, summary_version_at_embed — use explicit column list excluding fork_point_uuid for the v2 rebuild (17 columns remain)
 - `_apply_migrations` sets `PRAGMA foreign_keys = OFF` before migrations and restores in `finally` — v2 inherits this, no additional FK handling needed
-- The existing test `test_fresh_db_user_version_matches_schema_version` in test_db.py (line 647) will need its expected version updated from 1 to 2
+- The existing test `test_fresh_db_user_version_matches_schema_version` in test_db.py (line 647) compares against `db_module.SCHEMA_VERSION` dynamically — no code change needed there since bumping `SCHEMA_VERSION` to 2 automatically updates the test's expectation
 
 ## Verify
 - [ ] FR#4: `PRAGMA table_info(branches)` has no `fork_point_uuid` column after v2 migration

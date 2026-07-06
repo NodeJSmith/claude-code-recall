@@ -38,16 +38,17 @@ In `tests/test_session_tail.py`, update `TestResolveTarget.test_picks_second_new
 
 ### sanitize_fts_term relocation (FR#7)
 
-Move the `sanitize_fts_term` function definition from `src/ccrecall/content.py` (lines 11-32) to `src/ccrecall/search_query.py`. Add the necessary imports (`re` is already imported in search_query.py). Remove the function and its imports from `content.py`. The `content.py` module retains `extract_text_content`, `parse_origin`, `extract_plain_text`, and other helpers — verify it does not become empty.
+Move the `sanitize_fts_term` function definition from `src/ccrecall/content.py` (lines 11-32) to `src/ccrecall/search_query.py`. Add `import re` to `search_query.py` — it is not currently imported there but `sanitize_fts_term` calls `re.sub` three times. Remove the function and its imports from `content.py`. The `content.py` module retains `extract_text_content`, `parse_origin`, `extract_plain_text`, and other helpers — verify it does not become empty.
 
 Update `tests/test_security.py` line 3: change `from ccrecall.content import sanitize_fts_term` to `from ccrecall.search_query import sanitize_fts_term`.
 
 ## Focus
 - `deque` is already imported in `session_tail.py` (line 23) — no new import needed for the tail window
 - `json` is NOT currently imported in `session_tail.py` — add `import json` at the top
+- `whenever` / `Instant` is NOT currently imported in `session_tail.py` — add `from whenever import Instant` for the mtime fallback
 - The project uses `whenever` instead of stdlib `datetime` for the mtime fallback — use `Instant.from_timestamp()` not `datetime.fromtimestamp()`
-- `search_query.py` already imports `re` (line 1) which `sanitize_fts_term` needs
-- `content.py` currently has `import re` only for `sanitize_fts_term` — check if any remaining functions use `re` before removing the import
+- `search_query.py` does NOT currently import `re` — add `import re` at the top when moving `sanitize_fts_term` (it calls `re.sub` three times)
+- `content.py`'s `import re` must NOT be removed — `extract_text_content` (5 `re.sub` calls) and `extract_commits` (1 `re.search` call) depend on it. Only remove the `sanitize_fts_term` function definition and any imports used exclusively by it (none — `re` is shared)
 - The `test_picks_second_newest` test currently creates temporary files and sets mtimes with `os.utime()` — the new test should write actual JSONL content with `{"timestamp": "..."}` entries
 
 ## Verify
