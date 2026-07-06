@@ -115,6 +115,7 @@ def search_sessions(
                 ordered_ids,
                 branch_scores={bid: branch_rrf_scores[bid] for bid in ordered_ids},
             )
+            _logger.info("Session search for %r returned %d result(s) (vector search on)", query, len(cards))
             return cards, True
         except sqlite3.Error:
             # DB-level failure in the fusion path: degrade to keyword search
@@ -133,6 +134,7 @@ def search_sessions(
     deduped_ids = dedup_by_session(cursor, [bid for bid, _score in fts_rows])
     ordered_ids = deduped_ids[:max_results]
     cards = hydrate_cards(cursor, ordered_ids, branch_scores=branch_scores)
+    _logger.info("Session search for %r returned %d result(s) (vector search off)", query, len(cards))
     return cards, ranked
 
 
@@ -179,6 +181,7 @@ def search_messages(
 
     ordered = raw[:max_results]
     snippets = hydrate_snippets(cursor, ordered)
+    _logger.info("Message search for %r returned %d snippet(s)", query, len(snippets))
     return snippets, True
 
 

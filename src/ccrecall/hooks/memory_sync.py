@@ -48,7 +48,7 @@ def main():
     except Exception:
         # Top-level hook guard: must never crash the session stop. Log
         # best-effort (no-op unless logging_enabled) so the failure isn't silent.
-        log_hook_exception("memory-sync")
+        log_hook_exception("sync")
 
     print(json.dumps({"continue": True}))
 

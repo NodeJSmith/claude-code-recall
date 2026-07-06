@@ -157,7 +157,7 @@ def main():
     except Exception:
         # Top-level hook guard: must never crash the session start. Log
         # best-effort (no-op unless logging_enabled) so the failure isn't silent.
-        log_hook_exception("memory-setup")
+        log_hook_exception("setup")
 
     output: dict = {"continue": True}
     if additional_context is not None:

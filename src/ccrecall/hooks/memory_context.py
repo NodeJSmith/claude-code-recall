@@ -29,6 +29,7 @@ from ccrecall.config import (
     DEFAULT_SETTINGS,
     get_db_path,
     load_settings,
+    log_hook_exception,
     setup_logging,
 )
 from ccrecall.db import get_connection
@@ -66,6 +67,10 @@ HANDOFF_STALE_SECONDS = 30
 TOPIC_PREVIEW_MAX_CHARS = 120
 # Most recent prior branches scanned when picking sessions to inject.
 _CANDIDATE_LIMIT = 20
+
+# Rough chars-per-token ratio for the injected-context size estimate logged
+# below. Not model-exact — just enough signal to spot an outsized injection.
+_CHARS_PER_TOKEN_ESTIMATE = 4
 
 
 def _emit_empty() -> None:
@@ -549,7 +554,7 @@ def build_context(sessions: list[dict]) -> str:
 
 def main():
     settings = load_settings()
-    logger = setup_logging(settings)
+    logger = setup_logging(settings, process_name="context")
 
     raw = sys.stdin.read()
     try:
@@ -669,6 +674,12 @@ def main():
             else:
                 full_context = f"{directive}\n\n{origin}\n\n{pending}{context}"
 
+            logger.info(
+                "Injected context: ~%d tokens (%d chars)",
+                len(full_context) // _CHARS_PER_TOKEN_ESTIMATE,
+                len(full_context),
+            )
+
             output = {
                 "hookSpecificOutput": {
                     "hookEventName": "SessionStart",
@@ -677,8 +688,8 @@ def main():
             }
             print(json.dumps(output))
 
-        except Exception as e:
-            logger.error("Context injection error: %s", e)
+        except Exception:
+            log_hook_exception("context")
             # Don't block session start on errors; proactive alert (if any) still surfaces.
             _emit_with_proactive(proactive_block)
             sys.exit(0)

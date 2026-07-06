@@ -275,7 +275,7 @@ def run(
         raise ValueError("limit must be >= 1")
 
     settings = load_settings()
-    logger = setup_logging(settings)
+    logger = setup_logging(settings, process_name="backfill-embed")
 
     if status:
         return run_status(days=days, json_mode=json_mode, settings=settings, logger=logger)

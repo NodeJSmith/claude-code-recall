@@ -167,7 +167,7 @@ def run(input_file: Path | None = None) -> None:
 
     try:
         settings = load_settings()
-        logger = setup_logging(settings)
+        logger = setup_logging(settings, process_name="sync")
 
         # Read hook input from file or stdin
         if input_file:

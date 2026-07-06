@@ -223,7 +223,7 @@ def _run(
     project: str | None,
 ) -> None:
     settings = load_settings()
-    logger = setup_logging(settings)
+    logger = setup_logging(settings, process_name="import")
 
     if db != DEFAULT_DB_PATH:
         settings["db_path"] = str(db)

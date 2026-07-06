@@ -33,7 +33,7 @@ def run():
 
 def _main():
     settings = load_settings()
-    logger = setup_logging(settings)
+    logger = setup_logging(settings, process_name="backfill-summary")
 
     total_updated = 0
 

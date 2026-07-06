@@ -120,16 +120,24 @@ def get_db_path(settings: dict | None = None) -> Path:
     return DEFAULT_DB_PATH
 
 
-def setup_logging(settings: dict | None = None) -> logging.Logger:
-    """Set up logging with rotation. Returns a null logger if logging is disabled."""
+def setup_logging(settings: dict | None = None, process_name: str = "ccrecall") -> logging.Logger:
+    """Set up logging with rotation. Returns a null logger if logging is disabled.
+
+    Each process type gets its own rotating log file
+    (``RUNTIME_DIR/ccrecall-<process_name>.log``) so concurrent processes never
+    race on the same file's rotation. ``process_name`` defaults to the bare
+    ``"ccrecall"`` process name for callers that don't identify themselves.
+    """
     logger = logging.getLogger(LOGGER_NAME)
+    for h in logger.handlers:
+        h.close()
     logger.handlers.clear()
 
     if not settings or not settings.get("logging_enabled", True):
         logger.addHandler(logging.NullHandler())
         return logger
 
-    log_path = DEFAULT_LOG_PATH
+    log_path = RUNTIME_DIR / f"ccrecall-{process_name}.log"
     ensure_parent_dir(log_path)
 
     handler = RotatingFileHandler(
@@ -155,4 +163,4 @@ def log_hook_exception(context: str) -> None:
     stays crash-proof and failures become observable when logging is turned on.
     """
     with contextlib.suppress(Exception):
-        setup_logging(load_settings()).exception("%s hook failed", context)
+        setup_logging(load_settings(), process_name=context).exception("%s hook failed", context)

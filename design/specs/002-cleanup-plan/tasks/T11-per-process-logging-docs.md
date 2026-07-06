@@ -1,7 +1,7 @@
 ---
 task_id: "T11"
 title: "Add per-process logging and update documentation"
-status: "planned"
+status: "done"
 depends_on: ["T09", "T10"]
 implements: ["FR#12", "FR#13", "AC#1", "AC#2", "AC#9"]
 ---
