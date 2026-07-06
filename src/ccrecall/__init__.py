@@ -2,7 +2,8 @@
 ccrecall — conversation memory package for Claude Code.
 
 Submodules:
-  db                — Database connection, config/settings, vec operations, logging
+  db                — Database connection, vec operations
+  config            — Paths, config/settings loading, PID files, and logging
   schema            — Conversation DB schema constants (SCHEMA_*) and FTS detection
   content           — Message content extraction and tool detection
   parsing           — JSONL parsing, branch detection, metadata extraction

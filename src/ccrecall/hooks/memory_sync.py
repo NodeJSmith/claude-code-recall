@@ -9,7 +9,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from ccrecall.db import SYNC_TEMP_PREFIX, log_hook_exception
+from ccrecall.config import SYNC_TEMP_PREFIX, log_hook_exception
 
 
 def main():

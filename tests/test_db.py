@@ -2,6 +2,8 @@
 
 import json
 import sqlite3
+import subprocess
+import sys
 from typing import ClassVar
 from unittest.mock import patch
 
@@ -9,15 +11,18 @@ import pytest
 import sqlite_vec
 from conftest import make_vec_conn
 
+import ccrecall.config as config_module
 import ccrecall.db as db_module
-from ccrecall.db import (
+from ccrecall.config import (
     DEFAULT_SETTINGS,
     atomic_write_json,
-    fetch_branch_messages,
-    get_db_connection,
     load_config,
     load_settings,
     log_hook_exception,
+)
+from ccrecall.db import (
+    fetch_branch_messages,
+    get_db_connection,
     vec_available,
 )
 from ccrecall.embeddings import EMBEDDING_DIM, EMBEDDING_MODEL, EMBEDDING_VERSION
@@ -70,7 +75,7 @@ class TestSchemaCreation:
 class TestLoadSettings:
     def test_always_returns_defaults(self, tmp_path, monkeypatch):
         """load_settings returns hardcoded defaults when no config file exists."""
-        monkeypatch.setattr(db_module, "CONFIG_PATH", tmp_path / "no_config.json")
+        monkeypatch.setattr(config_module, "CONFIG_PATH", tmp_path / "no_config.json")
         settings = load_settings()
         assert settings == DEFAULT_SETTINGS
 
@@ -97,7 +102,7 @@ class TestLoadConfig:
         """A well-formed JSON object is returned as-is."""
         cfg = tmp_path / "config.json"
         cfg.write_text(json.dumps({"auto_inject_context": False, "onboarding_completed": True}))
-        monkeypatch.setattr("ccrecall.db.CONFIG_PATH", cfg)
+        monkeypatch.setattr("ccrecall.config.CONFIG_PATH", cfg)
 
         result = load_config()
         assert result == {"auto_inject_context": False, "onboarding_completed": True}
@@ -106,7 +111,7 @@ class TestLoadConfig:
         """A JSON array (not a dict) must return {} — prevents callers from crashing on .get()."""
         cfg = tmp_path / "config.json"
         cfg.write_text(json.dumps([1, 2, 3]))
-        monkeypatch.setattr("ccrecall.db.CONFIG_PATH", cfg)
+        monkeypatch.setattr("ccrecall.config.CONFIG_PATH", cfg)
 
         assert load_config() == {}
 
@@ -114,7 +119,7 @@ class TestLoadConfig:
         """A JSON string must return {} — not a dict, should not propagate."""
         cfg = tmp_path / "config.json"
         cfg.write_text(json.dumps("hello"))
-        monkeypatch.setattr("ccrecall.db.CONFIG_PATH", cfg)
+        monkeypatch.setattr("ccrecall.config.CONFIG_PATH", cfg)
 
         assert load_config() == {}
 
@@ -122,13 +127,13 @@ class TestLoadConfig:
         """JSON null must return {} — null is not a valid settings container."""
         cfg = tmp_path / "config.json"
         cfg.write_text("null")
-        monkeypatch.setattr("ccrecall.db.CONFIG_PATH", cfg)
+        monkeypatch.setattr("ccrecall.config.CONFIG_PATH", cfg)
 
         assert load_config() == {}
 
     def test_returns_empty_dict_for_missing_file(self, tmp_path, monkeypatch):
         """Missing config file returns {} without raising."""
-        monkeypatch.setattr("ccrecall.db.CONFIG_PATH", tmp_path / "nonexistent.json")
+        monkeypatch.setattr("ccrecall.config.CONFIG_PATH", tmp_path / "nonexistent.json")
 
         assert load_config() == {}
 
@@ -136,7 +141,7 @@ class TestLoadConfig:
         """Corrupt JSON returns {} without raising."""
         cfg = tmp_path / "config.json"
         cfg.write_text("{bad json}")
-        monkeypatch.setattr("ccrecall.db.CONFIG_PATH", cfg)
+        monkeypatch.setattr("ccrecall.config.CONFIG_PATH", cfg)
 
         assert load_config() == {}
 
@@ -144,9 +149,9 @@ class TestLoadConfig:
         """A non-OSError/ValueError (a real bug) must surface, not be masked as {} (issue #10)."""
         cfg = tmp_path / "config.json"
         cfg.write_text("{}")
-        monkeypatch.setattr("ccrecall.db.CONFIG_PATH", cfg)
+        monkeypatch.setattr("ccrecall.config.CONFIG_PATH", cfg)
 
-        with patch("ccrecall.db.json.loads", side_effect=TypeError("boom")), pytest.raises(TypeError):
+        with patch("ccrecall.config.json.loads", side_effect=TypeError("boom")), pytest.raises(TypeError):
             load_config()
 
 
@@ -162,7 +167,7 @@ class TestLogHookException:
 
     def test_does_not_raise_when_logging_setup_fails(self):
         """Even if logging setup itself raises, the helper suppresses it and returns."""
-        with patch("ccrecall.db.setup_logging", side_effect=RuntimeError("broke")):
+        with patch("ccrecall.config.setup_logging", side_effect=RuntimeError("broke")):
             try:
                 raise ValueError("boom")
             except ValueError:
@@ -200,7 +205,7 @@ class TestLoadSettingsWithConfig:
         """load_settings() returns DEFAULT_SETTINGS when config.json is a JSON array."""
         cfg = tmp_path / "config.json"
         cfg.write_text(json.dumps([]))
-        monkeypatch.setattr("ccrecall.db.CONFIG_PATH", cfg)
+        monkeypatch.setattr("ccrecall.config.CONFIG_PATH", cfg)
 
         result = load_settings()
         assert result == DEFAULT_SETTINGS
@@ -209,7 +214,7 @@ class TestLoadSettingsWithConfig:
         """Valid config keys are merged into defaults."""
         cfg = tmp_path / "config.json"
         cfg.write_text(json.dumps({"auto_inject_context": False, "max_context_sessions": 5}))
-        monkeypatch.setattr("ccrecall.db.CONFIG_PATH", cfg)
+        monkeypatch.setattr("ccrecall.config.CONFIG_PATH", cfg)
 
         result = load_settings()
         assert result["auto_inject_context"] is False
@@ -220,7 +225,7 @@ class TestLoadSettingsWithConfig:
         """The snooze window changes when alert_snooze_hours is set in config;
         the 24h default applies when the key is absent."""
         cfg = tmp_path / "config.json"
-        monkeypatch.setattr("ccrecall.db.CONFIG_PATH", cfg)
+        monkeypatch.setattr("ccrecall.config.CONFIG_PATH", cfg)
 
         # Absent → default of 24 applies.
         cfg.write_text(json.dumps({"auto_inject_context": True}))
@@ -234,7 +239,7 @@ class TestLoadSettingsWithConfig:
         """logging_enabled and exclude_projects are user-overridable from config.json."""
         cfg = tmp_path / "config.json"
         cfg.write_text(json.dumps({"logging_enabled": False, "exclude_projects": ["work-secret"]}))
-        monkeypatch.setattr("ccrecall.db.CONFIG_PATH", cfg)
+        monkeypatch.setattr("ccrecall.config.CONFIG_PATH", cfg)
 
         result = load_settings()
         assert result["logging_enabled"] is False
@@ -242,7 +247,7 @@ class TestLoadSettingsWithConfig:
 
     def test_missing_config_returns_defaults(self, tmp_path, monkeypatch):
         """load_settings() returns DEFAULT_SETTINGS when config.json does not exist."""
-        monkeypatch.setattr("ccrecall.db.CONFIG_PATH", tmp_path / "nonexistent.json")
+        monkeypatch.setattr("ccrecall.config.CONFIG_PATH", tmp_path / "nonexistent.json")
 
         result = load_settings()
         assert result == DEFAULT_SETTINGS
@@ -446,7 +451,7 @@ class TestLoadVecParameter:
     def test_default_connection_initializes_cleanly(self, tmp_path, monkeypatch):
         """get_db_connection() with default load_vec=False returns a working connection."""
         db_file = tmp_path / "conversations.db"
-        monkeypatch.setattr(db_module, "DEFAULT_DB_PATH", db_file)
+        monkeypatch.setattr(config_module, "DEFAULT_DB_PATH", db_file)
 
         conn = get_db_connection()
         # Core tables must exist
@@ -465,7 +470,7 @@ class TestLoadVecParameter:
     def test_load_vec_true_allows_chunk_vec_query(self, tmp_path, monkeypatch):
         """get_db_connection(load_vec=True) returns a connection that can query chunk_vec."""
         db_file = tmp_path / "conversations.db"
-        monkeypatch.setattr(db_module, "DEFAULT_DB_PATH", db_file)
+        monkeypatch.setattr(config_module, "DEFAULT_DB_PATH", db_file)
 
         conn = get_db_connection(load_vec=True)
         # chunk_vec must be queryable (extension loaded, branch_vec absent by teardown)
@@ -482,7 +487,7 @@ class TestLoadVecParameter:
         touch branch_vec in a way that would require the extension.
         """
         db_file = tmp_path / "conversations.db"
-        monkeypatch.setattr(db_module, "DEFAULT_DB_PATH", db_file)
+        monkeypatch.setattr(config_module, "DEFAULT_DB_PATH", db_file)
 
         conn = get_db_connection()
         # Must be able to read branches without touching branch_vec
@@ -1006,3 +1011,46 @@ class TestFetchBranchMessagesUuid:
         assert len(messages) == 1
         assert "uuid" in messages[0], "fetch_branch_messages must include 'uuid' key in each message dict"
         assert messages[0]["uuid"] == "msg-uuid-test"
+
+
+class TestTransitiveImportIsolation:
+    """config.py, health.py, and hooks/memory_sync.py must stay free of the heavy
+    fastembed/onnxruntime/sqlite_vec stack.
+
+    Each module is imported in a fresh subprocess (not the test process, which
+    has already loaded sqlite_vec via ccrecall.db) so sys.modules reflects only
+    what that one import pulled in.
+    """
+
+    HEAVY_MODULES: ClassVar[str] = "{'fastembed', 'onnxruntime', 'sqlite_vec'}"
+
+    def _assert_no_heavy_imports(self, module_name: str) -> None:
+        code = (
+            f"import {module_name}\n"
+            "import sys\n"
+            f"heavy = {self.HEAVY_MODULES}\n"
+            "found = heavy & set(sys.modules)\n"
+            "assert not found, f'Heavy modules loaded: {found}'\n"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert result.returncode == 0, result.stderr
+
+    def test_config_does_not_import_heavy_deps(self):
+        self._assert_no_heavy_imports("ccrecall.config")
+
+    def test_health_does_not_import_heavy_deps(self):
+        """health.py imports only from config.py, not db.py."""
+        self._assert_no_heavy_imports("ccrecall.health")
+
+    def test_memory_sync_does_not_import_heavy_deps(self):
+        """memory_sync.py imports only from config.py."""
+        self._assert_no_heavy_imports("ccrecall.hooks.memory_sync")
+
+    def test_clear_handoff_does_not_import_heavy_deps(self):
+        """clear_handoff.py imports only from config.py."""
+        self._assert_no_heavy_imports("ccrecall.hooks.clear_handoff")

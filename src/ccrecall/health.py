@@ -20,7 +20,7 @@ from pathlib import Path
 
 from whenever import Instant
 
-from ccrecall.db import PID_FILE_MODE, RUNTIME_DIR, atomic_write_json
+from ccrecall.config import PID_FILE_MODE, RUNTIME_DIR, atomic_write_json
 from ccrecall.models import LOGGER_NAME
 
 # ── Sidecar paths ──────────────────────────────────────────────────────────────
@@ -172,7 +172,7 @@ def _read_snooze_ledger(path: Path) -> dict:
 def _write_snooze_ledger(path: Path, ledger: dict) -> None:
     """Write the snooze ledger atomically.
 
-    Delegates to db.atomic_write_json (tempfile + replace + cleanup + ensure_parent_dir).
+    Delegates to config.atomic_write_json (tempfile + replace + cleanup + ensure_parent_dir).
     Raises on failure — callers that need the degrade-to-re-fire behavior catch externally.
     """
     atomic_write_json(path, ledger)

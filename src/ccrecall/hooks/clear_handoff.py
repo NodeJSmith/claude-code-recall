@@ -6,7 +6,7 @@ import sys
 from pydantic import ValidationError
 from whenever import Instant
 
-from ccrecall.db import CLEAR_HANDOFF_FILENAME, get_db_path, load_settings, log_hook_exception
+from ccrecall.config import CLEAR_HANDOFF_FILENAME, get_db_path, load_settings, log_hook_exception
 from ccrecall.models import HookInput
 
 

@@ -1,7 +1,7 @@
 ---
 task_id: "T03"
 title: "Create config.py and repoint config-only callers"
-status: "planned"
+status: "done"
 depends_on: ["T01", "T02"]
 implements: ["FR#8", "FR#9", "FR#10", "AC#3", "AC#4"]
 ---
