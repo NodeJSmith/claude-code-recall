@@ -1,13 +1,12 @@
 """
 Conversation-DB schema constants (SCHEMA_CORE/FTS5/FTS4) and FTS capability
-detection. For the token-analytics schema, see ccrecall.token_schema.
+detection.
 
 This module has no ccrecall dependencies — only the stdlib sqlite3 module.
 """
 
 import sqlite3
 
-# Database schema — v3: messages stored once, branches as separate index
 # Split into core (tables/indexes) and FTS variants for compatibility
 SCHEMA_CORE = """
 -- Projects table (derived from directory structure)
@@ -122,24 +121,6 @@ CREATE INDEX IF NOT EXISTS idx_chunks_version ON chunks(embedding_version);
 
 # FTS5 schema (best: porter stemming + unicode61, BM25 ranking)
 SCHEMA_FTS5 = """
-CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
-  content,
-  content=messages,
-  content_rowid=id,
-  tokenize='porter unicode61'
-);
-
-CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
-  INSERT INTO messages_fts(rowid, content) VALUES (new.id, new.content);
-END;
-CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
-  INSERT INTO messages_fts(messages_fts, rowid, content) VALUES('delete', old.id, old.content);
-END;
-CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
-  INSERT INTO messages_fts(messages_fts, rowid, content) VALUES('delete', old.id, old.content);
-  INSERT INTO messages_fts(rowid, content) VALUES (new.id, new.content);
-END;
-
 CREATE VIRTUAL TABLE IF NOT EXISTS branches_fts USING fts5(
   aggregated_content,
   content=branches,
@@ -161,23 +142,6 @@ END;
 
 # FTS4 schema (fallback: porter stemming, no BM25 but supports MATCH + snippet)
 SCHEMA_FTS4 = """
-CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts4(
-  content,
-  content=messages,
-  tokenize=porter
-);
-
-CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
-  INSERT INTO messages_fts(rowid, content) VALUES (new.id, new.content);
-END;
-CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
-  INSERT INTO messages_fts(messages_fts, rowid, content) VALUES('delete', old.id, old.content);
-END;
-CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
-  INSERT INTO messages_fts(messages_fts, rowid, content) VALUES('delete', old.id, old.content);
-  INSERT INTO messages_fts(rowid, content) VALUES (new.id, new.content);
-END;
-
 CREATE VIRTUAL TABLE IF NOT EXISTS branches_fts USING fts4(
   aggregated_content,
   content=branches,

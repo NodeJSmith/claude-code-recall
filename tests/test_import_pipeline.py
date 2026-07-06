@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from ccrecall.db import get_db_connection
+from ccrecall.db import get_connection
 from ccrecall.embeddings import EMBEDDING_MODEL, EMBEDDING_VERSION
 from ccrecall.hooks.import_conversations import import_project, import_session, print_stats
 
@@ -63,17 +63,21 @@ class TestImportSessionBasic:
 
 
 class TestImportSessionWithBranches:
-    """Test import with conversation branches (from rewinds)."""
+    """Test import of a session with a rewind recorded in the JSONL.
+
+    Session-keyed branch identity means find_all_branches returns only the
+    active branch, so a rewind in the fixture no longer produces multiple
+    branch rows — it produces exactly one, active, row.
+    """
 
     def test_import_session_with_branches(self, memory_db, project_id):
-        """Import single_rewind.jsonl and verify 3 branches are detected."""
+        """Import single_rewind.jsonl and verify exactly one branch is detected."""
         fixture_file = FIXTURE_DIR / "single_rewind.jsonl"
         assert fixture_file.exists(), f"Fixture {fixture_file} not found"
 
         branches_imported, total_messages = import_session(memory_db, fixture_file, project_id)
 
-        # single_rewind has 3 branches
-        assert branches_imported == 3, f"Expected 3 branches, got {branches_imported}"
+        assert branches_imported == 1, f"Expected 1 branch, got {branches_imported}"
         assert total_messages > 0, "Should import messages"
 
         # Verify branches table
@@ -82,7 +86,7 @@ class TestImportSessionWithBranches:
             "SELECT COUNT(*) FROM branches WHERE session_id IN (SELECT id FROM sessions WHERE project_id = ?)",
             (project_id,),
         )
-        assert cursor.fetchone()[0] == 3, "Exactly 3 branches should exist in DB"
+        assert cursor.fetchone()[0] == 1, "Exactly 1 branch should exist in DB"
 
         # Verify active branch is marked
         cursor.execute(
@@ -300,11 +304,11 @@ class TestFKSafeReimport:
         memory_db.commit()
 
     def test_reimport_with_branches_fk(self, memory_db, project_id):
-        """Reimport of branched conversation with FK enabled should not crash."""
+        """Reimport of a rewound conversation with FK enabled should not crash."""
         fixture_file = FIXTURE_DIR / "single_rewind.jsonl"
 
         branches1, _messages1 = import_session(memory_db, fixture_file, project_id)
-        assert branches1 == 3
+        assert branches1 == 1
         memory_db.commit()
 
         # Force reimport
@@ -316,7 +320,7 @@ class TestFKSafeReimport:
         memory_db.commit()
 
         branches2, _messages2 = import_session(memory_db, fixture_file, project_id)
-        assert branches2 == 3, "Reimport should produce same branch count"
+        assert branches2 == 1, "Reimport should produce same branch count"
         memory_db.commit()
 
 
@@ -485,7 +489,7 @@ class TestBranchMessagesDiffOnReimport:
         fixture_file = FIXTURE_DIR / "single_rewind.jsonl"
 
         branches1, _ = import_session(memory_db, fixture_file, project_id)
-        assert branches1 == 3, "Fixture must produce 3 branches for this test to be meaningful"
+        assert branches1 == 1, "Session-keyed identity: fixture must produce exactly 1 branch row"
 
         cursor = memory_db.cursor()
         cursor.execute(
@@ -511,7 +515,7 @@ class TestBranchMessagesDiffOnReimport:
         memory_db.commit()
 
         branches2, _ = import_session(memory_db, fixture_file, project_id)
-        assert branches2 == 3, "Reimport must produce same branch count"
+        assert branches2 == 1, "Reimport must produce same branch count"
 
         cursor.execute(
             """
@@ -780,13 +784,12 @@ class TestPrintStatsEmbeddingCoverage:
     def test_reports_partial_coverage(self, tmp_path, capsys):
         """Two of three embeddable branches embedded → '2/3 branches (67%)'."""
         db_path = tmp_path / "stats.db"
-        conn = get_db_connection({"db_path": str(db_path)}, load_vec=False)
-        self._seed_embeddable_branch(conn, 1, embedded=True)
-        self._seed_embeddable_branch(conn, 2, embedded=True)
-        self._seed_embeddable_branch(conn, 3, embedded=False)
-        # An inactive branch must not count toward the embeddable denominator.
-        self._seed_embeddable_branch(conn, 4, embedded=False, is_active=0)
-        conn.close()
+        with get_connection({"db_path": str(db_path)}, load_vec=False) as conn:
+            self._seed_embeddable_branch(conn, 1, embedded=True)
+            self._seed_embeddable_branch(conn, 2, embedded=True)
+            self._seed_embeddable_branch(conn, 3, embedded=False)
+            # An inactive branch must not count toward the embeddable denominator.
+            self._seed_embeddable_branch(conn, 4, embedded=False, is_active=0)
 
         print_stats(db=db_path)
         out = capsys.readouterr().out
@@ -796,8 +799,8 @@ class TestPrintStatsEmbeddingCoverage:
     def test_zero_embeddable_branches(self, tmp_path, capsys):
         """A DB with no embeddable branches reports 0/0 without dividing by zero."""
         db_path = tmp_path / "empty.db"
-        conn = get_db_connection({"db_path": str(db_path)}, load_vec=False)
-        conn.close()
+        with get_connection({"db_path": str(db_path)}, load_vec=False):
+            pass
 
         print_stats(db=db_path)
         out = capsys.readouterr().out

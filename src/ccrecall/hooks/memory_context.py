@@ -24,15 +24,15 @@ from pathlib import Path
 from pydantic import ValidationError
 from whenever import Instant
 
-from ccrecall.db import (
+from ccrecall.config import (
     CLEAR_HANDOFF_FILENAME,
     DEFAULT_SETTINGS,
-    get_db_connection,
     get_db_path,
-    load_config,
     load_settings,
+    log_hook_exception,
     setup_logging,
 )
+from ccrecall.db import get_connection
 from ccrecall.formatting import (
     format_time_full,
     get_project_key,
@@ -67,6 +67,10 @@ HANDOFF_STALE_SECONDS = 30
 TOPIC_PREVIEW_MAX_CHARS = 120
 # Most recent prior branches scanned when picking sessions to inject.
 _CANDIDATE_LIMIT = 20
+
+# Rough chars-per-token ratio for the injected-context size estimate logged
+# below. Not model-exact — just enough signal to spot an outsized injection.
+_CHARS_PER_TOKEN_ESTIMATE = 4
 
 
 def _emit_empty() -> None:
@@ -550,7 +554,7 @@ def build_context(sessions: list[dict]) -> str:
 
 def main():
     settings = load_settings()
-    logger = setup_logging(settings)
+    logger = setup_logging(settings, process_name="context")
 
     raw = sys.stdin.read()
     try:
@@ -575,126 +579,120 @@ def main():
     # correctly classifies that as a persist fault.
     # The db_path.exists() guard prevents creating a fresh DB on a first-run
     # install where the DB hasn't been initialised yet (not a fault condition).
+    # ExitStack (rather than a plain `with`) because this function has several
+    # early returns before the connection's natural end-of-function close point;
+    # entering get_connection() via the stack defers its commit/rollback/close
+    # to whichever return statement fires, without duplicating the with-block
+    # at every gate.
     db_path = get_db_path(settings)
     db_available = db_path.exists()
     conn: sqlite3.Connection | None = None
-    if db_available:
+    with contextlib.ExitStack() as stack:
+        if db_available:
+            try:
+                conn = stack.enter_context(get_connection(settings))
+            except Exception:
+                # conn stays None; DB probe will report this as a persist fault.
+                logger.warning("DB connection failed — DB probe will report fault")
+
+        # ── Proactive alert evaluation ──────────────────────────────────────────
+        # Must run before ALL early-return gates so alerts fire even when sessions
+        # is empty or the DB is inaccessible.
+        proactive_block = _proactive_alert_block(settings, conn, db_available)
+
+        # ── Gate: context injection disabled ─────────────────────────────────────
+        if not settings.get("auto_inject_context", True):
+            logger.info("Context injection disabled by settings")
+            _emit_with_proactive(proactive_block)
+            return
+
+        # ── Gate: must have cwd + session_id to inject session context ──────────
+        if not cwd or not session_id:
+            _emit_with_proactive(proactive_block)
+            return
+
+        # ── Gate: DB must exist for context injection ───────────────────────────
+        if not db_available:
+            _emit_with_proactive(proactive_block)
+            return
+
+        # ── Gate: DB connection must be open for context injection ──────────────
+        if conn is None:
+            # Connection failed earlier; proactive alert already captures this fault.
+            _emit_with_proactive(proactive_block)
+            return
+
+        # ── Context injection ────────────────────────────────────────────────────
         try:
-            conn = get_db_connection(settings)
-        except Exception:
-            # conn stays None; DB probe will report this as a persist fault.
-            logger.warning("DB connection failed — DB probe will report fault")
+            project_key = get_project_key(cwd)
+            max_sessions = settings.get("max_context_sessions", 2)
+            sessions = select_sessions(
+                conn,
+                project_key,
+                session_id,
+                max_sessions,
+                source=source,
+                db_path=db_path,
+                cwd=cwd,
+            )
 
-    # ── Proactive alert evaluation ──────────────────────────────────────────────
-    # Must run before ALL early-return gates so alerts fire even when sessions is
-    # empty, the DB is inaccessible, or onboarding is incomplete.
-    proactive_block = _proactive_alert_block(settings, conn, db_available)
+            if not sessions:
+                _emit_with_proactive(proactive_block)
+                return
 
-    # ── Gate: onboarding incomplete ────────────────────────────────────────────
-    config = load_config()
-    if not config.get("onboarding_completed"):
-        # The proactive write-failure alert (if active) still surfaces here:
-        # it explains why onboarding config.json can't be saved. onboarding.py
-        # fires as a separate hook with its own injection; if both would appear,
-        # the write-failure alert wins in this hook (it's the cause of the blockage).
-        if conn is not None:
-            conn.close()
-        _emit_with_proactive(proactive_block)
-        return
+            context = build_context(sessions)
+            if not context:
+                _emit_with_proactive(proactive_block)
+                return
 
-    # ── Gate: context injection disabled ───────────────────────────────────────
-    if not settings.get("auto_inject_context", True):
-        logger.info("Context injection disabled by settings")
-        if conn is not None:
-            conn.close()
-        _emit_with_proactive(proactive_block)
-        return
+            logger.info("Injecting context from %s session(s) for project %s", len(sessions), project_key)
 
-    # ── Gate: must have cwd + session_id to inject session context ─────────────
-    if not cwd or not session_id:
-        if conn is not None:
-            conn.close()
-        _emit_with_proactive(proactive_block)
-        return
+            # Top-of-context directive: placed first because the hook's inline
+            # preview may be truncated by the harness, and because earlier tokens
+            # receive more attention. Tells Claude how to read the rest of this
+            # injection and when to reach for the persisted file or recall skill.
+            directive = (
+                "## How To Use This Context\n"
+                "- Sessions below are ordered most-recent first, and within each session "
+                "the most recent exchanges come first. Read top-down to get the freshest "
+                "context before older context.\n"
+                "- If this hook's output was truncated inline and a persisted file path "
+                "is referenced, Read that file before answering any message that references "
+                "prior work — the last exchanges of the previous session may live only there.\n"
+                "- For anything beyond the sessions shown here, use the "
+                "`recall-conversations` skill rather than guessing."
+            )
 
-    # ── Gate: DB must exist for context injection ───────────────────────────────
-    if not db_available:
-        _emit_with_proactive(proactive_block)
-        return
+            # Assemble: directive + proactive (if any) + origin + pending + context.
+            # The directive is first (it tells Claude how to read the rest); the
+            # proactive block immediately follows it, ahead of origin / pending /
+            # prior-session content (highest-attention position for the alert).
+            origin = build_origin_block(source, sessions)
+            pending = _pending_question_block(sessions, cwd)
+            if proactive_block:
+                full_context = f"{directive}\n\n{proactive_block}\n\n{origin}\n\n{pending}{context}"
+            else:
+                full_context = f"{directive}\n\n{origin}\n\n{pending}{context}"
 
-    # ── Gate: DB connection must be open for context injection ──────────────────
-    if conn is None:
-        # Connection failed earlier; proactive alert already captures this fault.
-        _emit_with_proactive(proactive_block)
-        return
+            logger.info(
+                "Injected context: ~%d tokens (%d chars)",
+                len(full_context) // _CHARS_PER_TOKEN_ESTIMATE,
+                len(full_context),
+            )
 
-    # ── Context injection ───────────────────────────────────────────────────────
-    try:
-        project_key = get_project_key(cwd)
-        max_sessions = settings.get("max_context_sessions", 2)
-        sessions = select_sessions(
-            conn,
-            project_key,
-            session_id,
-            max_sessions,
-            source=source,
-            db_path=db_path,
-            cwd=cwd,
-        )
-
-        if not sessions:
-            _emit_with_proactive(proactive_block)
-            return
-
-        context = build_context(sessions)
-        if not context:
-            _emit_with_proactive(proactive_block)
-            return
-
-        logger.info("Injecting context from %s session(s) for project %s", len(sessions), project_key)
-
-        # Top-of-context directive: placed first because the hook's inline
-        # preview may be truncated by the harness, and because earlier tokens
-        # receive more attention. Tells Claude how to read the rest of this
-        # injection and when to reach for the persisted file or recall skill.
-        directive = (
-            "## How To Use This Context\n"
-            "- Sessions below are ordered most-recent first, and within each session "
-            "the most recent exchanges come first. Read top-down to get the freshest "
-            "context before older context.\n"
-            "- If this hook's output was truncated inline and a persisted file path "
-            "is referenced, Read that file before answering any message that references "
-            "prior work — the last exchanges of the previous session may live only there.\n"
-            "- For anything beyond the sessions shown here, use the "
-            "`recall-conversations` skill rather than guessing."
-        )
-
-        # Assemble: directive + proactive (if any) + origin + pending + context.
-        # The directive is first (it tells Claude how to read the rest); the
-        # proactive block immediately follows it, ahead of origin / pending /
-        # prior-session content (highest-attention position for the alert).
-        origin = build_origin_block(source, sessions)
-        pending = _pending_question_block(sessions, cwd)
-        if proactive_block:
-            full_context = f"{directive}\n\n{proactive_block}\n\n{origin}\n\n{pending}{context}"
-        else:
-            full_context = f"{directive}\n\n{origin}\n\n{pending}{context}"
-
-        output = {
-            "hookSpecificOutput": {
-                "hookEventName": "SessionStart",
-                "additionalContext": full_context,
+            output = {
+                "hookSpecificOutput": {
+                    "hookEventName": "SessionStart",
+                    "additionalContext": full_context,
+                }
             }
-        }
-        print(json.dumps(output))
+            print(json.dumps(output))
 
-    except Exception as e:
-        logger.error("Context injection error: %s", e)
-        # Don't block session start on errors; proactive alert (if any) still surfaces.
-        _emit_with_proactive(proactive_block)
-        sys.exit(0)
-    finally:
-        conn.close()
+        except Exception:
+            log_hook_exception("context")
+            # Don't block session start on errors; proactive alert (if any) still surfaces.
+            _emit_with_proactive(proactive_block)
+            sys.exit(0)
 
 
 if __name__ == "__main__":

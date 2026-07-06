@@ -14,16 +14,8 @@ import sqlite3
 import sys
 from pathlib import Path
 
-from ccrecall.db import (
-    DEFAULT_DB_PATH,
-    DEFAULT_PROJECTS_DIR,
-    branch_embedding_coverage,
-    get_db_connection,
-    get_db_path,
-    load_settings,
-    remove_pid_file,
-    setup_logging,
-)
+from ccrecall.config import DEFAULT_DB_PATH, get_db_path, load_settings, remove_pid_file, setup_logging
+from ccrecall.db import DEFAULT_PROJECTS_DIR, branch_embedding_coverage, get_connection
 from ccrecall.formatting import extract_project_name, normalize_project_key
 from ccrecall.parsing import extract_session_uuid
 from ccrecall.project_ops import upsert_project
@@ -181,7 +173,7 @@ def print_stats(db: Path = DEFAULT_DB_PATH) -> None:
         settings["db_path"] = str(db)
     db_path = get_db_path(settings)
 
-    with contextlib.closing(get_db_connection(settings, load_vec=False)) as conn:
+    with get_connection(settings, load_vec=False) as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT COUNT(*) FROM projects")
         projects = cursor.fetchone()[0]
@@ -193,8 +185,6 @@ def print_stats(db: Path = DEFAULT_DB_PATH) -> None:
         total_branches = cursor.fetchone()[0]
         cursor.execute("SELECT COUNT(*) FROM branches WHERE is_active = 1")
         active = cursor.fetchone()[0]
-        cursor.execute("SELECT COUNT(*) FROM branches WHERE is_active = 0")
-        abandoned = cursor.fetchone()[0]
         # Branch-grain embedding coverage (vec-free watermark count).
         embedded, embeddable = branch_embedding_coverage(conn)
 
@@ -204,7 +194,7 @@ def print_stats(db: Path = DEFAULT_DB_PATH) -> None:
     print(f"Size: {db_size / BYTES_PER_MB:.2f} MB")
     print(f"Projects: {projects}")
     print(f"Sessions: {sessions}")
-    print(f"Branches: {total_branches} ({active} active, {abandoned} abandoned)")
+    print(f"Branches: {total_branches} ({active} active)")
     print(f"Messages: {messages}")
     if embeddable:
         print(f"Embeddings: {embedded}/{embeddable} branches ({embedded / embeddable * 100:.0f}%)")
@@ -233,7 +223,7 @@ def _run(
     project: str | None,
 ) -> None:
     settings = load_settings()
-    logger = setup_logging(settings)
+    logger = setup_logging(settings, process_name="import")
 
     if db != DEFAULT_DB_PATH:
         settings["db_path"] = str(db)
@@ -246,7 +236,7 @@ def _run(
 
     # load_vec=False: skip embedding model + sqlite-vec during bulk import to avoid
     # ~200MB+ baseline RSS. Embeddings are backfilled separately via `ccrecall backfill embeddings`.
-    with contextlib.closing(get_db_connection(settings, load_vec=False)) as conn:
+    with get_connection(settings, load_vec=False) as conn:
         # Resolve libc once for malloc_trim in the GC loop below.
         # gc.collect() frees Python objects; malloc_trim() releases freed glibc arena
         # pages back to the OS (without it, RSS grows monotonically).

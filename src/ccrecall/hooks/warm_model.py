@@ -10,7 +10,7 @@ there is no hot-path concern — but keeping it a direct entry point is consiste
 and avoids coupling the warm to the CLI command lifecycle.
 """
 
-from ccrecall.db import remove_pid_file
+from ccrecall.config import load_settings, remove_pid_file, setup_logging
 from ccrecall.embeddings import model_available
 
 # PID key written by _spawn_background in memory_setup (imported there as WARM_MODEL_PID_KEY)
@@ -20,9 +20,12 @@ PID_KEY = "ccrecall-warm-model"
 
 def main() -> None:
     """Load (or download) the fastembed model cache, then release the PID sentinel."""
+    logger = setup_logging(load_settings(), process_name="warm-model")
+    logger.info("Warm-model: starting fastembed model warm-up")
     try:
         model_available()  # downloads on cold cache; no-ops on warm; never raises
     finally:
+        logger.info("Warm-model: warm-up complete")
         remove_pid_file(PID_KEY)
 
 

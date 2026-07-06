@@ -17,18 +17,10 @@ from ccrecall.embeddings import EMBEDDING_DIM, EMBEDDING_MODEL, EMBEDDING_VERSIO
 from ccrecall.formatting import apply_scores, format_snippet_json, format_snippet_markdown
 from ccrecall.recent_chats import get_recent_sessions
 from ccrecall.schema import SCHEMA, SCHEMA_CORE, detect_fts_support
-from ccrecall.search_conversations import (
-    _compute_caveat,
-    _dedup_by_session,
-    _get_vec_chunk_ids,
-    _hydrate_cards,
-    format_markdown,
-    print_status,
-    run,
-    run_messages,
-    search_messages,
-    search_sessions,
-)
+from ccrecall.search_cli import format_markdown, print_status, run, run_messages
+from ccrecall.search_conversations import compute_caveat, search_messages, search_sessions
+from ccrecall.search_hydrate import dedup_by_session, hydrate_cards
+from ccrecall.search_vector import get_vec_chunk_ids
 
 
 @pytest.fixture
@@ -707,11 +699,11 @@ class TestStaleVersionExclusion:
         reason="sqlite-vec not available",
     )
     def test_stale_chunk_excluded_from_vec_candidates(self, stale_db):
-        """_get_vec_chunk_ids must not return branches whose chunks are at a stale version."""
+        """get_vec_chunk_ids must not return branches whose chunks are at a stale version."""
         conn, current_id, stale_id = stale_db
         cursor = conn.cursor()
         fake_vec = [0.1] * EMBEDDING_DIM
-        results = _get_vec_chunk_ids(cursor, fake_vec, top_k=10)
+        results = get_vec_chunk_ids(cursor, fake_vec, top_k=10)
         branch_ids = [r[0] for r in results]
         assert stale_id not in branch_ids, "Stale-version chunk must not appear in chunk-KNN candidates"
         assert current_id in branch_ids, "Current-version chunk must appear in chunk-KNN candidates"
@@ -724,7 +716,7 @@ class TestStaleVersionExclusion:
         """Integration: stale chunk session appears in FTS results but NOT in chunk-KNN candidates.
 
         The stale branch's aggregated_content contains "stale text", so a keyword
-        search for "stale" must surface it via FTS. However, _get_vec_chunk_ids
+        search for "stale" must surface it via FTS. However, get_vec_chunk_ids
         must exclude it because its chunk.embedding_version != EMBEDDING_VERSION.
         """
         conn, _current_id, stale_id = stale_db
@@ -733,7 +725,7 @@ class TestStaleVersionExclusion:
         # Confirm chunk-KNN path excludes stale branch
         cursor = conn.cursor()
         fake_vec = [0.1] * EMBEDDING_DIM
-        results = _get_vec_chunk_ids(cursor, fake_vec, top_k=10)
+        results = get_vec_chunk_ids(cursor, fake_vec, top_k=10)
         branch_ids = [r[0] for r in results]
         assert stale_id not in branch_ids, "Stale-version chunk must not appear in chunk-KNN candidates"
 
@@ -751,7 +743,7 @@ class TestSessionDedup:
     """Two branches of the same session in the fused top-K yield exactly one result."""
 
     def test_dedup_by_session_unit(self):
-        """Unit test _dedup_by_session: keeps first (highest-ranked) branch per session."""
+        """Unit test dedup_by_session: keeps first (highest-ranked) branch per session."""
         conn = sqlite3.connect(":memory:")
         conn.executescript(SCHEMA)
         conn.commit()
@@ -782,7 +774,7 @@ class TestSessionDedup:
         conn.commit()
 
         # b1 ranked first — dedup should keep b1 and drop b2
-        result = _dedup_by_session(cursor, [b1, b2])
+        result = dedup_by_session(cursor, [b1, b2])
         assert result == [b1], "Should keep only the first branch of the session"
 
     def test_dedup_by_session_different_sessions(self):
@@ -821,7 +813,7 @@ class TestSessionDedup:
         by = cursor.lastrowid
         conn.commit()
 
-        result = _dedup_by_session(cursor, [bx, by])
+        result = dedup_by_session(cursor, [bx, by])
         assert result == [bx, by], "Different sessions should both be kept"
 
     @pytest.mark.skipif(
@@ -974,7 +966,7 @@ class TestExceptionNarrowing:
         """A DB error (chunk_vec table missing) degrades to an empty list, not a crash."""
         conn = sqlite3.connect(":memory:")  # no chunk_vec table → vec query raises sqlite3.Error
         try:
-            result = _get_vec_chunk_ids(conn.cursor(), [0.1, 0.2, 0.3, 0.4], top_k=5)
+            result = get_vec_chunk_ids(conn.cursor(), [0.1, 0.2, 0.3, 0.4], top_k=5)
             assert result == []
         finally:
             conn.close()
@@ -990,7 +982,7 @@ class TestExceptionNarrowing:
         cursor = MagicMock()
         cursor.execute.side_effect = AttributeError("real bug")
         with pytest.raises(AttributeError):
-            _get_vec_chunk_ids(cursor, [0.1] * EMBEDDING_DIM, top_k=5)
+            get_vec_chunk_ids(cursor, [0.1] * EMBEDDING_DIM, top_k=5)
 
     def test_detect_fts_support_returns_none_on_db_error(self):
         """A DB error (querying a closed connection) degrades to None, not a crash."""
@@ -1003,7 +995,7 @@ class TestExceptionNarrowing:
 
 
 class TestCardFields:
-    """_hydrate_cards must produce the output contract fields (session_uuid, handle, topic)."""
+    """hydrate_cards must produce the output contract fields (session_uuid, handle, topic)."""
 
     def _seed_with_summary(self, conn):
         """Seed a branch with context_summary_json carrying topic."""
@@ -1062,7 +1054,7 @@ class TestCardFields:
         conn.commit()
         branch_id = self._seed_with_summary(conn)
 
-        cards = _hydrate_cards(conn.cursor(), [branch_id])
+        cards = hydrate_cards(conn.cursor(), [branch_id])
         assert len(cards) == 1
         card = cards[0]
 
@@ -1083,7 +1075,7 @@ class TestCardFields:
         conn.commit()
         branch_id = self._seed_with_summary(conn)
 
-        cards = _hydrate_cards(conn.cursor(), [branch_id])
+        cards = hydrate_cards(conn.cursor(), [branch_id])
         uuid = cards[0]["session_uuid"]
         assert cards[0]["handle"] == uuid[:8]
 
@@ -1094,7 +1086,7 @@ class TestCardFields:
         conn.commit()
         _sess_id, branch_id = _seed_branch(conn, "gr-sess", "What is the deadline?", "")
 
-        cards = _hydrate_cards(conn.cursor(), [branch_id])
+        cards = hydrate_cards(conn.cursor(), [branch_id])
         assert len(cards) == 1
         card = cards[0]
         assert card["session_uuid"] == "gr-sess"
@@ -1124,7 +1116,7 @@ class TestMidSessionRecall:
         """Chunk at exchange_index=4 (middle) is the KNN nearest-neighbor → branch appears in results.
 
         Uses orthogonal dummy vectors so the query vec is unambiguously closest to the
-        middle chunk and far from all others. Verifies that _get_vec_chunk_ids returns
+        middle chunk and far from all others. Verifies that get_vec_chunk_ids returns
         the branch via its middle chunk (not only first/last).
         """
         conn = make_vec_conn()
@@ -1172,7 +1164,7 @@ class TestMidSessionRecall:
 
         conn.commit()
 
-        results = _get_vec_chunk_ids(cursor, query_vec, top_k=5)
+        results = get_vec_chunk_ids(cursor, query_vec, top_k=5)
         branch_ids = [r[0] for r in results]
         assert branch_id in branch_ids, (
             "AC#1: branch must appear in chunk-KNN results when the middle exchange matches the query"
@@ -1236,7 +1228,7 @@ class TestCappedChunkRetrieval:
     )
     def test_capped_chunk_is_retrievable_by_knn(self):
         """A was_capped=1 chunk (head+tail display text) whose vector matches the query
-        is returned by _get_vec_chunk_ids, alongside an orthogonal distractor that is not."""
+        is returned by get_vec_chunk_ids, alongside an orthogonal distractor that is not."""
         conn = make_vec_conn()
         cursor = conn.cursor()
 
@@ -1299,7 +1291,7 @@ class TestCappedChunkRetrieval:
         upsert_chunk_vec(cursor, other_chunk_id, orthogonal)
         conn.commit()
 
-        results = _get_vec_chunk_ids(cursor, query_vec, top_k=5)
+        results = get_vec_chunk_ids(cursor, query_vec, top_k=5)
         branch_ids = [r[0] for r in results]
         assert branch_id in branch_ids, (
             "AC#9: a head+tail-capped chunk must be retrievable via chunk-KNN for a matching query"
@@ -1624,16 +1616,16 @@ class TestRecallCaveat:
     """
 
     def test_caveat_when_vec_unavailable(self):
-        """_compute_caveat returns a string when chunk_vec is not queryable (no vec extension)."""
+        """compute_caveat returns a string when chunk_vec is not queryable (no vec extension)."""
         conn = sqlite3.connect(":memory:")
         # No chunk_vec table → chunk_vec_queryable returns False → caveat expected
-        caveat = _compute_caveat(conn)
+        caveat = compute_caveat(conn)
         assert caveat is not None
         assert "unavailable" in caveat.lower()
         conn.close()
 
     def test_caveat_when_coverage_below_threshold(self):
-        """_compute_caveat returns a string when branch coverage is below RECALL_CAVEAT_COVERAGE_THRESHOLD."""
+        """compute_caveat returns a string when branch coverage is below RECALL_CAVEAT_COVERAGE_THRESHOLD."""
         conn = sqlite3.connect(":memory:")
         conn.executescript(SCHEMA)
         conn.commit()
@@ -1672,14 +1664,14 @@ class TestRecallCaveat:
         conn.commit()
 
         with patch("ccrecall.search_conversations.chunk_vec_queryable", return_value=True):
-            caveat = _compute_caveat(conn)
+            caveat = compute_caveat(conn)
 
         assert caveat is not None
         assert "partial" in caveat.lower()
         conn.close()
 
     def test_no_caveat_when_coverage_at_threshold(self):
-        """_compute_caveat returns None when vec is available and all branches are embedded (100% >= 95%)."""
+        """compute_caveat returns None when vec is available and all branches are embedded (100% >= 95%)."""
         conn = sqlite3.connect(":memory:")
         conn.executescript(SCHEMA)
         conn.commit()
@@ -1703,26 +1695,26 @@ class TestRecallCaveat:
         conn.commit()
 
         with patch("ccrecall.search_conversations.chunk_vec_queryable", return_value=True):
-            caveat = _compute_caveat(conn)
+            caveat = compute_caveat(conn)
 
         assert caveat is None
         conn.close()
 
     def test_no_crash_when_total_zero(self):
-        """_compute_caveat returns None (no crash) when there are no embeddable branches."""
+        """compute_caveat returns None (no crash) when there are no embeddable branches."""
         conn = sqlite3.connect(":memory:")
         conn.executescript(SCHEMA)
         conn.commit()
         # Empty DB: no branches → total = 0
 
         with patch("ccrecall.search_conversations.chunk_vec_queryable", return_value=True):
-            caveat = _compute_caveat(conn)
+            caveat = compute_caveat(conn)
 
         assert caveat is None
         conn.close()
 
     def test_caveat_degrades_on_error(self):
-        """_compute_caveat returns None (no exception) when coverage computation fails."""
+        """compute_caveat returns None (no exception) when coverage computation fails."""
         conn = sqlite3.connect(":memory:")
         with (
             patch("ccrecall.search_conversations.chunk_vec_queryable", return_value=True),
@@ -1731,7 +1723,7 @@ class TestRecallCaveat:
                 side_effect=RuntimeError("db gone"),
             ),
         ):
-            caveat = _compute_caveat(conn)
+            caveat = compute_caveat(conn)
         assert caveat is None
         conn.close()
 
@@ -1744,9 +1736,9 @@ class TestRecallCaveat:
         c.close()
 
         with (
-            patch("ccrecall.search_conversations.search_sessions", return_value=([], False)),
+            patch("ccrecall.search_cli.search_sessions", return_value=([], False)),
             patch(
-                "ccrecall.search_conversations._compute_caveat",
+                "ccrecall.search_cli.compute_caveat",
                 return_value="embeddings unavailable — keyword-only results",
             ),
         ):
@@ -1765,8 +1757,8 @@ class TestRecallCaveat:
         c.close()
 
         with (
-            patch("ccrecall.search_conversations.search_sessions", return_value=([], False)),
-            patch("ccrecall.search_conversations._compute_caveat", return_value=None),
+            patch("ccrecall.search_cli.search_sessions", return_value=([], False)),
+            patch("ccrecall.search_cli.compute_caveat", return_value=None),
         ):
             run(query="test", output_format="json", db=db_path)
 
@@ -1783,9 +1775,9 @@ class TestRecallCaveat:
         c.close()
 
         with (
-            patch("ccrecall.search_conversations.search_sessions", return_value=([], False)),
+            patch("ccrecall.search_cli.search_sessions", return_value=([], False)),
             patch(
-                "ccrecall.search_conversations._compute_caveat",
+                "ccrecall.search_cli.compute_caveat",
                 return_value="embeddings unavailable — keyword-only results",
             ),
         ):
@@ -1803,8 +1795,8 @@ class TestRecallCaveat:
         c.close()
 
         with (
-            patch("ccrecall.search_conversations.search_sessions", return_value=([], False)),
-            patch("ccrecall.search_conversations._compute_caveat", return_value=None),
+            patch("ccrecall.search_cli.search_sessions", return_value=([], False)),
+            patch("ccrecall.search_cli.compute_caveat", return_value=None),
         ):
             run(query="test", output_format="markdown", db=db_path)
 

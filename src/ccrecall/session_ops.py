@@ -164,8 +164,8 @@ def insert_new_messages(
 def update_branch_row(
     cursor: sqlite3.Cursor,
     branch_db_id: int,
+    leaf_uuid: str,
     is_active: bool,
-    fork_point_uuid: str | None,
     branch_meta: dict,
     exchange_count: int,
     files_json: str | None,
@@ -176,8 +176,8 @@ def update_branch_row(
     cursor.execute(
         """
         UPDATE branches SET
+            leaf_uuid = ?,
             is_active = ?,
-            fork_point_uuid = ?,
             started_at = ?,
             ended_at = ?,
             exchange_count = ?,
@@ -187,8 +187,8 @@ def update_branch_row(
         WHERE id = ?
         """,
         (
+            leaf_uuid,
             int(is_active),
-            fork_point_uuid,
             branch_meta["started_at"],
             branch_meta["ended_at"],
             exchange_count,
@@ -204,7 +204,6 @@ def insert_branch_row(
     cursor: sqlite3.Cursor,
     session_id: int,
     leaf_uuid: str,
-    fork_point_uuid: str | None,
     is_active: bool,
     branch_meta: dict,
     exchange_count: int,
@@ -212,18 +211,21 @@ def insert_branch_row(
     commits_json: str | None,
     tool_counts_json: str | None,
 ) -> int | None:
-    """INSERT a new branches row; return lastrowid (None only if the INSERT did not run)."""
+    """INSERT a new branches row; return lastrowid (None only if the INSERT did not run).
+
+    fork_point_uuid is always NULL now — abandoned-fork tracking was removed
+    along with the leaf_uuid-keyed identity it supported.
+    """
     cursor.execute(
         """
         INSERT INTO branches
             (session_id, leaf_uuid, fork_point_uuid, is_active,
              started_at, ended_at, exchange_count, files_modified, commits, tool_counts)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             session_id,
             leaf_uuid,
-            fork_point_uuid,
             int(is_active),
             branch_meta["started_at"],
             branch_meta["ended_at"],
@@ -236,17 +238,6 @@ def insert_branch_row(
     return cursor.lastrowid
 
 
-def enforce_single_active_branch(cursor: sqlite3.Cursor, session_id: int, branch_db_id: int) -> None:
-    """Deactivate every other branch in the session so only branch_db_id stays active."""
-    cursor.execute(
-        """
-        UPDATE branches SET is_active = 0
-        WHERE session_id = ? AND id != ? AND is_active = 1
-        """,
-        (session_id, branch_db_id),
-    )
-
-
 def upsert_branch(
     cursor: sqlite3.Cursor,
     branch: dict,
@@ -256,20 +247,31 @@ def upsert_branch(
     commits_json: str | None,
     tool_counts_json: str | None,
     session_id: int,
-    existing_branches: dict[str, int],
 ) -> int:
-    """INSERT or UPDATE the branches row; enforce single-active-branch; return branch_db_id."""
+    """INSERT or UPDATE the branches row, keyed on session_id; return branch_db_id.
+
+    Session-keyed identity: at most one row per session, looked up directly by
+    session_id and updated in place on every sync — no leaf_uuid dict needed,
+    and no separate step to deactivate other rows since there's only ever one.
+    leaf_uuid is still written each sync as a diagnostic field (the latest
+    message UUID) but is no longer part of the identity key.
+    """
     leaf_uuid = branch["leaf_uuid"]
-    fork_point_uuid = branch.get("fork_point_uuid")
     is_active = branch["is_active"]
 
-    if leaf_uuid in existing_branches:
-        branch_db_id = existing_branches[leaf_uuid]
+    cursor.execute(
+        "SELECT id FROM branches WHERE session_id = ? AND is_active = 1",
+        (session_id,),
+    )
+    row = cursor.fetchone()
+
+    if row:
+        branch_db_id = row[0]
         update_branch_row(
             cursor,
             branch_db_id,
+            leaf_uuid,
             is_active,
-            fork_point_uuid,
             branch_meta,
             exchange_count,
             files_json,
@@ -281,7 +283,6 @@ def upsert_branch(
             cursor,
             session_id,
             leaf_uuid,
-            fork_point_uuid,
             is_active,
             branch_meta,
             exchange_count,
@@ -289,12 +290,9 @@ def upsert_branch(
             commits_json,
             tool_counts_json,
         )
-    # branch_db_id is set on both paths above: existing_branches[leaf_uuid] (UPDATE) or
-    # lastrowid (INSERT, non-None after a successful insert). Narrow for the type checker.
+    # branch_db_id is set on both paths above: row[0] (UPDATE) or lastrowid (INSERT,
+    # non-None after a successful insert). Narrow for the type checker.
     assert branch_db_id is not None  # noqa: S101 — type-checker narrowing; set on both branches above
-
-    if is_active:
-        enforce_single_active_branch(cursor, session_id, branch_db_id)
 
     return branch_db_id
 
@@ -577,7 +575,6 @@ def sync_branch(
     branch: dict,
     messages: list[dict],
     uuid_to_msg_id: dict[str, int],
-    existing_branches: dict[str, int],
     session_id: int,
     vec_writable: bool,
 ) -> None:
@@ -604,7 +601,6 @@ def sync_branch(
         commits_json,
         tool_counts_json,
         session_id,
-        existing_branches,
     )
 
     diff_branch_messages(cursor, branch_db_id, branch_uuids, uuid_to_msg_id)
@@ -733,10 +729,6 @@ def sync_session(
     )
     uuid_to_msg_id = {row[1]: row[0] for row in cursor.fetchall()}
 
-    # Get existing branch leaf_uuids for this session
-    cursor.execute("SELECT id, leaf_uuid FROM branches WHERE session_id = ?", (session_id,))
-    existing_branches = {row[1]: row[0] for row in cursor.fetchall()}
-
     # Probe vec persistence once: if sqlite-vec didn't load, chunk_vec doesn't
     # exist and embed_branch_chunks would raise. Skip embed-on-write entirely
     # in that case rather than paying for embed_text inference on every active
@@ -744,7 +736,7 @@ def sync_session(
     vec_writable = chunk_vec_queryable(conn)
 
     for branch in branches:
-        sync_branch(cursor, branch, messages, uuid_to_msg_id, existing_branches, session_id, vec_writable)
+        sync_branch(cursor, branch, messages, uuid_to_msg_id, session_id, vec_writable)
 
     if write_import_log:
         upsert_import_log(cursor, filepath, session_id, file_hash, log_row)

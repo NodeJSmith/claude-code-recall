@@ -24,15 +24,13 @@ import sqlite3
 import sys
 import time
 
+from ccrecall.config import load_settings, remove_pid_file, setup_logging
 from ccrecall.db import (
     CHUNK_EMBEDDABLE_BRANCH_FILTER,
     CONTENT_ERROR_VERSION,
     chunk_vec_queryable,
     fetch_branch_messages,
-    get_db_connection,
-    load_settings,
-    remove_pid_file,
-    setup_logging,
+    get_connection,
 )
 from ccrecall.embeddings import (
     DEFAULT_EMBED_THREADS,
@@ -230,22 +228,16 @@ def run_status(
 ) -> int:
     """Report branch coverage (embedded/total) plus eligible/errored counts (read-only)."""
     try:
-        conn = get_db_connection(settings, load_vec=True)
+        with get_connection(settings, load_vec=True) as conn:
+            if not chunk_vec_queryable(conn):
+                logger.error("Backfill status: sqlite-vec unavailable")
+                print("ccrecall backfill embeddings: sqlite-vec unavailable", file=sys.stderr)
+                return EXIT_ABORT
+            counts = count_status(conn.cursor(), days)
     except (sqlite3.Error, OSError) as e:
-        logger.error("Backfill status: failed to connect to DB: %s", e)
-        print(f"ccrecall backfill embeddings: failed to connect to DB: {e}", file=sys.stderr)
+        logger.error("Backfill status: aborted: %s", e)
+        print(f"ccrecall backfill embeddings: aborted: {e}", file=sys.stderr)
         return EXIT_ABORT
-
-    if not chunk_vec_queryable(conn):
-        logger.error("Backfill status: sqlite-vec unavailable")
-        print("ccrecall backfill embeddings: sqlite-vec unavailable", file=sys.stderr)
-        conn.close()
-        return EXIT_ABORT
-
-    try:
-        counts = count_status(conn.cursor(), days)
-    finally:
-        conn.close()
 
     if json_mode:
         print(json.dumps({**counts, "days": days}))
@@ -283,7 +275,7 @@ def run(
         raise ValueError("limit must be >= 1")
 
     settings = load_settings()
-    logger = setup_logging(settings)
+    logger = setup_logging(settings, process_name="backfill-embed")
 
     if status:
         return run_status(days=days, json_mode=json_mode, settings=settings, logger=logger)
@@ -307,33 +299,6 @@ def run(
         )
         return EXIT_ABORT
 
-    try:
-        conn = get_db_connection(settings, load_vec=True)
-    except (sqlite3.Error, OSError) as e:
-        logger.error("Backfill embeddings: failed to connect to DB: %s", e)
-        print(
-            f"ccrecall backfill embeddings: failed to connect to DB: {e}",
-            file=sys.stderr,
-        )
-        return EXIT_ABORT
-
-    cursor = conn.cursor()
-
-    # ABORT level: chunk_vec must be queryable before any selection runs — the
-    # eligibility WHERE references chunks/chunk_vec, which get_db_connection
-    # creates only when sqlite-vec loaded. Without this guard the queries below
-    # crash with "no such table: chunk_vec" instead of exiting cleanly.
-    if not chunk_vec_queryable(conn):
-        with contextlib.suppress(Exception):  # best-effort; sidecar write must not affect exit behavior
-            record_embedding_failure(reason=REASON_VEC_UNAVAILABLE)
-        logger.error("Backfill embeddings: sqlite-vec unavailable, aborting (no rows marked)")
-        print(
-            "ccrecall backfill embeddings: sqlite-vec unavailable, aborting (no rows marked)",
-            file=sys.stderr,
-        )
-        conn.close()
-        return EXIT_ABORT
-
     total_updated = 0
     total_inferences = 0
     last_progress = 0
@@ -342,134 +307,158 @@ def run(
 
     where, params = build_selection(days)
 
-    # Compute total-eligible count once (avoid per-batch full COUNT).
-    cursor.execute(f"SELECT COUNT(*) FROM branches {where}", params)
-    total_eligible = cursor.fetchone()[0]
-    if limit is not None:
-        total_eligible = min(total_eligible, limit)
+    try:
+        with get_connection(settings, load_vec=True) as conn:
+            cursor = conn.cursor()
 
-    logger.info("Backfill embeddings: starting, %s branches to embed", total_eligible)
-    print(
-        f"ccrecall backfill embeddings: starting, {total_eligible} to embed",
-        file=sys.stderr,
-    )
+            # ABORT level: chunk_vec must be queryable before any selection runs —
+            # the eligibility WHERE references chunks/chunk_vec, which get_connection
+            # creates only when sqlite-vec loaded. Without this guard the queries
+            # below crash with "no such table: chunk_vec" instead of exiting cleanly.
+            if not chunk_vec_queryable(conn):
+                with contextlib.suppress(Exception):  # best-effort; sidecar write must not affect exit behavior
+                    record_embedding_failure(reason=REASON_VEC_UNAVAILABLE)
+                logger.error("Backfill embeddings: sqlite-vec unavailable, aborting (no rows marked)")
+                print(
+                    "ccrecall backfill embeddings: sqlite-vec unavailable, aborting (no rows marked)",
+                    file=sys.stderr,
+                )
+                return EXIT_ABORT
 
-    while True:
-        if limit is not None and total_updated >= limit:
-            break
+            # Compute total-eligible count once (avoid per-batch full COUNT).
+            cursor.execute(f"SELECT COUNT(*) FROM branches {where}", params)
+            total_eligible = cursor.fetchone()[0]
+            if limit is not None:
+                total_eligible = min(total_eligible, limit)
 
-        # ORDER BY id keeps batch order deterministic: the no-progress guard
-        # below compares current_ids to last_batch_ids, which is only meaningful
-        # if re-selection returns rows in a stable order.
-        cursor.execute(
-            f"SELECT id FROM branches {where} ORDER BY id LIMIT ?",
-            (*params, BATCH_SIZE),
-        )
-        rows = cursor.fetchall()
-
-        if not rows:
-            break
-
-        # Honor --limit precisely even though batches are BATCH_SIZE-wide.
-        if limit is not None:
-            rows = rows[: limit - total_updated]
-
-        current_ids = [r[0] for r in rows]
-        if current_ids == last_batch_ids:
-            logger.error("Backfill embeddings: no progress — same batch re-selected; aborting to avoid infinite loop")
+            logger.info("Backfill embeddings: starting, %s branches to embed", total_eligible)
             print(
-                "ccrecall backfill embeddings: no progress — same batch re-selected, aborting",
+                f"ccrecall backfill embeddings: starting, {total_eligible} to embed",
                 file=sys.stderr,
             )
-            conn.close()
-            return EXIT_ABORT
-        last_batch_ids = current_ids
 
-        try:
-            for (branch_id,) in rows:
-                # Fetch messages BEFORE the SAVEPOINT: a sqlite3.Error here is
-                # a batch-abort (infra failure), NOT a per-row content error.
-                # It propagates through the inner except to the outer handler.
-                branch_msgs = fetch_branch_messages(cursor, branch_id, include_notifications=False)
+            while True:
+                if limit is not None and total_updated >= limit:
+                    break
 
-                cursor.execute("SAVEPOINT row")
+                # ORDER BY id keeps batch order deterministic: the no-progress guard
+                # below compares current_ids to last_batch_ids, which is only
+                # meaningful if re-selection returns rows in a stable order.
+                cursor.execute(
+                    f"SELECT id FROM branches {where} ORDER BY id LIMIT ?",
+                    (*params, BATCH_SIZE),
+                )
+                rows = cursor.fetchall()
+
+                if not rows:
+                    break
+
+                # Honor --limit precisely even though batches are BATCH_SIZE-wide.
+                if limit is not None:
+                    rows = rows[: limit - total_updated]
+
+                current_ids = [r[0] for r in rows]
+                if current_ids == last_batch_ids:
+                    logger.error(
+                        "Backfill embeddings: no progress — same batch re-selected; aborting to avoid infinite loop"
+                    )
+                    print(
+                        "ccrecall backfill embeddings: no progress — same batch re-selected, aborting",
+                        file=sys.stderr,
+                    )
+                    return EXIT_ABORT
+                last_batch_ids = current_ids
+
                 try:
-                    # Pre-delete stale or missing-vector chunk rows so
-                    # embed_branch_chunks sees them as new and re-embeds them.
-                    # The cascade trigger removes their chunk_vec rows too.
-                    # Chunks that are already current (correct version+model AND
-                    # have a chunk_vec) are preserved — not re-embedded needlessly.
-                    cursor.execute(
-                        """
-                        DELETE FROM chunks
-                        WHERE branch_id = ?
-                          AND (
-                            embedding_version IS NULL
-                            OR embedding_version != ?
-                            OR embedding_model IS NOT ?
-                            OR NOT EXISTS (
-                              SELECT 1 FROM chunk_vec WHERE chunk_id = chunks.id
+                    for (branch_id,) in rows:
+                        # Fetch messages BEFORE the SAVEPOINT: a sqlite3.Error here is
+                        # a batch-abort (infra failure), NOT a per-row content error.
+                        # It propagates through the inner except to the outer handler.
+                        branch_msgs = fetch_branch_messages(cursor, branch_id, include_notifications=False)
+
+                        cursor.execute("SAVEPOINT row")
+                        try:
+                            # Pre-delete stale or missing-vector chunk rows so
+                            # embed_branch_chunks sees them as new and re-embeds them.
+                            # The cascade trigger removes their chunk_vec rows too.
+                            # Chunks that are already current (correct version+model AND
+                            # have a chunk_vec) are preserved — not re-embedded needlessly.
+                            cursor.execute(
+                                """
+                                DELETE FROM chunks
+                                WHERE branch_id = ?
+                                  AND (
+                                    embedding_version IS NULL
+                                    OR embedding_version != ?
+                                    OR embedding_model IS NOT ?
+                                    OR NOT EXISTS (
+                                      SELECT 1 FROM chunk_vec WHERE chunk_id = chunks.id
+                                    )
+                                  )
+                                """,
+                                (branch_id, EMBEDDING_VERSION, EMBEDDING_MODEL),
                             )
-                          )
-                        """,
-                        (branch_id, EMBEDDING_VERSION, EMBEDDING_MODEL),
+                            # embed_branch_chunks RAISES on failure — content errors
+                            # (ValueError/OverflowError/UnicodeError) are caught below and
+                            # marked once; infra errors propagate to the outer except.
+                            # max_embeds=None: backfill is off the hot path and must fully
+                            # embed each branch in one pass. With the write-path cap, a
+                            # branch longer than the cap would stay eligible and trip the
+                            # no-progress guard on re-selection. The return value is the
+                            # actual inference count (exchanges embedded), so total_inferences
+                            # excludes already-current chunks the pre-delete preserved.
+                            embedded = embed_branch_chunks(
+                                cursor, branch_id, branch_msgs, is_active=True, vec_writable=True, max_embeds=None
+                            )
+                            cursor.execute("RELEASE SAVEPOINT row")
+                            total_updated += 1
+                            total_inferences += embedded
+                        except (ValueError, OverflowError, UnicodeError) as e:
+                            cursor.execute("ROLLBACK TO SAVEPOINT row")
+                            cursor.execute("RELEASE SAVEPOINT row")
+                            # Per-row content error: mark sentinel so this row is skipped next run.
+                            cursor.execute(
+                                "UPDATE branches SET embedding_version = ? WHERE id = ?",
+                                (CONTENT_ERROR_VERSION, branch_id),
+                            )
+                            logger.error("Backfill embeddings: branch %s failed: %s", branch_id, e)
+                except Exception as e:
+                    # Infra/session failure (e.g. ONNX session crash, sqlite3.Error on
+                    # fetch_branch_messages, OOM): abort without marking the content-error
+                    # sentinel. Any committed partial state (a pre-delete + cleared watermark
+                    # from an interrupted row) is recovered by the heal clause / watermark-
+                    # stale predicate on the next run; affected rows stay eligible.
+                    logger.error("Backfill embeddings: session failure, aborting: %s", e)
+                    conn.commit()
+                    return EXIT_ABORT
+
+                conn.commit()
+
+                # Progress: cadence-gated, with elapsed + ETA for unattended runs.
+                if total_updated - last_progress >= progress_every:
+                    elapsed = time.monotonic() - started
+                    remaining = max(0, total_eligible - total_updated)
+                    rate = total_updated / elapsed if elapsed > 0 else 0.0
+                    eta = format_duration(remaining / rate) if rate > 0 else "?"
+                    msg = (
+                        f"{total_inferences} exchanges embedded across "
+                        f"{total_updated}/{total_eligible} branches, "
+                        f"{remaining} remaining, "
+                        f"{format_duration(elapsed)} elapsed, ETA {eta}"
                     )
-                    # embed_branch_chunks RAISES on failure — content errors
-                    # (ValueError/OverflowError/UnicodeError) are caught below and
-                    # marked once; infra errors propagate to the outer except.
-                    # max_embeds=None: backfill is off the hot path and must fully
-                    # embed each branch in one pass. With the write-path cap, a
-                    # branch longer than the cap would stay eligible and trip the
-                    # no-progress guard on re-selection. The return value is the
-                    # actual inference count (exchanges embedded), so total_inferences
-                    # excludes already-current chunks the pre-delete preserved.
-                    embedded = embed_branch_chunks(
-                        cursor, branch_id, branch_msgs, is_active=True, vec_writable=True, max_embeds=None
-                    )
-                    cursor.execute("RELEASE SAVEPOINT row")
-                    total_updated += 1
-                    total_inferences += embedded
-                except (ValueError, OverflowError, UnicodeError) as e:
-                    cursor.execute("ROLLBACK TO SAVEPOINT row")
-                    cursor.execute("RELEASE SAVEPOINT row")
-                    # Per-row content error: mark sentinel so this row is skipped next run.
-                    cursor.execute(
-                        "UPDATE branches SET embedding_version = ? WHERE id = ?",
-                        (CONTENT_ERROR_VERSION, branch_id),
-                    )
-                    logger.error("Backfill embeddings: branch %s failed: %s", branch_id, e)
-        except Exception as e:
-            # Infra/session failure (e.g. ONNX session crash, sqlite3.Error on
-            # fetch_branch_messages, OOM): abort without marking the content-error
-            # sentinel. Any committed partial state (a pre-delete + cleared watermark
-            # from an interrupted row) is recovered by the heal clause / watermark-
-            # stale predicate on the next run; affected rows stay eligible.
-            logger.error("Backfill embeddings: session failure, aborting: %s", e)
-            conn.commit()
-            conn.close()
-            return EXIT_ABORT
+                    logger.info("Backfill embeddings: %s", msg)
+                    print(f"ccrecall backfill embeddings: {msg}", file=sys.stderr)
+                    last_progress = total_updated
 
-        conn.commit()
+                time.sleep(BACKFILL_BATCH_DELAY_SECONDS)
+    except (sqlite3.Error, OSError) as e:
+        logger.error("Backfill embeddings: aborted: %s", e)
+        print(
+            f"ccrecall backfill embeddings: aborted: {e}",
+            file=sys.stderr,
+        )
+        return EXIT_ABORT
 
-        # Progress: cadence-gated, with elapsed + ETA for unattended runs.
-        if total_updated - last_progress >= progress_every:
-            elapsed = time.monotonic() - started
-            remaining = max(0, total_eligible - total_updated)
-            rate = total_updated / elapsed if elapsed > 0 else 0.0
-            eta = format_duration(remaining / rate) if rate > 0 else "?"
-            msg = (
-                f"{total_inferences} exchanges embedded across "
-                f"{total_updated}/{total_eligible} branches, "
-                f"{remaining} remaining, "
-                f"{format_duration(elapsed)} elapsed, ETA {eta}"
-            )
-            logger.info("Backfill embeddings: %s", msg)
-            print(f"ccrecall backfill embeddings: {msg}", file=sys.stderr)
-            last_progress = total_updated
-
-        time.sleep(BACKFILL_BATCH_DELAY_SECONDS)
-
-    conn.close()
     elapsed = time.monotonic() - started
     remaining = max(0, total_eligible - total_updated)
     logger.info(

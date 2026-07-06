@@ -1,6 +1,6 @@
 """ccrecall recent invariant: output unaffected by embedding columns/tables.
 
-recent_chats uses get_db_connection with load_vec=False and performs no query
+recent_chats uses get_connection with load_vec=False and performs no query
 or fusion. The invariant is that get_recent_sessions produces identical results
 on a fixture DB regardless of whether embedding columns (embedding_version,
 embedding_model, summary_version_at_embed) and the branch_vec virtual table

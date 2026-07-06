@@ -9,11 +9,11 @@ import sqlite3
 import sys
 from pathlib import Path
 
+from ccrecall.config import DEFAULT_DB_PATH
 from ccrecall.db import (
-    DEFAULT_DB_PATH,
     escape_like,
     fetch_branch_messages,
-    get_db_connection,
+    get_connection,
     parse_project_filter,
     resolve_db_settings,
 )
@@ -181,20 +181,19 @@ def run(
 
     try:
         settings = resolve_db_settings(db)
-        conn = get_db_connection(settings)
-        sessions = get_recent_sessions(
-            conn,
-            n=n,
-            sort_order=sort_order,
-            before=before,
-            after=after,
-            projects=projects,
-            session_id=session,
-            path=path,
-            verbose=verbose,
-            include_notifications=include_notifications,
-        )
-        conn.close()
+        with get_connection(settings) as conn:
+            sessions = get_recent_sessions(
+                conn,
+                n=n,
+                sort_order=sort_order,
+                before=before,
+                after=after,
+                projects=projects,
+                session_id=session,
+                path=path,
+                verbose=verbose,
+                include_notifications=include_notifications,
+            )
 
         if output_format == "json":
             print(format_json_sessions(sessions))

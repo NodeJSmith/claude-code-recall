@@ -2,6 +2,10 @@
 
 import json
 import sqlite3
+import subprocess
+import sys
+import threading
+import time
 from typing import ClassVar
 from unittest.mock import patch
 
@@ -9,21 +13,22 @@ import pytest
 import sqlite_vec
 from conftest import make_vec_conn
 
+import ccrecall.config as config_module
 import ccrecall.db as db_module
-from ccrecall.db import (
-    CURRENT_ONBOARDING_VERSION,
+from ccrecall.config import (
     DEFAULT_SETTINGS,
     atomic_write_json,
-    fetch_branch_messages,
-    get_db_connection,
     load_config,
     load_settings,
     log_hook_exception,
+)
+from ccrecall.db import (
+    fetch_branch_messages,
+    get_connection,
     vec_available,
 )
 from ccrecall.embeddings import EMBEDDING_DIM, EMBEDDING_MODEL, EMBEDDING_VERSION
-from ccrecall.schema import SCHEMA, detect_fts_support
-from ccrecall.token_schema import ensure_schema as token_ensure_schema
+from ccrecall.schema import SCHEMA, SCHEMA_CORE, SCHEMA_FTS5, detect_fts_support
 
 
 class TestSchemaCreation:
@@ -42,11 +47,12 @@ class TestSchemaCreation:
         assert expected.issubset(tables)
 
     def test_fts_tables_exist(self, memory_db):
+        """messages_fts was removed as a dead index; branches_fts is the live keyword index."""
         cursor = memory_db.cursor()
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE '%_fts%'")
         fts_tables = {row[0] for row in cursor.fetchall()}
-        assert "messages_fts" in fts_tables
         assert "branches_fts" in fts_tables
+        assert "messages_fts" not in fts_tables
 
     def test_schema_idempotent(self, memory_db):
         """Applying schema twice should not raise."""
@@ -72,7 +78,7 @@ class TestSchemaCreation:
 class TestLoadSettings:
     def test_always_returns_defaults(self, tmp_path, monkeypatch):
         """load_settings returns hardcoded defaults when no config file exists."""
-        monkeypatch.setattr(db_module, "CONFIG_PATH", tmp_path / "no_config.json")
+        monkeypatch.setattr(config_module, "CONFIG_PATH", tmp_path / "no_config.json")
         settings = load_settings()
         assert settings == DEFAULT_SETTINGS
 
@@ -99,7 +105,7 @@ class TestLoadConfig:
         """A well-formed JSON object is returned as-is."""
         cfg = tmp_path / "config.json"
         cfg.write_text(json.dumps({"auto_inject_context": False, "onboarding_completed": True}))
-        monkeypatch.setattr("ccrecall.db.CONFIG_PATH", cfg)
+        monkeypatch.setattr("ccrecall.config.CONFIG_PATH", cfg)
 
         result = load_config()
         assert result == {"auto_inject_context": False, "onboarding_completed": True}
@@ -108,7 +114,7 @@ class TestLoadConfig:
         """A JSON array (not a dict) must return {} — prevents callers from crashing on .get()."""
         cfg = tmp_path / "config.json"
         cfg.write_text(json.dumps([1, 2, 3]))
-        monkeypatch.setattr("ccrecall.db.CONFIG_PATH", cfg)
+        monkeypatch.setattr("ccrecall.config.CONFIG_PATH", cfg)
 
         assert load_config() == {}
 
@@ -116,7 +122,7 @@ class TestLoadConfig:
         """A JSON string must return {} — not a dict, should not propagate."""
         cfg = tmp_path / "config.json"
         cfg.write_text(json.dumps("hello"))
-        monkeypatch.setattr("ccrecall.db.CONFIG_PATH", cfg)
+        monkeypatch.setattr("ccrecall.config.CONFIG_PATH", cfg)
 
         assert load_config() == {}
 
@@ -124,13 +130,13 @@ class TestLoadConfig:
         """JSON null must return {} — null is not a valid settings container."""
         cfg = tmp_path / "config.json"
         cfg.write_text("null")
-        monkeypatch.setattr("ccrecall.db.CONFIG_PATH", cfg)
+        monkeypatch.setattr("ccrecall.config.CONFIG_PATH", cfg)
 
         assert load_config() == {}
 
     def test_returns_empty_dict_for_missing_file(self, tmp_path, monkeypatch):
         """Missing config file returns {} without raising."""
-        monkeypatch.setattr("ccrecall.db.CONFIG_PATH", tmp_path / "nonexistent.json")
+        monkeypatch.setattr("ccrecall.config.CONFIG_PATH", tmp_path / "nonexistent.json")
 
         assert load_config() == {}
 
@@ -138,7 +144,7 @@ class TestLoadConfig:
         """Corrupt JSON returns {} without raising."""
         cfg = tmp_path / "config.json"
         cfg.write_text("{bad json}")
-        monkeypatch.setattr("ccrecall.db.CONFIG_PATH", cfg)
+        monkeypatch.setattr("ccrecall.config.CONFIG_PATH", cfg)
 
         assert load_config() == {}
 
@@ -146,9 +152,9 @@ class TestLoadConfig:
         """A non-OSError/ValueError (a real bug) must surface, not be masked as {} (issue #10)."""
         cfg = tmp_path / "config.json"
         cfg.write_text("{}")
-        monkeypatch.setattr("ccrecall.db.CONFIG_PATH", cfg)
+        monkeypatch.setattr("ccrecall.config.CONFIG_PATH", cfg)
 
-        with patch("ccrecall.db.json.loads", side_effect=TypeError("boom")), pytest.raises(TypeError):
+        with patch("ccrecall.config.json.loads", side_effect=TypeError("boom")), pytest.raises(TypeError):
             load_config()
 
 
@@ -164,7 +170,7 @@ class TestLogHookException:
 
     def test_does_not_raise_when_logging_setup_fails(self):
         """Even if logging setup itself raises, the helper suppresses it and returns."""
-        with patch("ccrecall.db.setup_logging", side_effect=RuntimeError("broke")):
+        with patch("ccrecall.config.setup_logging", side_effect=RuntimeError("broke")):
             try:
                 raise ValueError("boom")
             except ValueError:
@@ -202,7 +208,7 @@ class TestLoadSettingsWithConfig:
         """load_settings() returns DEFAULT_SETTINGS when config.json is a JSON array."""
         cfg = tmp_path / "config.json"
         cfg.write_text(json.dumps([]))
-        monkeypatch.setattr("ccrecall.db.CONFIG_PATH", cfg)
+        monkeypatch.setattr("ccrecall.config.CONFIG_PATH", cfg)
 
         result = load_settings()
         assert result == DEFAULT_SETTINGS
@@ -211,7 +217,7 @@ class TestLoadSettingsWithConfig:
         """Valid config keys are merged into defaults."""
         cfg = tmp_path / "config.json"
         cfg.write_text(json.dumps({"auto_inject_context": False, "max_context_sessions": 5}))
-        monkeypatch.setattr("ccrecall.db.CONFIG_PATH", cfg)
+        monkeypatch.setattr("ccrecall.config.CONFIG_PATH", cfg)
 
         result = load_settings()
         assert result["auto_inject_context"] is False
@@ -222,7 +228,7 @@ class TestLoadSettingsWithConfig:
         """The snooze window changes when alert_snooze_hours is set in config;
         the 24h default applies when the key is absent."""
         cfg = tmp_path / "config.json"
-        monkeypatch.setattr("ccrecall.db.CONFIG_PATH", cfg)
+        monkeypatch.setattr("ccrecall.config.CONFIG_PATH", cfg)
 
         # Absent → default of 24 applies.
         cfg.write_text(json.dumps({"auto_inject_context": True}))
@@ -236,7 +242,7 @@ class TestLoadSettingsWithConfig:
         """logging_enabled and exclude_projects are user-overridable from config.json."""
         cfg = tmp_path / "config.json"
         cfg.write_text(json.dumps({"logging_enabled": False, "exclude_projects": ["work-secret"]}))
-        monkeypatch.setattr("ccrecall.db.CONFIG_PATH", cfg)
+        monkeypatch.setattr("ccrecall.config.CONFIG_PATH", cfg)
 
         result = load_settings()
         assert result["logging_enabled"] is False
@@ -244,18 +250,10 @@ class TestLoadSettingsWithConfig:
 
     def test_missing_config_returns_defaults(self, tmp_path, monkeypatch):
         """load_settings() returns DEFAULT_SETTINGS when config.json does not exist."""
-        monkeypatch.setattr("ccrecall.db.CONFIG_PATH", tmp_path / "nonexistent.json")
+        monkeypatch.setattr("ccrecall.config.CONFIG_PATH", tmp_path / "nonexistent.json")
 
         result = load_settings()
         assert result == DEFAULT_SETTINGS
-
-
-class TestCurrentOnboardingVersion:
-    """Import contract: CURRENT_ONBOARDING_VERSION must exist and equal 1."""
-
-    def test_value_is_one(self):
-        """Both write_config and onboarding.py depend on this being 1."""
-        assert CURRENT_ONBOARDING_VERSION == 1
 
 
 # vec schema, columns, trigger, vec_available, load_vec
@@ -451,75 +449,395 @@ class TestVecSchema:
 
 
 class TestLoadVecParameter:
-    """get_db_connection(load_vec=...) parameter behavior."""
+    """get_connection(load_vec=...) parameter behavior."""
 
     def test_default_connection_initializes_cleanly(self, tmp_path, monkeypatch):
-        """get_db_connection() with default load_vec=False returns a working connection."""
+        """get_connection() with default load_vec=False returns a working connection."""
         db_file = tmp_path / "conversations.db"
-        monkeypatch.setattr(db_module, "DEFAULT_DB_PATH", db_file)
+        monkeypatch.setattr(config_module, "DEFAULT_DB_PATH", db_file)
 
-        conn = get_db_connection()
-        # Core tables must exist
-        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
-        assert "branches" in tables
-        assert "sessions" in tables
+        with get_connection() as conn:
+            # Core tables must exist
+            tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+            assert "branches" in tables
+            assert "sessions" in tables
 
-        # Three new columns must exist
-        cols = {row[1] for row in conn.execute("PRAGMA table_info(branches)").fetchall()}
-        assert "embedding_version" in cols
-        assert "embedding_model" in cols
-        assert "summary_version_at_embed" in cols
-        conn.close()
+            # Three new columns must exist
+            cols = {row[1] for row in conn.execute("PRAGMA table_info(branches)").fetchall()}
+            assert "embedding_version" in cols
+            assert "embedding_model" in cols
+            assert "summary_version_at_embed" in cols
 
     @pytest.mark.skipif(not _VEC_AVAILABLE, reason="sqlite-vec not available in this environment")
     def test_load_vec_true_allows_chunk_vec_query(self, tmp_path, monkeypatch):
-        """get_db_connection(load_vec=True) returns a connection that can query chunk_vec."""
+        """get_connection(load_vec=True) returns a connection that can query chunk_vec."""
         db_file = tmp_path / "conversations.db"
-        monkeypatch.setattr(db_module, "DEFAULT_DB_PATH", db_file)
+        monkeypatch.setattr(config_module, "DEFAULT_DB_PATH", db_file)
 
-        conn = get_db_connection(load_vec=True)
-        # chunk_vec must be queryable (extension loaded, branch_vec absent by teardown)
-        count = conn.execute("SELECT COUNT(*) FROM chunk_vec").fetchone()[0]
-        assert count == 0
-        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
-        assert "branch_vec" not in tables, "branch_vec must be absent after T06 teardown"
-        conn.close()
+        with get_connection(load_vec=True) as conn:
+            # chunk_vec must be queryable (extension loaded, branch_vec absent by teardown)
+            count = conn.execute("SELECT COUNT(*) FROM chunk_vec").fetchone()[0]
+            assert count == 0
+            tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+            assert "branch_vec" not in tables, "branch_vec must be absent after T06 teardown"
 
     def test_load_vec_false_default_does_not_require_extension(self, tmp_path, monkeypatch):
-        """get_db_connection() default path works even on machines where vec is unavailable.
+        """get_connection() default path works even on machines where vec is unavailable.
 
         This test always passes — it verifies the non-load_vec path does not
         touch branch_vec in a way that would require the extension.
         """
         db_file = tmp_path / "conversations.db"
-        monkeypatch.setattr(db_module, "DEFAULT_DB_PATH", db_file)
+        monkeypatch.setattr(config_module, "DEFAULT_DB_PATH", db_file)
 
-        conn = get_db_connection()
-        # Must be able to read branches without touching branch_vec
-        count = conn.execute("SELECT COUNT(*) FROM branches").fetchone()[0]
-        assert count == 0
-        conn.close()
+        with get_connection() as conn:
+            # Must be able to read branches without touching branch_vec
+            count = conn.execute("SELECT COUNT(*) FROM branches").fetchone()[0]
+            assert count == 0
+
+
+class TestGetConnectionContextManager:
+    """get_connection() as a context manager — commit-on-success, rollback/close-on-exception."""
+
+    def test_connection_closed_on_exception(self, tmp_path):
+        """A connection opened via get_connection() is closed even when the with-block raises.
+
+        Characterizes the sync_current.py leak this context manager fixes: the
+        old raw-connection pattern left the connection open (and any
+        in-progress write uncommitted) whenever the caller's work raised before
+        reaching an explicit conn.close(). get_connection() must close on every
+        exit path, exception included.
+        """
+        db_path = tmp_path / "test.db"
+        conn_holder: dict = {}
+
+        def _raise_inside_with():
+            with get_connection({"db_path": str(db_path)}) as conn:
+                conn_holder["conn"] = conn
+                conn.execute("SELECT 1")
+                raise ValueError("simulate failure")
+
+        with pytest.raises(ValueError, match="simulate failure"):
+            _raise_inside_with()
+
+        with pytest.raises(sqlite3.ProgrammingError):
+            conn_holder["conn"].execute("SELECT 1")
+
+    def test_connection_closed_on_success(self, tmp_path):
+        """A connection opened via get_connection() is committed and closed on normal exit."""
+        db_path = tmp_path / "test.db"
+        with get_connection({"db_path": str(db_path)}) as conn:
+            conn.execute("SELECT 1")
+        with pytest.raises(sqlite3.ProgrammingError):
+            conn.execute("SELECT 1")
+
+
+def _seed_v0_db_with_dead_branches(db_path) -> None:
+    """Build a pre-migration (v0) conversation DB matching a real upgrade DB's shape.
+
+    Uses SCHEMA_CORE plus the FTS5 schema as it looked before this migration
+    (messages_fts and its messages_ai/ad/au triggers — since removed from
+    schema.py but still present on disk for anyone upgrading from before this
+    change). Seeds one active and one inactive ("churn") branch for the same
+    session, each wired to a branch_messages row and a chunks row — the exact
+    shape the v1 migration must delete, and the exact shape the old
+    UNIQUE(session_id, leaf_uuid) constraint used to allow that the new
+    UNIQUE(session_id) constraint no longer does.
+    """
+    pre_migration_fts5 = (
+        """
+        CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+          content, content=messages, content_rowid=id, tokenize='porter unicode61'
+        );
+        CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
+          INSERT INTO messages_fts(rowid, content) VALUES (new.id, new.content);
+        END;
+        CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
+          INSERT INTO messages_fts(messages_fts, rowid, content) VALUES('delete', old.id, old.content);
+        END;
+        CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
+          INSERT INTO messages_fts(messages_fts, rowid, content) VALUES('delete', old.id, old.content);
+          INSERT INTO messages_fts(rowid, content) VALUES (new.id, new.content);
+        END;
+        """
+        + SCHEMA_FTS5
+    )
+
+    conn = sqlite3.connect(db_path)
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.executescript(SCHEMA_CORE)
+    conn.executescript(pre_migration_fts5)
+    conn.commit()
+
+    conn.execute("INSERT INTO projects (path, key, name) VALUES ('/p-v0', '-p-v0', 'p-v0')")
+    proj_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    conn.execute("INSERT INTO sessions (uuid, project_id) VALUES ('sess-v0', ?)", (proj_id,))
+    sess_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+    conn.execute("INSERT INTO branches (session_id, leaf_uuid, is_active) VALUES (?, 'leaf-active', 1)", (sess_id,))
+    active_branch_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    conn.execute("INSERT INTO branches (session_id, leaf_uuid, is_active) VALUES (?, 'leaf-churn', 0)", (sess_id,))
+    inactive_branch_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+    conn.execute(
+        "INSERT INTO messages (session_id, uuid, role, content) VALUES (?, 'msg-v0', 'user', 'hi')", (sess_id,)
+    )
+    msg_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+    conn.execute("INSERT INTO branch_messages (branch_id, message_id) VALUES (?, ?)", (active_branch_id, msg_id))
+    conn.execute("INSERT INTO branch_messages (branch_id, message_id) VALUES (?, ?)", (inactive_branch_id, msg_id))
+
+    conn.execute(
+        "INSERT INTO chunks (branch_id, exchange_index, content_hash) VALUES (?, 0, 'hash-active')",
+        (active_branch_id,),
+    )
+    conn.execute(
+        "INSERT INTO chunks (branch_id, exchange_index, content_hash) VALUES (?, 0, 'hash-inactive')",
+        (inactive_branch_id,),
+    )
+
+    conn.commit()
+    conn.close()
+
+
+def _seed_v0_db_with_dead_branch_chunk_vec(db_path) -> None:
+    """Extend _seed_v0_db_with_dead_branches with a real vec-loaded chunk_vec row.
+
+    Mirrors production usage: an embedding write connection (load_vec=True)
+    creates chunk_vec and its cascade triggers (branches_chunks_ad,
+    chunks_vec_ad) and writes a real vector for the dead branch's chunk. Those
+    triggers persist on disk regardless of which connection created them, so a
+    later non-vec connection (load_vec=False — the mainline path for most CLI
+    commands and non-embedding hooks) reopening this DB must still purge the
+    dead branch/chunk/chunk_vec rows correctly instead of crashing with
+    "no such module: vec0" when the purge's DELETE fires the cascade.
+    """
+    _seed_v0_db_with_dead_branches(db_path)
+
+    conn = sqlite3.connect(db_path)
+    conn.enable_load_extension(True)
+    sqlite_vec.load(conn)
+    conn.enable_load_extension(False)
+    conn.execute(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS chunk_vec"
+        f" USING vec0(chunk_id INTEGER PRIMARY KEY, embedding float[{EMBEDDING_DIM}])"
+    )
+    conn.execute(
+        "CREATE TRIGGER IF NOT EXISTS branches_chunks_ad"
+        " AFTER DELETE ON branches"
+        " BEGIN DELETE FROM chunks WHERE branch_id = OLD.id; END"
+    )
+    conn.execute(
+        "CREATE TRIGGER IF NOT EXISTS chunks_vec_ad"
+        " AFTER DELETE ON chunks"
+        " BEGIN DELETE FROM chunk_vec WHERE chunk_id = OLD.id; END"
+    )
+    inactive_chunk_id = conn.execute("SELECT id FROM chunks WHERE content_hash = 'hash-inactive'").fetchone()[0]
+    conn.execute(
+        "INSERT INTO chunk_vec(chunk_id, embedding) VALUES (?, ?)",
+        (inactive_chunk_id, sqlite_vec.serialize_float32([0.1] * EMBEDDING_DIM)),
+    )
+    conn.commit()
+    conn.close()
+
+
+class TestSchemaVersioning:
+    """PRAGMA user_version schema versioning and the v1 dead-branch migration."""
+
+    def test_fresh_db_user_version_matches_schema_version(self, tmp_path):
+        """A freshly created DB is stamped with SCHEMA_VERSION on first connection."""
+        db_path = tmp_path / "fresh.db"
+        with get_connection(settings={"db_path": str(db_path)}) as conn:
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == db_module.SCHEMA_VERSION
+
+    def test_migration_from_v0_purges_dead_branches_and_rebuilds(self, tmp_path):
+        """A v0 DB seeded with a churn (inactive) branch row is cleaned on first connection.
+
+        Covers dead branch rows purged in FK-safe order, messages_fts dropped
+        while branches_fts is preserved and still trigger-synced, and the
+        UNIQUE(session_id, leaf_uuid) -> UNIQUE(session_id) constraint change
+        from the branches table rebuild.
+        """
+        db_path = tmp_path / "legacy.db"
+        _seed_v0_db_with_dead_branches(db_path)
+
+        with get_connection(settings={"db_path": str(db_path)}) as conn:
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == db_module.SCHEMA_VERSION
+
+            assert conn.execute("SELECT COUNT(*) FROM branches WHERE is_active = 0").fetchone()[0] == 0
+            assert conn.execute("SELECT COUNT(*) FROM branches WHERE is_active = 1").fetchone()[0] == 1
+            assert conn.execute("SELECT COUNT(*) FROM branch_messages").fetchone()[0] == 1
+            assert conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0] == 1
+
+            tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+            assert "messages_fts" not in tables
+            assert "branches_fts" in tables
+
+            # branches_fts sync triggers were re-created after the rebuild — an
+            # UPDATE must still land in the FTS index.
+            conn.execute("UPDATE branches SET aggregated_content = 'hello world' WHERE is_active = 1")
+            match = conn.execute("SELECT rowid FROM branches_fts WHERE branches_fts MATCH 'hello'").fetchall()
+            assert len(match) == 1
+
+            # UNIQUE(session_id) now rejects a second row for the same session —
+            # the old UNIQUE(session_id, leaf_uuid) would have allowed this.
+            sess_id = conn.execute("SELECT session_id FROM branches WHERE is_active = 1").fetchone()[0]
+            with pytest.raises(sqlite3.IntegrityError, match="UNIQUE constraint failed"):
+                conn.execute(
+                    "INSERT INTO branches (session_id, leaf_uuid, is_active) VALUES (?, 'dup-leaf', 1)",
+                    (sess_id,),
+                )
+
+            assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+
+    @pytest.mark.skipif(not _VEC_AVAILABLE, reason="sqlite-vec not available in this environment")
+    def test_migration_purges_orphaned_chunk_vec_without_crashing(self, tmp_path):
+        """The mainline load_vec=False migration path must not crash on a real upgrade DB.
+
+        Regression test for a reproduced CRITICAL bug: a DB that already has a
+        vec-loaded chunk_vec row + chunks_vec_ad cascade trigger for a dead
+        branch's chunk (the exact population the v1 migration exists to purge)
+        used to raise `sqlite3.OperationalError: no such module: vec0` the
+        first time a non-vec connection (get_connection's default,
+        load_vec=False — most CLI commands and non-embedding hooks) reopened
+        it, because the purge's DELETE fired the on-disk cascade trigger
+        without vec0 registered on that connection.
+        """
+        db_path = tmp_path / "legacy_with_vec.db"
+        _seed_v0_db_with_dead_branch_chunk_vec(db_path)
+
+        with get_connection(settings={"db_path": str(db_path)}, load_vec=False) as conn:
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == db_module.SCHEMA_VERSION
+            assert conn.execute("SELECT COUNT(*) FROM branches WHERE is_active = 0").fetchone()[0] == 0
+            assert conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0] == 1
+            # The dead chunk's chunk_vec row is orphaned by the purge — it must
+            # be cleaned up too, not just left dangling or erroring.
+            assert conn.execute("SELECT COUNT(*) FROM chunk_vec").fetchone()[0] == 0
+
+    def test_migration_is_reentrant(self, tmp_path):
+        """Re-running the migration (a second get_connection call) is a no-op."""
+        db_path = tmp_path / "legacy_reentrant.db"
+        _seed_v0_db_with_dead_branches(db_path)
+
+        with get_connection(settings={"db_path": str(db_path)}) as conn:
+            first_version = conn.execute("PRAGMA user_version").fetchone()[0]
+            first_active = conn.execute("SELECT COUNT(*) FROM branches WHERE is_active = 1").fetchone()[0]
+
+        with get_connection(settings={"db_path": str(db_path)}) as conn:
+            second_version = conn.execute("PRAGMA user_version").fetchone()[0]
+            second_active = conn.execute("SELECT COUNT(*) FROM branches WHERE is_active = 1").fetchone()[0]
+
+        assert first_version == second_version == db_module.SCHEMA_VERSION
+        assert first_active == second_active == 1
+
+    def test_migration_toctou_race_runs_migration_once(self, tmp_path):
+        """Two connections racing to open the same v0 DB must not both migrate.
+
+        Regression test for a reproduced TOCTOU: the pre-fix code read
+        `PRAGMA user_version` once *before* acquiring BEGIN IMMEDIATE, so a
+        second connection blocked waiting for the write lock would still act
+        on that stale, unmigrated read once the lock was granted — re-running
+        _migrate_to_v1 after the first connection had already committed the
+        migration. The fix (db.py:389-390) re-reads user_version under the
+        lock before deciding whether to migrate. This test forces the race
+        with an artificial delay inside a patched _migrate_to_v1 and asserts
+        it runs exactly once even when two threads open the same v0 DB
+        concurrently.
+        """
+        db_path = tmp_path / "legacy_race.db"
+        _seed_v0_db_with_dead_branches(db_path)
+
+        # Stamp the file as WAL up front so both threads' own journal_mode=WAL
+        # pragma (in apply_base_pragmas) is a same-mode no-op rather than a
+        # second, unrelated lock race over the mode switch itself — this test
+        # targets the user_version re-read race in _apply_migrations, not
+        # first-time WAL conversion.
+        warmup = sqlite3.connect(db_path)
+        db_module.apply_base_pragmas(warmup)
+        warmup.close()
+
+        call_count = 0
+        count_lock = threading.Lock()
+        original_migrate = db_module._migrate_to_v1
+
+        def slow_migrate(conn):
+            nonlocal call_count
+            with count_lock:
+                call_count += 1
+            time.sleep(0.2)
+            original_migrate(conn)
+
+        barrier = threading.Barrier(2)
+        errors: list[Exception] = []
+
+        def open_connection():
+            try:
+                barrier.wait()
+                with get_connection(settings={"db_path": str(db_path)}) as conn:
+                    conn.execute("SELECT 1")
+            except Exception as exc:
+                errors.append(exc)
+
+        with patch.object(db_module, "_migrate_to_v1", side_effect=slow_migrate):
+            threads = [threading.Thread(target=open_connection) for _ in range(2)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=5)
+
+        assert not errors, f"unexpected errors in racing threads: {errors}"
+        assert call_count == 1
+
+    @pytest.mark.skipif(not _VEC_AVAILABLE, reason="sqlite-vec not available in this environment")
+    def test_vec_self_heal_runs_outside_version_gate(self, tmp_path):
+        """_ensure_vec_schema's self-heal runs on every vec-loaded connection, not just when migrating.
+
+        Once a DB is already at SCHEMA_VERSION, _apply_migrations is a no-op on
+        every later connection. Dropping chunk_vec directly (bypassing
+        get_connection) after the first vec-loaded connection simulates the
+        kind of drift _ensure_vec_schema heals (e.g. a stale embedding
+        dimension). A second vec-loaded connection must still recreate it even
+        though no migration ran — proving the self-heal isn't gated by the
+        version check.
+        """
+        db_path = tmp_path / "selfheal.db"
+        with get_connection(settings={"db_path": str(db_path)}, load_vec=True) as conn:
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == db_module.SCHEMA_VERSION
+            assert db_module.chunk_vec_queryable(conn)
+
+        raw = sqlite3.connect(db_path)
+        raw.enable_load_extension(True)
+        sqlite_vec.load(raw)
+        raw.enable_load_extension(False)
+        raw.execute("DROP TABLE chunk_vec")
+        raw.commit()
+        raw.close()
+
+        with get_connection(settings={"db_path": str(db_path)}, load_vec=True) as conn:
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == db_module.SCHEMA_VERSION
+            assert db_module.chunk_vec_queryable(conn), "chunk_vec must be re-created by the self-heal, not migration"
 
 
 class TestSchemaEquivalencePin:
     """Characterization pin — guards the migrations squash to v6 baseline.
 
     This pin captures the schema a fresh conversation DB produces via the
-    production get_db_connection path and asserts it matches an inline expected
+    production get_connection path and asserts it matches an inline expected
     literal.  SCHEMA_CORE now carries the embedding DDL and migrations.py is gone,
     so a fresh DB matches this snapshot exactly — the schema is the v6 baseline
     minus the intentionally-removed token_snapshots table.
 
     Exclusion rule: we exclude from the snapshot any table whose name contains
     '_fts_' (those are FTS5 shadow tables auto-created alongside the virtual FTS
-    tables — e.g. messages_fts_data, branches_fts_idx) plus token_snapshots (owned
-    solely by token_schema.py; the conversation DB no longer creates it) and
-    sqlite_* internals.  The FTS virtual tables themselves (messages_fts,
-    branches_fts) do NOT contain '_fts_' so they ARE included.
+    tables — e.g. branches_fts_idx) and sqlite_* internals.  The FTS virtual
+    table itself (branches_fts) does NOT contain '_fts_' so it IS included.
+    messages_fts is gone entirely (dropped by the
+    version-1 migration and removed from schema.py) so it is absent from both
+    the table set and the exclusion rule.
     """
 
     # Expected schema captured from the production SCHEMA_CORE + SCHEMA_FTS5 output.
-    # token_snapshots is intentionally absent — SCHEMA_CORE and get_db_connection no
+    # token_snapshots is intentionally absent — SCHEMA_CORE and get_connection no
     # longer create it; the exclusion clause keeps this literal stable on legacy DBs
     # that still carry the table.
     EXPECTED_TABLES: ClassVar[list[str]] = [
@@ -529,7 +847,6 @@ class TestSchemaEquivalencePin:
         "chunks",
         "import_log",
         "messages",
-        "messages_fts",
         "projects",
         "sessions",
     ]
@@ -597,9 +914,6 @@ class TestSchemaEquivalencePin:
             (10, "is_notification", "INTEGER", 0, "0", 0),
             (11, "origin", "TEXT", 0, None, 0),
         ],
-        "messages_fts": [
-            (0, "content", "", 0, None, 0),
-        ],
         "projects": [
             (0, "id", "INTEGER", 0, None, 1),
             (1, "path", "TEXT", 1, None, 0),
@@ -639,52 +953,51 @@ class TestSchemaEquivalencePin:
         Only runs when FTS5 is available — mirrors how other test_db.py tests
         guard FTS-specific assertions via detect_fts_support.
         """
-        conn = get_db_connection(settings={"db_path": str(tmp_path / "conv.db")})
-        fts = detect_fts_support(conn)
-        if fts != "fts5":
-            pytest.skip("FTS5 not available in this SQLite build")
+        with get_connection(settings={"db_path": str(tmp_path / "conv.db")}) as conn:
+            fts = detect_fts_support(conn)
+            if fts != "fts5":
+                pytest.skip("FTS5 not available in this SQLite build")
 
-        cursor = conn.cursor()
+            cursor = conn.cursor()
 
-        # Tables: exclude token_snapshots, sqlite_* internals, and FTS shadow tables
-        # (shadow tables contain '_fts_' in their name, e.g. messages_fts_data).
-        # The FTS virtual tables (messages_fts, branches_fts) do NOT match '_fts_%'
-        # so they are correctly included.
-        cursor.execute("""
-            SELECT name FROM sqlite_master
-            WHERE type='table'
-            AND name NOT LIKE 'sqlite_%'
-            AND name != 'token_snapshots'
-            AND name NOT LIKE '%_fts_%'
-            ORDER BY name
-        """)
-        actual_tables = [row[0] for row in cursor.fetchall()]
-        assert actual_tables == self.EXPECTED_TABLES, (
-            f"Table set mismatch.\nExpected: {self.EXPECTED_TABLES}\nActual:   {actual_tables}"
-        )
-
-        # Per-table column info (preserves column order)
-        for tbl in actual_tables:
-            cursor.execute(f"PRAGMA table_info({tbl})")
-            actual_cols = [tuple(row) for row in cursor.fetchall()]
-            assert actual_cols == self.EXPECTED_COLUMNS[tbl], (
-                f"Column mismatch for table '{tbl}'.\nExpected: {self.EXPECTED_COLUMNS[tbl]}\nActual:   {actual_cols}"
+            # Tables: exclude token_snapshots, sqlite_* internals, and FTS shadow tables
+            # (shadow tables contain '_fts_' in their name, e.g. branches_fts_idx).
+            # The branches_fts virtual table does NOT match '_fts_%' so it is
+            # correctly included. messages_fts no longer exists.
+            cursor.execute("""
+                SELECT name FROM sqlite_master
+                WHERE type='table'
+                AND name NOT LIKE 'sqlite_%'
+                AND name != 'token_snapshots'
+                AND name NOT LIKE '%_fts_%'
+                ORDER BY name
+            """)
+            actual_tables = [row[0] for row in cursor.fetchall()]
+            assert actual_tables == self.EXPECTED_TABLES, (
+                f"Table set mismatch.\nExpected: {self.EXPECTED_TABLES}\nActual:   {actual_tables}"
             )
 
-        # idx_* indexes only (skip sqlite auto-indexes and token_snapshots indexes)
-        cursor.execute("""
-            SELECT name FROM sqlite_master
-            WHERE type='index'
-            AND name LIKE 'idx_%'
-            AND name NOT LIKE 'idx_token_%'
-            ORDER BY name
-        """)
-        actual_indexes = [row[0] for row in cursor.fetchall()]
-        assert actual_indexes == self.EXPECTED_IDX_INDEXES, (
-            f"Index set mismatch.\nExpected: {self.EXPECTED_IDX_INDEXES}\nActual:   {actual_indexes}"
-        )
+            # Per-table column info (preserves column order)
+            for tbl in actual_tables:
+                cursor.execute(f"PRAGMA table_info({tbl})")
+                actual_cols = [tuple(row) for row in cursor.fetchall()]
+                assert actual_cols == self.EXPECTED_COLUMNS[tbl], (
+                    f"Column mismatch for table '{tbl}'.\nExpected: {self.EXPECTED_COLUMNS[tbl]}\n"
+                    f"Actual:   {actual_cols}"
+                )
 
-        conn.close()
+            # idx_* indexes only (skip sqlite auto-indexes and token_snapshots indexes)
+            cursor.execute("""
+                SELECT name FROM sqlite_master
+                WHERE type='index'
+                AND name LIKE 'idx_%'
+                AND name NOT LIKE 'idx_token_%'
+                ORDER BY name
+            """)
+            actual_indexes = [row[0] for row in cursor.fetchall()]
+            assert actual_indexes == self.EXPECTED_IDX_INDEXES, (
+                f"Index set mismatch.\nExpected: {self.EXPECTED_IDX_INDEXES}\nActual:   {actual_indexes}"
+            )
 
 
 class TestEmbeddingDDLInSchema:
@@ -727,33 +1040,11 @@ class TestEmbeddingDDLInSchema:
         conn.close()
 
 
-class TestNoTokenSnapshotsOnConversationDb:
-    """A fresh conversation DB has no token_snapshots; the token DB still gets it via ensure_schema."""
-
-    def test_fresh_conversation_db_has_no_token_snapshots(self, tmp_path, monkeypatch):
-        """get_db_connection on a fresh path must not create token_snapshots."""
-        db_file = tmp_path / "conversations.db"
-        monkeypatch.setattr(db_module, "DEFAULT_DB_PATH", db_file)
-
-        conn = get_db_connection(settings={"db_path": str(db_file)})
-        row = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='token_snapshots'").fetchone()
-        conn.close()
-        assert row is None, "fresh conversation DB must not have token_snapshots table"
-
-    def test_token_db_ensure_schema_still_creates_token_snapshots(self, tmp_path):
-        """token_schema.ensure_schema creates token_snapshots on the token-analytics DB."""
-        conn = sqlite3.connect(str(tmp_path / "tokens.db"))
-        token_ensure_schema(conn)
-        row = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='token_snapshots'").fetchone()
-        conn.close()
-        assert row is not None, "ensure_schema must create token_snapshots on the token-analytics DB"
-
-
 class TestExistingV6DbOpen:
     """Opening a pre-populated v6-style DB succeeds and leaves all rows intact."""
 
-    def test_existing_v6_db_rows_intact_after_get_db_connection(self, tmp_path):
-        """Reopen an existing v6 DB: get_db_connection must not drop or overwrite any table or row."""
+    def test_existing_v6_db_rows_intact_after_get_connection(self, tmp_path):
+        """Reopen an existing v6 DB: get_connection must not drop or overwrite any table or row."""
         db_file = tmp_path / "existing_v6.db"
 
         # Build a DB that looks like an existing v6 conversation DB
@@ -782,41 +1073,16 @@ class TestExistingV6DbOpen:
         )
         setup_conn.commit()
 
-        # Manually create token_snapshots to simulate the inert legacy table that
-        # exists on pre-squash conversation DBs.  SCHEMA no longer creates it; the
-        # test adds it to verify get_db_connection never drops it.
-        setup_conn.execute("""
-            CREATE TABLE token_snapshots (
-                id INTEGER PRIMARY KEY,
-                session_uuid TEXT UNIQUE NOT NULL,
-                input_tokens INTEGER DEFAULT 0
-            )
-        """)
-        setup_conn.execute(
-            "INSERT INTO token_snapshots (session_uuid, input_tokens) VALUES (?, ?)",
-            ("sess-v6-ac4", 42),
-        )
         setup_conn.execute("PRAGMA user_version = 6")
         setup_conn.commit()
         setup_conn.close()
 
-        # Reopen via get_db_connection
-        conn = get_db_connection(settings={"db_path": str(db_file)})
-
-        assert conn.execute("SELECT COUNT(*) FROM projects").fetchone()[0] == 1
-        assert conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 1
-        assert conn.execute("SELECT COUNT(*) FROM branches").fetchone()[0] == 1
-        assert conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 1
-
-        # token_snapshots must still exist and its row must be intact
-        snap_row = conn.execute(
-            "SELECT input_tokens FROM token_snapshots WHERE session_uuid = ?",
-            ("sess-v6-ac4",),
-        ).fetchone()
-        assert snap_row is not None, "token_snapshots table was dropped by get_db_connection"
-        assert snap_row[0] == 42, "token_snapshots row was modified by get_db_connection"
-
-        conn.close()
+        # Reopen via get_connection
+        with get_connection(settings={"db_path": str(db_file)}) as conn:
+            assert conn.execute("SELECT COUNT(*) FROM projects").fetchone()[0] == 1
+            assert conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 1
+            assert conn.execute("SELECT COUNT(*) FROM branches").fetchone()[0] == 1
+            assert conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 1
 
 
 # ── chunk schema and persistence helpers ─────────────────────────────────
@@ -1060,3 +1326,46 @@ class TestFetchBranchMessagesUuid:
         assert len(messages) == 1
         assert "uuid" in messages[0], "fetch_branch_messages must include 'uuid' key in each message dict"
         assert messages[0]["uuid"] == "msg-uuid-test"
+
+
+class TestTransitiveImportIsolation:
+    """config.py, health.py, and hooks/memory_sync.py must stay free of the heavy
+    fastembed/onnxruntime/sqlite_vec stack.
+
+    Each module is imported in a fresh subprocess (not the test process, which
+    has already loaded sqlite_vec via ccrecall.db) so sys.modules reflects only
+    what that one import pulled in.
+    """
+
+    HEAVY_MODULES: ClassVar[str] = "{'fastembed', 'onnxruntime', 'sqlite_vec'}"
+
+    def _assert_no_heavy_imports(self, module_name: str) -> None:
+        code = (
+            f"import {module_name}\n"
+            "import sys\n"
+            f"heavy = {self.HEAVY_MODULES}\n"
+            "found = heavy & set(sys.modules)\n"
+            "assert not found, f'Heavy modules loaded: {found}'\n"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert result.returncode == 0, result.stderr
+
+    def test_config_does_not_import_heavy_deps(self):
+        self._assert_no_heavy_imports("ccrecall.config")
+
+    def test_health_does_not_import_heavy_deps(self):
+        """health.py imports only from config.py, not db.py."""
+        self._assert_no_heavy_imports("ccrecall.health")
+
+    def test_memory_sync_does_not_import_heavy_deps(self):
+        """memory_sync.py imports only from config.py."""
+        self._assert_no_heavy_imports("ccrecall.hooks.memory_sync")
+
+    def test_clear_handoff_does_not_import_heavy_deps(self):
+        """clear_handoff.py imports only from config.py."""
+        self._assert_no_heavy_imports("ccrecall.hooks.clear_handoff")

@@ -191,12 +191,21 @@ def _chunks_for_branch(conn: sqlite3.Connection, branch_id: int) -> list[tuple]:
 class _NoCloseConn:
     """Wrapper that delegates to a sqlite3.Connection but makes close() a no-op.
 
-    run() calls conn.close() at the end; wrapping prevents the test from losing
-    access to the connection after run() returns.
+    Stands in for get_connection() (a @contextlib.contextmanager) in these tests
+    via `patch(..., return_value=_NoCloseConn(conn))`: __enter__/__exit__ let it
+    satisfy `with get_connection(...) as conn:` without the production commit/
+    rollback/close behavior, so the test keeps access to the same connection
+    (and its rows) after run() returns.
     """
 
     def __init__(self, conn: sqlite3.Connection):
         self._conn = conn
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
 
     def close(self):
         pass  # intentional no-op
@@ -211,7 +220,7 @@ def _run_backfill_with_stub(conn: sqlite3.Connection, *, days=None, limit=None):
         patch("ccrecall.hooks.backfill_embeddings.model_available", return_value=True),
         patch("ccrecall.session_ops.embed_text", return_value=_FIXED_VEC),
         patch(
-            "ccrecall.hooks.backfill_embeddings.get_db_connection",
+            "ccrecall.hooks.backfill_embeddings.get_connection",
             return_value=_NoCloseConn(conn),
         ),
         patch("ccrecall.hooks.backfill_embeddings.load_settings", return_value={}),
@@ -256,7 +265,7 @@ class TestBackfillEmbedsFull:
         with (
             patch("ccrecall.hooks.backfill_embeddings.model_available", return_value=True),
             patch("ccrecall.session_ops.embed_text", return_value=_FIXED_VEC),
-            patch("ccrecall.hooks.backfill_embeddings.get_db_connection", return_value=_NoCloseConn(conn)),
+            patch("ccrecall.hooks.backfill_embeddings.get_connection", return_value=_NoCloseConn(conn)),
             patch("ccrecall.hooks.backfill_embeddings.load_settings", return_value={}),
             patch("ccrecall.hooks.backfill_embeddings.time.sleep"),
         ):
@@ -347,7 +356,7 @@ class TestBackfillResume:
             with (
                 patch("ccrecall.hooks.backfill_embeddings.model_available", return_value=True),
                 patch("ccrecall.session_ops.embed_text", side_effect=counting_embed),
-                patch("ccrecall.hooks.backfill_embeddings.get_db_connection", return_value=_NoCloseConn(conn)),
+                patch("ccrecall.hooks.backfill_embeddings.get_connection", return_value=_NoCloseConn(conn)),
                 patch("ccrecall.hooks.backfill_embeddings.load_settings", return_value={}),
                 patch("ccrecall.hooks.backfill_embeddings.time.sleep"),
             ):
@@ -470,7 +479,7 @@ class TestBackfillNoProgressGuard:
             patch("ccrecall.hooks.backfill_embeddings.model_available", return_value=True),
             # no-op: row never advanced; return_value=0 so total_inferences stays an int
             patch("ccrecall.hooks.backfill_embeddings.embed_branch_chunks", return_value=0),
-            patch("ccrecall.hooks.backfill_embeddings.get_db_connection", return_value=_NoCloseConn(conn)),
+            patch("ccrecall.hooks.backfill_embeddings.get_connection", return_value=_NoCloseConn(conn)),
             patch("ccrecall.hooks.backfill_embeddings.load_settings", return_value={}),
             patch("ccrecall.hooks.backfill_embeddings.time.sleep"),
         ):
@@ -528,7 +537,7 @@ class TestBackfillFailureModes:
 
         with (
             patch("ccrecall.hooks.backfill_embeddings.model_available", return_value=False),
-            patch("ccrecall.hooks.backfill_embeddings.get_db_connection", return_value=_NoCloseConn(conn)),
+            patch("ccrecall.hooks.backfill_embeddings.get_connection", return_value=_NoCloseConn(conn)),
             patch("ccrecall.hooks.backfill_embeddings.load_settings", return_value={}),
         ):
             run()
@@ -557,7 +566,7 @@ class TestBackfillFailureModes:
         with (
             patch("ccrecall.hooks.backfill_embeddings.model_available", return_value=True),
             patch("ccrecall.session_ops.embed_text", side_effect=counting_embed),
-            patch("ccrecall.hooks.backfill_embeddings.get_db_connection", return_value=_NoCloseConn(conn)),
+            patch("ccrecall.hooks.backfill_embeddings.get_connection", return_value=_NoCloseConn(conn)),
             patch("ccrecall.hooks.backfill_embeddings.load_settings", return_value={}),
             patch("ccrecall.hooks.backfill_embeddings.time.sleep"),
         ):
@@ -584,7 +593,7 @@ class TestBackfillFailureModes:
         with (
             patch("ccrecall.hooks.backfill_embeddings.model_available", return_value=True),
             patch("ccrecall.session_ops.embed_text", side_effect=infra_fail),
-            patch("ccrecall.hooks.backfill_embeddings.get_db_connection", return_value=_NoCloseConn(conn)),
+            patch("ccrecall.hooks.backfill_embeddings.get_connection", return_value=_NoCloseConn(conn)),
             patch("ccrecall.hooks.backfill_embeddings.load_settings", return_value={}),
             patch("ccrecall.hooks.backfill_embeddings.time.sleep"),
         ):
@@ -611,7 +620,7 @@ class TestBackfillFailureModes:
         with (
             patch("ccrecall.hooks.backfill_embeddings.model_available", return_value=True),
             patch("ccrecall.session_ops.embed_text", side_effect=counting_embed),
-            patch("ccrecall.hooks.backfill_embeddings.get_db_connection", return_value=_NoCloseConn(conn)),
+            patch("ccrecall.hooks.backfill_embeddings.get_connection", return_value=_NoCloseConn(conn)),
             patch("ccrecall.hooks.backfill_embeddings.load_settings", return_value={}),
             patch("ccrecall.hooks.backfill_embeddings.time.sleep"),
         ):
@@ -632,7 +641,7 @@ class TestBackfillFailureModes:
                 "ccrecall.hooks.backfill_embeddings.fetch_branch_messages",
                 side_effect=sqlite3.OperationalError("disk I/O error"),
             ),
-            patch("ccrecall.hooks.backfill_embeddings.get_db_connection", return_value=_NoCloseConn(conn)),
+            patch("ccrecall.hooks.backfill_embeddings.get_connection", return_value=_NoCloseConn(conn)),
             patch("ccrecall.hooks.backfill_embeddings.load_settings", return_value={}),
             patch("ccrecall.hooks.backfill_embeddings.time.sleep"),
         ):
@@ -750,7 +759,7 @@ class TestHistoryPreservation:
 def _run_status(conn: sqlite3.Connection, capsys, *, json_mode=False, days=None):
     """Invoke run(status=True, ...) against conn; return captured stdout."""
     with (
-        patch("ccrecall.hooks.backfill_embeddings.get_db_connection", return_value=_NoCloseConn(conn)),
+        patch("ccrecall.hooks.backfill_embeddings.get_connection", return_value=_NoCloseConn(conn)),
         patch("ccrecall.hooks.backfill_embeddings.load_settings", return_value={}),
     ):
         code = run(status=True, json_mode=json_mode, days=days)
@@ -868,7 +877,7 @@ class TestBackfillInferencesCounter:
         with (
             patch("ccrecall.hooks.backfill_embeddings.model_available", return_value=True),
             patch("ccrecall.session_ops.embed_text", return_value=_FIXED_VEC),
-            patch("ccrecall.hooks.backfill_embeddings.get_db_connection", return_value=_NoCloseConn(conn)),
+            patch("ccrecall.hooks.backfill_embeddings.get_connection", return_value=_NoCloseConn(conn)),
             patch("ccrecall.hooks.backfill_embeddings.load_settings", return_value={}),
             patch("ccrecall.hooks.backfill_embeddings.time.sleep"),
             patch("builtins.print", side_effect=capturing_print),
@@ -917,10 +926,12 @@ class TestBackfillEmbeddingStatusRecording:
         """chunk_vec_queryable() → False inside run() writes 'vec_unavailable' to sidecar."""
         sidecar = tmp_path / "embedding-status.json"
         mock_conn = MagicMock()
+        mock_conn.__enter__.return_value = mock_conn
+        mock_conn.__exit__.return_value = False
 
         with (
             patch("ccrecall.hooks.backfill_embeddings.model_available", return_value=True),
-            patch("ccrecall.hooks.backfill_embeddings.get_db_connection", return_value=mock_conn),
+            patch("ccrecall.hooks.backfill_embeddings.get_connection", return_value=mock_conn),
             patch("ccrecall.hooks.backfill_embeddings.chunk_vec_queryable", return_value=False),
             patch("ccrecall.hooks.backfill_embeddings.load_settings", return_value={}),
             patch(
@@ -948,7 +959,7 @@ class TestBackfillEmbeddingStatusRecording:
         with (
             patch("ccrecall.hooks.backfill_embeddings.model_available", return_value=True),
             patch("ccrecall.session_ops.embed_text", return_value=_FIXED_VEC),
-            patch("ccrecall.hooks.backfill_embeddings.get_db_connection", return_value=_NoCloseConn(conn)),
+            patch("ccrecall.hooks.backfill_embeddings.get_connection", return_value=_NoCloseConn(conn)),
             patch("ccrecall.hooks.backfill_embeddings.load_settings", return_value={}),
             patch("ccrecall.hooks.backfill_embeddings.time.sleep"),
             patch(
@@ -967,11 +978,13 @@ class TestBackfillEmbeddingStatusRecording:
         runs `ccrecall backfill embeddings --status` — a design violation (Edge Cases).
         """
         mock_conn = MagicMock()
+        mock_conn.__enter__.return_value = mock_conn
+        mock_conn.__exit__.return_value = False
 
         record_calls = []
 
         with (
-            patch("ccrecall.hooks.backfill_embeddings.get_db_connection", return_value=mock_conn),
+            patch("ccrecall.hooks.backfill_embeddings.get_connection", return_value=mock_conn),
             patch("ccrecall.hooks.backfill_embeddings.chunk_vec_queryable", return_value=False),
             patch("ccrecall.hooks.backfill_embeddings.load_settings", return_value={}),
             patch(

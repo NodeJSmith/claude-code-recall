@@ -1,38 +1,32 @@
-"""Database connection, config/settings, vec (embedding) operations, and logging.
+"""Database connection, vec (embedding) operations, and schema-adjacent utilities.
 
-Schema constants live in ccrecall.schema.
+Schema constants live in ccrecall.schema. Paths, config/settings loading, PID
+files, and logging live in ccrecall.config — imported below for this module's
+own use (get_db_path, ensure_parent_dir, DEFAULT_DB_PATH, ...).
 """
 
 import contextlib
-import json
-import logging
-import os
 import sqlite3
-import tempfile
-from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 import sqlite_vec
 
+from ccrecall.config import DEFAULT_DB_PATH, ensure_parent_dir, get_db_path
 from ccrecall.embeddings import EMBEDDING_DIM, EMBEDDING_MODEL, EMBEDDING_VERSION
-from ccrecall.models import BUSY_TIMEOUT_MS, LOGGER_NAME
+from ccrecall.models import BUSY_TIMEOUT_MS
 from ccrecall.schema import SCHEMA_CORE, SCHEMA_FTS4, SCHEMA_FTS5, detect_fts_support
 
 # Default paths
-RUNTIME_DIR = Path.home() / ".ccrecall"
-DEFAULT_DB_PATH = RUNTIME_DIR / "conversations.db"
 DEFAULT_PROJECTS_DIR = Path.home() / ".claude" / "projects"
-DEFAULT_LOG_PATH = RUNTIME_DIR / "ccrecall.log"
-CONFIG_PATH = RUNTIME_DIR / "config.json"
 
-# Hook filenames/prefixes — writer and reader live in different modules and must agree.
-CLEAR_HANDOFF_FILENAME = "clear-handoff.json"
-SYNC_TEMP_PREFIX = "ccrecall-sync-"
+# Current schema version. Bump when adding a migration and wire the new DDL
+# delta into _apply_migrations (see _migrate_to_v1 for the version-1 shape).
+SCHEMA_VERSION = 1
 
 # Shared SQL predicate for "branches that are candidates to embed": active
 # leaves (the query path only returns is_active=1) with a usable summary. This
 # is the single source of truth for the embedding universe — build_selection()
-# (eligibility), count_status() (backfill progress), and search_conversations
+# (eligibility), count_status() (backfill progress), and search_cli
 # print_status() (diagnostics) all build on it so their counts can't drift.
 EMBEDDABLE_BRANCH_FILTER = "is_active = 1 AND context_summary IS NOT NULL AND context_summary != ''"
 # Chunk-path universe: active leaf with at least one message. Wider than
@@ -46,33 +40,9 @@ CHUNK_EMBEDDABLE_BRANCH_FILTER = "is_active = 1 AND EXISTS(SELECT 1 FROM branch_
 # "errored".
 CONTENT_ERROR_VERSION = -1
 
-# Default settings. Every key here is user-overridable from config.json —
-# load_settings() merges any of these present in the file over the defaults.
-# (db_path is deliberately absent: it is not a config key. The CLI --db flag
-# injects it into the settings dict, which get_db_path reads; without it,
-# get_db_path falls back to DEFAULT_DB_PATH. The settings dict thus doubles as
-# the transport for that programmatic override.)
-DEFAULT_SETTINGS = {
-    "auto_inject_context": True,
-    "max_context_sessions": 2,
-    "exclude_projects": [],
-    "logging_enabled": True,
-    "log_level": "INFO",
-    "alert_snooze_hours": 24,
-}
-
-CURRENT_ONBOARDING_VERSION = 1
-
 # Vec-loaded connections (concurrent embedding writers) wait longer than the
 # base BUSY_TIMEOUT_MS on a collision.
 VEC_BUSY_TIMEOUT_MS = 30000
-
-# Rotating memory-log handler sizing.
-LOG_MAX_BYTES = 1_000_000
-LOG_BACKUP_COUNT = 2
-
-# PID sentinel file permissions: owner read/write only.
-PID_FILE_MODE = 0o600
 
 
 def apply_base_pragmas(conn: sqlite3.Connection) -> None:
@@ -85,47 +55,6 @@ def apply_base_pragmas(conn: sqlite3.Connection) -> None:
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
     conn.execute("PRAGMA foreign_keys = ON")
-
-
-def ensure_parent_dir(path: Path) -> None:
-    """Create ``path``'s parent directory (idempotent) before writing to it.
-
-    Centralizes the mkdir flags for runtime-dir writers, any of which may be the
-    first to run on a fresh machine before ~/.ccrecall/ exists. Takes a path
-    rather than hardcoding the runtime dir so a settings-overridden db_path
-    materializes under its own parent, not the default dir.
-    """
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-
-def atomic_write_json(path: Path, data: dict) -> None:
-    """Atomically write ``data`` as JSON to ``path`` (tempfile + replace + cleanup).
-
-    The single implementation of the runtime-dir atomic-write pattern (config.json,
-    the embedding-status sidecar, the snooze ledger). Ensures the parent dir exists, writes via
-    a temp file in the same directory, and replaces in one step so a concurrent reader
-    never sees a partial file. Removes the temp file on any error before re-raising.
-    """
-    ensure_parent_dir(path)
-    fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w") as fh:
-            fh.write(json.dumps(data, indent=2) + "\n")
-        Path(tmp).replace(path)
-    except Exception:
-        Path(tmp).unlink(missing_ok=True)
-        raise
-
-
-def pid_file_path(pid_key: str) -> Path:
-    """Path to a background job's PID sentinel (lives in the runtime dir, beside the DB)."""
-    return RUNTIME_DIR / f".pid-{pid_key}"
-
-
-def remove_pid_file(pid_key: str) -> None:
-    """Delete a job's PID sentinel so the next session can spawn again (best-effort)."""
-    with contextlib.suppress(OSError):
-        pid_file_path(pid_key).unlink(missing_ok=True)
 
 
 def escape_like(value: str) -> str:
@@ -306,45 +235,188 @@ def _ensure_vec_schema(conn: sqlite3.Connection) -> None:
     )
 
 
-def load_config() -> dict:
-    """Read ~/.ccrecall/config.json. Returns empty dict on missing/malformed config."""
-    if not CONFIG_PATH.exists():
-        return {}
+def _migrate_to_v1(conn: sqlite3.Connection) -> None:
+    """Version-1 migration: purge dead branch rows, drop messages_fts, rebuild branches.
+
+    Runs inside the caller's BEGIN IMMEDIATE transaction (_apply_migrations).
+
+    1. Delete `is_active = 0` branches and dependents in FK-safe order
+       (branch_messages, then chunks — the vec cascade trigger, when present,
+       handles chunk_vec — then branches) *before* the rebuild in step 3, or
+       leftover duplicate session_id values would violate its new UNIQUE.
+    2. Drop `messages_fts` and its messages_ai/ad/au triggers. A real upgrade
+       DB may still carry these triggers even though their definitions are
+       already gone from schema.py; a dangling trigger referencing the
+       just-dropped table breaks the ALTER TABLE RENAME in step 3 (SQLite
+       revalidates every trigger body during a rename).
+    3. Rebuild `branches` to change `UNIQUE(session_id, leaf_uuid)` to
+       `UNIQUE(session_id)` — SQLite has no DROP CONSTRAINT, so this is the
+       standard create-copy-drop-rename sequence. That drop also takes every
+       trigger and index defined on the old table with it — including the
+       live `branches_fts` sync triggers and the `idx_branches_*` indexes —
+       so both are re-created below via individual `conn.execute` calls, not
+       `conn.executescript` (which implicitly commits, ending this
+       transaction early and leaving the final version bump with nothing to
+       commit). `branches_fts` content itself is untouched — ids survive the
+       `INSERT INTO branches_new SELECT * FROM branches` copy — only its
+       sync triggers need re-creating.
+
+    Table rebuilds where another table holds a foreign key to the table being
+    dropped require `PRAGMA foreign_keys = OFF` for the whole connection —
+    the caller (_apply_migrations) sets this outside any transaction, since
+    toggling it here would be a no-op once a transaction is open.
+    """
+    conn.execute("DELETE FROM branch_messages WHERE branch_id IN (SELECT id FROM branches WHERE is_active = 0)")
+    conn.execute("DELETE FROM chunks WHERE branch_id IN (SELECT id FROM branches WHERE is_active = 0)")
+    conn.execute("DELETE FROM branches WHERE is_active = 0")
+
+    conn.execute("DROP TRIGGER IF EXISTS messages_ai")
+    conn.execute("DROP TRIGGER IF EXISTS messages_ad")
+    conn.execute("DROP TRIGGER IF EXISTS messages_au")
+    conn.execute("DROP TABLE IF EXISTS messages_fts")
+
+    conn.execute("""
+        CREATE TABLE branches_new (
+          id INTEGER PRIMARY KEY,
+          session_id INTEGER NOT NULL REFERENCES sessions(id),
+          leaf_uuid TEXT NOT NULL,
+          fork_point_uuid TEXT,
+          is_active INTEGER DEFAULT 1,
+          started_at DATETIME,
+          ended_at DATETIME,
+          exchange_count INTEGER DEFAULT 0,
+          files_modified TEXT,
+          commits TEXT,
+          tool_counts TEXT,
+          aggregated_content TEXT,
+          context_summary TEXT,
+          context_summary_json TEXT,
+          summary_version INTEGER DEFAULT 0,
+          embedding_version INTEGER DEFAULT 0,
+          embedding_model TEXT,
+          summary_version_at_embed INTEGER,
+          UNIQUE(session_id)
+        )
+    """)
+    conn.execute("INSERT INTO branches_new SELECT * FROM branches")
+    conn.execute("DROP TABLE branches")
+    conn.execute("ALTER TABLE branches_new RENAME TO branches")
+
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_branches_session ON branches(session_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_branches_active ON branches(is_active)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_branches_summary_version ON branches(summary_version)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_branches_embedding_version ON branches(embedding_version)")
+
+    fts = detect_fts_support(conn)
+    if fts == "fts5":
+        conn.execute(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS branches_fts USING fts5("
+            "aggregated_content, content=branches, content_rowid=id, tokenize='porter unicode61')"
+        )
+    elif fts == "fts4":
+        conn.execute(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS branches_fts USING fts4("
+            "aggregated_content, content=branches, tokenize=porter)"
+        )
+    if fts in ("fts5", "fts4"):
+        # Trigger bodies are identical across the FTS5/FTS4 variants (only the
+        # CREATE VIRTUAL TABLE statement above differs) — one copy suffices.
+        conn.execute(
+            "CREATE TRIGGER IF NOT EXISTS branches_ai AFTER INSERT ON branches BEGIN"
+            " INSERT INTO branches_fts(rowid, aggregated_content) VALUES (new.id, new.aggregated_content); END"
+        )
+        conn.execute(
+            "CREATE TRIGGER IF NOT EXISTS branches_ad AFTER DELETE ON branches BEGIN"
+            " INSERT INTO branches_fts(branches_fts, rowid, aggregated_content)"
+            " VALUES('delete', old.id, old.aggregated_content); END"
+        )
+        conn.execute(
+            "CREATE TRIGGER IF NOT EXISTS branches_au AFTER UPDATE ON branches BEGIN"
+            " INSERT INTO branches_fts(branches_fts, rowid, aggregated_content)"
+            " VALUES('delete', old.id, old.aggregated_content);"
+            " INSERT INTO branches_fts(rowid, aggregated_content) VALUES (new.id, new.aggregated_content); END"
+        )
+
+
+def _apply_migrations(conn: sqlite3.Connection) -> None:
+    """Apply version-gated schema migrations up to SCHEMA_VERSION, atomically.
+
+    Must run after SCHEMA_CORE/FTS creation (their CREATE TABLE/TRIGGER IF NOT
+    EXISTS statements are always safe to re-run) and before _ensure_vec_schema
+    — the vec self-heal checks stay outside the version gate, running on
+    every vec-loaded connection regardless of schema version.
+
+    On a fresh install user_version starts at 0 and every migration DML step
+    is a no-op against the schema just created. On failure the whole thing
+    rolls back, user_version stays at its prior value, and the next
+    connection retries from scratch — every step is written to tolerate that.
+
+    A real upgrade DB (any installation with prior chunk-embedding activity)
+    already carries the chunks_vec_ad cascade trigger on disk regardless of
+    whether *this* connection asked for load_vec — CREATE TRIGGER persists
+    independently of which connection loaded the vec0 module. _migrate_to_v1's
+    purge deletes from branches/chunks, which fires that trigger's
+    ``DELETE FROM chunk_vec``; without vec0 registered on this connection that
+    raises ``sqlite3.OperationalError: no such module: vec0`` and crashes the
+    (usually load_vec=False) caller. Loading vec here — before the purge, and
+    only once migration is confirmed necessary — registers vec0 so the cascade
+    can fire, with the side benefit of correctly purging the now-orphaned
+    chunk_vec rows for deleted chunks instead of erroring. A no-op when
+    sqlite-vec isn't installed/loadable at all (vec_available fails closed),
+    which matches the case where chunk_vec/its cascade trigger were never
+    created in the first place.
+
+    foreign_keys is toggled OFF for the duration: the branches rebuild in
+    _migrate_to_v1 drops and recreates a table that branch_messages and
+    chunks reference via foreign key, and SQLite only allows that when
+    enforcement is disabled *outside* any transaction (toggling mid-
+    transaction is a no-op, and leaving it on fails the COMMIT with a
+    foreign-key error even though ``PRAGMA foreign_key_check`` reports no
+    violations — see sqlite.org/lang_altertable.html). Restored in
+    ``finally`` on every path so foreign_keys is ON whenever this returns.
+    """
+    current = conn.execute("PRAGMA user_version").fetchone()[0]
+    if current >= SCHEMA_VERSION:
+        return
+    conn.execute("PRAGMA foreign_keys = OFF")
     try:
-        result = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        # OSError = read failure; ValueError = malformed JSON (JSONDecodeError /
-        # UnicodeDecodeError). A real bug surfaces instead of masking as "no config".
-        return {}
-    return result if isinstance(result, dict) else {}
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            # Re-read under the write lock: another connection may have raced
+            # this one to BEGIN IMMEDIATE and already committed the migration
+            # while this connection was blocked waiting for the lock — the
+            # `current` read above happened before the lock was held.
+            current = conn.execute("PRAGMA user_version").fetchone()[0]
+            if current < SCHEMA_VERSION:
+                if current < 1:
+                    # Load vec only now that migration is confirmed necessary
+                    # under the lock — enable_load_extension/sqlite_vec.load
+                    # are C-API calls, not SQL, so they are unaffected by
+                    # transaction state and safe to call here.
+                    vec_available(conn)
+                    _migrate_to_v1(conn)
+                conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+    finally:
+        conn.execute("PRAGMA foreign_keys = ON")
 
 
-def load_settings() -> dict:
-    """Return settings with config.json overrides merged on top of defaults."""
-    settings = DEFAULT_SETTINGS.copy()
-    config = load_config()
-    for key in DEFAULT_SETTINGS:
-        if key in config:
-            settings[key] = config[key]
-    return settings
-
-
-def get_db_path(settings: dict | None = None) -> Path:
-    """Get database path from settings or default."""
-    if settings and "db_path" in settings:
-        return Path(settings["db_path"]).expanduser()
-    return DEFAULT_DB_PATH
-
-
-def get_db_connection(settings: dict | None = None, load_vec: bool = False) -> sqlite3.Connection:
-    """Get database connection, initializing the schema on first use (idempotent).
+def _open_connection(settings: dict | None = None, load_vec: bool = False) -> sqlite3.Connection:
+    """Open a raw database connection, initializing the schema on first use (idempotent).
 
     Uses the settings-based db_path when provided and applies the base pragmas for
     concurrent-safe access. When ``load_vec`` is True, loads the sqlite-vec extension
     and raises busy_timeout to VEC_BUSY_TIMEOUT_MS — use it for connections that query
     or write chunk_vec (search, write path, backfill). Default False keeps
-    the extension unloaded, cheaper for recent-chats, token analytics, and setup paths
-    that never touch the vec tables.
+    the extension unloaded, cheaper for recent-chats and setup paths that never
+    touch the vec tables.
+
+    Callers should not use this directly — use ``get_connection`` (the
+    context-manager wrapper) instead, which guarantees the connection is
+    committed on success, rolled back on exception, and always closed.
     """
     db_path = get_db_path(settings)
     ensure_parent_dir(db_path)
@@ -360,6 +432,11 @@ def get_db_connection(settings: dict | None = None, load_vec: bool = False) -> s
         conn.executescript(SCHEMA_FTS4)
     conn.commit()
 
+    # Version-gated schema migrations run after the idempotent schema creation
+    # above (tables must exist before migration DML runs) and before the vec
+    # self-heal below (which is not version-gated — see _apply_migrations).
+    _apply_migrations(conn)
+
     if load_vec and vec_available(conn):
         # First and only place the vec extension is loaded for this connection.
         # _ensure_vec_schema tears down the obsolete branch_vec, creates chunk_vec
@@ -370,6 +447,30 @@ def get_db_connection(settings: dict | None = None, load_vec: bool = False) -> s
         conn.execute(f"PRAGMA busy_timeout = {VEC_BUSY_TIMEOUT_MS}")
 
     return conn
+
+
+@contextlib.contextmanager
+def get_connection(settings: dict | None = None, load_vec: bool = False):
+    """Get a database connection as a context manager: commit-on-success, rollback-on-exception, always-close.
+
+    Use as ``with get_connection(settings) as conn:``. On normal exit from the
+    ``with`` block, the connection is committed then closed. On an exception
+    propagating out of the block, the connection is rolled back (so partial
+    work isn't silently persisted) then closed, and the exception re-raises.
+    Either way the connection is guaranteed to be closed — this replaces the
+    old raw-connection pattern (``conn = _open_connection(...)``, previously
+    a public helper of the same name) that leaked the connection whenever the
+    caller's work raised before reaching an explicit ``conn.close()``.
+    """
+    conn = _open_connection(settings, load_vec)
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def branch_embedding_coverage(conn: sqlite3.Connection) -> tuple[int, int]:
@@ -394,41 +495,3 @@ def branch_embedding_coverage(conn: sqlite3.Connection) -> tuple[int, int]:
         (EMBEDDING_VERSION, EMBEDDING_MODEL),
     ).fetchone()[0]
     return embedded, total
-
-
-def setup_logging(settings: dict | None = None) -> logging.Logger:
-    """Set up logging with rotation. Returns a null logger if logging is disabled."""
-    logger = logging.getLogger(LOGGER_NAME)
-    logger.handlers.clear()
-
-    if not settings or not settings.get("logging_enabled", True):
-        logger.addHandler(logging.NullHandler())
-        return logger
-
-    log_path = DEFAULT_LOG_PATH
-    ensure_parent_dir(log_path)
-
-    handler = RotatingFileHandler(
-        log_path,
-        maxBytes=LOG_MAX_BYTES,
-        backupCount=LOG_BACKUP_COUNT,
-    )
-    formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
-    handler.setFormatter(formatter)
-    logger.addHandler(handler)
-    level_name = settings.get("log_level", "INFO")
-    logger.setLevel(getattr(logging, level_name.upper(), logging.INFO))
-
-    return logger
-
-
-def log_hook_exception(context: str) -> None:
-    """Best-effort: route the active exception to the memory log without ever raising.
-
-    Top-level hook guards must never crash the session, but a bare ``except: pass``
-    also hides every failure. This logs the in-flight exception (a no-op unless
-    logging_enabled) while suppressing any error from logging itself, so the guard
-    stays crash-proof and failures become observable when logging is turned on.
-    """
-    with contextlib.suppress(Exception):
-        setup_logging(load_settings()).exception("%s hook failed", context)

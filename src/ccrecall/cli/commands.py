@@ -6,26 +6,26 @@ PID-file lifecycle are preserved from the former cm-* entry points; only the
 argument-parsing layer changed (argparse -> cyclopts).
 """
 
+import logging
 from pathlib import Path
 from typing import Annotated, Literal
 
 from cyclopts import ArgumentCollection, Group, Parameter
 from cyclopts.validators import Number
 
-from ccrecall import legacy as legacy_mod
 from ccrecall import recent_chats as recent_chats_mod
-from ccrecall import search_conversations as search_mod
+from ccrecall import search_cli as search_mod
 from ccrecall import session_tail as session_tail_mod
-from ccrecall import token_dashboard as token_dashboard_mod
 from ccrecall.cli import app, backfill_app
 from ccrecall.cli.context import DEFAULT_CLI_CONTEXT, CLIContextParam
-from ccrecall.db import DEFAULT_DB_PATH, DEFAULT_PROJECTS_DIR
+from ccrecall.config import DEFAULT_DB_PATH, load_settings
+from ccrecall.db import DEFAULT_PROJECTS_DIR, get_connection
 from ccrecall.embeddings import DEFAULT_EMBED_THREADS
 from ccrecall.hooks import backfill_embeddings as backfill_embeddings_mod
 from ccrecall.hooks import backfill_summaries as backfill_summaries_mod
 from ccrecall.hooks import import_conversations as import_mod
 from ccrecall.hooks import sync_current as sync_current_mod
-from ccrecall.hooks import write_config as write_config_mod
+from ccrecall.models import LOGGER_NAME
 
 # store_true flags carry no --no-<flag> negation, matching the former argparse.
 _FLAG = Parameter(negative=[])
@@ -36,7 +36,7 @@ def _exactly_one_query_or_status(arguments: ArgumentCollection) -> None:
 
     Runs at parse time so the message renders in cyclopts' boxed error style
     (and exits 2 via the entry-point wrapper), matching every other usage error.
-    search_conversations.run() keeps the same guard for direct (non-CLI) callers.
+    search_cli.run() keeps the same guard for direct (non-CLI) callers.
     """
     # arg.tokens is non-empty only when that argument was supplied on the CLI.
     provided = [arg for arg in arguments if arg.tokens]
@@ -88,16 +88,22 @@ def cmd_import(
     import_mod.run(db=db, projects_dir=projects_dir, project=project)
 
 
-@app.command(name="migrate", show=False)
-def cmd_migrate() -> None:
-    """Carry a pre-rename install (~/.claude-memory) forward into ~/.ccrecall.
+def _count_multi_active_branch_sessions(db: Path) -> int:
+    """Return the count of sessions with more than one active branch.
 
-    Undocumented one-time helper: copies the legacy DB and portable config keys,
-    leaving the original as a backup. Normally auto-spawned by the SessionStart
-    hook when a legacy DB is detected; safe to run by hand and idempotent.
+    Session-keyed branch identity (session_ops.upsert_branch) should make this
+    always zero going forward — this is a standing invariant check, not an
+    expected condition. Read-only: shares no PID lifecycle with import.run().
     """
-    code = legacy_mod.run_migration()
-    raise SystemExit(code)
+    settings = load_settings()
+    if db != DEFAULT_DB_PATH:
+        settings["db_path"] = str(db)
+    with get_connection(settings, load_vec=False) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT session_id, COUNT(*) as cnt FROM branches WHERE is_active = 1 GROUP BY session_id HAVING cnt > 1"
+        )
+        return len(cursor.fetchall())
 
 
 @app.command(name="stats")
@@ -109,6 +115,13 @@ def cmd_stats(
     # Read-only DB-global counts: print_stats() shares no PID lifecycle with
     # import.run(), so it can't disturb a concurrent background import.
     import_mod.print_stats(db=db)
+
+    violations = _count_multi_active_branch_sessions(db)
+    print(f"Branch invariant violations: {violations} session(s) with multiple active branches")
+    if violations:
+        logging.getLogger(LOGGER_NAME).warning(
+            "branch invariant violated: %d session(s) have more than one active branch", violations
+        )
 
 
 @backfill_app.command(name="summaries")
@@ -277,21 +290,3 @@ def cmd_tail(
 ) -> None:
     """Print the tail of a prior session's transcript for fast resume."""
     raise SystemExit(session_tail_mod.run(selector, list_sessions=list_sessions, cwd=cwd, n=n))
-
-
-@app.command(name="tokens")
-def cmd_tokens() -> None:
-    """Ingest token data, refresh the dashboard, and print a slim summary."""
-    token_dashboard_mod.run()
-
-
-@app.command(name="write-config")
-def cmd_write_config(
-    *,
-    defaults: Annotated[bool, _FLAG, Parameter(help="Write recommended defaults without explicit flags.")] = False,
-    auto_inject_context: Annotated[
-        bool | None, Parameter(name=["--auto-inject-context"], help="Enable session context injection on startup.")
-    ] = None,
-) -> None:
-    """Write or update the ccrecall config from onboarding choices."""
-    write_config_mod.run(defaults=defaults, auto_inject_context=auto_inject_context)

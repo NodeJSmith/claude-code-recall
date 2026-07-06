@@ -1,9 +1,9 @@
 """Pydantic models validating untrusted JSON at the system boundaries.
 
-Claude Code transcripts, token-usage records, and hook stdin are all external
-input. These models validate the shapes the code relies on so a malformed line
-or an upstream schema change surfaces as a clean skip (logged at the boundary)
-rather than a mid-import AttributeError. They stay permissive on unknown fields
+Claude Code transcripts and hook stdin are all external input. These models
+validate the shapes the code relies on so a malformed line or an upstream
+schema change surfaces as a clean skip (logged at the boundary) rather than a
+mid-import AttributeError. They stay permissive on unknown fields
 (``extra="allow"``) and only enforce the types the downstream code dereferences.
 """
 
@@ -18,7 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 LOGGER_NAME = "ccrecall"
 
 # Base SQLite busy_timeout (ms) for this app's connections. Lives here, the lowest
-# module, so db.py and token_schema.py share one value without an import cycle.
+# module, so db.py can import it without a cycle.
 BUSY_TIMEOUT_MS = 5000
 
 _LOG = logging.getLogger(LOGGER_NAME)
@@ -66,43 +66,6 @@ class TranscriptEntry(BaseModel):
     is_meta: bool | None = Field(default=None, alias="isMeta")
     session_id: str | None = Field(default=None, alias="sessionId")
     message: EntryMessage | None = None
-
-
-class TokenUsage(BaseModel):
-    """The ``usage`` block on an assistant message — feeds cost computation."""
-
-    model_config = ConfigDict(extra="allow")
-
-    input_tokens: int = 0
-    output_tokens: int = 0
-    cache_read_input_tokens: int = 0
-    cache_creation_input_tokens: int = 0
-    cache_creation: dict | None = None
-
-
-class TokenMessage(BaseModel):
-    """The ``message`` object on a token-usage JSONL line."""
-
-    model_config = ConfigDict(extra="allow")
-
-    id: str | None = None
-    model: str | None = None
-    stop_reason: str | None = None
-    usage: TokenUsage | None = None
-    # str | list (not list[dict]): parse_session iterates content blocks but
-    # guards each with isinstance(block, dict), so any list shape is acceptable —
-    # we only reject a scalar that would break the iteration.
-    content: str | list | None = None
-
-
-class TokenLine(BaseModel):
-    """One line of a token-usage JSONL file (the envelope parse_session reads)."""
-
-    model_config = ConfigDict(extra="allow")
-
-    type: str | None = None
-    subtype: str | None = None
-    message: TokenMessage | None = None
 
 
 class HookInput(BaseModel):

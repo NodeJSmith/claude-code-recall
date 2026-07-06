@@ -13,6 +13,7 @@ from cyclopts import App, Group, Parameter
 from cyclopts.exceptions import CycloptsError
 
 from ccrecall.cli.context import CLIContext
+from ccrecall.config import load_settings, setup_logging
 
 try:
     _version = version("ccrecall")
@@ -83,7 +84,15 @@ def main() -> None:
     usual usage-error code — carrying cyclopts' boxed message, so parser errors
     agree with the app-level validators. A command that raises its own SystemExit
     bypasses this handler (SystemExit is not a CycloptsError), keeping its code.
+
+    Sets up the "cli" process log before dispatch. Subcommands that are
+    themselves detached background workers (sync-current, import, backfill
+    summaries/embeddings) call ``setup_logging`` again with their own
+    process name, which reconfigures the shared logger to their own log file
+    for the rest of this process — this call only "sticks" for direct,
+    interactive commands (search, recent, stats, tail).
     """
+    setup_logging(load_settings(), process_name="cli")
     try:
         app.meta(exit_on_error=False, print_error=True)
     except CycloptsError as exc:

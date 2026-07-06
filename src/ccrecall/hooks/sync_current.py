@@ -17,20 +17,18 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from ccrecall.db import (
+from ccrecall.config import (
     DEFAULT_LOG_PATH,
-    DEFAULT_PROJECTS_DIR,
     LOG_BACKUP_COUNT,
     LOG_MAX_BYTES,
     PID_FILE_MODE,
-    chunk_vec_queryable,
     ensure_parent_dir,
-    get_db_connection,
     load_settings,
     pid_file_path,
     remove_pid_file,
     setup_logging,
 )
+from ccrecall.db import DEFAULT_PROJECTS_DIR, chunk_vec_queryable, get_connection
 from ccrecall.embeddings import is_model_cached_on_disk
 from ccrecall.formatting import extract_project_name, normalize_cwd
 from ccrecall.health import REASON_VEC_UNAVAILABLE, clear_embedding_failure, record_embedding_failure
@@ -169,7 +167,7 @@ def run(input_file: Path | None = None) -> None:
 
     try:
         settings = load_settings()
-        logger = setup_logging(settings)
+        logger = setup_logging(settings, process_name="sync")
 
         # Read hook input from file or stdin
         if input_file:
@@ -223,35 +221,34 @@ def run(input_file: Path | None = None) -> None:
         _warn_cold_model()
 
         try:
-            conn = get_db_connection(settings, load_vec=True)
-            project_dir = session_file.parent
+            with get_connection(settings, load_vec=True) as conn:
+                project_dir = session_file.parent
 
-            # Handle subagent paths
-            if project_dir.name == "subagents":
-                project_dir = project_dir.parent.parent
+                # Handle subagent paths
+                if project_dir.name == "subagents":
+                    project_dir = project_dir.parent.parent
 
-            # Embedding capability check: sqlite-vec availability determines whether
-            # embedding can run. Record a failure on unavailability; clear on success.
-            # Only the vec check is accessible here — model failures in sync_current
-            # are silently swallowed by session_ops (contextlib.suppress) and are
-            # detected authoritatively by backfill_embeddings instead.
-            # Both calls are best-effort: a sidecar write failure must never affect
-            # the hook's output or exit behavior.
-            _vec_ok = chunk_vec_queryable(conn)
-            if not _vec_ok:
-                with contextlib.suppress(Exception):  # best-effort; must not affect hook behavior
-                    record_embedding_failure(reason=REASON_VEC_UNAVAILABLE)
+                # Embedding capability check: sqlite-vec availability determines whether
+                # embedding can run. Record a failure on unavailability; clear on success.
+                # Only the vec check is accessible here — model failures in sync_current
+                # are silently swallowed by session_ops (contextlib.suppress) and are
+                # detected authoritatively by backfill_embeddings instead.
+                # Both calls are best-effort: a sidecar write failure must never affect
+                # the hook's output or exit behavior.
+                _vec_ok = chunk_vec_queryable(conn)
+                if not _vec_ok:
+                    with contextlib.suppress(Exception):  # best-effort; must not affect hook behavior
+                        record_embedding_failure(reason=REASON_VEC_UNAVAILABLE)
 
-            # Sync path: write import_log with NULL file_hash as a "synced" marker
-            new_messages = sync_session(
-                conn,
-                session_file,
-                project_dir,
-                write_import_log=True,
-                file_hash=None,
-            )
-            conn.commit()
-            conn.close()
+                # Sync path: write import_log with NULL file_hash as a "synced" marker
+                new_messages = sync_session(
+                    conn,
+                    session_file,
+                    project_dir,
+                    write_import_log=True,
+                    file_hash=None,
+                )
+            # conn is committed and closed on the line above (context manager exit).
 
             if new_messages > 0:
                 logger.info("Synced %s new message(s) from session %s", new_messages, session_id[:8])

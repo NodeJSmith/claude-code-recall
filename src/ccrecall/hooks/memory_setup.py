@@ -10,41 +10,22 @@ import tempfile
 import time
 from pathlib import Path
 
-from ccrecall.db import (
-    CONTENT_ERROR_VERSION,
+from ccrecall.config import (
     DEFAULT_DB_PATH,
     PID_FILE_MODE,
     SYNC_TEMP_PREFIX,
     ensure_parent_dir,
-    get_db_connection,
     load_settings,
     log_hook_exception,
     pid_file_path,
 )
+from ccrecall.db import CONTENT_ERROR_VERSION, get_connection
 from ccrecall.hooks import backfill_summaries, import_conversations
 from ccrecall.hooks.warm_model import PID_KEY as WARM_MODEL_PID_KEY
-from ccrecall.legacy import PID_KEY as MIGRATE_PID_KEY
-from ccrecall.legacy import find_legacy_db
 from ccrecall.summarizer import SUMMARY_VERSION
 
 # Stale sync temp files older than this (seconds) are reaped on SessionStart.
 STALE_TEMP_FILE_MAX_AGE_SECONDS = 3600
-
-# Injected when a pre-rename install is detected and migration is auto-spawned.
-# "auto-migrate with a message": the copy runs in the background; this tells
-# Claude to let the user know it's happening so it isn't silent.
-MIGRATION_NOTICE = """\
-## ccrecall: migrating your history
-
-ccrecall found a conversation database from a previous version at \
-~/.claude-memory and is copying it into ~/.ccrecall in the background. Your \
-original is left untouched as a backup, this runs once, and it needs no action.
-
-At the end of your response, mention this to the user in one line of natural \
-prose (not AskUserQuestion): their history is being migrated to the new \
-location, and semantic search rebuilds as they work — they can run \
-`ccrecall backfill embeddings` to seed historical search coverage now if they \
-want it immediately."""
 
 
 def _spawn_background(argv: list[str], pid_key: str) -> None:
@@ -99,11 +80,10 @@ def _needs_reimport(settings: dict | None = None) -> bool:
     NULL file_hash is written by the normal sync path when file_hash is unavailable.
     """
     try:
-        conn = get_db_connection(settings)
-        cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM import_log WHERE file_hash IS NULL")
-        count = cursor.fetchone()[0]
-        conn.close()
+        with get_connection(settings) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM import_log WHERE file_hash IS NULL")
+            count = cursor.fetchone()[0]
         return count > 0
     except (sqlite3.Error, OSError):
         return False
@@ -112,20 +92,18 @@ def _needs_reimport(settings: dict | None = None) -> bool:
 def _needs_backfill(settings: dict | None = None) -> bool:
     """Check if any branches need summary backfill. Returns False on any error."""
     try:
-        conn = get_db_connection(settings)
-        cursor = conn.cursor()
-        cursor.execute("PRAGMA table_info(branches)")
-        cols = {row[1] for row in cursor.fetchall()}
-        if "summary_version" not in cols:
-            conn.close()
-            return False
-        cursor.execute(
-            "SELECT COUNT(*) FROM branches WHERE summary_version IS NULL"
-            " OR (summary_version < ? AND summary_version != ?)",
-            (SUMMARY_VERSION, CONTENT_ERROR_VERSION),
-        )
-        count = cursor.fetchone()[0]
-        conn.close()
+        with get_connection(settings) as conn:
+            cursor = conn.cursor()
+            cursor.execute("PRAGMA table_info(branches)")
+            cols = {row[1] for row in cursor.fetchall()}
+            if "summary_version" not in cols:
+                return False
+            cursor.execute(
+                "SELECT COUNT(*) FROM branches WHERE summary_version IS NULL"
+                " OR (summary_version < ? AND summary_version != ?)",
+                (SUMMARY_VERSION, CONTENT_ERROR_VERSION),
+            )
+            count = cursor.fetchone()[0]
         return count > 0
     except (sqlite3.Error, OSError):
         return False
@@ -158,28 +136,11 @@ def main():
         settings = load_settings()
 
         db_absent = not DEFAULT_DB_PATH.exists()
-        # A pending migration is "current DB absent AND a legacy DB exists".
-        # Resolved once and reused below so the import/backfill decisions can't
-        # disagree about whether migration is happening.
-        legacy_db = find_legacy_db() if db_absent else None
 
-        if db_absent:
-            if legacy_db is not None:
-                # Carry a pre-rename install at ~/.claude-memory forward in the
-                # background instead of re-importing — re-importing would abandon
-                # every synced summary and embedding it already holds.
-                _spawn_background(["ccrecall", "migrate"], MIGRATE_PID_KEY)
-                additional_context = MIGRATION_NOTICE
-            else:
-                _spawn_background(["ccrecall", "import"], import_conversations.PID_KEY)
-        elif _needs_reimport(settings):
+        if db_absent or _needs_reimport(settings):
             _spawn_background(["ccrecall", "import"], import_conversations.PID_KEY)
 
-        # Don't probe the DB while a migration is pending: _needs_backfill calls
-        # get_db_connection, which creates ~/.ccrecall/conversations.db if absent
-        # — and copy_legacy_db refuses to overwrite an existing destination, so
-        # the probe would silently block the migration it raced.
-        if legacy_db is None and _needs_backfill(settings):
+        if _needs_backfill(settings):
             _spawn_background(["ccrecall", "backfill", "summaries"], backfill_summaries.PID_KEY)
 
         # Note: embedding backfill is NOT auto-spawned. Embeddings are filled
@@ -196,7 +157,7 @@ def main():
     except Exception:
         # Top-level hook guard: must never crash the session start. Log
         # best-effort (no-op unless logging_enabled) so the failure isn't silent.
-        log_hook_exception("memory-setup")
+        log_hook_exception("setup")
 
     output: dict = {"continue": True}
     if additional_context is not None:

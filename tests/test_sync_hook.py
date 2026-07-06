@@ -20,7 +20,7 @@ from ccrecall.hooks import memory_setup, memory_sync, sync_current
 from ccrecall.hooks.sync_current import sync_session, validate_session_id
 from ccrecall.recent_chats import run as recent_chats_run
 from ccrecall.schema import SCHEMA
-from ccrecall.search_conversations import run as search_conversations_run
+from ccrecall.search_cli import run as search_conversations_run
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures"
 
@@ -71,10 +71,11 @@ class TestSyncSessionCreatesBranches:
             cursor.execute("SELECT COUNT(*) FROM sessions")
             assert cursor.fetchone()[0] == 1
 
-            # Verify branches were created
+            # Verify branches were created — session-keyed identity means exactly one
+            # branch row per session, even for a fixture with a rewind recorded in it.
             cursor.execute("SELECT COUNT(*) FROM branches")
             branch_count = cursor.fetchone()[0]
-            assert branch_count > 0, "Should have created at least one branch"
+            assert branch_count == 1, "Session-keyed identity: exactly one branch row per session"
 
             # Verify branch_messages were created
             cursor.execute("SELECT COUNT(*) FROM branch_messages")
@@ -191,6 +192,49 @@ class TestSyncSessionUpdatesExisting:
             branches_2 = cursor.fetchall()
             assert len(branches_2) == len(branches_1), "Branch count should be unchanged"
             assert [b[1] for b in branches_2] == [b[1] for b in branches_1], "Branch leaf_uuids should be unchanged"
+
+
+class TestSessionKeyedBranchIdentity:
+    """Characterization test for session-keyed branch identity (upsert_branch).
+
+    Prevents: keying branch identity on leaf_uuid, which creates a new branches
+    row every time the leaf message changes — i.e. on every Stop-hook fire
+    against a growing JSONL file, since the leaf UUID is different each time.
+    Session-keyed identity looks up the existing row by session_id directly, so
+    repeated syncs of the same (growing) session always update the one row.
+    """
+
+    def test_ten_sequential_syncs_produce_exactly_one_branch(self, memory_db_with_project):
+        """10 Stop-hook fires against a session file that grows on each fire must
+        still leave exactly one branch row, active, for that session."""
+        conn, _ = memory_db_with_project
+        fixture_lines = (FIXTURE_DIR / "single_rewind.jsonl").read_text().splitlines()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project_dir = Path(tmpdir)
+            # UUID-shaped stem so sync_session can parse it as a session UUID; the
+            # path is reused across all 10 syncs so they map to the same session row.
+            session_stem = "aaaaaaaa-1111-2222-3333-444444444444"
+            session_path = project_dir / f"{session_stem}.jsonl"
+
+            step = max(1, len(fixture_lines) // 10)
+            for i in range(1, 11):
+                cutoff = len(fixture_lines) if i == 10 else min(i * step, len(fixture_lines))
+                session_path.write_text("\n".join(fixture_lines[:cutoff]))
+                sync_session(conn, session_path, project_dir)
+                conn.commit()
+
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM sessions")
+            assert cursor.fetchone()[0] == 1, "all 10 syncs must resolve to the same session row"
+
+            cursor.execute("SELECT COUNT(*) FROM branches")
+            assert cursor.fetchone()[0] == 1, (
+                "10 sequential syncs of a growing session file must produce exactly one branch row"
+            )
+
+            cursor.execute("SELECT COUNT(*) FROM branches WHERE is_active = 1")
+            assert cursor.fetchone()[0] == 1, "the single branch row must be active"
 
 
 class TestValidateSessionIdValid:
@@ -553,7 +597,7 @@ class TestRecentChatsDbFlag:
 
 
 class TestSearchConversationsDbFlag:
-    """Tests for --db flag override in search_conversations.py after sqlite3.connect replacement."""
+    """Tests for --db flag override in search_cli.py after sqlite3.connect replacement."""
 
     def test_search_conversations_db_flag_override(self, tmp_path):
         """--db /tmp/test.db still works after sqlite3.connect replacement."""
@@ -781,7 +825,6 @@ class TestModelWarmOnSetup:
         monkeypatch.setattr(memory_setup, "load_settings", lambda: {"logging_enabled": False})
         monkeypatch.setattr(memory_setup, "_needs_reimport", lambda *a, **k: False)
         monkeypatch.setattr(memory_setup, "_needs_backfill", lambda *a, **k: False)
-        monkeypatch.setattr(memory_setup, "find_legacy_db", lambda: None)
         monkeypatch.setattr(memory_setup, "_reap_stale_temp_files", lambda: None)
 
         captured = io.StringIO()
@@ -803,7 +846,6 @@ class TestModelWarmOnSetup:
         monkeypatch.setattr(memory_setup, "load_settings", lambda: {"logging_enabled": False})
         monkeypatch.setattr(memory_setup, "_needs_reimport", lambda *a, **k: False)
         monkeypatch.setattr(memory_setup, "_needs_backfill", lambda *a, **k: False)
-        monkeypatch.setattr(memory_setup, "find_legacy_db", lambda: None)
         monkeypatch.setattr(memory_setup, "_reap_stale_temp_files", lambda: None)
 
         with patch("sys.stdout", io.StringIO()):
@@ -822,7 +864,6 @@ class TestModelWarmOnSetup:
         monkeypatch.setattr(memory_setup, "load_settings", lambda: {"logging_enabled": False})
         monkeypatch.setattr(memory_setup, "_needs_reimport", lambda *a, **k: False)
         monkeypatch.setattr(memory_setup, "_needs_backfill", lambda *a, **k: False)
-        monkeypatch.setattr(memory_setup, "find_legacy_db", lambda: None)
         monkeypatch.setattr(memory_setup, "_reap_stale_temp_files", lambda: None)
 
         captured = io.StringIO()
@@ -892,7 +933,9 @@ class TestSyncEmbeddingStatusRecording:
         monkeypatch.setattr(sync_current, "get_session_file", lambda *a, **k: session_file)
 
         mock_conn = MagicMock()
-        monkeypatch.setattr(sync_current, "get_db_connection", lambda *a, **k: mock_conn)
+        mock_conn.__enter__.return_value = mock_conn
+        mock_conn.__exit__.return_value = False
+        monkeypatch.setattr(sync_current, "get_connection", lambda *a, **k: mock_conn)
         monkeypatch.setattr(sync_current, "chunk_vec_queryable", lambda conn: vec_queryable)
         monkeypatch.setattr(sync_current, "sync_session", lambda *a, **k: 0)
 
