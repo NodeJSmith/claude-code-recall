@@ -1,6 +1,6 @@
 """
 Tests for the SessionEnd handoff contract between clear-handoff.py and
-_find_cleared_from_session_uuid in memory-context.py.
+_find_cleared_from_session_uuid in session_selection.py.
 
 Contract:
   1. clear-handoff.py only writes when end_reason == "clear"
