@@ -13,7 +13,7 @@ from ccrecall.fusion import rrf_scored
 from ccrecall.health import RECALL_CAVEAT_COVERAGE_THRESHOLD
 from ccrecall.search_hydrate import dedup_by_session, hydrate_cards
 from ccrecall.search_query import get_fts_branch_ids
-from ccrecall.search_vector import _execute_chunk_knn, get_vec_chunk_ids, hydrate_snippets
+from ccrecall.search_vector import execute_chunk_knn, get_vec_chunk_ids, hydrate_snippets
 
 _logger = logging.getLogger("ccrecall")
 
@@ -146,11 +146,11 @@ def search_messages(
 ) -> tuple[list[dict], bool]:
     """Search for matched exchanges (Entrypoint B), returning (snippets, ranked).
 
-    Uses chunk-KNN via _execute_chunk_knn with NO per-branch rollup — multiple
+    Uses chunk-KNN via execute_chunk_knn with NO per-branch rollup — multiple
     matching chunks in one session all appear as separate snippet results.
     ranked=False only on the pre-KNN gates (empty query, model unavailable,
     chunk_vec unavailable, or embed_text failure). Once the KNN runs, ranked=True:
-    a sqlite3.Error inside _execute_chunk_knn degrades to an empty list that is
+    a sqlite3.Error inside execute_chunk_knn degrades to an empty list that is
     indistinguishable from "no matches" at this layer, so both stay ranked=True.
     There is no keyword fallback for B in this landing — deferred to issue #34.
     """
@@ -171,9 +171,9 @@ def search_messages(
     top_k = max(max_results * OVERFETCH_MULTIPLIER, OVERFETCH_FLOOR)
     cursor = conn.cursor()
 
-    raw = _execute_chunk_knn(cursor, query_vec, top_k, projects, session_id, path)
+    raw = execute_chunk_knn(cursor, query_vec, top_k, projects, session_id, path)
     if not raw:
-        # Either no matches or a DB error caught inside _execute_chunk_knn;
+        # Either no matches or a DB error caught inside execute_chunk_knn;
         # both cases return ranked=True (vec was available but yielded nothing).
         return [], True
 

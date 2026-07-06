@@ -26,7 +26,7 @@ SCHEMA_VERSION = 1
 # Shared SQL predicate for "branches that are candidates to embed": active
 # leaves (the query path only returns is_active=1) with a usable summary. This
 # is the single source of truth for the embedding universe — build_selection()
-# (eligibility), count_status() (backfill progress), and search_conversations
+# (eligibility), count_status() (backfill progress), and search_cli
 # print_status() (diagnostics) all build on it so their counts can't drift.
 EMBEDDABLE_BRANCH_FILTER = "is_active = 1 AND context_summary IS NOT NULL AND context_summary != ''"
 # Chunk-path universe: active leaf with at least one message. Wider than

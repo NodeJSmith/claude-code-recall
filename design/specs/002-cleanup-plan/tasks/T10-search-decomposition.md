@@ -1,7 +1,7 @@
 ---
 task_id: "T10"
 title: "Decompose search_conversations.py into 5 modules"
-status: "planned"
+status: "done"
 depends_on: ["T08"]
 implements: ["FR#11", "AC#7", "AC#8"]
 ---

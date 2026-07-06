@@ -597,7 +597,7 @@ class TestRecentChatsDbFlag:
 
 
 class TestSearchConversationsDbFlag:
-    """Tests for --db flag override in search_conversations.py after sqlite3.connect replacement."""
+    """Tests for --db flag override in search_cli.py after sqlite3.connect replacement."""
 
     def test_search_conversations_db_flag_override(self, tmp_path):
         """--db /tmp/test.db still works after sqlite3.connect replacement."""

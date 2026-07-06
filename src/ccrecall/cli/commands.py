@@ -36,7 +36,7 @@ def _exactly_one_query_or_status(arguments: ArgumentCollection) -> None:
 
     Runs at parse time so the message renders in cyclopts' boxed error style
     (and exits 2 via the entry-point wrapper), matching every other usage error.
-    search_conversations.run() keeps the same guard for direct (non-CLI) callers.
+    search_cli.run() keeps the same guard for direct (non-CLI) callers.
     """
     # arg.tokens is non-empty only when that argument was supplied on the CLI.
     provided = [arg for arg in arguments if arg.tokens]

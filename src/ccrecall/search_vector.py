@@ -8,7 +8,7 @@ from ccrecall.embeddings import EMBEDDING_MODEL, EMBEDDING_VERSION
 from ccrecall.search_query import scope_filter_clause
 
 
-def _execute_chunk_knn(
+def execute_chunk_knn(
     cursor: sqlite3.Cursor,
     query_vec: list[float],
     top_k: int,
@@ -78,11 +78,11 @@ def get_vec_chunk_ids(
 ) -> list[tuple[int, float, int]]:
     """Return ordered (branch_id, distance, chunk_id) from chunk-vec KNN (Entrypoint A).
 
-    Applies best-chunk-per-branch max rollup on top of _execute_chunk_knn, keeping
+    Applies best-chunk-per-branch max rollup on top of execute_chunk_knn, keeping
     the first (closest) chunk per branch in KNN order. Returns empty list on DB
     error so the caller degrades to keyword search; non-DB bugs propagate.
     """
-    raw = _execute_chunk_knn(cursor, query_vec, top_k, projects, session_id, path)
+    raw = execute_chunk_knn(cursor, query_vec, top_k, projects, session_id, path)
     if not raw:
         return []
 
