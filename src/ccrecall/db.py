@@ -61,8 +61,6 @@ DEFAULT_SETTINGS = {
     "alert_snooze_hours": 24,
 }
 
-CURRENT_ONBOARDING_VERSION = 1
-
 # Vec-loaded connections (concurrent embedding writers) wait longer than the
 # base BUSY_TIMEOUT_MS on a collision.
 VEC_BUSY_TIMEOUT_MS = 30000

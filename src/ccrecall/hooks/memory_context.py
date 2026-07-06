@@ -29,7 +29,6 @@ from ccrecall.db import (
     DEFAULT_SETTINGS,
     get_db_connection,
     get_db_path,
-    load_config,
     load_settings,
     setup_logging,
 )
@@ -587,20 +586,8 @@ def main():
 
     # ── Proactive alert evaluation ──────────────────────────────────────────────
     # Must run before ALL early-return gates so alerts fire even when sessions is
-    # empty, the DB is inaccessible, or onboarding is incomplete.
+    # empty or the DB is inaccessible.
     proactive_block = _proactive_alert_block(settings, conn, db_available)
-
-    # ── Gate: onboarding incomplete ────────────────────────────────────────────
-    config = load_config()
-    if not config.get("onboarding_completed"):
-        # The proactive write-failure alert (if active) still surfaces here:
-        # it explains why onboarding config.json can't be saved. onboarding.py
-        # fires as a separate hook with its own injection; if both would appear,
-        # the write-failure alert wins in this hook (it's the cause of the blockage).
-        if conn is not None:
-            conn.close()
-        _emit_with_proactive(proactive_block)
-        return
 
     # ── Gate: context injection disabled ───────────────────────────────────────
     if not settings.get("auto_inject_context", True):

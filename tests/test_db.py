@@ -11,7 +11,6 @@ from conftest import make_vec_conn
 
 import ccrecall.db as db_module
 from ccrecall.db import (
-    CURRENT_ONBOARDING_VERSION,
     DEFAULT_SETTINGS,
     atomic_write_json,
     fetch_branch_messages,
@@ -247,14 +246,6 @@ class TestLoadSettingsWithConfig:
 
         result = load_settings()
         assert result == DEFAULT_SETTINGS
-
-
-class TestCurrentOnboardingVersion:
-    """Import contract: CURRENT_ONBOARDING_VERSION must exist and equal 1."""
-
-    def test_value_is_one(self):
-        """Both write_config and onboarding.py depend on this being 1."""
-        assert CURRENT_ONBOARDING_VERSION == 1
 
 
 # vec schema, columns, trigger, vec_available, load_vec

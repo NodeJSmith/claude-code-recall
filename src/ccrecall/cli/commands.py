@@ -12,7 +12,6 @@ from typing import Annotated, Literal
 from cyclopts import ArgumentCollection, Group, Parameter
 from cyclopts.validators import Number
 
-from ccrecall import legacy as legacy_mod
 from ccrecall import recent_chats as recent_chats_mod
 from ccrecall import search_conversations as search_mod
 from ccrecall import session_tail as session_tail_mod
@@ -24,7 +23,6 @@ from ccrecall.hooks import backfill_embeddings as backfill_embeddings_mod
 from ccrecall.hooks import backfill_summaries as backfill_summaries_mod
 from ccrecall.hooks import import_conversations as import_mod
 from ccrecall.hooks import sync_current as sync_current_mod
-from ccrecall.hooks import write_config as write_config_mod
 
 # store_true flags carry no --no-<flag> negation, matching the former argparse.
 _FLAG = Parameter(negative=[])
@@ -85,18 +83,6 @@ def cmd_import(
 ) -> None:
     """Import Claude Code conversations into the memory DB."""
     import_mod.run(db=db, projects_dir=projects_dir, project=project)
-
-
-@app.command(name="migrate", show=False)
-def cmd_migrate() -> None:
-    """Carry a pre-rename install (~/.claude-memory) forward into ~/.ccrecall.
-
-    Undocumented one-time helper: copies the legacy DB and portable config keys,
-    leaving the original as a backup. Normally auto-spawned by the SessionStart
-    hook when a legacy DB is detected; safe to run by hand and idempotent.
-    """
-    code = legacy_mod.run_migration()
-    raise SystemExit(code)
 
 
 @app.command(name="stats")
@@ -276,15 +262,3 @@ def cmd_tail(
 ) -> None:
     """Print the tail of a prior session's transcript for fast resume."""
     raise SystemExit(session_tail_mod.run(selector, list_sessions=list_sessions, cwd=cwd, n=n))
-
-
-@app.command(name="write-config")
-def cmd_write_config(
-    *,
-    defaults: Annotated[bool, _FLAG, Parameter(help="Write recommended defaults without explicit flags.")] = False,
-    auto_inject_context: Annotated[
-        bool | None, Parameter(name=["--auto-inject-context"], help="Enable session context injection on startup.")
-    ] = None,
-) -> None:
-    """Write or update the ccrecall config from onboarding choices."""
-    write_config_mod.run(defaults=defaults, auto_inject_context=auto_inject_context)

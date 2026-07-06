@@ -781,7 +781,6 @@ class TestModelWarmOnSetup:
         monkeypatch.setattr(memory_setup, "load_settings", lambda: {"logging_enabled": False})
         monkeypatch.setattr(memory_setup, "_needs_reimport", lambda *a, **k: False)
         monkeypatch.setattr(memory_setup, "_needs_backfill", lambda *a, **k: False)
-        monkeypatch.setattr(memory_setup, "find_legacy_db", lambda: None)
         monkeypatch.setattr(memory_setup, "_reap_stale_temp_files", lambda: None)
 
         captured = io.StringIO()
@@ -803,7 +802,6 @@ class TestModelWarmOnSetup:
         monkeypatch.setattr(memory_setup, "load_settings", lambda: {"logging_enabled": False})
         monkeypatch.setattr(memory_setup, "_needs_reimport", lambda *a, **k: False)
         monkeypatch.setattr(memory_setup, "_needs_backfill", lambda *a, **k: False)
-        monkeypatch.setattr(memory_setup, "find_legacy_db", lambda: None)
         monkeypatch.setattr(memory_setup, "_reap_stale_temp_files", lambda: None)
 
         with patch("sys.stdout", io.StringIO()):
@@ -822,7 +820,6 @@ class TestModelWarmOnSetup:
         monkeypatch.setattr(memory_setup, "load_settings", lambda: {"logging_enabled": False})
         monkeypatch.setattr(memory_setup, "_needs_reimport", lambda *a, **k: False)
         monkeypatch.setattr(memory_setup, "_needs_backfill", lambda *a, **k: False)
-        monkeypatch.setattr(memory_setup, "find_legacy_db", lambda: None)
         monkeypatch.setattr(memory_setup, "_reap_stale_temp_files", lambda: None)
 
         captured = io.StringIO()
