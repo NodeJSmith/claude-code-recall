@@ -1,7 +1,7 @@
 ---
 task_id: "T07"
 title: "Fix branch identity to session-keyed single row"
-status: "planned"
+status: "done"
 depends_on: ["T05"]
 implements: ["FR#4", "FR#5", "FR#6", "FR#18"]
 ---

@@ -185,8 +185,6 @@ def print_stats(db: Path = DEFAULT_DB_PATH) -> None:
         total_branches = cursor.fetchone()[0]
         cursor.execute("SELECT COUNT(*) FROM branches WHERE is_active = 1")
         active = cursor.fetchone()[0]
-        cursor.execute("SELECT COUNT(*) FROM branches WHERE is_active = 0")
-        abandoned = cursor.fetchone()[0]
         # Branch-grain embedding coverage (vec-free watermark count).
         embedded, embeddable = branch_embedding_coverage(conn)
 
@@ -196,7 +194,7 @@ def print_stats(db: Path = DEFAULT_DB_PATH) -> None:
     print(f"Size: {db_size / BYTES_PER_MB:.2f} MB")
     print(f"Projects: {projects}")
     print(f"Sessions: {sessions}")
-    print(f"Branches: {total_branches} ({active} active, {abandoned} abandoned)")
+    print(f"Branches: {total_branches} ({active} active)")
     print(f"Messages: {messages}")
     if embeddable:
         print(f"Embeddings: {embedded}/{embeddable} branches ({embedded / embeddable * 100:.0f}%)")

@@ -16,11 +16,6 @@ from ccrecall.content import (
 )
 from ccrecall.models import TranscriptEntry, is_valid
 
-# Recursion guard for the parent->child branch walk in find_all_branches — caps
-# descendant search depth so a pathological/cyclic transcript tree can't blow the
-# stack.
-MAX_BRANCH_DEPTH = 100
-
 
 def is_valid_entry(obj: object) -> bool:
     """Validate a raw transcript entry at the ingest boundary.
@@ -116,38 +111,32 @@ def extract_session_metadata(entries: list[dict]) -> dict:
 
 def find_all_branches(all_entries: list[dict]) -> list[dict]:
     """
-    Find all conversation branches (from rewinds).
+    Find the active conversation branch.
 
-    Returns list of branches, each with:
+    Returns a single-element list containing the active branch:
       - leaf_uuid: UUID of the last message in this branch
       - uuids: set of all UUIDs on this branch path
-      - is_active: True if this is the current active branch
-      - fork_point_uuid: UUID where this branch diverged (None for active)
+      - is_active: always True
+      - fork_point_uuid: always None (abandoned-fork tracking was removed —
+        session identity is now session-keyed, not leaf_uuid-keyed, so there
+        is no longer a reason to detect or persist rewound/abandoned forks)
 
-    Algorithm:
-    1. Find active branch (trace from latest message back to root)
-    2. Find fork points on the active path where non-active children
-       lead to subtrees with user messages (actual rewinds, not tree noise)
-    3. For each rewind fork, collect the abandoned subtree + common prefix
+    Algorithm: trace from the latest message back to the root via parentUuid.
     """
     uuid_to_entry: dict[str, dict] = {}
     uuid_to_parent: dict[str, str | None] = {}
-    children: dict[str, list[str]] = {}
 
     for entry in all_entries:
         uuid = entry.get("uuid")
         if not uuid:
             continue
         uuid_to_entry[uuid] = entry
-        parent = entry.get("parentUuid")
-        uuid_to_parent[uuid] = parent
-        if parent:
-            children.setdefault(parent, []).append(uuid)
+        uuid_to_parent[uuid] = entry.get("parentUuid")
 
     if not uuid_to_entry:
         return []
 
-    # Step 1: Find active branch (latest -> root)
+    # Find active branch (latest -> root)
     latest = max(uuid_to_entry.values(), key=lambda e: e.get("timestamp") or "")
     active_uuids: set[str] = set()
     current: str | None = latest["uuid"]
@@ -163,60 +152,6 @@ def find_all_branches(all_entries: list[dict]) -> list[dict]:
             "fork_point_uuid": None,
         }
     ]
-
-    # Step 2: Find rewind forks on the active path
-    def has_user_descendant(uuid: str, depth: int = 0) -> bool:
-        if depth > MAX_BRANCH_DEPTH:
-            return False
-        entry = uuid_to_entry.get(uuid)
-        if entry and entry.get("type") == "user":
-            return True
-        return any(has_user_descendant(kid, depth + 1) for kid in children.get(uuid, []))
-
-    def collect_subtree(uuid: str) -> set[str]:
-        result: set[str] = set()
-        stack = [uuid]
-        while stack:
-            node = stack.pop()
-            result.add(node)
-            stack.extend(children.get(node, []))
-        return result
-
-    for uuid in active_uuids:
-        kids = children.get(uuid, [])
-        if len(kids) <= 1:
-            continue
-
-        for kid in kids:
-            if kid in active_uuids:
-                continue
-            if not has_user_descendant(kid):
-                continue
-
-            # Real rewind fork — build the abandoned branch
-            # Common prefix: fork point back to root
-            prefix: set[str] = set()
-            cur: str | None = uuid
-            while cur:
-                prefix.add(cur)
-                cur = uuid_to_parent.get(cur)
-
-            subtree = collect_subtree(kid)
-            branch_uuids = prefix | subtree
-
-            subtree_entries = [uuid_to_entry[u] for u in subtree if u in uuid_to_entry]
-            if not subtree_entries:
-                continue
-            leaf = max(subtree_entries, key=lambda e: e.get("timestamp") or "")
-
-            branches.append(
-                {
-                    "leaf_uuid": leaf["uuid"],
-                    "uuids": branch_uuids,
-                    "is_active": False,
-                    "fork_point_uuid": uuid,
-                }
-            )
 
     return branches
 
