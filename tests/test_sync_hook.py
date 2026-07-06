@@ -20,7 +20,7 @@ from ccrecall.hooks import memory_setup, memory_sync, sync_current
 from ccrecall.hooks.sync_current import sync_session, validate_session_id
 from ccrecall.recent_chats import run as recent_chats_run
 from ccrecall.schema import SCHEMA
-from ccrecall.search_conversations import run as search_conversations_run
+from ccrecall.search_cli import run as search_conversations_run
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures"
 

@@ -14,7 +14,7 @@ from cyclopts import ArgumentCollection, Group, Parameter
 from cyclopts.validators import Number
 
 from ccrecall import recent_chats as recent_chats_mod
-from ccrecall import search_conversations as search_mod
+from ccrecall import search_cli as search_mod
 from ccrecall import session_tail as session_tail_mod
 from ccrecall.cli import app, backfill_app
 from ccrecall.cli.context import DEFAULT_CLI_CONTEXT, CLIContextParam
