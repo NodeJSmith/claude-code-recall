@@ -1,7 +1,7 @@
 ---
 task_id: "T08"
 title: "Update tests for session-keyed branch identity"
-status: "planned"
+status: "done"
 depends_on: ["T06", "T07"]
 implements: ["AC#6"]
 ---

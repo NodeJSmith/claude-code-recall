@@ -39,7 +39,7 @@ class TestSyncSessionCreatesBranches:
 
         cursor.execute("SELECT COUNT(*) FROM branches")
         branch_count = cursor.fetchone()[0]
-        assert branch_count > 0, "Should have created at least one branch"
+        assert branch_count == 1, "Session-keyed identity: exactly one branch row per session"
 
         cursor.execute("SELECT COUNT(*) FROM branch_messages")
         assert cursor.fetchone()[0] > 0

@@ -1,10 +1,6 @@
 """Tests for ccrecall.parsing — branch detection, JSONL parsing, metadata."""
 
-import uuid as uuid_mod
 from pathlib import Path
-
-from hypothesis import given, settings
-from hypothesis import strategies as st
 
 from ccrecall.parsing import (
     compute_branch_metadata,
@@ -35,108 +31,22 @@ class TestExtractSessionUuid:
         assert extract_session_uuid(Path("/x/agent-abc")) == "abc"
 
 
-# Verified expected values from real fixture analysis
+# Verified expected values from real fixture analysis. Every fixture now yields
+# exactly one branch — find_all_branches returns only the active branch, so
+# "branches" is always 1 regardless of rewinds recorded in the fixture.
 EXPECTED = {
     "linear_3_exchange": {"branches": 1, "active_exchanges": 3},
     "tool_heavy": {"branches": 1, "active_exchanges": 2},
-    "single_rewind": {"branches": 3, "active_exchanges": 5},
-    "multi_rewind": {"branches": 4, "active_exchanges": 7},
+    "single_rewind": {"branches": 1, "active_exchanges": 5},
+    "multi_rewind": {"branches": 1, "active_exchanges": 7},
     "with_notifications": {"branches": 1, "active_exchanges": 2},
     "with_teammate_messages": {"branches": 1, "active_exchanges": 2},
     "channel_telegram": {"branches": 1, "active_exchanges": 2},
 }
 
 
-# ── Hypothesis property tests for find_all_branches ──
-
-
-def _build_uuid_tree(n_entries, fork_indices):
-    """
-    Build a synthetic UUID tree with controlled fork points.
-    Returns list of entry dicts with uuid, parentUuid, type, timestamp.
-    """
-    entries = []
-    uuids = [str(uuid_mod.uuid4()) for _ in range(n_entries)]
-    roles = ["user", "assistant"]
-
-    # Build a linear chain first
-    for i, uid in enumerate(uuids):
-        entry = {
-            "uuid": uid,
-            "parentUuid": uuids[i - 1] if i > 0 else None,
-            "type": roles[i % 2],
-            "timestamp": f"2025-01-01T00:00:{i:02d}Z",
-        }
-        entries.append(entry)
-
-    # Add fork branches at specified indices
-    for fork_idx in fork_indices:
-        if fork_idx >= len(uuids):
-            continue
-        fork_parent = uuids[fork_idx]
-        branch_len = max(2, n_entries // 4)
-        for j in range(branch_len):
-            uid = str(uuid_mod.uuid4())
-            entry = {
-                "uuid": uid,
-                "parentUuid": fork_parent if j == 0 else entries[-1]["uuid"],
-                "type": roles[j % 2],
-                # Earlier timestamps so the main chain stays active
-                "timestamp": f"2024-06-01T00:00:{j:02d}Z",
-            }
-            entries.append(entry)
-
-    return entries
-
-
-@st.composite
-def uuid_trees(draw):
-    """Hypothesis strategy generating random UUID trees."""
-    n = draw(st.integers(min_value=2, max_value=30))
-    n_forks = draw(st.integers(min_value=0, max_value=min(3, n - 1)))
-    fork_indices = draw(
-        st.lists(
-            st.integers(min_value=0, max_value=n - 1),
-            min_size=n_forks,
-            max_size=n_forks,
-            unique=True,
-        )
-    )
-    return _build_uuid_tree(n, fork_indices)
-
-
-class TestFindAllBranchesProperties:
-    @given(entries=uuid_trees())
-    @settings(max_examples=200)
-    def test_exactly_one_active_branch(self, entries):
-        branches = find_all_branches(entries)
-        active = [b for b in branches if b["is_active"]]
-        assert len(active) == 1
-
-    @given(entries=uuid_trees())
-    @settings(max_examples=200)
-    def test_active_contains_latest_entry(self, entries):
-        branches = find_all_branches(entries)
-        latest = max(entries, key=lambda e: e.get("timestamp") or "")
-        active = [b for b in branches if b["is_active"]][0]
-        assert latest["uuid"] in active["uuids"]
-
-    @given(entries=uuid_trees())
-    @settings(max_examples=200)
-    def test_no_duplicate_leaf_uuids(self, entries):
-        branches = find_all_branches(entries)
-        leaves = [b["leaf_uuid"] for b in branches]
-        assert len(leaves) == len(set(leaves))
-
-    @given(entries=uuid_trees())
-    @settings(max_examples=200)
-    def test_fork_points_on_active_path(self, entries):
-        """Non-active branches should fork from a UUID on the active branch."""
-        branches = find_all_branches(entries)
-        active = [b for b in branches if b["is_active"]][0]
-        for b in branches:
-            if not b["is_active"] and b["fork_point_uuid"]:
-                assert b["fork_point_uuid"] in active["uuids"]
+class TestFindAllBranchesBasics:
+    """Plain edge-case coverage for find_all_branches (single-branch return)."""
 
     def test_empty_entries(self):
         assert find_all_branches([]) == []
