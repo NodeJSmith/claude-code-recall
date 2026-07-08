@@ -360,6 +360,7 @@ class TestBuildContext:
         """When context_summary is present, it should be used as-is."""
         sessions = [
             {
+                "uuid": "abc-123",
                 "context_summary": "### Session: 2025-01-15 14:30 -> 15:00\nCached content here.",
                 "started_at": "2025-01-15T14:30:00Z",
                 "ended_at": "2025-01-15T15:00:00Z",
@@ -367,11 +368,13 @@ class TestBuildContext:
         ]
         result = build_context(sessions)
         assert "Cached content here." in result
+        assert "Session ID:" not in result
 
     def test_fallback_renders_exchange(self):
         """Without context_summary, fallback should render exchanges."""
         sessions = [
             {
+                "uuid": "fallback-uuid-456",
                 "started_at": "2025-01-15T14:30:00Z",
                 "ended_at": "2025-01-15T15:00:00Z",
                 "files_modified": [],
@@ -391,6 +394,7 @@ class TestBuildContext:
             }
         ]
         result = build_context(sessions)
+        assert "Session ID:" not in result
         assert "### Session:" in result
         assert "How do I use pytest?" in result
         assert "Run pytest from the project root." in result
@@ -401,6 +405,7 @@ class TestBuildContext:
     def test_multi_session_separator(self):
         sessions = [
             {
+                "uuid": "primary-uuid",
                 "started_at": "2025-01-15T14:00:00Z",
                 "ended_at": "2025-01-15T14:30:00Z",
                 "files_modified": [],
@@ -419,6 +424,7 @@ class TestBuildContext:
                 ],
             },
             {
+                "uuid": "supplementary-uuid",
                 "context_summary": "### Session: Second\nCached.",
             },
         ]
@@ -426,6 +432,8 @@ class TestBuildContext:
         assert "---" in result
         assert "First session" in result
         assert "Cached." in result
+        assert "> Session ID: supplementary-uuid" in result
+        assert "> Session ID: primary-uuid" not in result
 
     def test_mixed_cached_and_fallback(self):
         """Sessions can mix cached and uncached."""
@@ -453,6 +461,17 @@ class TestBuildContext:
         result = build_context(sessions)
         assert "Cached session 1." in result
         assert "Uncached session" in result
+
+    def test_no_uuid_omits_session_id_line(self):
+        """Sessions without a uuid should not get a Session ID line."""
+        sessions = [
+            {
+                "context_summary": "Cached without uuid.",
+            }
+        ]
+        result = build_context(sessions)
+        assert "Session ID:" not in result
+        assert "Cached without uuid." in result
 
 
 class TestBuildFallbackContext:
