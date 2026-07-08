@@ -132,7 +132,7 @@ def build_context(sessions: list[dict]) -> str:
 
     Prepends a Session ID blockquote to supplementary session blocks (index
     > 0) so they are traceable — the primary session's UUID is already in
-    the Session Origin block.  Uses cached context_summary when available,
+    the Session Origin block. Uses cached context_summary when available,
     falls back to truncated last-3 exchanges for uncached branches.
     """
     if not sessions:
