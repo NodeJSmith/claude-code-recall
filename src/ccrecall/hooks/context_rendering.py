@@ -130,18 +130,21 @@ def build_origin_block(source: str, sessions: list[dict]) -> str:
 def build_context(sessions: list[dict]) -> str:
     """Build markdown context from selected sessions.
 
-    Uses cached context_summary when available, falls back to
-    truncated last-3 exchanges for uncached branches.
+    Prepends a Session ID blockquote to supplementary session blocks (index
+    > 0) so they are traceable — the primary session's UUID is already in
+    the Session Origin block. Uses cached context_summary when available,
+    falls back to truncated last-3 exchanges for uncached branches.
     """
     if not sessions:
         return ""
 
     parts = []
-    for session in sessions:
+    for i, session in enumerate(sessions):
         cached = session.get("context_summary")
-        if cached:
-            parts.append(cached)
-        else:
-            parts.append(_build_fallback_context(session))
+        body = cached if cached else _build_fallback_context(session)
+        uuid = session.get("uuid", "")
+        if uuid and i > 0:
+            body = f"> Session ID: {uuid}\n\n{body}"
+        parts.append(body)
 
     return "\n\n---\n\n".join(parts)
