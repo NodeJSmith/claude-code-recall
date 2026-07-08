@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.0](https://github.com/NodeJSmith/claude-code-recall/compare/v0.13.4...v0.14.0) (2026-07-08)
+
+
+### Features
+
+* include session ID in supplementary context blocks ([#57](https://github.com/NodeJSmith/claude-code-recall/issues/57)) ([eb488b8](https://github.com/NodeJSmith/claude-code-recall/commit/eb488b8e92c8a2361b85f6a8763ecbcc890d77fc))
+
 ## [0.13.4](https://github.com/NodeJSmith/claude-code-recall/compare/v0.13.3...v0.13.4) (2026-07-06)
 
 
