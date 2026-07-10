@@ -17,6 +17,7 @@ class CLIContext:
     """
 
     json_mode: bool = False
+    debug: bool = False
 
     @property
     def output_format(self) -> str:

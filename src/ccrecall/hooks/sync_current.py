@@ -240,13 +240,10 @@ def run(input_file: Path | None = None) -> None:
                     with contextlib.suppress(Exception):  # best-effort; must not affect hook behavior
                         record_embedding_failure(reason=REASON_VEC_UNAVAILABLE)
 
-                # Sync path: write import_log with NULL file_hash as a "synced" marker
                 new_messages = sync_session(
                     conn,
                     session_file,
                     project_dir,
-                    write_import_log=True,
-                    file_hash=None,
                 )
             # conn is committed and closed on the line above (context manager exit).
 

@@ -87,9 +87,10 @@ def cmd_import(
     db: Annotated[Path, Parameter(help="Database path.")] = DEFAULT_DB_PATH,
     projects_dir: Annotated[Path, Parameter(help="Projects directory.")] = DEFAULT_PROJECTS_DIR,
     project: Annotated[str | None, Parameter(help="Import only this project (by directory name).")] = None,
+    ctx: CLIContextParam = DEFAULT_CLI_CONTEXT,
 ) -> None:
     """Import Claude Code conversations into the memory DB."""
-    import_mod.run(db=db, projects_dir=projects_dir, project=project)
+    import_mod.run(db=db, projects_dir=projects_dir, project=project, verbose=ctx.debug)
 
 
 def _count_multi_active_branch_sessions(db: Path) -> int:
@@ -129,9 +130,12 @@ def cmd_stats(
 
 
 @backfill_app.command(name="summaries")
-def cmd_backfill_summaries() -> None:
+def cmd_backfill_summaries(
+    *,
+    ctx: CLIContextParam = DEFAULT_CLI_CONTEXT,
+) -> None:
     """Backfill context summaries for branches that lack a current one."""
-    backfill_summaries_mod.run()
+    backfill_summaries_mod.run(verbose=ctx.debug)
 
 
 @backfill_app.command(name="embeddings")
@@ -161,6 +165,7 @@ def cmd_backfill_embeddings(
             limit=limit,
             progress_every=progress_every,
             threads=threads,
+            verbose=ctx.debug,
         )
     finally:
         # Status is read-only: never disturb a concurrent backfill's PID marker.

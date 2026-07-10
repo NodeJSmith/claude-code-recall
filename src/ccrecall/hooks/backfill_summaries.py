@@ -18,22 +18,22 @@ BATCH_SIZE = 50
 PID_KEY = "ccrecall-backfill-summaries"
 
 
-def run():
+def run(*, verbose: bool = False):
     """Backfill context summaries for branches that lack a current one.
 
     Wraps the ``_main()`` work in PID-file cleanup. ``_main()`` is kept separate
     so tests can exercise the backfill logic without the PID-file lifecycle.
     """
     try:
-        _main()
+        _main(verbose=verbose)
     finally:
         # Delete PID file so _spawn_background can spawn again next session
         remove_pid_file(PID_KEY)
 
 
-def _main():
+def _main(*, verbose: bool = False):
     settings = load_settings()
-    logger = setup_logging(settings, process_name="backfill-summary")
+    logger = setup_logging(settings, process_name="backfill-summary", verbose=verbose)
 
     total_updated = 0
 

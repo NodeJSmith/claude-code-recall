@@ -21,7 +21,7 @@ DEFAULT_PROJECTS_DIR = Path.home() / ".claude" / "projects"
 
 # Current schema version. Bump when adding a migration and wire the new DDL
 # delta into _apply_migrations (see _migrate_to_v1 for the version-1 shape).
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # Shared SQL predicate for "branches that are candidates to embed": active
 # leaves (the query path only returns is_active=1) with a usable summary. This
@@ -431,6 +431,22 @@ def _migrate_to_v2(conn: sqlite3.Connection) -> None:
     _recreate_branches_indexes_and_fts(conn)
 
 
+def _migrate_to_v3(conn: sqlite3.Connection) -> None:
+    """Version-3 migration: add stat-based fast skip columns to import_log.
+
+    Runs outside the version-gated BEGIN IMMEDIATE block because this branch
+    may be behind the installed version (user_version > SCHEMA_VERSION) but the
+    columns still need to exist. Concurrent processes may race on the ALTER —
+    the duplicate-column error is caught as a harmless concurrency signal.
+    """
+    for column, decl in (("file_size", "INTEGER"), ("file_mtime", "REAL")):
+        try:
+            conn.execute(f"ALTER TABLE import_log ADD COLUMN {column} {decl}")
+        except sqlite3.OperationalError as e:  # noqa: PERF203 — 2-iteration loop, concurrency guard
+            if "duplicate column name" not in str(e):
+                raise
+
+
 def _apply_migrations(conn: sqlite3.Connection) -> None:
     """Apply version-gated schema migrations up to SCHEMA_VERSION, atomically.
 
@@ -469,6 +485,14 @@ def _apply_migrations(conn: sqlite3.Connection) -> None:
     ``finally`` on every path so foreign_keys is ON whenever this returns.
     """
     current = conn.execute("PRAGMA user_version").fetchone()[0]
+
+    # _migrate_to_v3 is additive (ALTER TABLE ADD COLUMN) and self-guarded by
+    # catching the duplicate-column error, so it runs outside the version gate —
+    # this branch may be behind the installed version (user_version >
+    # SCHEMA_VERSION) but the columns still need to exist for this code to work.
+    _migrate_to_v3(conn)
+    conn.commit()
+
     if current >= SCHEMA_VERSION:
         return
     conn.execute("PRAGMA foreign_keys = OFF")
