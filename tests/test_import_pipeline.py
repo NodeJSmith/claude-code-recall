@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 import sqlite_vec
-from conftest import VEC_AVAILABLE, make_vec_conn
+from conftest import VEC_SKIP, make_vec_conn
 
 from ccrecall.db import get_connection
 from ccrecall.embeddings import EMBEDDING_DIM, EMBEDDING_MODEL, EMBEDDING_VERSION
@@ -815,7 +815,7 @@ class TestEmptySessionCascadeRegression:
     """Regression: #59 — empty-session cleanup must not crash when cascade
     triggers reach chunk_vec on a load_vec=False connection."""
 
-    @pytest.mark.skipif(not VEC_AVAILABLE, reason="sqlite-vec not available in this environment")
+    @VEC_SKIP
     def test_branch_delete_with_chunk_vec_cascade(self, tmp_path):
         """Deleting branches during empty-session cleanup loads vec on demand
         so the chunks_vec_ad cascade trigger can reach chunk_vec."""
@@ -826,29 +826,29 @@ class TestEmptySessionCascadeRegression:
         # a session with chunks + chunk_vec (simulating a prior embedding run).
         vec_conn = make_vec_conn(str(db_file))
         vec_conn.execute("PRAGMA foreign_keys = ON")
-        cur = vec_conn.cursor()
-        cur.execute(
+        cursor = vec_conn.cursor()
+        cursor.execute(
             "INSERT INTO projects (path, key, name) VALUES (?, ?, ?)",
             ("/p", "-p", "p"),
         )
-        proj_id = cur.lastrowid
-        cur.execute(
+        project_id = cursor.lastrowid
+        cursor.execute(
             "INSERT INTO sessions (uuid, project_id) VALUES (?, ?)",
-            (session_uuid, proj_id),
+            (session_uuid, project_id),
         )
-        sess_id = cur.lastrowid
-        cur.execute(
+        session_id = cursor.lastrowid
+        cursor.execute(
             "INSERT INTO branches (session_id, leaf_uuid) VALUES (?, ?)",
-            (sess_id, "leaf-59"),
+            (session_id, "leaf-59"),
         )
-        branch_id = cur.lastrowid
-        cur.execute(
+        branch_id = cursor.lastrowid
+        cursor.execute(
             "INSERT INTO chunks (branch_id, exchange_index, content_hash) VALUES (?, ?, ?)",
             (branch_id, 0, "hash-0"),
         )
-        chunk_id = cur.lastrowid
+        chunk_id = cursor.lastrowid
         vec = sqlite_vec.serialize_float32([0.1] * EMBEDDING_DIM)
-        cur.execute(
+        cursor.execute(
             "INSERT INTO chunk_vec(chunk_id, embedding) VALUES (?, ?)",
             (chunk_id, vec),
         )
@@ -878,7 +878,7 @@ class TestEmptySessionCascadeRegression:
 
         # Without the fix this raises:
         #   sqlite3.OperationalError: no such module: vec0
-        branches_imported, total_messages = import_session(conn, jsonl, proj_id)
+        branches_imported, total_messages = import_session(conn, jsonl, project_id)
 
         assert branches_imported == -1
         assert total_messages == 0

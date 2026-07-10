@@ -15,7 +15,13 @@ import sys
 from pathlib import Path
 
 from ccrecall.config import DEFAULT_DB_PATH, get_db_path, load_settings, remove_pid_file, setup_logging
-from ccrecall.db import DEFAULT_PROJECTS_DIR, branch_embedding_coverage, get_connection, vec_available
+from ccrecall.db import (
+    DEFAULT_PROJECTS_DIR,
+    TRIGGER_CHUNKS_VEC_AD,
+    branch_embedding_coverage,
+    get_connection,
+    vec_available,
+)
 from ccrecall.formatting import extract_project_name, normalize_project_key
 from ccrecall.parsing import extract_session_uuid
 from ccrecall.project_ops import upsert_project
@@ -31,11 +37,11 @@ PID_KEY = "ccrecall-import"
 
 def get_file_hash(filepath: Path) -> str:
     """Get MD5 hash of file for change detection."""
-    h = hashlib.md5(usedforsecurity=False)
-    with open(filepath, "rb") as f:
-        for chunk in iter(lambda: f.read(HASH_CHUNK_SIZE), b""):
-            h.update(chunk)
-    return h.hexdigest()
+    hasher = hashlib.md5(usedforsecurity=False)
+    with open(filepath, "rb") as fh:
+        for chunk in iter(lambda: fh.read(HASH_CHUNK_SIZE), b""):
+            hasher.update(chunk)
+    return hasher.hexdigest()
 
 
 def import_session(
@@ -101,9 +107,13 @@ def import_session(
         # loaded, the DELETE crashes with "no such module: vec0". Load it
         # on demand (same approach as _apply_migrations, which loads vec
         # before migration DML that triggers the same cascade).
-        has_vec_cascade = cursor.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='trigger' AND name='chunks_vec_ad'"
-        ).fetchone()
+        has_vec_cascade = (
+            cursor.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='trigger' AND name=?",
+                (TRIGGER_CHUNKS_VEC_AD,),
+            ).fetchone()
+            is not None
+        )
         if has_vec_cascade:
             vec_available(conn)
 

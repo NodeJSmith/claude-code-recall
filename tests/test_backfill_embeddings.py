@@ -17,7 +17,7 @@ import sqlite3
 from unittest.mock import MagicMock, patch
 
 import pytest
-from conftest import VEC_AVAILABLE, make_vec_conn, patched_clear, patched_record
+from conftest import VEC_SKIP, make_vec_conn, patched_clear, patched_record
 
 from ccrecall.db import CONTENT_ERROR_VERSION
 from ccrecall.embed_ops import MAX_WRITE_PATH_EMBEDS_PER_SYNC
@@ -48,7 +48,7 @@ def _isolate_embedding_status(monkeypatch):
 _branch_counter = [0]
 
 
-_VEC_SKIP = pytest.mark.skipif(not VEC_AVAILABLE, reason="sqlite-vec not available in this environment")
+_VEC_SKIP = VEC_SKIP
 
 
 # Helpers

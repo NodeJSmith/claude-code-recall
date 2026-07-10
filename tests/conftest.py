@@ -41,6 +41,7 @@ def vec_available_in_env() -> bool:
 
 
 VEC_AVAILABLE = vec_available_in_env()
+VEC_SKIP = pytest.mark.skipif(not VEC_AVAILABLE, reason="sqlite-vec not available in this environment")
 
 
 def make_vec_conn(db_path: str = ":memory:") -> sqlite3.Connection:
