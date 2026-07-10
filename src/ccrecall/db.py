@@ -481,10 +481,10 @@ def _apply_migrations(conn: sqlite3.Connection) -> None:
     """
     current = conn.execute("PRAGMA user_version").fetchone()[0]
 
-    # _migrate_to_v3 is additive (ALTER TABLE ADD COLUMN) and self-guarded via
-    # PRAGMA table_info, so it runs outside the version gate — this branch may
-    # be behind the installed version (user_version > SCHEMA_VERSION) but the
-    # columns still need to exist for this code to work.
+    # _migrate_to_v3 is additive (ALTER TABLE ADD COLUMN) and self-guarded by
+    # catching the duplicate-column error, so it runs outside the version gate —
+    # this branch may be behind the installed version (user_version >
+    # SCHEMA_VERSION) but the columns still need to exist for this code to work.
     _migrate_to_v3(conn)
     conn.commit()
 
