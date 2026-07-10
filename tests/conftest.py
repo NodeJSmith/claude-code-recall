@@ -27,6 +27,23 @@ def patched_clear(sidecar: Path):
     return lambda: clear_embedding_failure(path=sidecar)
 
 
+def vec_available_in_env() -> bool:
+    """Return True if the sqlite-vec extension can be loaded in this test run."""
+    try:
+        conn = sqlite3.connect(":memory:")
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+        conn.close()
+        return True
+    except Exception:
+        return False
+
+
+VEC_AVAILABLE = vec_available_in_env()
+VEC_SKIP = pytest.mark.skipif(not VEC_AVAILABLE, reason="sqlite-vec not available in this environment")
+
+
 def make_vec_conn(db_path: str = ":memory:") -> sqlite3.Connection:
     """Return a connection with schema + sqlite-vec extension loaded.
 

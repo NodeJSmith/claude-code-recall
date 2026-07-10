@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 import pytest
 import sqlite_vec
-from conftest import make_vec_conn
+from conftest import VEC_SKIP, make_vec_conn
 
 import ccrecall.config as config_module
 import ccrecall.db as db_module
@@ -259,21 +259,6 @@ class TestLoadSettingsWithConfig:
 # vec schema, columns, trigger, vec_available, load_vec
 
 
-def _vec_available_in_env() -> bool:
-    """Return True if the sqlite-vec extension can be loaded in this test run."""
-    try:
-        conn = sqlite3.connect(":memory:")
-        conn.enable_load_extension(True)
-        sqlite_vec.load(conn)
-        conn.close()
-        return True
-    except Exception:
-        return False
-
-
-_VEC_AVAILABLE = _vec_available_in_env()
-
-
 class TestVecAvailable:
     """vec_available(conn) returns bool and never raises."""
 
@@ -310,7 +295,7 @@ class TestVecAvailable:
             result = vec_available(_FakeConn())
             assert result is False
 
-    @pytest.mark.skipif(not _VEC_AVAILABLE, reason="sqlite-vec not available in this environment")
+    @VEC_SKIP
     def test_returns_true_when_available(self):
         """Returns True when the extension loads successfully."""
         conn = sqlite3.connect(":memory:")
@@ -341,7 +326,7 @@ class TestVecSchema:
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='branches'")
         assert cursor.fetchone() is not None
 
-    @pytest.mark.skipif(not _VEC_AVAILABLE, reason="sqlite-vec not available in this environment")
+    @VEC_SKIP
     def test_branch_vec_absent_after_teardown(self):
         """branch_vec teardown: _ensure_vec_schema unconditionally drops branch_vec.
 
@@ -354,7 +339,7 @@ class TestVecSchema:
         assert "branch_vec" not in tables, "branch_vec must be absent after T06 teardown"
         conn.close()
 
-    @pytest.mark.skipif(not _VEC_AVAILABLE, reason="sqlite-vec not available in this environment")
+    @VEC_SKIP
     def test_branches_vec_ad_trigger_absent_and_chunk_triggers_present(self):
         """branch_vec teardown: branches_vec_ad is dropped; branches_chunks_ad + chunks_vec_ad are present."""
         conn = make_vec_conn()
@@ -364,7 +349,7 @@ class TestVecSchema:
         assert "chunks_vec_ad" in triggers, "chunks_vec_ad must exist after _ensure_vec_schema"
         conn.close()
 
-    @pytest.mark.skipif(not _VEC_AVAILABLE, reason="sqlite-vec not available in this environment")
+    @VEC_SKIP
     def test_existing_branch_vec_dropped_and_watermarks_reset(self):
         """When branch_vec existed before _ensure_vec_schema, it is dropped and watermarks reset to 0.
 
@@ -410,7 +395,7 @@ class TestVecSchema:
         assert wm == 0, "embedding_version must be reset to 0 when branch_vec is torn down"
         conn.close()
 
-    @pytest.mark.skipif(not _VEC_AVAILABLE, reason="sqlite-vec not available in this environment")
+    @VEC_SKIP
     def test_ensure_vec_schema_idempotent_no_branch_vec(self):
         """Running _ensure_vec_schema twice when branch_vec was never present: watermarks untouched.
 
@@ -468,7 +453,7 @@ class TestLoadVecParameter:
             assert "embedding_model" in cols
             assert "summary_version_at_embed" in cols
 
-    @pytest.mark.skipif(not _VEC_AVAILABLE, reason="sqlite-vec not available in this environment")
+    @VEC_SKIP
     def test_load_vec_true_allows_chunk_vec_query(self, tmp_path, monkeypatch):
         """get_connection(load_vec=True) returns a connection that can query chunk_vec."""
         db_file = tmp_path / "conversations.db"
@@ -777,7 +762,7 @@ class TestSchemaVersioning:
 
             assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
 
-    @pytest.mark.skipif(not _VEC_AVAILABLE, reason="sqlite-vec not available in this environment")
+    @VEC_SKIP
     def test_migration_purges_orphaned_chunk_vec_without_crashing(self, tmp_path):
         """The mainline load_vec=False migration path must not crash on a real upgrade DB.
 
@@ -875,7 +860,7 @@ class TestSchemaVersioning:
         assert not errors, f"unexpected errors in racing threads: {errors}"
         assert call_count == 1
 
-    @pytest.mark.skipif(not _VEC_AVAILABLE, reason="sqlite-vec not available in this environment")
+    @VEC_SKIP
     def test_vec_self_heal_runs_outside_version_gate(self, tmp_path):
         """_ensure_vec_schema's self-heal runs on every vec-loaded connection, not just when migrating.
 
@@ -1185,7 +1170,7 @@ class TestChunkSchema:
         assert "idx_chunks_branch" in indexes
         assert "idx_chunks_version" in indexes
 
-    @pytest.mark.skipif(not _VEC_AVAILABLE, reason="sqlite-vec not available in this environment")
+    @VEC_SKIP
     def test_chunk_vec_exists_after_ensure_vec_schema(self):
         """chunk_vec virtual table is created by _ensure_vec_schema."""
         conn = make_vec_conn()
@@ -1193,7 +1178,7 @@ class TestChunkSchema:
         assert "chunk_vec" in tables
         conn.close()
 
-    @pytest.mark.skipif(not _VEC_AVAILABLE, reason="sqlite-vec not available in this environment")
+    @VEC_SKIP
     def test_branch_vec_absent_chunk_vec_present_after_teardown(self):
         """branch_vec teardown: branch_vec absent, chunk_vec present after _ensure_vec_schema."""
         conn = make_vec_conn()
@@ -1202,7 +1187,7 @@ class TestChunkSchema:
         assert "chunk_vec" in tables, "chunk_vec must be present after _ensure_vec_schema"
         conn.close()
 
-    @pytest.mark.skipif(not _VEC_AVAILABLE, reason="sqlite-vec not available in this environment")
+    @VEC_SKIP
     def test_both_cascade_triggers_exist(self):
         """branches_chunks_ad and chunks_vec_ad triggers exist after _ensure_vec_schema."""
         conn = make_vec_conn()
@@ -1211,7 +1196,7 @@ class TestChunkSchema:
         assert "chunks_vec_ad" in triggers
         conn.close()
 
-    @pytest.mark.skipif(not _VEC_AVAILABLE, reason="sqlite-vec not available in this environment")
+    @VEC_SKIP
     def test_two_level_cascade_delete(self):
         """deleting a branch row removes all its chunks rows and their chunk_vec rows."""
         conn = make_vec_conn()
@@ -1254,7 +1239,7 @@ class TestChunkSchema:
         )
         conn.close()
 
-    @pytest.mark.skipif(not _VEC_AVAILABLE, reason="sqlite-vec not available in this environment")
+    @VEC_SKIP
     def test_chunk_vec_stale_dim_rebuilds_and_resets_watermarks(self):
         """A stale-dim chunk_vec is rebuilt at EMBEDDING_DIM and branch watermarks reset to 0.
 
@@ -1300,7 +1285,7 @@ class TestChunkSchema:
         assert wm == 0, "chunk_vec drop must reset branches.embedding_version watermark to 0"
         conn.close()
 
-    @pytest.mark.skipif(not _VEC_AVAILABLE, reason="sqlite-vec not available in this environment")
+    @VEC_SKIP
     def test_write_chunk_embedding_round_trip(self):
         """write_chunk_embedding writes the vector FIRST, then the chunk's version/model bookkeeping."""
         conn = make_vec_conn()
@@ -1332,7 +1317,7 @@ class TestChunkSchema:
         assert model == EMBEDDING_MODEL
         conn.close()
 
-    @pytest.mark.skipif(not _VEC_AVAILABLE, reason="sqlite-vec not available in this environment")
+    @VEC_SKIP
     def test_upsert_chunk_vec_replaces_without_error(self):
         """upsert_chunk_vec (DELETE+INSERT) replaces an existing row without error."""
         conn = make_vec_conn()
@@ -1375,7 +1360,7 @@ class TestChunkVecQueryable:
         assert db_module.chunk_vec_queryable(conn) is False
         conn.close()
 
-    @pytest.mark.skipif(not _VEC_AVAILABLE, reason="sqlite-vec not available in this environment")
+    @VEC_SKIP
     def test_returns_true_with_vec_loaded(self):
         """chunk_vec_queryable returns True when chunk_vec exists and is queryable."""
         conn = make_vec_conn()

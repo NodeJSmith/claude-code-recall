@@ -40,6 +40,11 @@ CHUNK_EMBEDDABLE_BRANCH_FILTER = "is_active = 1 AND EXISTS(SELECT 1 FROM branch_
 # "errored".
 CONTENT_ERROR_VERSION = -1
 
+# Trigger names created by _ensure_vec_schema. Exposed as constants so callers
+# that need to probe for the cascade (e.g. import_session's empty-session
+# cleanup) stay in sync with the definition site.
+TRIGGER_CHUNKS_VEC_AD = "chunks_vec_ad"
+
 # Vec-loaded connections (concurrent embedding writers) wait longer than the
 # base BUSY_TIMEOUT_MS on a collision.
 VEC_BUSY_TIMEOUT_MS = 30000
@@ -210,7 +215,7 @@ def _ensure_vec_schema(conn: sqlite3.Connection) -> None:
         # Drop the trigger first: SQLite does not cascade-drop a trigger when its
         # target table is dropped, so a surviving chunks_vec_ad would fire against
         # a missing chunk_vec. (DROP TABLE works on virtual tables.)
-        conn.execute("DROP TRIGGER IF EXISTS chunks_vec_ad")
+        conn.execute(f"DROP TRIGGER IF EXISTS {TRIGGER_CHUNKS_VEC_AD}")
         conn.execute("DROP TABLE chunk_vec")
         # Reset branch watermarks: chunk_vec drop leaves branches reporting
         # EMBEDDING_VERSION while their vectors are gone; zero forces backfill
@@ -229,7 +234,7 @@ def _ensure_vec_schema(conn: sqlite3.Connection) -> None:
         " BEGIN DELETE FROM chunks WHERE branch_id = OLD.id; END"
     )
     conn.execute(
-        "CREATE TRIGGER IF NOT EXISTS chunks_vec_ad"
+        f"CREATE TRIGGER IF NOT EXISTS {TRIGGER_CHUNKS_VEC_AD}"
         " AFTER DELETE ON chunks"
         " BEGIN DELETE FROM chunk_vec WHERE chunk_id = OLD.id; END"
     )
