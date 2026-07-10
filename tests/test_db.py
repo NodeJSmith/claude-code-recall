@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 import pytest
 import sqlite_vec
-from conftest import make_vec_conn
+from conftest import VEC_AVAILABLE, make_vec_conn
 
 import ccrecall.config as config_module
 import ccrecall.db as db_module
@@ -259,19 +259,7 @@ class TestLoadSettingsWithConfig:
 # vec schema, columns, trigger, vec_available, load_vec
 
 
-def _vec_available_in_env() -> bool:
-    """Return True if the sqlite-vec extension can be loaded in this test run."""
-    try:
-        conn = sqlite3.connect(":memory:")
-        conn.enable_load_extension(True)
-        sqlite_vec.load(conn)
-        conn.close()
-        return True
-    except Exception:
-        return False
-
-
-_VEC_AVAILABLE = _vec_available_in_env()
+_VEC_AVAILABLE = VEC_AVAILABLE
 
 
 class TestVecAvailable:

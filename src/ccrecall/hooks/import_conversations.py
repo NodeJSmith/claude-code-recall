@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 
 from ccrecall.config import DEFAULT_DB_PATH, get_db_path, load_settings, remove_pid_file, setup_logging
-from ccrecall.db import DEFAULT_PROJECTS_DIR, branch_embedding_coverage, get_connection
+from ccrecall.db import DEFAULT_PROJECTS_DIR, branch_embedding_coverage, get_connection, vec_available
 from ccrecall.formatting import extract_project_name, normalize_project_key
 from ccrecall.parsing import extract_session_uuid
 from ccrecall.project_ops import upsert_project
@@ -95,6 +95,18 @@ def import_session(
         # inserted branch rows before that filtering. Tear down the FK chain
         # grandchild->child->parent (branch_messages -> branches -> sessions) so
         # the session delete doesn't trip the branches.session_id constraint.
+        #
+        # The branches_chunks_ad → chunks_vec_ad cascade reaches chunk_vec (a
+        # vec0 virtual table). If the trigger exists and the extension isn't
+        # loaded, the DELETE crashes with "no such module: vec0". Load it
+        # on demand (same approach as _apply_migrations, which loads vec
+        # before migration DML that triggers the same cascade).
+        has_vec_cascade = cursor.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='trigger' AND name='chunks_vec_ad'"
+        ).fetchone()
+        if has_vec_cascade:
+            vec_available(conn)
+
         cursor.execute(
             "DELETE FROM branch_messages WHERE branch_id IN (SELECT id FROM branches WHERE session_id = ?)",
             (session_id,),
