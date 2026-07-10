@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.1](https://github.com/NodeJSmith/claude-code-recall/compare/v0.14.0...v0.14.1) (2026-07-10)
+
+
+### Bug Fixes
+
+* load sqlite-vec before cascade-triggering branch delete ([#60](https://github.com/NodeJSmith/claude-code-recall/issues/60)) ([30c31e4](https://github.com/NodeJSmith/claude-code-recall/commit/30c31e4a1d3bc61350561720c2a13fb85f73a7f2)), closes [#59](https://github.com/NodeJSmith/claude-code-recall/issues/59)
+
 ## [0.14.0](https://github.com/NodeJSmith/claude-code-recall/compare/v0.13.4...v0.14.0) (2026-07-08)
 
 
