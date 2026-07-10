@@ -60,6 +60,7 @@ def run(
     limit: int | None = None,
     progress_every: int = DEFAULT_PROGRESS_EVERY,
     threads: int = DEFAULT_EMBED_THREADS,
+    verbose: bool = False,
 ) -> int:
     """Embed active-leaf branch exchanges at chunk grain (opt-in; not auto-spawned)."""
     # Backstop for direct callers; the CLI validators reject <1 before reaching
@@ -72,7 +73,7 @@ def run(
         raise ValueError("limit must be >= 1")
 
     settings = load_settings()
-    logger = setup_logging(settings, process_name="backfill-embed")
+    logger = setup_logging(settings, process_name="backfill-embed", verbose=verbose)
 
     if status:
         return run_status(days=days, json_mode=json_mode, settings=settings, logger=logger)

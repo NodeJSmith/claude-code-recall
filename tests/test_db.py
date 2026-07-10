@@ -23,6 +23,7 @@ from ccrecall.config import (
     log_hook_exception,
 )
 from ccrecall.db import (
+    SCHEMA_VERSION,
     fetch_branch_messages,
     get_connection,
     vec_available,
@@ -706,7 +707,7 @@ class TestSchemaVersioning:
         _seed_v1_db_with_orphan_messages(db_path)
 
         with get_connection(settings={"db_path": str(db_path)}) as conn:
-            assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
 
             columns = {row[1] for row in conn.execute("PRAGMA table_info(branches)").fetchall()}
             assert "fork_point_uuid" not in columns
@@ -733,7 +734,7 @@ class TestSchemaVersioning:
             second_version = conn.execute("PRAGMA user_version").fetchone()[0]
             second_cols = {row[1] for row in conn.execute("PRAGMA table_info(branches)").fetchall()}
 
-        assert first_version == second_version == 2
+        assert first_version == second_version == SCHEMA_VERSION
         assert "fork_point_uuid" not in first_cols
         assert first_cols == second_cols
 
@@ -985,6 +986,8 @@ class TestSchemaEquivalencePin:
             (2, "file_hash", "TEXT", 0, None, 0),
             (3, "imported_at", "DATETIME", 0, "CURRENT_TIMESTAMP", 0),
             (4, "messages_imported", "INTEGER", 0, "0", 0),
+            (5, "file_size", "INTEGER", 0, None, 0),
+            (6, "file_mtime", "REAL", 0, None, 0),
         ],
         "messages": [
             (0, "id", "INTEGER", 0, None, 1),

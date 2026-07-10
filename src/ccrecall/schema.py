@@ -93,7 +93,9 @@ CREATE TABLE IF NOT EXISTS import_log (
   file_path TEXT UNIQUE NOT NULL,
   file_hash TEXT,
   imported_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  messages_imported INTEGER DEFAULT 0
+  messages_imported INTEGER DEFAULT 0,
+  file_size INTEGER,
+  file_mtime REAL
 );
 
 -- Chunk metadata table (per-exchange embedding store)

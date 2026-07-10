@@ -110,7 +110,7 @@ class TestSyncSessionWritesNullHashImportLog:
     """Verify sync path writes import_log with file_hash = NULL."""
 
     def test_sync_session_writes_null_hash_import_log(self, memory_db):
-        """When write_import_log=True and file_hash=None, import_log has NULL hash."""
+        """When file_hash=None, import_log has NULL hash."""
 
         fixture_path = FIXTURE_DIR / "linear_3_exchange.jsonl"
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -119,7 +119,6 @@ class TestSyncSessionWritesNullHashImportLog:
                 memory_db,
                 fixture_path,
                 project_dir,
-                write_import_log=True,
                 file_hash=None,
             )
             memory_db.commit()
@@ -133,8 +132,8 @@ class TestSyncSessionWritesNullHashImportLog:
         assert row is not None, "import_log entry should exist"
         assert row[0] is None, "file_hash should be NULL for the sync path"
 
-    def test_sync_session_no_import_log_by_default(self, memory_db):
-        """Default call (write_import_log=False) must not write import_log."""
+    def test_sync_session_always_writes_import_log(self, memory_db):
+        """Default call (no hash) writes a NULL-hash import_log entry."""
 
         fixture_path = FIXTURE_DIR / "linear_3_exchange.jsonl"
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -143,15 +142,17 @@ class TestSyncSessionWritesNullHashImportLog:
             memory_db.commit()
 
         cursor = memory_db.cursor()
-        cursor.execute("SELECT COUNT(*) FROM import_log")
-        assert cursor.fetchone()[0] == 0, "import_log must not be written when write_import_log=False"
+        cursor.execute("SELECT file_hash FROM import_log WHERE file_path = ?", (str(fixture_path),))
+        row = cursor.fetchone()
+        assert row is not None, "import_log entry should always be written"
+        assert row[0] is None, "file_hash should be NULL when no hash is provided"
 
 
 class TestImportSessionWritesRealHashImportLog:
     """Verify import path writes import_log with the real file hash."""
 
     def test_import_session_writes_real_hash_import_log(self, memory_db):
-        """When write_import_log=True with a real hash, import_log stores that hash."""
+        """When file_hash is provided, import_log stores that hash."""
 
         fixture_path = FIXTURE_DIR / "linear_3_exchange.jsonl"
         file_hash = get_file_hash(fixture_path)
@@ -162,7 +163,6 @@ class TestImportSessionWritesRealHashImportLog:
                 memory_db,
                 fixture_path,
                 project_dir,
-                write_import_log=True,
                 file_hash=file_hash,
             )
             memory_db.commit()
@@ -196,7 +196,6 @@ class TestImportSkipsNullHashEntry:
                 memory_db,
                 fixture_path,
                 project_dir,
-                write_import_log=True,
                 file_hash=None,
             )
             memory_db.commit()
@@ -220,7 +219,6 @@ class TestImportSkipsNullHashEntry:
                 memory_db,
                 fixture_path,
                 project_dir2,
-                write_import_log=True,
                 file_hash=real_hash,
             )
             memory_db.commit()
@@ -283,7 +281,6 @@ class TestImportLogExactHashSkip:
                 memory_db,
                 fixture_path,
                 project_dir,
-                write_import_log=True,
                 file_hash=real_hash,
             )
             memory_db.commit()
@@ -315,7 +312,6 @@ class TestImportLogExactHashSkip:
                 memory_db,
                 fixture_path,
                 project_dir2,
-                write_import_log=True,
                 file_hash=real_hash,
             )
             memory_db.commit()
@@ -369,7 +365,6 @@ class TestSyncThenImportDedupIntegration:
                 memory_db,
                 fixture_path,
                 project_dir,
-                write_import_log=True,
                 file_hash=None,
             )
             memory_db.commit()
@@ -390,7 +385,6 @@ class TestSyncThenImportDedupIntegration:
                 memory_db,
                 fixture_path,
                 project_dir2,
-                write_import_log=True,
                 file_hash=real_hash,
             )
             memory_db.commit()

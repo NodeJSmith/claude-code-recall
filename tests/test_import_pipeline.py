@@ -259,7 +259,7 @@ class TestImportLogTracking:
 
         # Invalidate hash to force reimport (same pattern as TestFKSafeReimport)
         cursor.execute(
-            "UPDATE import_log SET file_hash = 'stale' WHERE file_path = ?",
+            "UPDATE import_log SET file_hash = 'stale', file_size = NULL, file_mtime = NULL WHERE file_path = ?",
             (str(fixture_file),),
         )
         memory_db.commit()
@@ -292,7 +292,7 @@ class TestFKSafeReimport:
         # Invalidate the import_log hash to force reimport
         cursor = memory_db.cursor()
         cursor.execute(
-            "UPDATE import_log SET file_hash = 'stale' WHERE file_path = ?",
+            "UPDATE import_log SET file_hash = 'stale', file_size = NULL, file_mtime = NULL WHERE file_path = ?",
             (str(fixture_file),),
         )
         memory_db.commit()
@@ -314,7 +314,7 @@ class TestFKSafeReimport:
         # Force reimport
         cursor = memory_db.cursor()
         cursor.execute(
-            "UPDATE import_log SET file_hash = 'stale' WHERE file_path = ?",
+            "UPDATE import_log SET file_hash = 'stale', file_size = NULL, file_mtime = NULL WHERE file_path = ?",
             (str(fixture_file),),
         )
         memory_db.commit()
@@ -427,7 +427,7 @@ class TestAppendOnlyReimport:
 
         # Force reimport by staling the hash
         cursor.execute(
-            "UPDATE import_log SET file_hash = 'stale' WHERE file_path = ?",
+            "UPDATE import_log SET file_hash = 'stale', file_size = NULL, file_mtime = NULL WHERE file_path = ?",
             (str(fixture_file),),
         )
         memory_db.commit()
@@ -459,7 +459,7 @@ class TestAppendOnlyReimport:
         for _ in range(2):
             cursor = memory_db.cursor()
             cursor.execute(
-                "UPDATE import_log SET file_hash = 'stale' WHERE file_path = ?",
+                "UPDATE import_log SET file_hash = 'stale', file_size = NULL, file_mtime = NULL WHERE file_path = ?",
                 (str(fixture_file),),
             )
             memory_db.commit()
@@ -509,7 +509,7 @@ class TestBranchMessagesDiffOnReimport:
 
         # Force reimport
         cursor.execute(
-            "UPDATE import_log SET file_hash = 'stale' WHERE file_path = ?",
+            "UPDATE import_log SET file_hash = 'stale', file_size = NULL, file_mtime = NULL WHERE file_path = ?",
             (str(fixture_file),),
         )
         memory_db.commit()
@@ -680,7 +680,7 @@ class TestEmptyBranchGuardTightened:
 
             # Force reimport
             cursor.execute(
-                "UPDATE import_log SET file_hash = 'stale' WHERE file_path = ?",
+                "UPDATE import_log SET file_hash = 'stale', file_size = NULL, file_mtime = NULL WHERE file_path = ?",
                 (str(temp_path),),
             )
             memory_db.commit()

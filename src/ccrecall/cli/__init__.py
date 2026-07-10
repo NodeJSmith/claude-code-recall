@@ -53,6 +53,10 @@ def launcher(
         bool,
         Parameter(name=["--json"], help="Emit machine-readable JSON instead of markdown.", negative=[]),
     ] = False,
+    debug: Annotated[
+        bool,
+        Parameter(name=["--debug", "-d"], help="Print log output to stdout as well as the log file.", negative=[]),
+    ] = False,
 ) -> None:
     """Parse global options into a CLIContext, then dispatch to the chosen command.
 
@@ -61,7 +65,9 @@ def launcher(
     contract from drifting. ``parse_args`` here mirrors the app-level error
     contract (boxed message, raise instead of exit) so ``main`` can force exit 2.
     """
-    ctx = CLIContext(json_mode=json_mode)
+    if debug:
+        setup_logging(load_settings(), process_name="cli", verbose=True)
+    ctx = CLIContext(json_mode=json_mode, debug=debug)
     # print_error=True is load-bearing: a CycloptsError escaping a meta.default
     # body is NOT re-rendered by the outer app.meta(), so this inner call is the
     # only thing that prints the boxed message. exit_on_error=False makes it

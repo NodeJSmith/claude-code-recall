@@ -1,6 +1,6 @@
 # Import OOM Fix
 
-**Status:** draft
+**Status:** archived
 **Issue:** #48
 
 ## Problem

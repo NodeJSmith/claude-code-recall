@@ -10,6 +10,7 @@ import contextlib
 import json
 import logging
 import os
+import sys
 import tempfile
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -120,13 +121,20 @@ def get_db_path(settings: dict | None = None) -> Path:
     return DEFAULT_DB_PATH
 
 
-def setup_logging(settings: dict | None = None, process_name: str = "ccrecall") -> logging.Logger:
+def setup_logging(
+    settings: dict | None = None,
+    process_name: str = "ccrecall",
+    verbose: bool = False,
+) -> logging.Logger:
     """Set up logging with rotation. Returns a null logger if logging is disabled.
 
     Each process type gets its own rotating log file
     (``RUNTIME_DIR/ccrecall-<process_name>.log``) so concurrent processes never
     race on the same file's rotation. ``process_name`` defaults to the bare
     ``"ccrecall"`` process name for callers that don't identify themselves.
+
+    When ``verbose`` is True, a StreamHandler writing to stdout is added so log
+    lines appear on the terminal as well as in the file.
     """
     logger = logging.getLogger(LOGGER_NAME)
     for h in logger.handlers:
@@ -140,16 +148,26 @@ def setup_logging(settings: dict | None = None, process_name: str = "ccrecall") 
     log_path = RUNTIME_DIR / f"ccrecall-{process_name}.log"
     ensure_parent_dir(log_path)
 
-    handler = RotatingFileHandler(
+    formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+
+    file_handler = RotatingFileHandler(
         log_path,
         maxBytes=LOG_MAX_BYTES,
         backupCount=LOG_BACKUP_COUNT,
     )
-    formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
-    handler.setFormatter(formatter)
-    logger.addHandler(handler)
-    level_name = settings.get("log_level", "INFO")
-    logger.setLevel(getattr(logging, level_name.upper(), logging.INFO))
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+
+    if verbose:
+        stream_handler = logging.StreamHandler(sys.stdout)
+        stream_handler.setFormatter(formatter)
+        logger.addHandler(stream_handler)
+
+    if verbose:
+        logger.setLevel(logging.DEBUG)
+    else:
+        level_name = settings.get("log_level", "INFO")
+        logger.setLevel(getattr(logging, level_name.upper(), logging.INFO))
 
     return logger
 
