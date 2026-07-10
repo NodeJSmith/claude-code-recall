@@ -133,7 +133,7 @@ def setup_logging(
     race on the same file's rotation. ``process_name`` defaults to the bare
     ``"ccrecall"`` process name for callers that don't identify themselves.
 
-    When ``verbose`` is True, a StreamHandler writing to stdout is added so log
+    When ``verbose`` is True, a StreamHandler writing to stderr is added so log
     lines appear on the terminal as well as in the file.
     """
     logger = logging.getLogger(LOGGER_NAME)
@@ -159,7 +159,7 @@ def setup_logging(
     logger.addHandler(file_handler)
 
     if verbose:
-        stream_handler = logging.StreamHandler(sys.stdout)
+        stream_handler = logging.StreamHandler(sys.stderr)
         stream_handler.setFormatter(formatter)
         logger.addHandler(stream_handler)
         logger.setLevel(logging.DEBUG)
