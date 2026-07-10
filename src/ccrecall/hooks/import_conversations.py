@@ -29,6 +29,7 @@ from ccrecall.session_ops import sync_session
 # Chunk size for streaming a file through the change-detection hash (bounded memory).
 HASH_CHUNK_SIZE = 8192
 BYTES_PER_MB = 1024 * 1024
+KB_PER_MB = 1024
 
 log = logging.getLogger(LOGGER_NAME)
 
@@ -41,10 +42,10 @@ def _rss_mb() -> float:
         with open("/proc/self/status") as f:
             for line in f:
                 if line.startswith("VmRSS:"):
-                    return int(line.split()[1]) / 1024
+                    return int(line.split()[1]) / KB_PER_MB
     except OSError:
         pass
-    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / KB_PER_MB
 
 
 def get_file_hash(filepath: Path) -> str:
@@ -153,7 +154,7 @@ def import_session(
     if cursor.fetchone()[0] == 0:
         return -1, 0
 
-    log.info(
+    log.debug(
         "imported %s (%.1f MB): %d branches, %d messages [RSS %.0f MB]",
         filepath.name,
         file_size / BYTES_PER_MB,
@@ -210,7 +211,7 @@ def import_project(
             reclaim_memory()
 
     if sessions_imported or sessions_skipped:
-        log.info(
+        log.debug(
             "project %s (%s): %d branches imported, %d sessions skipped [RSS %.0f MB]",
             project_name,
             project_dir.name,

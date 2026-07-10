@@ -162,8 +162,6 @@ def setup_logging(
         stream_handler = logging.StreamHandler(sys.stdout)
         stream_handler.setFormatter(formatter)
         logger.addHandler(stream_handler)
-
-    if verbose:
         logger.setLevel(logging.DEBUG)
     else:
         level_name = settings.get("log_level", "INFO")

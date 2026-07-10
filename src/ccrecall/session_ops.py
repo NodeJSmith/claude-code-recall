@@ -136,14 +136,6 @@ def sync_session(
     for branch in branches:
         sync_branch(cursor, branch, messages, uuid_to_msg_id, session_id, vec_writable)
 
-    log.debug(
-        "sync_session writing import_log for %s: hash=%s size=%s mtime=%s log_row=%s",
-        filepath.name,
-        file_hash,
-        file_size,
-        file_mtime,
-        log_row,
-    )
     upsert_import_log(cursor, filepath, session_id, file_hash, log_row, file_size, file_mtime)
 
     log.debug("sync_session %s: new_count=%d", filepath.name, new_count)

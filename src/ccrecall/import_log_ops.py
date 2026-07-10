@@ -59,24 +59,12 @@ def upsert_import_log(
             """,
             (file_hash, total_messages, file_size, file_mtime, str(filepath)),
         )
-        log.debug(
-            "import_log UPDATE %s: hash=%s size=%s mtime=%s rows_affected=%d",
-            filepath.name,
-            file_hash,
-            file_size,
-            file_mtime,
-            cursor.rowcount,
-        )
+        op = "UPDATE"
     else:
         cursor.execute(
             "INSERT INTO import_log (file_path, file_hash, messages_imported, file_size, file_mtime)"
             " VALUES (?, ?, ?, ?, ?)",
             (str(filepath), file_hash, total_messages, file_size, file_mtime),
         )
-        log.debug(
-            "import_log INSERT %s: hash=%s size=%s mtime=%s",
-            filepath.name,
-            file_hash,
-            file_size,
-            file_mtime,
-        )
+        op = "INSERT"
+    log.debug("import_log %s %s: hash=%s size=%s mtime=%s", op, filepath.name, file_hash, file_size, file_mtime)

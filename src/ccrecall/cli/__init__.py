@@ -20,6 +20,8 @@ try:
 except PackageNotFoundError:
     _version = "unknown"
 
+_CLI_PROCESS_NAME = "cli"
+
 app = App(
     name="ccrecall",
     version=_version,
@@ -66,7 +68,7 @@ def launcher(
     contract (boxed message, raise instead of exit) so ``main`` can force exit 2.
     """
     if debug:
-        setup_logging(load_settings(), process_name="cli", verbose=True)
+        setup_logging(load_settings(), process_name=_CLI_PROCESS_NAME, verbose=True)
     ctx = CLIContext(json_mode=json_mode, debug=debug)
     # print_error=True is load-bearing: a CycloptsError escaping a meta.default
     # body is NOT re-rendered by the outer app.meta(), so this inner call is the
@@ -98,7 +100,7 @@ def main() -> None:
     for the rest of this process — this call only "sticks" for direct,
     interactive commands (search, recent, stats, tail).
     """
-    setup_logging(load_settings(), process_name="cli")
+    setup_logging(load_settings(), process_name=_CLI_PROCESS_NAME)
     try:
         app.meta(exit_on_error=False, print_error=True)
     except CycloptsError as exc:
