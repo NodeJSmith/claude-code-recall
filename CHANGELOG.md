@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.15.0](https://github.com/NodeJSmith/claude-code-recall/compare/v0.14.1...v0.15.0) (2026-07-10)
+
+
+### Features
+
+* fix import OOM/perf issues, add debug logging ([#62](https://github.com/NodeJSmith/claude-code-recall/issues/62)) ([3433cbd](https://github.com/NodeJSmith/claude-code-recall/commit/3433cbd50ddf05027207bc800962fd571c95b9fc))
+
 ## [0.14.1](https://github.com/NodeJSmith/claude-code-recall/compare/v0.14.0...v0.14.1) (2026-07-10)
 
 
