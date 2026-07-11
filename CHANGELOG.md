@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.16.0](https://github.com/NodeJSmith/claude-code-recall/compare/v0.15.0...v0.16.0) (2026-07-11)
+
+
+### Features
+
+* **tail:** fall back to global search when selector not found locally ([#64](https://github.com/NodeJSmith/claude-code-recall/issues/64)) ([4cf7ac2](https://github.com/NodeJSmith/claude-code-recall/commit/4cf7ac20c0eab9ce4bf05a2ffa4bf8b1a5f76a04))
+
 ## [0.15.0](https://github.com/NodeJSmith/claude-code-recall/compare/v0.14.1...v0.15.0) (2026-07-10)
 
 
