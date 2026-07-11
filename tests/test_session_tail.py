@@ -12,6 +12,7 @@ from ccrecall.session_tail import (
     list_transcripts,
     load_tail_entries,
     resolve_target,
+    resolve_target_global,
     transcript_dir,
     typed_instruction,
 )
@@ -248,6 +249,50 @@ class TestResolveTarget:
     def test_single_session_returns_none(self, tmp_path):
         self._write(tmp_path, "only")
         assert resolve_target(tmp_path, None) is None
+
+
+class TestResolveTargetGlobal:
+    def _write(self, path, stem, timestamp=None):
+        path.mkdir(parents=True, exist_ok=True)
+        f = path / f"{stem}.jsonl"
+        entry = {"type": "user", "uuid": "u", "message": {}}
+        if timestamp:
+            entry["timestamp"] = timestamp
+        f.write_text(json.dumps(entry) + "\n")
+        return f
+
+    def test_finds_session_in_other_project(self, tmp_path):
+        proj_a = tmp_path / "project-a"
+        proj_b = tmp_path / "project-b"
+        self._write(proj_a, "aaaa-1111")
+        self._write(proj_b, "bbbb-2222")
+        result = resolve_target_global("bbbb", projects_dir=tmp_path)
+        assert result is not None
+        assert result.stem == "bbbb-2222"
+
+    def test_no_match_returns_none(self, tmp_path):
+        proj = tmp_path / "project-a"
+        self._write(proj, "aaaa-1111")
+        assert resolve_target_global("zzzz", projects_dir=tmp_path) is None
+
+    def test_picks_newest_when_ambiguous(self, tmp_path):
+        proj_a = tmp_path / "project-a"
+        proj_b = tmp_path / "project-b"
+        self._write(proj_a, "abc-older", timestamp="2024-01-01T00:00:00Z")
+        self._write(proj_b, "abc-newer", timestamp="2024-06-01T00:00:00Z")
+        result = resolve_target_global("abc", projects_dir=tmp_path)
+        assert result is not None
+        assert result.stem == "abc-newer"
+
+    def test_skips_non_directories(self, tmp_path):
+        (tmp_path / "not-a-dir.txt").write_text("hi")
+        proj = tmp_path / "project-a"
+        self._write(proj, "aaaa-1111")
+        result = resolve_target_global("aaaa", projects_dir=tmp_path)
+        assert result is not None
+
+    def test_missing_projects_dir_returns_none(self, tmp_path):
+        assert resolve_target_global("anything", projects_dir=tmp_path / "nope") is None
 
 
 class TestLastEventTimestampFallback:

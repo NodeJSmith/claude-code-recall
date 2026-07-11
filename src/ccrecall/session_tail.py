@@ -318,6 +318,30 @@ def resolve_target(pdir: Path, selector: str | None) -> Path | None:
     return sessions[1] if len(sessions) >= 2 else None
 
 
+def resolve_target_global(selector: str, projects_dir: Path = DEFAULT_PROJECTS_DIR) -> Path | None:
+    """Search all project dirs for a transcript matching *selector* by substring.
+
+    Called as a fallback when resolve_target finds no match in the local project.
+    Returns the newest match (by last-event timestamp) when multiple projects
+    contain a matching session id.
+    """
+    if not projects_dir.is_dir():
+        return None
+    matches: list[Path] = [
+        p
+        for project_dir in projects_dir.iterdir()
+        if project_dir.is_dir()
+        for p in project_dir.glob("*.jsonl")
+        if p.is_file() and selector in p.stem
+    ]
+    if not matches:
+        return None
+    if len(matches) == 1:
+        return matches[0]
+    matches.sort(key=_last_event_timestamp, reverse=True)
+    return matches[0]
+
+
 def first_typed_preview(path: Path) -> str:
     for entry in load_entries(path):
         text = typed_instruction(entry)
@@ -404,6 +428,8 @@ def run(
         return 0
 
     target = resolve_target(pdir, selector)
+    if target is None and selector:
+        target = resolve_target_global(selector)
     if target is None:
         if selector:
             print(
