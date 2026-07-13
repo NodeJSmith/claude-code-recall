@@ -196,7 +196,11 @@ def cmd_recent(
     db: _DB = DEFAULT_DB_PATH,
     ctx: CLIContextParam = DEFAULT_CLI_CONTEXT,
 ) -> None:
-    """List recent conversation sessions."""
+    """List recent conversation sessions.
+
+    With --json: {sessions: [{uuid, project, started_at, ended_at, git_branch,
+    messages}], total_sessions, total_messages}
+    """
     recent_chats_mod.run(
         n=n,
         sort_order=sort_order,
@@ -221,7 +225,7 @@ def cmd_search(
     max_results: Annotated[
         int,
         Parameter(
-            name=["--max-results"],
+            name=["--max-results", "-n", "--n"],
             validator=Number(gte=1, lte=search_mod.MAX_SEARCH_RESULTS),
             help=f"Max sessions (1-{search_mod.MAX_SEARCH_RESULTS}).",
         ),
@@ -234,7 +238,10 @@ def cmd_search(
     db: _DB = DEFAULT_DB_PATH,
     ctx: CLIContextParam = DEFAULT_CLI_CONTEXT,
 ) -> None:
-    """Search conversation sessions (keyword + vector fusion)."""
+    """Search conversation sessions (keyword + vector fusion).
+
+    With --json: {query, ranked, count, results: [{score, session_uuid, handle, project, git_branch, topic, ...}]}
+    """
     search_mod.run(
         query=query,
         status=status,
@@ -257,7 +264,7 @@ def cmd_search_messages(
     max_results: Annotated[
         int,
         Parameter(
-            name=["--max-results"],
+            name=["--max-results", "-n", "--n"],
             validator=Number(gte=1, lte=search_mod.MAX_SEARCH_RESULTS),
             help=f"Max matched exchanges (1-{search_mod.MAX_SEARCH_RESULTS}).",
         ),
@@ -273,9 +280,8 @@ def cmd_search_messages(
 
     Returns matched exchanges ranked by chunk distance — not rolled up to session,
     so multiple matches within one session all appear as separate results.
-    On machines where the vector index is unavailable, exits 0 with an empty result.
-    No --verbose flag: B snippets carry pre-bounded user/assistant text with no
-    collapsible metadata lists (unlike Track A session cards).
+
+    With --json: {query, ranked, count, results: [{score, session_uuid, handle, exchange_index, user, assistant, ...}]}
     """
     search_mod.run_messages(
         query=query,
@@ -294,8 +300,13 @@ def cmd_tail(
     selector: Annotated[str | None, Parameter(help="Session id or substring to target.")] = None,
     *,
     list_sessions: Annotated[bool, _FLAG, Parameter(name=["--list"], help="List sessions and exit.")] = False,
+    full: Annotated[
+        bool, _FLAG, Parameter(name=["--full"], help="Print full untruncated last instruction and assistant message.")
+    ] = False,
     cwd: Annotated[str | None, Parameter(name=["--cwd"], help="Derive project dir from this path.")] = None,
-    n: Annotated[int, Parameter(name=["-n"], help="Number of tail events to show.")] = _TAIL_DEFAULT_N,
+    n: Annotated[
+        int, Parameter(name=["-n", "--n", "--lines"], help="Number of tail events to show.")
+    ] = _TAIL_DEFAULT_N,
 ) -> None:
     """Print the tail of a prior session's transcript for fast resume."""
-    raise SystemExit(session_tail_mod.run(selector, list_sessions=list_sessions, cwd=cwd, n=n))
+    raise SystemExit(session_tail_mod.run(selector, list_sessions=list_sessions, cwd=cwd, n=n, full=full))

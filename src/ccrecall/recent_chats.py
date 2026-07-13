@@ -4,9 +4,7 @@ Returns markdown by default (token-efficient), or JSON when output_format="json"
 (the CLI maps the global --json flag onto that argument).
 """
 
-import json
 import sqlite3
-import sys
 from pathlib import Path
 
 from ccrecall.config import DEFAULT_DB_PATH
@@ -17,6 +15,7 @@ from ccrecall.db import (
     parse_project_filter,
     resolve_db_settings,
 )
+from ccrecall.errors import emit_error
 from ccrecall.formatting import format_json_sessions, format_markdown_session
 from ccrecall.serialization import decode_json_column
 
@@ -173,11 +172,12 @@ def run(
     projects = parse_project_filter(project)
 
     if not db.exists():
-        if output_format == "json":
-            print(json.dumps({"error": "Database not found", "sessions": [], "total_sessions": 0}))
-        else:
-            print("Error: Database not found. Run memory setup first.")
-        sys.exit(1)
+        emit_error(
+            "Database not found",
+            code="db_not_found",
+            exit_code=1,
+            remediation="Run ccrecall import or start a session with the ccrecall plugin installed.",
+        )
 
     try:
         settings = resolve_db_settings(db)
@@ -200,11 +200,10 @@ def run(
         else:
             print(format_markdown(sessions, verbose=verbose))
 
-    # Deliberately broad: top-level CLI handler — reports any error to the user
-    # and exits non-zero rather than dumping a traceback.
     except Exception as e:
-        if output_format == "json":
-            print(json.dumps({"error": str(e), "sessions": [], "total_sessions": 0}))
-        else:
-            print(f"Error: {e}")
-        sys.exit(1)
+        emit_error(
+            str(e),
+            code="query_error",
+            exit_code=1,
+            remediation="Check ccrecall stats for database health.",
+        )

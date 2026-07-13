@@ -17,6 +17,7 @@ from ccrecall.hooks.import_conversations import get_file_hash
 from ccrecall.parsing import extract_session_uuid
 from ccrecall.schema import SCHEMA
 from ccrecall.session_ops import sync_session
+from ccrecall.summarizer import SUMMARY_VERSION
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures"
 
@@ -76,7 +77,7 @@ class TestSyncSessionCreatesBranches:
         row = cursor.fetchone()
         assert row is not None
         assert row[0], "Context summary should be populated"
-        assert row[1] == 4, "summary_version should be 4"
+        assert row[1] == SUMMARY_VERSION
 
     def test_no_has_tool_use_in_insert(self, memory_db):
         """has_tool_use and tool_summary columns should NOT be in the INSERT column list in session_ops.
