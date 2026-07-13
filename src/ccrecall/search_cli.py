@@ -88,9 +88,8 @@ def run_messages(
             remediation="Run ccrecall import or start a session with the ccrecall plugin installed.",
         )
 
-    settings = resolve_db_settings(db)
-
     try:
+        settings = resolve_db_settings(db)
         with get_connection(settings, load_vec=True) as conn:
             snippets, ranked = search_messages(
                 conn,
@@ -206,17 +205,17 @@ def run(
             remediation="Run ccrecall import or start a session with the ccrecall plugin installed.",
         )
 
-    settings = resolve_db_settings(db)
-
-    if status:
-        print_status(settings)
-        return  # print_status calls sys.exit(0), but be explicit
-
-    # Past the status branch with the xor-validation above satisfied, query is
-    # guaranteed present (status is False, so a missing query already exited 2).
-    assert query is not None  # noqa: S101 — type-checker narrowing; the real guard is the exit above
-
     try:
+        settings = resolve_db_settings(db)
+
+        if status:
+            print_status(settings)
+            return  # print_status calls sys.exit(0), but be explicit
+
+        # Past the status branch with the xor-validation above satisfied, query is
+        # guaranteed present (status is False, so a missing query already exited 2).
+        assert query is not None  # noqa: S101 — type-checker narrowing; the real guard is the exit above
+
         with get_connection(settings, load_vec=True) as conn:
             fts_level = detect_fts_support(conn)
 
