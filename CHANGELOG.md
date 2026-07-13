@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.0](https://github.com/NodeJSmith/claude-code-recall/compare/v0.16.0...v0.17.0) (2026-07-13)
+
+
+### Features
+
+* **cli:** improve agent ergonomics based on usage audit ([#69](https://github.com/NodeJSmith/claude-code-recall/issues/69)) ([e2d36cd](https://github.com/NodeJSmith/claude-code-recall/commit/e2d36cd40cd76b656ec04083bfccea668c7e2d41))
+
 ## [0.16.0](https://github.com/NodeJSmith/claude-code-recall/compare/v0.15.0...v0.16.0) (2026-07-11)
 
 
