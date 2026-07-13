@@ -7,7 +7,7 @@ name = "ccrecall"
 version = "0.15.0"
 description = "Conversation history and semantic search for Claude Code"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "Jessica Smith", email = "12jessicasmith34@gmail.com" }]
@@ -25,7 +25,6 @@ classifiers = [
     "Intended Audience :: Developers",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
@@ -44,8 +43,7 @@ classifiers = [
 dependencies = [
     "sqlite-vec==0.1.9",
     "fastembed==0.8.0",
-    "numpy==2.2.6; python_version < '3.11'",
-    "numpy==2.4.6; python_version >= '3.11'",
+    "numpy==2.4.6",
     "whenever==0.10.0",
     # Pin pydantic exactly so its native (Rust) pydantic-core dep resolves to a
     # known ABI — same rationale as the native wheels above.
