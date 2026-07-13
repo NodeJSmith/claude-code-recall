@@ -4,8 +4,10 @@ import json
 import os
 
 from ccrecall.session_tail import (
+    _emit_full,
     _last_event_timestamp,
     build_tail,
+    emit,
     find_pending_question,
     format_pending_block,
     last_typed_instruction,
@@ -349,6 +351,40 @@ class TestLoadTailEntries:
             + "\n"
         )
         assert [e["uuid"] for e in load_tail_entries(f, tail_lines=10)] == ["u1"]
+
+
+class TestEmitFull:
+    def test_prints_unclipped_content(self, capsys):
+        long_text = "x" * 2000
+        long_asst = "y" * 2000
+        entries = [user_text(long_text), assistant_text(long_asst)]
+        _emit_full(entries, pending=None)
+        out = capsys.readouterr().out
+        assert long_text in out
+        assert long_asst in out
+        assert "[…]" not in out
+
+    def test_full_omits_assistant_when_pending(self, capsys):
+        entries = [
+            user_text("do the thing"),
+            assistant_text("here is my answer"),
+            ask_question("t1", "proceed?", OPTS),
+        ]
+        pending = find_pending_question(entries)
+        _emit_full(entries, pending=pending)
+        out = capsys.readouterr().out
+        assert "do the thing" in out
+        assert "LAST ASSISTANT MESSAGE" not in out
+
+    def test_emit_full_flag_skips_tail_events(self, tmp_path, capsys):
+        path = tmp_path / "s.jsonl"
+        entries = [user_text("instruct me"), assistant_text("z" * 2000)]
+        path.write_text("\n".join(json.dumps(e) for e in entries) + "\n")
+        code = emit(path, k=8, full=True)
+        assert code == 0
+        out = capsys.readouterr().out
+        assert "TAIL (last" not in out
+        assert "LAST ASSISTANT MESSAGE:" in out
 
 
 class TestFormatPendingBlock:

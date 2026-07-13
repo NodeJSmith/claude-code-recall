@@ -20,7 +20,6 @@ for locating files. So we encode the raw cwd here.
 """
 
 import json
-import sys
 from collections import deque
 from pathlib import Path
 
@@ -33,6 +32,7 @@ from ccrecall.content import (
     is_tool_result,
 )
 from ccrecall.db import DEFAULT_PROJECTS_DIR
+from ccrecall.errors import emit_error_return
 from ccrecall.parsing import (
     extract_session_metadata,
     extract_session_uuid,
@@ -350,15 +350,9 @@ def first_typed_preview(path: Path) -> str:
     return "(no user message)"
 
 
-def emit(path: Path, k: int) -> int:
-    entries = load_entries(path)
-    if not entries:
-        print(f"ccrecall tail: transcript is empty: {path}", file=sys.stderr)
-        return 1
+def _emit_header(entries: list[dict], path: Path) -> str:
+    """Print the session header block and return the session id."""
     meta = extract_session_metadata(entries)
-    # Prefer an entry's sessionId; fall back to the filename UUID (agent- prefix
-    # stripped so it matches the session record). sessionId is Any (untyped JSON)
-    # and the fallback is str, so str() narrows for the type checker.
     sid = str(next((e.get("sessionId") for e in entries if e.get("sessionId")), extract_session_uuid(path)))
 
     print(f"RESUME — prior session {sid[:8]}")
@@ -366,11 +360,28 @@ def emit(path: Path, k: int) -> int:
     print(f"  last active: {meta.get('ended_at') or 'unknown'}")
     print(f"  branch:      {meta.get('git_branch') or 'unknown'}")
     print()
+    return sid
+
+
+def emit(path: Path, k: int, full: bool = False) -> int:
+    entries = load_entries(path)
+    if not entries:
+        return emit_error_return(
+            f"transcript is empty: {path}",
+            code="empty_transcript",
+            exit_code=1,
+            remediation="The session file exists but contains no parseable entries.",
+        )
+
+    _emit_header(entries, path)
 
     pending = find_pending_question(entries)
     if pending:
         print(format_pending_block(pending))
         print()
+
+    if full:
+        return _emit_full(entries, pending)
 
     instr = last_typed_instruction(entries)
     if instr:
@@ -394,33 +405,59 @@ def emit(path: Path, k: int) -> int:
     return 0
 
 
+def _emit_full(entries: list[dict], pending: dict | None) -> int:
+    """Print the full untruncated last instruction and assistant message."""
+    instr = last_typed_instruction(entries)
+    if instr:
+        print("LAST USER INSTRUCTION:")
+        print(instr)
+        print()
+
+    if not pending:
+        last = last_assistant_text(entries)
+        if last:
+            print("LAST ASSISTANT MESSAGE:")
+            print(last)
+    return 0
+
+
 def run(
     selector: str | None = None,
     *,
     list_sessions: bool = False,
     cwd: str | None = None,
     n: int = DEFAULT_TAIL_EVENTS,
+    full: bool = False,
 ) -> int:
     """Print the tail of a prior session's transcript for fast resume."""
     if cwd is None:
         cwd = str(Path.cwd())
     if n < 1:
-        print("ccrecall tail: -n must be >= 1", file=sys.stderr)
-        return 2
+        return emit_error_return(
+            "-n must be >= 1",
+            code="invalid_arg",
+            exit_code=2,
+            remediation="Pass a positive integer: ccrecall tail -n 8",
+        )
 
     pdir = transcript_dir(cwd)
     if not pdir.is_dir():
-        print(
-            f"ccrecall tail: no project dir for {cwd}\n  expected: {pdir}",
-            file=sys.stderr,
+        return emit_error_return(
+            f"no project dir for {cwd}",
+            code="no_project_dir",
+            exit_code=2,
+            remediation=f"Expected {pdir}. Use --cwd to specify a different project path.",
         )
-        return 2
 
     if list_sessions:
         sessions = list_transcripts(pdir)
         if not sessions:
-            print("ccrecall tail: no sessions found", file=sys.stderr)
-            return 2
+            return emit_error_return(
+                "no sessions found",
+                code="no_sessions",
+                exit_code=2,
+                remediation="Run a Claude Code session in this project first, then retry.",
+            )
         print(f"Sessions in {pdir.name} (newest first; newest is the current session):")
         for i, p in enumerate(sessions):
             marker = "  <- current" if i == 0 else ""
@@ -432,15 +469,22 @@ def run(
         target = resolve_target_global(selector)
     if target is None:
         if selector:
-            print(
-                f"ccrecall tail: no session matching '{selector}'",
-                file=sys.stderr,
+            return emit_error_return(
+                f"no session matching '{selector}'",
+                code="no_match",
+                exit_code=2,
+                remediation=(
+                    "Run ccrecall tail --list to see available sessions, or ccrecall recent to search by project."
+                ),
             )
-        else:
-            print(
-                "ccrecall tail: no prior session found (only the current one exists)",
-                file=sys.stderr,
-            )
-        return 2
+        return emit_error_return(
+            "no prior session found (only the current one exists)",
+            code="no_prior_session",
+            exit_code=2,
+            remediation=(
+                "This is the first session in this project."
+                " Use ccrecall search -q '<topic>' to find sessions in other projects."
+            ),
+        )
 
-    return emit(target, n)
+    return emit(target, n, full=full)

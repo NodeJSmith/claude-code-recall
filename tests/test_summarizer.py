@@ -12,6 +12,7 @@ from ccrecall.hooks import backfill_summaries, memory_setup
 from ccrecall.schema import SCHEMA
 from ccrecall.summarizer import (
     SUMMARY_VERSION,
+    _extract_topic,
     build_context_summary_json,
     build_exchange_pairs,
     compute_context_summary,
@@ -160,7 +161,7 @@ class TestBuildContextSummaryJson:
         ]
         result = build_context_summary_json(branch_row, messages)
 
-        assert result["version"] == 4
+        assert result["version"] == SUMMARY_VERSION
         assert result["topic"] == "Fix the bug in main.py"
         assert len(result["first_exchanges"]) == 2
         assert result["first_exchanges"][0]["user"] == "Fix the bug in main.py"
@@ -218,6 +219,47 @@ class TestBuildContextSummaryJson:
         ]
         result = build_context_summary_json(branch_row, messages)
         assert len(result["topic"]) <= 123  # 120 + "..."
+
+
+class TestExtractTopic:
+    def _ex(self, text):
+        return {"user": text, "assistant": "", "timestamp": None, "index": 0, "first_message_uuid": None}
+
+    def test_skips_interrupt_noise(self):
+        exchanges = [
+            self._ex("[Request interrupted by user for tool use]"),
+            self._ex("fix the auth bug"),
+        ]
+        assert _extract_topic(exchanges) == "fix the auth bug"
+
+    def test_skips_silently_read(self):
+        exchanges = [
+            self._ex("First, silently read CLAUDE.md for context."),
+            self._ex("build the dashboard"),
+        ]
+        assert _extract_topic(exchanges) == "build the dashboard"
+
+    def test_skips_reread_claude_md(self):
+        exchanges = [self._ex("Re-read ./CLAUDE.md and resume"), self._ex("ship it")]
+        assert _extract_topic(exchanges) == "ship it"
+
+    def test_skips_system_reminder(self):
+        exchanges = [self._ex("<system-reminder>be good</system-reminder>"), self._ex("deploy")]
+        assert _extract_topic(exchanges) == "deploy"
+
+    def test_all_noise_returns_empty(self):
+        exchanges = [self._ex("[Request interrupted by user]")]
+        assert _extract_topic(exchanges) == ""
+
+    def test_first_real_message_wins(self):
+        exchanges = [self._ex("real topic here"), self._ex("second message")]
+        assert _extract_topic(exchanges) == "real topic here"
+
+    def test_truncates_long_topic(self):
+        exchanges = [self._ex("x" * 200)]
+        result = _extract_topic(exchanges)
+        assert len(result) == 123  # 120 + "..."
+        assert result.endswith("...")
 
 
 class TestRenderContextSummary:
@@ -433,7 +475,7 @@ class TestComputeContextSummary:
         assert "/ccrecall:ccr-recall" in md
 
         parsed = json.loads(json_str)
-        assert parsed["version"] == 4
+        assert parsed["version"] == SUMMARY_VERSION
         assert parsed["topic"] == "How do I fix the parser bug?"
         assert parsed["metadata"]["git_branch"] == "main"
         assert len(parsed["last_exchanges"]) == 3  # Short session (3 exchanges, <=8), all in last
@@ -494,7 +536,7 @@ class TestBuildContextSummaryJsonTruncation:
             {"role": "assistant", "content": "Hi", "timestamp": "t2"},
         ]
         result = build_context_summary_json(branch_row, messages)
-        assert result["version"] == 4
+        assert result["version"] == SUMMARY_VERSION
 
 
 class TestNeedsBackfillVersionBump:
@@ -551,7 +593,7 @@ class TestNeedsBackfillVersionBump:
     def test_backfill_summaries_uses_version_constants(self):
         """backfill_summaries ties its threshold/sentinel to the shared constants.
 
-        SUMMARY_VERSION is the canonical 4 and CONTENT_ERROR_VERSION the -1
+        SUMMARY_VERSION is the canonical version and CONTENT_ERROR_VERSION the -1
         sentinel — using the constants (not stale literals) keeps a future
         version bump from silently desyncing this hook.
         """

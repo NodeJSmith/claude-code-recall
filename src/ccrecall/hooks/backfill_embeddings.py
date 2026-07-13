@@ -211,6 +211,21 @@ def run(
                             cursor.execute(f"RELEASE SAVEPOINT {_SAVEPOINT_NAME}")
                             total_updated += 1
                             total_inferences += embedded
+
+                            if total_updated - last_progress >= progress_every:
+                                elapsed = time.monotonic() - started
+                                remaining = max(0, total_eligible - total_updated)
+                                rate = total_updated / elapsed if elapsed > 0 else 0.0
+                                eta = format_duration(remaining / rate) if rate > 0 else "?"
+                                msg = (
+                                    f"{total_inferences} exchanges embedded across "
+                                    f"{total_updated}/{total_eligible} branches, "
+                                    f"{remaining} remaining, "
+                                    f"{format_duration(elapsed)} elapsed, ETA {eta}"
+                                )
+                                logger.info("%s: %s", _LOG_PREFIX, msg)
+                                print(f"{_PRINT_PREFIX}: {msg}", file=sys.stderr)
+                                last_progress = total_updated
                         except (ValueError, OverflowError, UnicodeError):
                             cursor.execute(f"ROLLBACK TO SAVEPOINT {_SAVEPOINT_NAME}")
                             cursor.execute(f"RELEASE SAVEPOINT {_SAVEPOINT_NAME}")
@@ -231,22 +246,6 @@ def run(
                     return EXIT_ABORT
 
                 conn.commit()
-
-                # Progress: cadence-gated, with elapsed + ETA for unattended runs.
-                if total_updated - last_progress >= progress_every:
-                    elapsed = time.monotonic() - started
-                    remaining = max(0, total_eligible - total_updated)
-                    rate = total_updated / elapsed if elapsed > 0 else 0.0
-                    eta = format_duration(remaining / rate) if rate > 0 else "?"
-                    msg = (
-                        f"{total_inferences} exchanges embedded across "
-                        f"{total_updated}/{total_eligible} branches, "
-                        f"{remaining} remaining, "
-                        f"{format_duration(elapsed)} elapsed, ETA {eta}"
-                    )
-                    logger.info("%s: %s", _LOG_PREFIX, msg)
-                    print(f"{_PRINT_PREFIX}: {msg}", file=sys.stderr)
-                    last_progress = total_updated
 
                 time.sleep(BACKFILL_BATCH_DELAY_SECONDS)
     except (sqlite3.Error, OSError) as e:

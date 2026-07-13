@@ -21,6 +21,7 @@ from ccrecall.hooks.sync_current import sync_session, validate_session_id
 from ccrecall.recent_chats import run as recent_chats_run
 from ccrecall.schema import SCHEMA
 from ccrecall.search_cli import run as search_conversations_run
+from ccrecall.summarizer import SUMMARY_VERSION
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures"
 
@@ -118,7 +119,7 @@ class TestSyncSessionCreatesBranches:
             assert row is not None
             summary, version = row
             assert summary, "Active branch should have context_summary"
-            assert version == 4, "summary_version should be 4 after sync"
+            assert version == SUMMARY_VERSION
             assert "### Session:" in summary
             assert "/ccrecall:ccr-recall" in summary
 

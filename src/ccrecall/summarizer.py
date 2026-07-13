@@ -15,7 +15,7 @@ from ccrecall.serialization import decode_json_field
 
 # Schema version stamped on each generated summary. Bumped when the JSON shape
 # or extraction logic changes so the backfill path can detect stale summaries.
-SUMMARY_VERSION = 4
+SUMMARY_VERSION = 5
 
 # Truncation limits
 _FRONT_CHARS = 300
@@ -36,6 +36,17 @@ SHORT_SESSION_MAX_EXCHANGES = FIRST_EXCHANGES + LAST_EXCHANGES
 # used in the recall-priming footer.
 _TOPIC_MAX_CHARS = 120
 _TOPIC_FOOTER_MAX_CHARS = 80
+
+_TOPIC_NOISE_PREFIXES = (
+    "[request interrupted",
+    "first, silently read",
+    "re-read ./claude.md",
+    "re-read claude.md",
+    "<system-reminder>",
+    "<local-command-",
+    "base directory for this skill:",
+    "<command-message>",
+)
 
 # Metadata display caps in the rendered markdown.
 _MAX_FILES_SHOWN = 6
@@ -104,6 +115,20 @@ def build_exchange_pairs(messages: list[dict]) -> list[dict]:
     return exchanges
 
 
+def _extract_topic(exchanges: list[dict]) -> str:
+    """Pick the first real user instruction as the topic, skipping harness noise."""
+    for ex in exchanges:
+        text = ex["user"].strip()
+        if not text:
+            continue
+        if text.lstrip().lower().startswith(_TOPIC_NOISE_PREFIXES):
+            continue
+        if len(text) > _TOPIC_MAX_CHARS:
+            return text[:_TOPIC_MAX_CHARS] + "..."
+        return text
+    return ""
+
+
 def build_context_summary_json(branch_row: dict, messages: list[dict]) -> dict:
     """
     Assemble the structured JSON summary from branch metadata and messages.
@@ -122,10 +147,7 @@ def build_context_summary_json(branch_row: dict, messages: list[dict]) -> dict:
             "metadata": {},
         }
 
-    # Topic from first user message
-    topic = exchanges[0]["user"]
-    if len(topic) > _TOPIC_MAX_CHARS:
-        topic = topic[:_TOPIC_MAX_CHARS] + "..."
+    topic = _extract_topic(exchanges)
 
     # Parse JSON fields from branch_row (raw column strings or already decoded)
     files = decode_json_field(branch_row.get("files_modified"), [])

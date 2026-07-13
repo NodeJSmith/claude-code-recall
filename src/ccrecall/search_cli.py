@@ -18,6 +18,7 @@ from ccrecall.db import (
     resolve_db_settings,
 )
 from ccrecall.embeddings import DEPS_AVAILABLE, EMBEDDING_MODEL, EMBEDDING_VERSION
+from ccrecall.errors import emit_error
 from ccrecall.formatting import (
     apply_scores,
     build_envelope,
@@ -80,11 +81,12 @@ def run_messages(
     projects = parse_project_filter(project)
 
     if not db.exists():
-        if output_format == "json":
-            print(json.dumps({"error": "Database not found", "query": query}))
-        else:
-            print("Error: Database not found. Run memory setup first.")
-        sys.exit(1)
+        emit_error(
+            "Database not found",
+            code="db_not_found",
+            exit_code=1,
+            remediation="Run ccrecall import or start a session with the ccrecall plugin installed.",
+        )
 
     settings = resolve_db_settings(db)
 
@@ -106,13 +108,13 @@ def run_messages(
         else:
             print(format_messages_markdown(snippets, query, ranked))
 
-    # Deliberately broad: top-level CLI handler — reports the error and exits non-zero.
     except Exception as e:
-        if output_format == "json":
-            print(json.dumps({"error": str(e), "query": query}))
-        else:
-            print(f"Error: {e}")
-        sys.exit(1)
+        emit_error(
+            str(e),
+            code="search_error",
+            exit_code=1,
+            remediation="Check ccrecall search --status for diagnostics.",
+        )
 
 
 def print_status(settings: dict | None) -> None:
@@ -170,13 +172,20 @@ def run(
     db: Path = DEFAULT_DB_PATH,
 ) -> None:
     """Search conversation sessions (keyword + chunk-vector fusion)."""
-    # Validate: exactly one of --query / --status must be provided.
     if not status and not query:
-        print("error: one of --query/-q or --status is required", file=sys.stderr)
-        sys.exit(2)
+        emit_error(
+            "one of --query/-q or --status is required",
+            code="missing_arg",
+            exit_code=2,
+            remediation="ccrecall search -q 'your query' or ccrecall search --status",
+        )
     if status and query:
-        print("error: --query and --status are mutually exclusive", file=sys.stderr)
-        sys.exit(2)
+        emit_error(
+            "--query and --status are mutually exclusive",
+            code="conflicting_args",
+            exit_code=2,
+            remediation="Use --query to search, or --status to check diagnostics — not both.",
+        )
 
     # Backstop for direct callers; the CLI validator rejects out-of-range
     # --max-results before reaching here. Both sides bound on MAX_SEARCH_RESULTS.
@@ -185,19 +194,17 @@ def run(
 
     if not db.exists():
         if status:
-            # For --status, report missing DB gracefully rather than hard-exiting.
-            # Model identity is independent of the DB, so report it even when the
-            # DB is absent (deps check only — no download in a read-only path).
             print("vec extension: no")
             print(f"model: {EMBEDDING_MODEL} (deps {'available' if DEPS_AVAILABLE else 'missing'})")
             print("chunk coverage: error (database not found)")
             print("embedded branches: error (database not found)")
             sys.exit(0)
-        if output_format == "json":
-            print(json.dumps({"error": "Database not found", "sessions": [], "query": query}))
-        else:
-            print("Error: Database not found. Run memory setup first.")
-        sys.exit(1)
+        emit_error(
+            "Database not found",
+            code="db_not_found",
+            exit_code=1,
+            remediation="Run ccrecall import or start a session with the ccrecall plugin installed.",
+        )
 
     settings = resolve_db_settings(db)
 
@@ -236,11 +243,10 @@ def run(
                 md += f"\n\n_{caveat}_"
             print(md)
 
-    # Deliberately broad: top-level CLI handler — reports any error to the user
-    # and exits non-zero rather than dumping a traceback.
     except Exception as e:
-        if output_format == "json":
-            print(json.dumps({"error": str(e), "sessions": [], "query": query}))
-        else:
-            print(f"Error: {e}")
-        sys.exit(1)
+        emit_error(
+            str(e),
+            code="search_error",
+            exit_code=1,
+            remediation="Check ccrecall search --status for diagnostics.",
+        )
