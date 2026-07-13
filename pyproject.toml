@@ -88,6 +88,9 @@ dev = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
+[tool.uv]
+constraint-dependencies = ["pillow>=12.3.0"]
+
 [tool.coverage.run]
 branch = true          # measure branch coverage, not just lines
 source = ["ccrecall"]
