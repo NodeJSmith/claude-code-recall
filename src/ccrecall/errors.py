@@ -19,8 +19,7 @@ def emit_error(
     """Write a structured error to stderr and exit.
 
     The JSON envelope is always one line on stderr, parseable by agents even
-    when stdout carries other output. The same message is printed to stderr
-    as plain text for humans reading directly.
+    when stdout carries other output. The envelope is the only error output.
 
     Exit codes:
       1 — runtime error (DB missing, query failed, transient)
