@@ -20,6 +20,7 @@ for locating files. So we encode the raw cwd here.
 """
 
 import json
+import sys
 from collections import deque
 from pathlib import Path
 
@@ -33,6 +34,7 @@ from ccrecall.content import (
 )
 from ccrecall.db import DEFAULT_PROJECTS_DIR
 from ccrecall.errors import emit_error_return
+from ccrecall.formatting import split_worktree_path
 from ccrecall.parsing import (
     extract_session_metadata,
     extract_session_uuid,
@@ -421,6 +423,70 @@ def _emit_full(entries: list[dict], pending: dict | None) -> int:
     return 0
 
 
+def _build_search_dirs(provided_cwd: str, *, real_cwd: str | None = None) -> list[Path]:
+    """Build ordered list of transcript dirs to search (worktree-specific first).
+
+    When the process is running inside a worktree but --cwd was passed pointing at
+    the repo root, the worktree dir is still searched first and a warning is emitted.
+    Only activates worktree logic when provided_cwd relates to the same repo.
+
+    When --cwd explicitly names a *different* worktree of the same repo, that
+    worktree is searched first (the user asked for it), not the process's own.
+    """
+    real_cwd_normalized = (real_cwd or str(Path.cwd())).replace("\\", "/")
+    real_parts = split_worktree_path(real_cwd_normalized)
+    if not real_parts:
+        return [transcript_dir(provided_cwd)]
+
+    repo_root, worktree_cwd = real_parts
+
+    provided_parts = split_worktree_path(provided_cwd)
+    provided_base = provided_parts[0] if provided_parts else provided_cwd.replace("\\", "/")
+
+    if provided_base.rstrip("/") != repo_root.rstrip("/"):
+        return [transcript_dir(provided_cwd)]
+
+    if provided_parts and provided_parts[1].rstrip("/") != worktree_cwd.rstrip("/"):
+        primary = provided_parts[1]
+    elif provided_base.rstrip("/") == repo_root.rstrip("/") and provided_cwd.replace("\\", "/").rstrip(
+        "/"
+    ) != worktree_cwd.rstrip("/"):
+        print(
+            f"note: running in worktree — checking {worktree_cwd} before repo root",
+            file=sys.stderr,
+        )
+        primary = worktree_cwd
+    else:
+        primary = worktree_cwd
+
+    dirs = [transcript_dir(primary)]
+    root_dir = transcript_dir(repo_root)
+    if root_dir not in dirs:
+        dirs.append(root_dir)
+
+    return dirs
+
+
+def _resolve_across_dirs(dirs: list[Path], selector: str | None) -> Path | None:
+    """Search multiple transcript dirs for a target session.
+
+    The first dir is the primary (contains the current live session when no
+    selector is given), so resolve_target skips the newest file there.
+    Fallback dirs don't contain the current session, so their newest is fair game.
+    """
+    for i, pdir in enumerate(dirs):
+        if selector:
+            target = resolve_target(pdir, selector)
+        elif i == 0:
+            target = resolve_target(pdir, None)
+        else:
+            sessions = list_transcripts(pdir)
+            target = sessions[0] if sessions else None
+        if target is not None:
+            return target
+    return None
+
+
 def run(
     selector: str | None = None,
     *,
@@ -440,8 +506,11 @@ def run(
             remediation="Pass a positive integer: ccrecall tail -n 8",
         )
 
-    pdir = transcript_dir(cwd)
-    if not pdir.is_dir():
+    search_dirs = _build_search_dirs(cwd)
+    valid_dirs = [d for d in search_dirs if d.is_dir()]
+
+    if not valid_dirs:
+        pdir = search_dirs[0]
         return emit_error_return(
             f"no project dir for {cwd}",
             code="no_project_dir",
@@ -450,23 +519,26 @@ def run(
         )
 
     if list_sessions:
-        sessions = list_transcripts(pdir)
-        if not sessions:
-            return emit_error_return(
-                "no sessions found",
-                code="no_sessions",
-                exit_code=2,
-                remediation="Run a Claude Code session in this project first, then retry.",
-            )
-        print(f"Sessions in {pdir.name} (newest first; newest is the current session):")
-        for i, p in enumerate(sessions):
-            marker = "  <- current" if i == 0 else ""
-            print(f"  {p.stem[:8]}  {first_typed_preview(p)}{marker}")
-        return 0
+        for pdir in valid_dirs:
+            sessions = list_transcripts(pdir)
+            if sessions:
+                print(f"Sessions in {pdir.name} (newest first; newest is the current session):")
+                for i, p in enumerate(sessions):
+                    marker = "  <- current" if i == 0 else ""
+                    print(f"  {p.stem[:8]}  {first_typed_preview(p)}{marker}")
+                return 0
+        return emit_error_return(
+            "no sessions found",
+            code="no_sessions",
+            exit_code=2,
+            remediation="Run a Claude Code session in this project first, then retry.",
+        )
 
-    target = resolve_target(pdir, selector)
+    target = _resolve_across_dirs(valid_dirs, selector)
+
     if target is None and selector:
         target = resolve_target_global(selector)
+
     if target is None:
         if selector:
             return emit_error_return(

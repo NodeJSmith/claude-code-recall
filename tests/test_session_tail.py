@@ -4,8 +4,10 @@ import json
 import os
 
 from ccrecall.session_tail import (
+    _build_search_dirs,
     _emit_full,
     _last_event_timestamp,
+    _resolve_across_dirs,
     build_tail,
     emit,
     find_pending_question,
@@ -400,3 +402,75 @@ class TestFormatPendingBlock:
         out = format_pending_block(payload)
         assert "PENDING QUESTION" in out
         assert "1. Ship it" in out
+
+
+class TestBuildSearchDirs:
+    def test_not_in_worktree_returns_provided_cwd(self):
+        dirs = _build_search_dirs("/home/user/repo", real_cwd="/home/user/repo")
+        assert len(dirs) == 1
+        assert dirs[0] == transcript_dir("/home/user/repo")
+
+    def test_in_worktree_returns_worktree_first(self):
+        wt = "/home/user/repo/.claude/worktrees/billing"
+        dirs = _build_search_dirs(wt, real_cwd=wt)
+        assert len(dirs) == 2
+        assert dirs[0] == transcript_dir(wt)
+        assert dirs[1] == transcript_dir("/home/user/repo")
+
+    def test_cwd_is_repo_root_but_in_worktree(self, capsys):
+        wt = "/home/user/repo/.claude/worktrees/billing"
+        dirs = _build_search_dirs("/home/user/repo", real_cwd=wt)
+        assert len(dirs) == 2
+        assert dirs[0] == transcript_dir(wt)
+        assert dirs[1] == transcript_dir("/home/user/repo")
+        err = capsys.readouterr().err
+        assert "running in worktree" in err
+
+    def test_unrelated_cwd_skips_worktree_logic(self):
+        wt = "/home/user/repo/.claude/worktrees/billing"
+        dirs = _build_search_dirs("/other/project", real_cwd=wt)
+        assert len(dirs) == 1
+        assert dirs[0] == transcript_dir("/other/project")
+
+    def test_sibling_worktree_cwd_searched_first(self):
+        wt_a = "/home/user/repo/.claude/worktrees/billing"
+        wt_b = "/home/user/repo/.claude/worktrees/genie"
+        dirs = _build_search_dirs(wt_b, real_cwd=wt_a)
+        assert dirs[0] == transcript_dir(wt_b)
+        assert dirs[1] == transcript_dir("/home/user/repo")
+        assert len(dirs) == 2
+
+
+class TestResolveAcrossDirs:
+    def _write_transcript(self, pdir, stem, ts):
+        pdir.mkdir(parents=True, exist_ok=True)
+        path = pdir / f"{stem}.jsonl"
+        path.write_text(json.dumps({"timestamp": ts}) + "\n")
+        return path
+
+    def test_skips_newest_in_first_dir_only(self, tmp_path):
+        dir1 = tmp_path / "primary"
+        dir2 = tmp_path / "fallback"
+        self._write_transcript(dir1, "current", "2026-07-13T10:00:00Z")
+        prior = self._write_transcript(dir1, "prior", "2026-07-13T09:00:00Z")
+
+        result = _resolve_across_dirs([dir1, dir2], None)
+        assert result == prior
+
+    def test_fallback_dir_returns_newest(self, tmp_path):
+        dir1 = tmp_path / "primary"
+        dir2 = tmp_path / "fallback"
+        dir1.mkdir(parents=True)
+        newest = self._write_transcript(dir2, "only-one", "2026-07-13T09:00:00Z")
+
+        result = _resolve_across_dirs([dir1, dir2], None)
+        assert result == newest
+
+    def test_selector_matches_across_dirs(self, tmp_path):
+        dir1 = tmp_path / "primary"
+        dir2 = tmp_path / "fallback"
+        dir1.mkdir(parents=True)
+        target = self._write_transcript(dir2, "abc12345-full-uuid", "2026-07-13T09:00:00Z")
+
+        result = _resolve_across_dirs([dir1, dir2], "abc12345")
+        assert result == target
