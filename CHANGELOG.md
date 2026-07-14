@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.1](https://github.com/NodeJSmith/claude-code-recall/compare/v0.17.0...v0.17.1) (2026-07-14)
+
+
+### Bug Fixes
+
+* **tail:** scope session selection to worktree cwd ([#71](https://github.com/NodeJSmith/claude-code-recall/issues/71)) ([2d7119c](https://github.com/NodeJSmith/claude-code-recall/commit/2d7119cb57be779304c778bf2532a060942f6870))
+
 ## [0.17.0](https://github.com/NodeJSmith/claude-code-recall/compare/v0.16.0...v0.17.0) (2026-07-13)
 
 
