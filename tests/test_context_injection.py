@@ -49,13 +49,14 @@ class TestSessionSelection:
         uuid: str | None = None,
         parent_session_id: int | None = None,
         git_branch: str = "main",
+        cwd: str | None = None,
     ) -> int:
         """Helper to insert a session and return its ID."""
         cursor = memory_db.cursor()
         uuid = uuid or str(uuid4())
         cursor.execute(
-            "INSERT INTO sessions (uuid, project_id, parent_session_id, git_branch) VALUES (?, ?, ?, ?)",
-            (uuid, project_id, parent_session_id, git_branch),
+            "INSERT INTO sessions (uuid, project_id, parent_session_id, git_branch, cwd) VALUES (?, ?, ?, ?, ?)",
+            (uuid, project_id, parent_session_id, git_branch, cwd),
         )
         memory_db.commit()
         return cursor.lastrowid
@@ -348,6 +349,92 @@ class TestSessionSelection:
         # Only sess-active should be selected; sess-inactive is excluded by is_active filter
         assert len(selected) == 1
         assert selected[0]["uuid"] == "sess-active"
+
+    def test_select_sessions_prefers_same_cwd(self, memory_db: sqlite3.Connection):
+        """When cwd is provided, sessions from that cwd should be preferred over
+        sessions from other cwds in the same project."""
+        project_id = self._insert_project(memory_db, "test-proj")
+        current_session = str(uuid4())
+        worktree_a = "/home/user/repo/.claude/worktrees/billing"
+        worktree_b = "/home/user/repo/.claude/worktrees/genie-sdk"
+
+        # Session in worktree A (billing) — substantive, most recent
+        sess_a = self._insert_session(memory_db, project_id, uuid="sess-billing", cwd=worktree_a)
+        self._insert_branch(memory_db, sess_a, exchange_count=5)
+
+        # Session in worktree B (genie-sdk) — substantive, older
+        sess_b = self._insert_session(memory_db, project_id, uuid="sess-genie", cwd=worktree_b)
+        self._insert_branch(memory_db, sess_b, exchange_count=4)
+
+        # From worktree B: should get the genie session, not billing
+        selected = select_sessions(
+            memory_db,
+            "test-proj",
+            current_session,
+            max_sessions=2,
+            cwd=worktree_b,
+        )
+        assert len(selected) == 1
+        assert selected[0]["uuid"] == "sess-genie"
+
+    def test_select_sessions_falls_back_to_project_wide(self, memory_db: sqlite3.Connection):
+        """When no sessions match the cwd, fall back to project-wide selection."""
+        project_id = self._insert_project(memory_db, "test-proj")
+        current_session = str(uuid4())
+        worktree_a = "/home/user/repo/.claude/worktrees/billing"
+        worktree_new = "/home/user/repo/.claude/worktrees/new-feature"
+
+        # Session in worktree A — substantive
+        sess_a = self._insert_session(memory_db, project_id, uuid="sess-billing", cwd=worktree_a)
+        self._insert_branch(memory_db, sess_a, exchange_count=5)
+
+        # From a brand new worktree with no prior sessions: should fall back to project-wide
+        selected = select_sessions(
+            memory_db,
+            "test-proj",
+            current_session,
+            max_sessions=2,
+            cwd=worktree_new,
+        )
+        assert len(selected) == 1
+        assert selected[0]["uuid"] == "sess-billing"
+
+    def test_select_sessions_cwd_none_uses_project_wide(self, memory_db: sqlite3.Connection):
+        """When cwd is empty/None, should use project-wide selection (backward compat)."""
+        project_id = self._insert_project(memory_db, "test-proj")
+        current_session = str(uuid4())
+
+        sess = self._insert_session(
+            memory_db,
+            project_id,
+            uuid="sess-1",
+            cwd="/home/user/repo",
+        )
+        self._insert_branch(memory_db, sess, exchange_count=5)
+
+        selected = select_sessions(memory_db, "test-proj", current_session, max_sessions=2, cwd="")
+        assert len(selected) == 1
+        assert selected[0]["uuid"] == "sess-1"
+
+    def test_select_sessions_cwd_backslash_normalization(self, memory_db: sqlite3.Connection):
+        """Windows-style backslash cwds should match forward-slash stored cwds."""
+        project_id = self._insert_project(memory_db, "test-proj")
+        current_session = str(uuid4())
+        stored_cwd = "C:/Users/jsmith/source/repo"
+
+        sess = self._insert_session(memory_db, project_id, uuid="sess-win", cwd=stored_cwd)
+        self._insert_branch(memory_db, sess, exchange_count=5)
+
+        # Query with backslashes
+        selected = select_sessions(
+            memory_db,
+            "test-proj",
+            current_session,
+            max_sessions=2,
+            cwd="C:\\Users\\jsmith\\source\\repo",
+        )
+        assert len(selected) == 1
+        assert selected[0]["uuid"] == "sess-win"
 
 
 class TestBuildContext:

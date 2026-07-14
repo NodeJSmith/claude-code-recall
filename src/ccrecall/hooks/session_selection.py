@@ -62,7 +62,7 @@ def _row_to_entry(row) -> dict:
     }
 
 
-_CANDIDATE_QUERY = f"""
+_CANDIDATE_BASE = """
     SELECT s.id, s.uuid, b.started_at, b.ended_at, b.exchange_count,
            b.files_modified, b.commits, s.git_branch, b.id as branch_db_id,
            b.context_summary
@@ -70,10 +70,13 @@ _CANDIDATE_QUERY = f"""
     JOIN branches b ON b.session_id = s.id AND b.is_active = 1
     WHERE s.project_id = ?
       AND s.uuid != ?
-      AND s.parent_session_id IS NULL
-    ORDER BY b.ended_at DESC
-    LIMIT {_CANDIDATE_LIMIT}
-"""
+      AND s.parent_session_id IS NULL"""
+
+_CANDIDATE_QUERY = f"{_CANDIDATE_BASE} ORDER BY b.ended_at DESC LIMIT {_CANDIDATE_LIMIT}"
+
+_CANDIDATE_CWD_QUERY = (
+    f"{_CANDIDATE_BASE} AND REPLACE(s.cwd, '\\\\', '/') = ? ORDER BY b.ended_at DESC LIMIT {_CANDIDATE_LIMIT}"
+)
 
 _SESSION_BY_UUID_QUERY = """
     SELECT s.id, s.uuid, b.started_at, b.ended_at, b.exchange_count,
@@ -87,6 +90,26 @@ _SESSION_BY_UUID_QUERY = """
     ORDER BY b.ended_at DESC
     LIMIT 1
 """
+
+
+def _filter_candidates(rows: list, max_sessions: int) -> list[dict]:
+    """Apply the substantive/short filtering to raw candidate rows."""
+    short_sessions: list[dict] = []
+    substantive = None
+    for row in rows:
+        entry = _row_to_entry(row)
+        if entry["exchange_count"] < SUBSTANTIVE_EXCHANGE_THRESHOLD:
+            continue
+        if entry["exchange_count"] == SUBSTANTIVE_EXCHANGE_THRESHOLD:
+            short_sessions.append(entry)
+            continue
+        substantive = entry
+        break
+
+    if substantive:
+        recent_shorts = short_sessions[: max_sessions - 1]
+        return [*recent_shorts, substantive]
+    return short_sessions[:max_sessions]
 
 
 def _find_first_substantive(cursor, project_id: int, exclude_uuid: str) -> dict | None:
@@ -245,32 +268,18 @@ def select_sessions(
         # Session not found in DB or no recent /clear — fall through to startup logic
 
     # Startup path (also fallback for clear with no handoff)
+    # Try cwd-scoped first so worktree sessions don't bleed across worktrees.
+    normalized_cwd = cwd.replace("\\", "/") if cwd else ""
+    if normalized_cwd:
+        cursor.execute(_CANDIDATE_CWD_QUERY, (project_id, current_session_id, normalized_cwd))
+        filtered = _filter_candidates(cursor.fetchall(), max_sessions)
+        if filtered:
+            _load_messages_for(cursor, filtered)
+            return _finalize(filtered)
+
+    # Fallback: project-wide (all worktrees / cwds under the same project key)
     cursor.execute(_CANDIDATE_QUERY, (project_id, current_session_id))
-    candidates = cursor.fetchall()
-
-    short_sessions = []  # exchange_count == 2
-    substantive = None
-    for row in candidates:
-        entry = _row_to_entry(row)
-
-        if entry["exchange_count"] < SUBSTANTIVE_EXCHANGE_THRESHOLD:
-            continue
-
-        if entry["exchange_count"] == SUBSTANTIVE_EXCHANGE_THRESHOLD:
-            short_sessions.append(entry)
-            continue
-
-        # First substantive session found — stop searching
-        substantive = entry
-        break
-
-    # Build filtered list: substantive session always gets a slot,
-    # remaining slots go to short sessions that are more recent
-    if substantive:
-        recent_shorts = short_sessions[: max_sessions - 1]
-        filtered = [*recent_shorts, substantive]
-    else:
-        filtered = short_sessions[:max_sessions]
+    filtered = _filter_candidates(cursor.fetchall(), max_sessions)
 
     if not filtered:
         return []

@@ -42,15 +42,26 @@ _WORKTREE_MARKER = "/.claude/worktrees/"
 _WORKTREE_KEY_MARKER = "--claude-worktrees-"
 
 
+def split_worktree_path(cwd: str) -> tuple[str, str] | None:
+    """Split a worktree path into (repo_root, worktree_cwd), or None if not a worktree.
+
+    Normalizes backslashes to forward slashes first so Windows paths match.
+    """
+    cwd = cwd.replace("\\", "/")
+    idx = cwd.rfind(_WORKTREE_MARKER)
+    if idx == -1:
+        return None
+    return cwd[:idx], cwd
+
+
 def normalize_cwd(cwd: str) -> str:
     """Strip .claude/worktrees/<name> suffix from a raw path, returning the base repo path.
 
     Normalizes backslashes to forward slashes first so Windows paths
     (C:\\Users\\...) match the forward-slash worktree marker.
     """
-    cwd = cwd.replace("\\", "/")
-    idx = cwd.rfind(_WORKTREE_MARKER)
-    return cwd[:idx] if idx != -1 else cwd
+    parts = split_worktree_path(cwd)
+    return parts[0] if parts else cwd.replace("\\", "/")
 
 
 def get_project_key(cwd: str) -> str:
