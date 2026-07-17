@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.18.0](https://github.com/NodeJSmith/claude-code-recall/compare/v0.17.1...v0.18.0) (2026-07-17)
+
+
+### Features
+
+* show tool detail in tail output instead of bare tool names ([#73](https://github.com/NodeJSmith/claude-code-recall/issues/73)) ([440236c](https://github.com/NodeJSmith/claude-code-recall/commit/440236c81ff4a434ff6ac284eafba701600af3ef))
+
 ## [0.17.1](https://github.com/NodeJSmith/claude-code-recall/compare/v0.17.0...v0.17.1) (2026-07-14)
 
 
