@@ -73,6 +73,7 @@ DEFAULT_TAIL_EVENTS = 8  # CLI -n default
 _INJECTION_OPTION_CLIP = 160
 _CLI_OPTION_CLIP = 140
 _PREVIEW_CLIP = 90
+_TOOL_CLIP = 80
 
 
 def transcript_dir(cwd: str, projects_dir: Path = DEFAULT_PROJECTS_DIR) -> Path:
@@ -210,9 +211,48 @@ def last_assistant_text(entries: list[dict]) -> str | None:
     return None
 
 
+def _brief_path(path: str) -> str:
+    """Last two path components — enough to identify the file without noise."""
+    parts = Path(path).parts
+    if len(parts) <= 2:
+        return path
+    return "…/" + "/".join(parts[-2:])
+
+
+def _tool_event(block: dict) -> tuple[str, str]:
+    """Extract (lowercase_tag, brief_summary) from a tool_use block."""
+    name = block.get("name", "?")
+    inp = block.get("input", {})
+    tag = name.lower()
+
+    if name == "Bash":
+        return tag, clip(inp.get("command", ""), _TOOL_CLIP)
+    if name == "Read":
+        return tag, _brief_path(inp.get("file_path", ""))
+    if name in ("Edit", "Write", "MultiEdit"):
+        return tag, _brief_path(inp.get("file_path", ""))
+    if name == "Agent":
+        desc = inp.get("description", "")
+        return tag, desc or clip(inp.get("prompt", ""), _TOOL_CLIP)
+    if name == "Skill":
+        return tag, inp.get("skill", "")
+    if name in ("Grep", "Glob"):
+        return tag, clip(inp.get("pattern", ""), _TOOL_CLIP)
+    if name == "AskUserQuestion":
+        qs = inp.get("questions", [])
+        if qs:
+            return "ask", clip(qs[0].get("question", ""), _TOOL_CLIP)
+        return "ask", ""
+    return tag, ""
+
+
 def build_tail(entries: list[dict], k: int) -> list[tuple[str, str]]:
-    """Last ``k`` main-chain events as (kind, body). One assistant entry can yield
-    several events (its text plus each tool_use); ``k`` bounds the output, not input."""
+    """Last ``k`` main-chain events as (tag, body). One assistant entry can yield
+    several events (its text plus each tool_use); ``k`` bounds the output, not input.
+
+    Tool events use the lowercase tool name as the tag (``bash``, ``read``, ``edit``,
+    ``agent``, etc.) with a brief summary from the tool's input as the body.
+    """
     if k <= 0:
         return []
     events: list[tuple[str, str]] = []
@@ -228,10 +268,10 @@ def build_tail(entries: list[dict], k: int) -> list[tuple[str, str]]:
         elif kind == "assistant":
             text, _, _, _ = extract_text_content(content)
             if text:
-                events.append(("assistant", clip(text)))
+                events.append(("asst", clip(text)))
             if isinstance(content, list):
                 events.extend(
-                    ("tool", block.get("name", "?"))
+                    _tool_event(block)
                     for block in content
                     if isinstance(block, dict) and block.get("type") == "tool_use"
                 )
@@ -394,9 +434,8 @@ def emit(path: Path, k: int, full: bool = False) -> int:
     tail = build_tail(entries, k)
     if tail:
         print(f"TAIL (last {len(tail)} events):")
-        tags = {"user": "user", "assistant": "asst", "tool": "tool"}
-        for kind, body in tail:
-            print(f"  [{tags[kind]}] {body}")
+        for tag, body in tail:
+            print(f"  [{tag}] {body}")
         print()
 
     if not pending:
