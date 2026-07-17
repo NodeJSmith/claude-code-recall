@@ -4,10 +4,12 @@ import json
 import os
 
 from ccrecall.session_tail import (
+    _brief_path,
     _build_search_dirs,
     _emit_full,
     _last_event_timestamp,
     _resolve_across_dirs,
+    _tool_event,
     build_tail,
     emit,
     find_pending_question,
@@ -199,8 +201,8 @@ class TestBuildTail:
         ]
         tail = build_tail(entries, 8)
         assert tail[0] == ("user", "u1")
-        assert tail[1] == ("assistant", "a1")
-        assert ("tool", "AskUserQuestion") in tail
+        assert tail[1] == ("asst", "a1")
+        assert ("ask", "q?") in tail
 
     def test_respects_k(self):
         entries = [user_text(f"u{i}") for i in range(20)]
@@ -210,6 +212,82 @@ class TestBuildTail:
         entries = [user_text("u1"), assistant_text("a1")]
         assert build_tail(entries, 0) == []
         assert build_tail(entries, -1) == []
+
+
+class TestBriefPath:
+    def test_short_path_unchanged(self):
+        assert _brief_path("/a.py") == "/a.py"
+        assert _brief_path("a/b.py") == "a/b.py"
+
+    def test_long_path_truncated(self):
+        assert _brief_path("/home/user/src/project/file.py") == "…/project/file.py"
+
+    def test_three_components(self):
+        assert _brief_path("/a/b/c.py") == "…/b/c.py"
+
+
+class TestToolEvent:
+    def test_bash(self):
+        block = {"name": "Bash", "input": {"command": "git status"}}
+        assert _tool_event(block) == ("bash", "git status")
+
+    def test_bash_clipped(self):
+        block = {"name": "Bash", "input": {"command": "x" * 200}}
+        tag, body = _tool_event(block)
+        assert tag == "bash"
+        assert len(body) <= 85
+
+    def test_read(self):
+        block = {"name": "Read", "input": {"file_path": "/home/user/src/foo.py"}}
+        assert _tool_event(block) == ("read", "…/src/foo.py")
+
+    def test_edit(self):
+        block = {"name": "Edit", "input": {"file_path": "/a/b/c.py"}}
+        assert _tool_event(block) == ("edit", "…/b/c.py")
+
+    def test_write(self):
+        block = {"name": "Write", "input": {"file_path": "/a/b.py"}}
+        assert _tool_event(block) == ("write", "…/a/b.py")
+
+    def test_multiedit(self):
+        block = {"name": "MultiEdit", "input": {"file_path": "/a/b/c.py"}}
+        assert _tool_event(block) == ("multiedit", "…/b/c.py")
+
+    def test_agent_with_description(self):
+        block = {"name": "Agent", "input": {"description": "Code review", "prompt": "review"}}
+        assert _tool_event(block) == ("agent", "Code review")
+
+    def test_agent_falls_back_to_prompt(self):
+        block = {"name": "Agent", "input": {"prompt": "review the changes"}}
+        assert _tool_event(block) == ("agent", "review the changes")
+
+    def test_skill(self):
+        block = {"name": "Skill", "input": {"skill": "mine-ship"}}
+        assert _tool_event(block) == ("skill", "mine-ship")
+
+    def test_grep(self):
+        block = {"name": "Grep", "input": {"pattern": "TODO"}}
+        assert _tool_event(block) == ("grep", "TODO")
+
+    def test_glob(self):
+        block = {"name": "Glob", "input": {"pattern": "*.py"}}
+        assert _tool_event(block) == ("glob", "*.py")
+
+    def test_ask_user_question(self):
+        block = {"name": "AskUserQuestion", "input": {"questions": [{"question": "proceed?"}]}}
+        assert _tool_event(block) == ("ask", "proceed?")
+
+    def test_ask_no_questions(self):
+        block = {"name": "AskUserQuestion", "input": {"questions": []}}
+        assert _tool_event(block) == ("ask", "")
+
+    def test_unknown_tool(self):
+        block = {"name": "WebFetch", "input": {"url": "https://example.com"}}
+        assert _tool_event(block) == ("webfetch", "")
+
+    def test_missing_input(self):
+        block = {"name": "Bash", "input": {}}
+        assert _tool_event(block) == ("bash", "")
 
 
 class TestTranscriptDir:
