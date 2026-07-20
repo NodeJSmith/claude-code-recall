@@ -12,12 +12,10 @@ from pathlib import Path
 import sqlite_vec
 
 from ccrecall.config import DEFAULT_DB_PATH, ensure_parent_dir, get_db_path
+from ccrecall.config import DEFAULT_PROJECTS_DIR as DEFAULT_PROJECTS_DIR
 from ccrecall.embeddings import EMBEDDING_DIM, EMBEDDING_MODEL, EMBEDDING_VERSION
 from ccrecall.models import BUSY_TIMEOUT_MS
 from ccrecall.schema import SCHEMA_CORE, SCHEMA_FTS4, SCHEMA_FTS5, detect_fts_support
-
-# Default paths
-DEFAULT_PROJECTS_DIR = Path.home() / ".claude" / "projects"
 
 # Current schema version. Bump when adding a migration and wire the new DDL
 # delta into _apply_migrations (see _migrate_to_v1 for the version-1 shape).
