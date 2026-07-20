@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.18.1](https://github.com/NodeJSmith/claude-code-recall/compare/v0.18.0...v0.18.1) (2026-07-20)
+
+
+### Bug Fixes
+
+* respect CLAUDE_CONFIG_DIR for transcript directory ([#75](https://github.com/NodeJSmith/claude-code-recall/issues/75)) ([ac33fe0](https://github.com/NodeJSmith/claude-code-recall/commit/ac33fe0c6a058357ed7bd923e22cd7afcc05ada9))
+
 ## [0.18.0](https://github.com/NodeJSmith/claude-code-recall/compare/v0.17.1...v0.18.0) (2026-07-17)
 
 
