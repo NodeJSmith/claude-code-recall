@@ -1458,6 +1458,7 @@ class TestClaudeConfigDir:
             capture_output=True,
             text=True,
             timeout=10,
+            check=False,
             env={**dict(os.environ), "CLAUDE_CONFIG_DIR": str(tmp_path)},
         )
         assert result.returncode == 0, result.stderr
@@ -1475,7 +1476,25 @@ class TestClaudeConfigDir:
             capture_output=True,
             text=True,
             timeout=10,
+            check=False,
             env=env,
+        )
+        assert result.returncode == 0, result.stderr
+
+    def test_empty_env_var_falls_back_to_dot_claude(self):
+        code = (
+            "from ccrecall.config import DEFAULT_PROJECTS_DIR\n"
+            "from pathlib import Path\n"
+            "assert DEFAULT_PROJECTS_DIR == Path.home() / '.claude' / 'projects', "
+            "f'got {DEFAULT_PROJECTS_DIR}'\n"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+            env={**dict(os.environ), "CLAUDE_CONFIG_DIR": ""},
         )
         assert result.returncode == 0, result.stderr
 
@@ -1490,6 +1509,7 @@ class TestClaudeConfigDir:
             capture_output=True,
             text=True,
             timeout=10,
+            check=False,
             env={**dict(os.environ), "CLAUDE_CONFIG_DIR": str(tmp_path)},
         )
         assert result.returncode == 0, result.stderr

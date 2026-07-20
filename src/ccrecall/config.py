@@ -18,7 +18,7 @@ from pathlib import Path
 from ccrecall.models import LOGGER_NAME
 
 # Claude Code config directory — respects CLAUDE_CONFIG_DIR when set.
-CLAUDE_CONFIG_DIR = Path(os.environ.get("CLAUDE_CONFIG_DIR", Path.home() / ".claude"))
+CLAUDE_CONFIG_DIR = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
 
 # Default paths
 RUNTIME_DIR = Path.home() / ".ccrecall"
