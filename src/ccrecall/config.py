@@ -17,11 +17,17 @@ from pathlib import Path
 
 from ccrecall.models import LOGGER_NAME
 
+# Claude Code config directory — respects CLAUDE_CONFIG_DIR when set.
+CLAUDE_CONFIG_DIR = Path(os.environ.get("CLAUDE_CONFIG_DIR", Path.home() / ".claude"))
+
 # Default paths
 RUNTIME_DIR = Path.home() / ".ccrecall"
 DEFAULT_DB_PATH = RUNTIME_DIR / "conversations.db"
 DEFAULT_LOG_PATH = RUNTIME_DIR / "ccrecall.log"
 CONFIG_PATH = RUNTIME_DIR / "config.json"
+
+# Claude Code transcript directory
+DEFAULT_PROJECTS_DIR = CLAUDE_CONFIG_DIR / "projects"
 
 # Hook filenames/prefixes — writer and reader live in different modules and must agree.
 CLEAR_HANDOFF_FILENAME = "clear-handoff.json"

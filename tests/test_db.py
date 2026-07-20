@@ -1,6 +1,7 @@
 """Tests for ccrecall.db — schema creation, settings, and vec operations."""
 
 import json
+import os
 import sqlite3
 import subprocess
 import sys
@@ -1440,3 +1441,55 @@ class TestTransitiveImportIsolation:
     def test_clear_handoff_does_not_import_heavy_deps(self):
         """clear_handoff.py imports only from config.py."""
         self._assert_no_heavy_imports("ccrecall.hooks.clear_handoff")
+
+
+class TestClaudeConfigDir:
+    """DEFAULT_PROJECTS_DIR must respect the CLAUDE_CONFIG_DIR env var."""
+
+    def test_default_projects_dir_uses_env_var(self, tmp_path):
+        code = (
+            "from ccrecall.config import DEFAULT_PROJECTS_DIR\n"
+            "from pathlib import Path\n"
+            f"assert DEFAULT_PROJECTS_DIR == Path({str(tmp_path)!r}) / 'projects', "
+            f"f'got {{DEFAULT_PROJECTS_DIR}}'\n"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env={**dict(os.environ), "CLAUDE_CONFIG_DIR": str(tmp_path)},
+        )
+        assert result.returncode == 0, result.stderr
+
+    def test_default_projects_dir_falls_back_to_dot_claude(self):
+        code = (
+            "from ccrecall.config import DEFAULT_PROJECTS_DIR\n"
+            "from pathlib import Path\n"
+            "assert DEFAULT_PROJECTS_DIR == Path.home() / '.claude' / 'projects', "
+            "f'got {DEFAULT_PROJECTS_DIR}'\n"
+        )
+        env = {k: v for k, v in os.environ.items() if k != "CLAUDE_CONFIG_DIR"}
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=env,
+        )
+        assert result.returncode == 0, result.stderr
+
+    def test_db_reexports_same_value(self, tmp_path):
+        code = (
+            "from ccrecall.config import DEFAULT_PROJECTS_DIR as from_config\n"
+            "from ccrecall.db import DEFAULT_PROJECTS_DIR as from_db\n"
+            "assert from_config == from_db, f'{from_config} != {from_db}'\n"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env={**dict(os.environ), "CLAUDE_CONFIG_DIR": str(tmp_path)},
+        )
+        assert result.returncode == 0, result.stderr
