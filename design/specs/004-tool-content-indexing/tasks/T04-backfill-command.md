@@ -2,7 +2,7 @@
 task_id: "T04"
 title: "Add ccrecall backfill tool-content CLI command"
 status: "planned"
-depends_on: ["T01", "T02"]
+depends_on: ["T01", "T02", "T03"]
 implements: ["FR#8", "AC#6"]
 ---
 
@@ -12,6 +12,7 @@ Create a new `ccrecall backfill tool-content` CLI command that retroactively pop
 ## Target Files
 - create: `src/ccrecall/hooks/backfill_tool_content.py`
 - modify: `src/ccrecall/cli/commands.py`
+- read: `src/ccrecall/content.py` (`extract_text_content` — called directly for the UPDATE path)
 - read: `src/ccrecall/hooks/backfill_embeddings.py` (pattern reference)
 - read: `src/ccrecall/hooks/backfill_query.py` (shared primitives: `BATCH_SIZE`, no-progress guard)
 - read: `src/ccrecall/hooks/backfill_status.py` (shared `--status` reporting)
@@ -29,10 +30,10 @@ Create a new module with a `run()` function following `backfill_embeddings.py`'s
 
 **Per-session processing** (all wrapped in a single `SAVEPOINT` per session):
 1. Re-parse the JSONL file using `parse_all_with_uuids` + `find_all_branches` to reconstruct the branch→message UUID mapping.
-2. For each entry in the parsed transcript:
-   a. Call `build_message_row` (from `message_ops`) to get the row tuple including the new `tool_content`.
-   b. If a `messages` row already exists for this `(session_id, uuid)`: UPDATE `tool_content` on that row.
-   c. If no row exists (tool-only turn that was previously skipped): call `insert_new_messages` (which has `ON CONFLICT DO NOTHING` for race safety) and link the new row to the correct branch via `branch_messages`.
+2. Query existing UUIDs for this session from the `messages` table.
+3. For each assistant entry in the parsed transcript, extract tool content by calling `extract_text_content` directly (not `build_message_row` — that function's `existing_uuids` guard returns `None` for already-existing rows, which is exactly the rows the UPDATE path needs).
+   a. If a `messages` row already exists for this `(session_id, uuid)`: UPDATE `messages SET tool_content = ? WHERE session_id = ? AND uuid = ?`.
+   b. If no row exists (tool-only turn that was previously skipped): call `build_message_row` + `insert_new_messages` (which has `ON CONFLICT DO NOTHING` for race safety) and link the new row to the correct branch via `branch_messages`.
 3. Rebuild `branches.aggregated_content` for affected branches using `build_aggregated_content`.
 4. Reset `branches.embedding_version = NULL` for every touched branch — this is critical so `backfill embeddings` re-selects them for re-embedding.
 5. `RELEASE SAVEPOINT` on success; `ROLLBACK TO SAVEPOINT` on exception.

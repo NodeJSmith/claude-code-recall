@@ -3,7 +3,7 @@ task_id: "T03"
 title: "Wire tool content into FTS, embedding, and rendering paths"
 status: "planned"
 depends_on: ["T02"]
-implements: ["FR#5", "FR#6", "FR#7", "FR#10", "AC#3", "AC#4", "AC#5", "AC#9"]
+implements: ["FR#5", "FR#6", "FR#7", "FR#10", "AC#3", "AC#5", "AC#9"]
 ---
 
 ## Summary
@@ -59,7 +59,7 @@ Extend `format_markdown_session` (line ~105): after rendering `msg['content']`, 
 Update `build_exchange_pairs` tests:
 - Existing tests that construct mock message dicts: add `"tool_content": ""` (or `None`) to each dict so they don't break on the new `.get("tool_content")`.
 - Add new test: message with empty `content` but non-empty `tool_content` produces an exchange pair (tool-only turn guard).
-- Add new test: consecutive-type collapsing — 5 `[Read: ...]` markers become a single collapsed line.
+- Add new test: consecutive-type collapsing — 15 `[Read: ...]` markers become a single collapsed line.
 - Add new test: mixed prose + tool content both appear in the exchange pair.
 - Remove or update any test that asserts the vestigial `[Tool: X]` regex stripping behavior.
 
@@ -77,6 +77,5 @@ Update `build_exchange_pairs` tests:
 - [ ] FR#7: `search-messages` results include tool content in snippet text (via `chunks.assistant_text`)
 - [ ] FR#10: Unit test verifies 5 consecutive `[Read: ...]` markers are collapsed into a single summary line
 - [ ] AC#3: `aggregated_content` contains `[Bash: ...]` and `[AskUserQuestion: ...]` markers after sync
-- [ ] AC#4: Exchange pairs from `build_exchange_pairs` include tool content in assistant text (unit-level; end-to-end search-messages test is in T05)
-- [ ] AC#5: Search result snippet includes tool content text
+- [ ] AC#5: Exchange pairs from `build_exchange_pairs` include tool content in assistant text (end-to-end snippet verification is in T05)
 - [ ] AC#9: Consecutive identical tool types are collapsed before embedding

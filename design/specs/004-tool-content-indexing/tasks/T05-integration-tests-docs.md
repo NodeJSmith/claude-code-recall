@@ -3,7 +3,7 @@ task_id: "T05"
 title: "Add integration tests and update documentation"
 status: "planned"
 depends_on: ["T01", "T02", "T03", "T04"]
-implements: ["AC#4", "AC#5", "AC#10", "AC#11"]
+implements: ["AC#2", "AC#3", "AC#4", "AC#5", "AC#6", "AC#10", "AC#11"]
 ---
 
 ## Summary
@@ -62,7 +62,10 @@ Run:
 - The `messages` table column list in CLAUDE.md is in the "Four invariants to preserve" section under "Session-keyed branch identity" — check the exact location before editing.
 
 ## Verify
+- [ ] AC#2: Integration test verifies tool-only assistant turns produce `messages` rows with empty `content` and populated `tool_content`
+- [ ] AC#3: Integration test verifies `aggregated_content` contains tool markers after sync
 - [ ] AC#4: Integration test syncs a transcript with AskUserQuestion about "retry task", embeds, and verifies `search_messages` returns a matching result
 - [ ] AC#5: The search-messages result snippet includes the AskUserQuestion tool content text
+- [ ] AC#6: Integration test verifies backfill populates `tool_content`, rebuilds `aggregated_content`, and skips missing JSONL with a warning
 - [ ] AC#10: `uv run pytest` passes with 0 failures
 - [ ] AC#11: `uvx prek run --all-files` passes with no errors
