@@ -1,7 +1,7 @@
 ---
 task_id: "T01"
 title: "Add generic tool content extraction to extract_text_content"
-status: "planned"
+status: "done"
 depends_on: []
 implements: ["FR#1", "FR#2", "FR#9", "AC#1", "AC#7", "AC#8"]
 ---

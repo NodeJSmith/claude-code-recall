@@ -17,15 +17,16 @@ from ccrecall.content import (
 
 class TestExtractTextContent:
     def test_plain_string(self):
-        text, has_tool, has_think, summary = extract_text_content("Hello world")
+        text, has_tool, has_think, summary, tool_content = extract_text_content("Hello world")
         assert text == "Hello world"
         assert has_tool is False
         assert has_think is False
         assert summary is None
+        assert tool_content == ""
 
     def test_string_with_command_artifacts(self):
         raw = "prefix <command-name>foo</command-name> middle <command-args>bar</command-args> end"
-        text, _, _, _ = extract_text_content(raw)
+        text, _, _, _, _ = extract_text_content(raw)
         assert "<command-name>" not in text
         assert "<command-args>" not in text
         assert "prefix" in text
@@ -34,14 +35,14 @@ class TestExtractTextContent:
 
     def test_string_with_local_command_stdout(self):
         raw = "before <local-command-stdout>some output</local-command-stdout> after"
-        text, _, _, _ = extract_text_content(raw)
+        text, _, _, _, _ = extract_text_content(raw)
         assert "<local-command-stdout>" not in text
         assert "before" in text
         assert "after" in text
 
     def test_string_with_command_message(self):
         raw = "start <command-message>msg content</command-message> finish"
-        text, _, _, _ = extract_text_content(raw)
+        text, _, _, _, _ = extract_text_content(raw)
         assert "<command-message>" not in text
 
     def test_list_with_text_blocks(self):
@@ -49,11 +50,12 @@ class TestExtractTextContent:
             {"type": "text", "text": "Hello"},
             {"type": "text", "text": "World"},
         ]
-        text, has_tool, has_think, summary = extract_text_content(content)
+        text, has_tool, has_think, summary, tool_content = extract_text_content(content)
         assert text == "Hello\nWorld"
         assert has_tool is False
         assert has_think is False
         assert summary is None
+        assert tool_content == ""
 
     def test_list_with_tool_use(self):
         content = [
@@ -62,23 +64,25 @@ class TestExtractTextContent:
             {"type": "tool_use", "name": "Read", "input": {"file": "other.py"}},
             {"type": "tool_use", "name": "Bash", "input": {"command": "ls"}},
         ]
-        text, has_tool, _has_think, summary = extract_text_content(content)
+        text, has_tool, _has_think, summary, tool_content = extract_text_content(content)
         assert text == "Let me check."
         assert has_tool is True
         assert summary is not None
         counts = json.loads(summary)
         assert counts == {"Read": 2, "Bash": 1}
+        assert tool_content == "[Read: test.py]\n[Read: other.py]\n[Bash: ls]"
 
     def test_list_with_thinking(self):
         content = [
             {"type": "thinking", "thinking": "Let me reason..."},
             {"type": "text", "text": "The answer is 42."},
         ]
-        text, has_tool, has_think, summary = extract_text_content(content)
+        text, has_tool, has_think, summary, tool_content = extract_text_content(content)
         assert text == "The answer is 42."
         assert has_tool is False
         assert has_think is True
         assert summary is None
+        assert tool_content == ""
 
     def test_list_with_all_types(self):
         content = [
@@ -86,41 +90,284 @@ class TestExtractTextContent:
             {"type": "text", "text": "Here's what I found."},
             {"type": "tool_use", "name": "Grep", "input": {"pattern": "foo"}},
         ]
-        text, has_tool, has_think, summary = extract_text_content(content)
+        text, has_tool, has_think, summary, tool_content = extract_text_content(content)
         assert text == "Here's what I found."
         assert has_tool is True
         assert has_think is True
         assert json.loads(summary) == {"Grep": 1}
+        assert tool_content == "[Grep: foo]"
 
     def test_list_with_tool_use_no_name(self):
         """tool_use without a name should still flag has_tool_use but not appear in summary."""
         content = [{"type": "tool_use", "input": {}}]
-        _, has_tool, _, summary = extract_text_content(content)
+        _, has_tool, _, summary, tool_content = extract_text_content(content)
         assert has_tool is True
         assert summary is None  # No tool name -> no counts -> None
+        assert tool_content == "[]"  # empty name, no input fields
 
     def test_empty_string(self):
-        text, _has_tool, _has_think, summary = extract_text_content("")
+        text, _has_tool, _has_think, summary, tool_content = extract_text_content("")
         assert text == ""
         assert summary is None
+        assert tool_content == ""
 
     def test_none_input(self):
-        text, has_tool, has_think, summary = extract_text_content(None)
+        text, has_tool, has_think, summary, tool_content = extract_text_content(None)
         assert text == ""
         assert has_tool is False
         assert has_think is False
         assert summary is None
+        assert tool_content == ""
 
     def test_unexpected_type(self):
-        text, has_tool, _has_think, _summary = extract_text_content(42)
+        text, has_tool, _has_think, _summary, tool_content = extract_text_content(42)
         assert text == ""
         assert has_tool is False
+        assert tool_content == ""
 
     def test_empty_list(self):
-        text, has_tool, _has_think, summary = extract_text_content([])
+        text, has_tool, _has_think, summary, tool_content = extract_text_content([])
         assert text == ""
         assert has_tool is False
         assert summary is None
+        assert tool_content == ""
+
+
+# extract_text_content — tool_content extraction (generic field-join)
+
+
+class TestToolContentExtraction:
+    def test_bash_with_description(self):
+        content = [
+            {
+                "type": "tool_use",
+                "name": "Bash",
+                "input": {"command": "npm install", "description": "Install dependencies"},
+            }
+        ]
+        _, _, _, _, tool_content = extract_text_content(content)
+        assert tool_content == "[Bash: npm install Install dependencies]"
+
+    def test_bash_without_description(self):
+        content = [{"type": "tool_use", "name": "Bash", "input": {"command": "ls -la"}}]
+        _, _, _, _, tool_content = extract_text_content(content)
+        assert tool_content == "[Bash: ls -la]"
+
+    def test_ask_user_question(self):
+        content = [
+            {
+                "type": "tool_use",
+                "name": "AskUserQuestion",
+                "input": {
+                    "questions": [
+                        {
+                            "question": "What would you like to do?",
+                            "options": [
+                                {"label": "Approve", "description": "Approve as-is"},
+                                {"label": "Revise", "description": "Revise the plan"},
+                            ],
+                        }
+                    ]
+                },
+            }
+        ]
+        _, _, _, _, tool_content = extract_text_content(content)
+        assert tool_content == (
+            "[AskUserQuestion: What would you like to do? Approve Approve as-is Revise Revise the plan]"
+        )
+
+    def test_agent(self):
+        content = [
+            {
+                "type": "tool_use",
+                "name": "Agent",
+                "input": {"subagent_type": "researcher", "prompt": "Investigate the proposed change"},
+            }
+        ]
+        _, _, _, _, tool_content = extract_text_content(content)
+        assert tool_content == "[Agent: researcher Investigate the proposed change]"
+
+    def test_skill(self):
+        content = [
+            {
+                "type": "tool_use",
+                "name": "Skill",
+                "input": {"skill": "mine-define", "args": "add rate limiting"},
+            }
+        ]
+        _, _, _, _, tool_content = extract_text_content(content)
+        assert tool_content == "[Skill: mine-define add rate limiting]"
+
+    def test_edit(self):
+        content = [
+            {
+                "type": "tool_use",
+                "name": "Edit",
+                "input": {
+                    "file_path": "src/ccrecall/content.py",
+                    "old_string": "old_value",
+                    "new_string": "new_value",
+                },
+            }
+        ]
+        _, _, _, _, tool_content = extract_text_content(content)
+        assert tool_content == "[Edit: src/ccrecall/content.py old_value new_value]"
+
+    def test_read(self):
+        content = [{"type": "tool_use", "name": "Read", "input": {"file_path": "src/ccrecall/content.py"}}]
+        _, _, _, _, tool_content = extract_text_content(content)
+        assert tool_content == "[Read: src/ccrecall/content.py]"
+
+    def test_grep(self):
+        content = [{"type": "tool_use", "name": "Grep", "input": {"pattern": "extract_text_content"}}]
+        _, _, _, _, tool_content = extract_text_content(content)
+        assert tool_content == "[Grep: extract_text_content]"
+
+    def test_glob(self):
+        content = [{"type": "tool_use", "name": "Glob", "input": {"pattern": "**/*.py"}}]
+        _, _, _, _, tool_content = extract_text_content(content)
+        assert tool_content == "[Glob: **/*.py]"
+
+    def test_write(self):
+        content = [
+            {
+                "type": "tool_use",
+                "name": "Write",
+                "input": {"file_path": "src/new.py", "content": "print('hi')"},
+            }
+        ]
+        _, _, _, _, tool_content = extract_text_content(content)
+        assert tool_content == "[Write: src/new.py print('hi')]"
+
+    def test_multi_edit(self):
+        content = [
+            {
+                "type": "tool_use",
+                "name": "MultiEdit",
+                "input": {
+                    "file_path": "src/a.py",
+                    "edits": [{"old_string": "a", "new_string": "b"}],
+                },
+            }
+        ]
+        _, _, _, _, tool_content = extract_text_content(content)
+        assert tool_content == "[MultiEdit: src/a.py a b]"
+
+    def test_unknown_tool_type(self):
+        """A tool_use block with a name not covered by any dispatch table still
+        produces a marker — generic field-join extraction has no dispatch table."""
+        content = [
+            {
+                "type": "tool_use",
+                "name": "SomeNewTool",
+                "input": {"custom_field": "some value here"},
+            }
+        ]
+        _, _, _, _, tool_content = extract_text_content(content)
+        assert tool_content == "[SomeNewTool: some value here]"
+
+    def test_unknown_tool_type_no_string_fields(self):
+        content = [{"type": "tool_use", "name": "SomeNewTool", "input": {"count": 5, "enabled": True}}]
+        _, _, _, _, tool_content = extract_text_content(content)
+        assert tool_content == "[SomeNewTool]"
+
+    def test_multiple_tool_uses_newline_joined(self):
+        content = [
+            {"type": "tool_use", "name": "Read", "input": {"file_path": "a.py"}},
+            {"type": "tool_use", "name": "Bash", "input": {"command": "ls"}},
+        ]
+        _, _, _, _, tool_content = extract_text_content(content)
+        assert tool_content == "[Read: a.py]\n[Bash: ls]"
+
+
+# extract_text_content — malformed tool_use input never raises
+
+
+class TestToolContentMalformedInput:
+    def test_missing_input_key(self):
+        content = [{"type": "tool_use", "name": "Bash"}]
+        _, _, _, _, tool_content = extract_text_content(content)
+        assert tool_content == "[Bash]"
+
+    def test_input_is_string_not_dict(self):
+        content = [{"type": "tool_use", "name": "Bash", "input": "not a dict"}]
+        _, _, _, _, tool_content = extract_text_content(content)
+        assert tool_content == "[Bash]"
+
+    def test_input_is_none(self):
+        content = [{"type": "tool_use", "name": "Bash", "input": None}]
+        _, _, _, _, tool_content = extract_text_content(content)
+        assert tool_content == "[Bash]"
+
+    def test_none_value_where_string_expected(self):
+        content = [{"type": "tool_use", "name": "Bash", "input": {"command": None}}]
+        _, _, _, _, tool_content = extract_text_content(content)
+        assert tool_content == "[Bash]"
+
+    def test_nested_list_wrong_element_types(self):
+        """AskUserQuestion's questions field holding ints instead of dicts must not raise."""
+        content = [
+            {
+                "type": "tool_use",
+                "name": "AskUserQuestion",
+                "input": {"questions": [1, 2, 3]},
+            }
+        ]
+        _, _, _, _, tool_content = extract_text_content(content)
+        assert tool_content == "[AskUserQuestion]"
+
+    def test_nested_dict_with_none_values(self):
+        content = [
+            {
+                "type": "tool_use",
+                "name": "AskUserQuestion",
+                "input": {"questions": [{"question": None, "options": None}]},
+            }
+        ]
+        _, _, _, _, tool_content = extract_text_content(content)
+        assert tool_content == "[AskUserQuestion]"
+
+    def test_questions_field_not_a_list(self):
+        """questions is an int instead of a list — must not raise."""
+        content = [{"type": "tool_use", "name": "AskUserQuestion", "input": {"questions": 42}}]
+        _, _, _, _, tool_content = extract_text_content(content)
+        assert tool_content == "[AskUserQuestion]"
+
+    def test_missing_name(self):
+        content = [{"type": "tool_use", "input": {"command": "ls"}}]
+        _, _, _, _, tool_content = extract_text_content(content)
+        assert tool_content == "[: ls]"
+
+
+# extract_text_content — cap truncation (FR#9)
+
+
+class TestToolContentCapTruncation:
+    def test_field_capped_at_200_chars(self):
+        content = [
+            {
+                "type": "tool_use",
+                "name": "Agent",
+                "input": {"subagent_type": "researcher", "prompt": "x" * 1000},
+            }
+        ]
+        _, _, _, _, tool_content = extract_text_content(content)
+        assert tool_content == f"[Agent: researcher {'x' * 200}]"
+
+    def test_block_capped_at_300_chars_total(self):
+        content = [
+            {
+                "type": "tool_use",
+                "name": "Agent",
+                "input": {"subagent_type": "a" * 1000, "prompt": "b" * 1000},
+            }
+        ]
+        _, _, _, _, tool_content = extract_text_content(content)
+        # Each field is capped to 200 chars first (400 total + 1 space = 401),
+        # then the joined block is capped to 300 chars.
+        inner = tool_content[len("[Agent: ") : -1]
+        assert len(inner) == 300
+        assert inner.startswith("a" * 200)
 
 
 # is_tool_result
@@ -325,20 +572,20 @@ class TestExtractCommits:
 class TestChannelStripping:
     def test_strips_channel_xml(self):
         raw = '<channel source="plugin:telegram:telegram" chat_id="12345" user_name="alice">\nHello from Telegram!\n</channel>'
-        text, _, _, _ = extract_text_content(raw)
+        text, _, _, _, _ = extract_text_content(raw)
         assert text == "Hello from Telegram!"
         assert "<channel" not in text
 
     def test_strips_channel_with_nested_content(self):
         raw = '<channel source="plugin:discord:discord" chat_id="99" user_name="bob">\nCan you help me with this code?\n```python\nprint("hi")\n```\n</channel>'
-        text, _, _, _ = extract_text_content(raw)
+        text, _, _, _, _ = extract_text_content(raw)
         assert "Can you help me with this code?" in text
         assert 'print("hi")' in text
         assert "<channel" not in text
 
     def test_no_channel_tag_unchanged(self):
         raw = "Just a normal message"
-        text, _, _, _ = extract_text_content(raw)
+        text, _, _, _, _ = extract_text_content(raw)
         assert text == "Just a normal message"
 
 
