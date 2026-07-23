@@ -42,13 +42,13 @@ def user_text(text: str, sidechain: bool = False) -> dict:
     }
 
 
-def user_tool_result(tool_id: str, content) -> dict:
+def user_tool_result(tool_id: str, content, *, is_error: bool = False) -> dict:
+    block: dict = {"type": "tool_result", "tool_use_id": tool_id, "content": content}
+    if is_error:
+        block["is_error"] = True
     return {
         "type": "user",
-        "message": {
-            "role": "user",
-            "content": [{"type": "tool_result", "tool_use_id": tool_id, "content": content}],
-        },
+        "message": {"role": "user", "content": [block]},
         "uuid": _uuid(),
     }
 
@@ -99,14 +99,14 @@ class TestFindPendingQuestion:
     def test_asked_then_rejected_is_pending(self):
         entries = [
             ask_question("t1", "proceed?", OPTS),
-            user_tool_result("t1", REJECTED),
+            user_tool_result("t1", REJECTED, is_error=True),
         ]
         assert find_pending_question(entries) is not None
 
     def test_asked_then_interrupted_is_pending(self):
         entries = [
             ask_question("t1", "proceed?", OPTS),
-            user_tool_result("t1", INTERRUPT),
+            user_tool_result("t1", INTERRUPT, is_error=True),
         ]
         assert find_pending_question(entries) is not None
 
@@ -144,17 +144,51 @@ class TestFindPendingQuestion:
         ]
         assert find_pending_question(entries) is None
 
-    def test_result_as_list_content(self):
-        # Real transcripts sometimes store tool_result content as a list of blocks;
-        # the answer marker must be read from the extracted text, not str(list).
-        listed = [{"type": "text", "text": ANSWERED}]
-        entries = [ask_question("t1", "proceed?", OPTS), user_tool_result("t1", listed)]
+    def test_result_with_is_error_true_is_pending(self):
+        entries = [
+            ask_question("t1", "proceed?", OPTS),
+            user_tool_result("t1", "any text", is_error=True),
+        ]
+        assert find_pending_question(entries) is not None
+
+    def test_result_without_is_error_is_not_pending(self):
+        entries = [
+            ask_question("t1", "proceed?", OPTS),
+            user_tool_result("t1", "any text"),
+        ]
         assert find_pending_question(entries) is None
 
-    def test_list_result_without_marker_is_pending(self):
-        # A non-answer delivered as list-of-blocks must not be read as answered.
-        listed = [{"type": "text", "text": "user chose to stop"}]
-        entries = [ask_question("t1", "proceed?", OPTS), user_tool_result("t1", listed)]
+    def test_rejected_then_user_continued_is_not_pending(self):
+        entries = [
+            ask_question("t1", "proceed?", OPTS),
+            user_tool_result("t1", REJECTED, is_error=True),
+            user_text("do something else instead"),
+            assistant_text("OK, doing something else."),
+        ]
+        assert find_pending_question(entries) is None
+
+    def test_rejected_with_no_followup_is_pending(self):
+        entries = [
+            ask_question("t1", "proceed?", OPTS),
+            user_tool_result("t1", REJECTED, is_error=True),
+            assistant_text("OK, what would you like to do?"),
+        ]
+        assert find_pending_question(entries) is not None
+
+    def test_no_result_then_user_continued_is_not_pending(self):
+        entries = [
+            ask_question("t1", "proceed?", OPTS),
+            user_text("never mind, do this instead"),
+            assistant_text("OK, doing that."),
+        ]
+        assert find_pending_question(entries) is None
+
+    def test_sidechain_followup_does_not_supersede(self):
+        entries = [
+            ask_question("t1", "proceed?", OPTS),
+            user_tool_result("t1", REJECTED, is_error=True),
+            user_text("subagent instruction", sidechain=True),
+        ]
         assert find_pending_question(entries) is not None
 
 
