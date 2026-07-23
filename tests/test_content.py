@@ -3,6 +3,8 @@
 import json
 
 from ccrecall.content import (
+    TOOL_CONTENT_CAP,
+    TOOL_FIELD_CAP,
     extract_commits,
     extract_files_modified,
     extract_text_content,
@@ -364,7 +366,7 @@ class TestToolContentCapTruncation:
             }
         ]
         _, _, _, _, tool_content = extract_text_content(content)
-        assert tool_content == f"[Agent: researcher {'x' * 200}]"
+        assert tool_content == f"[Agent: researcher {'x' * TOOL_FIELD_CAP}]"
 
     def test_block_capped_at_300_chars_total(self):
         content = [
@@ -375,11 +377,11 @@ class TestToolContentCapTruncation:
             }
         ]
         _, _, _, _, tool_content = extract_text_content(content)
-        # Each field is capped to 200 chars first (400 total + 1 space = 401),
-        # then the joined block is capped to 300 chars.
+        # Each field is capped to TOOL_FIELD_CAP chars first, then the joined
+        # block is capped to TOOL_CONTENT_CAP chars total.
         inner = tool_content[len("[Agent: ") : -1]
-        assert len(inner) == 300
-        assert inner.startswith("a" * 200)
+        assert len(inner) == TOOL_CONTENT_CAP
+        assert inner.startswith("a" * TOOL_FIELD_CAP)
 
 
 # is_tool_result

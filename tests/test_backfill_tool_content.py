@@ -37,7 +37,7 @@ def _seed_session(
     *,
     filepath: Path,
     existing_messages: list[tuple[str, str, str, str]],
-    embedding_version: int | None = 5,
+    embedding_version: int | None = 5,  # any non-NULL value; asserts it gets reset to NULL
     ended_at: str = "2026-01-01T10:00:10Z",
 ) -> tuple[int, int]:
     """Seed a pre-migration-style session: sessions/messages/branches/import_log

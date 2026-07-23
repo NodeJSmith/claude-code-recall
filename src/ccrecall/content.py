@@ -13,7 +13,7 @@ TOOL_FIELD_CAP = 200
 TOOL_CONTENT_CAP = 300
 
 
-def extract_tool_strings(value) -> list[str]:
+def extract_tool_strings(value: object) -> list[str]:
     """Recursively collect string values out of a tool_use input value.
 
     Handles the shapes Claude Code's tool inputs actually take: plain strings,
