@@ -52,7 +52,7 @@ def build_tool_use_marker(item: dict) -> str:
     strings: list[str] = []
     for value in inp.values():
         strings.extend(extract_tool_strings(value))
-    joined = " ".join(strings)[:TOOL_CONTENT_CAP]
+    joined = " ".join(s.replace("\n", " ") for s in strings)[:TOOL_CONTENT_CAP]
     return f"[{name}: {joined}]" if joined else f"[{name}]"
 
 

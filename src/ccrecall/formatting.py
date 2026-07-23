@@ -139,7 +139,11 @@ def format_markdown_session(session: dict, verbose: bool = False) -> str:
             role = "Subagent Result"
         else:
             role = "User" if msg["role"] == "user" else "Assistant"
-        lines.append(f"**{role}:** {msg['content']}\n")
+        text = f"**{role}:** {msg['content']}"
+        tool_content = msg.get("tool_content") or ""
+        if tool_content:
+            text += f"\n{tool_content}"
+        lines.append(f"{text}\n")
 
     lines.append("---\n")
     return "\n".join(lines)

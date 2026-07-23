@@ -564,7 +564,16 @@ class TestBuildContext:
 class TestBuildFallbackContext:
     """Test _build_fallback_context() — the fallback renderer for uncached branches."""
 
-    def test_tool_markers_stripped(self):
+    def test_tool_content_included(self):
+        """Tool content flows through the fallback path alongside prose.
+
+        Regression coverage after the vestigial ``[Tool: \\w+]`` regex was deleted
+        from ``build_exchange_pairs`` — that regex never matched real tool
+        markers (``[Read: ...]``, ``[Bash: ...]``, etc.), only a literal
+        "Tool" placeholder no producer ever emitted. This test now verifies the
+        real mechanism: ``tool_content`` (as populated by ``extract_text_content``)
+        is surfaced in the rendered fallback context alongside prose content.
+        """
         session = {
             "started_at": "2025-01-15T14:30:00Z",
             "ended_at": "2025-01-15T15:00:00Z",
@@ -575,18 +584,20 @@ class TestBuildFallbackContext:
                     "role": "user",
                     "content": "Read the file",
                     "timestamp": "2025-01-15T14:30:00Z",
+                    "tool_content": "",
                 },
                 {
                     "role": "assistant",
-                    "content": "Here is the content [Tool: Read] of the file [Tool: Bash].",
+                    "content": "Here is the content of the file.",
                     "timestamp": "2025-01-15T14:31:00Z",
+                    "tool_content": "[Read: src/main.py]\n[Bash: cat src/main.py]",
                 },
             ],
         }
         result = _build_fallback_context(session)
-        assert "[Tool: Read]" not in result
-        assert "[Tool: Bash]" not in result
-        assert "Here is the content" in result
+        assert "Here is the content of the file." in result
+        assert "[Read: src/main.py]" in result
+        assert "[Bash: cat src/main.py]" in result
 
     def test_long_exchange_text_truncated(self):
         """Fallback mid-truncates long exchange text like the cached path.

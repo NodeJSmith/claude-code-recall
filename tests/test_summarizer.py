@@ -12,6 +12,7 @@ from ccrecall.hooks import backfill_summaries, memory_setup
 from ccrecall.schema import SCHEMA
 from ccrecall.summarizer import (
     SUMMARY_VERSION,
+    _collapse_consecutive_tool_markers,
     _extract_topic,
     build_context_summary_json,
     build_exchange_pairs,
@@ -42,11 +43,12 @@ class TestTruncateMid:
 class TestBuildExchangePairs:
     def test_simple_exchange(self):
         messages = [
-            {"role": "user", "content": "Hello", "timestamp": "2025-01-01T10:00:00Z"},
+            {"role": "user", "content": "Hello", "timestamp": "2025-01-01T10:00:00Z", "tool_content": ""},
             {
                 "role": "assistant",
                 "content": "Hi there",
                 "timestamp": "2025-01-01T10:01:00Z",
+                "tool_content": "",
             },
         ]
         exchanges = build_exchange_pairs(messages)
@@ -57,32 +59,15 @@ class TestBuildExchangePairs:
 
     def test_multiple_exchanges(self):
         messages = [
-            {"role": "user", "content": "Q1", "timestamp": "2025-01-01T10:00:00Z"},
-            {"role": "assistant", "content": "A1", "timestamp": "2025-01-01T10:01:00Z"},
-            {"role": "user", "content": "Q2", "timestamp": "2025-01-01T10:02:00Z"},
-            {"role": "assistant", "content": "A2", "timestamp": "2025-01-01T10:03:00Z"},
+            {"role": "user", "content": "Q1", "timestamp": "2025-01-01T10:00:00Z", "tool_content": ""},
+            {"role": "assistant", "content": "A1", "timestamp": "2025-01-01T10:01:00Z", "tool_content": ""},
+            {"role": "user", "content": "Q2", "timestamp": "2025-01-01T10:02:00Z", "tool_content": ""},
+            {"role": "assistant", "content": "A2", "timestamp": "2025-01-01T10:03:00Z", "tool_content": ""},
         ]
         exchanges = build_exchange_pairs(messages)
         assert len(exchanges) == 2
         assert exchanges[0]["user"] == "Q1"
         assert exchanges[1]["user"] == "Q2"
-
-    def test_tool_markers_stripped(self):
-        messages = [
-            {
-                "role": "user",
-                "content": "Read file",
-                "timestamp": "2025-01-01T10:00:00Z",
-            },
-            {
-                "role": "assistant",
-                "content": "Content [Tool: Read] here",
-                "timestamp": "2025-01-01T10:01:00Z",
-            },
-        ]
-        exchanges = build_exchange_pairs(messages)
-        assert "[Tool: Read]" not in exchanges[0]["assistant"]
-        assert "Content" in exchanges[0]["assistant"]
 
     def test_user_without_response(self):
         messages = [
@@ -90,6 +75,7 @@ class TestBuildExchangePairs:
                 "role": "user",
                 "content": "Last question",
                 "timestamp": "2025-01-01T10:00:00Z",
+                "tool_content": "",
             },
         ]
         exchanges = build_exchange_pairs(messages)
@@ -100,10 +86,10 @@ class TestBuildExchangePairs:
     def test_carries_first_message_uuid(self):
         """Each exchange carries the uuid of its first (user) message."""
         messages = [
-            {"role": "user", "content": "Q1", "timestamp": "t1", "uuid": "uuid-user-1"},
-            {"role": "assistant", "content": "A1", "timestamp": "t1", "uuid": "uuid-asst-1"},
-            {"role": "user", "content": "Q2", "timestamp": "t2", "uuid": "uuid-user-2"},
-            {"role": "assistant", "content": "A2", "timestamp": "t2", "uuid": "uuid-asst-2"},
+            {"role": "user", "content": "Q1", "timestamp": "t1", "uuid": "uuid-user-1", "tool_content": ""},
+            {"role": "assistant", "content": "A1", "timestamp": "t1", "uuid": "uuid-asst-1", "tool_content": ""},
+            {"role": "user", "content": "Q2", "timestamp": "t2", "uuid": "uuid-user-2", "tool_content": ""},
+            {"role": "assistant", "content": "A2", "timestamp": "t2", "uuid": "uuid-asst-2", "tool_content": ""},
         ]
         exchanges = build_exchange_pairs(messages)
         assert len(exchanges) == 2
@@ -118,12 +104,106 @@ class TestBuildExchangePairs:
     def test_uuid_none_when_missing(self):
         """Messages without a uuid key yield first_message_uuid=None without error."""
         messages = [
-            {"role": "user", "content": "Hello", "timestamp": "t1"},
-            {"role": "assistant", "content": "Hi", "timestamp": "t1"},
+            {"role": "user", "content": "Hello", "timestamp": "t1", "tool_content": ""},
+            {"role": "assistant", "content": "Hi", "timestamp": "t1", "tool_content": ""},
         ]
         exchanges = build_exchange_pairs(messages)
         assert len(exchanges) == 1
         assert exchanges[0]["first_message_uuid"] is None
+
+    def test_tool_only_turn_included(self):
+        """A tool-only assistant turn (empty content, non-empty tool_content) is not dropped.
+
+        Regression guard — before this fix, an assistant message with empty
+        ``content`` contributed nothing to the exchange, silently excluding
+        tool-only turns from the embedded text.
+        """
+        messages = [
+            {"role": "user", "content": "list the files", "timestamp": "t1", "tool_content": ""},
+            {
+                "role": "assistant",
+                "content": "",
+                "timestamp": "t1",
+                "tool_content": "[Read: src/ccrecall/content.py]",
+            },
+        ]
+        exchanges = build_exchange_pairs(messages)
+        assert len(exchanges) == 1
+        assert "[Read: src/ccrecall/content.py]" in exchanges[0]["assistant"]
+
+    def test_mixed_prose_and_tool_content_both_present(self):
+        """Both prose content and tool_content appear in the exchange's assistant text."""
+        messages = [
+            {"role": "user", "content": "fix the bug", "timestamp": "t1", "tool_content": ""},
+            {
+                "role": "assistant",
+                "content": "Found it in the parser.",
+                "timestamp": "t1",
+                "tool_content": "[Bash: pytest tests/test_parser.py]",
+            },
+        ]
+        exchanges = build_exchange_pairs(messages)
+        assert len(exchanges) == 1
+        assert "Found it in the parser." in exchanges[0]["assistant"]
+        assert "[Bash: pytest tests/test_parser.py]" in exchanges[0]["assistant"]
+
+    def test_consecutive_tool_markers_collapsed_in_exchange(self):
+        """15 consecutive [Read: ...] markers collapse to one summary line."""
+        read_markers = "\n".join(f"[Read: src/file{i}.py]" for i in range(15))
+        messages = [
+            {"role": "user", "content": "read the files", "timestamp": "t1", "tool_content": ""},
+            {
+                "role": "assistant",
+                "content": "",
+                "timestamp": "t1",
+                "tool_content": read_markers,
+            },
+        ]
+        exchanges = build_exchange_pairs(messages)
+        assistant_text = exchanges[0]["assistant"]
+        assert assistant_text.count("[Read:") == 1
+        assert "15 calls" in assistant_text
+        assert "src/file0.py" in assistant_text
+
+
+class TestCollapseConsecutiveToolMarkers:
+    """Direct unit tests for _collapse_consecutive_tool_markers."""
+
+    def test_empty_string_unchanged(self):
+        assert _collapse_consecutive_tool_markers("") == ""
+
+    def test_run_below_threshold_unchanged(self):
+        """Runs of 1-2 identical markers pass through unchanged."""
+        text = "[Read: a.py]\n[Read: b.py]"
+        assert _collapse_consecutive_tool_markers(text) == text
+
+    def test_run_of_three_or_more_collapsed(self):
+        text = "\n".join(f"[Bash: cmd{i}]" for i in range(5))
+        result = _collapse_consecutive_tool_markers(text)
+        assert result.count("[Bash:") == 1
+        assert "5 calls" in result
+        assert "cmd0" in result
+        assert "cmd1" in result
+        # Only the first _COLLAPSE_EXAMPLES (2) examples are kept
+        assert "cmd2" not in result
+
+    def test_different_tool_types_not_merged(self):
+        """Consecutive markers of different tool names are separate groups."""
+        text = "[Read: a.py]\n[Read: b.py]\n[Read: c.py]\n[Bash: ls]"
+        result = _collapse_consecutive_tool_markers(text)
+        assert "[Read: 3 calls including a.py, b.py, ...]" in result
+        assert "[Bash: ls]" in result
+
+    def test_non_marker_lines_pass_through(self):
+        """Lines that don't match the marker format are left as-is."""
+        text = "some prose line"
+        assert _collapse_consecutive_tool_markers(text) == text
+
+    def test_marker_with_no_detail_text(self):
+        """A bare '[ToolName]' marker (no colon/detail) still collapses correctly."""
+        text = "\n".join("[UnknownTool]" for _ in range(4))
+        result = _collapse_consecutive_tool_markers(text)
+        assert result == "[UnknownTool: 4 calls]"
 
 
 class TestBuildContextSummaryJson:

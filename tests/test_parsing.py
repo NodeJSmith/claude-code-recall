@@ -1,8 +1,11 @@
 """Tests for ccrecall.parsing — branch detection, JSONL parsing, metadata."""
 
+import sqlite3
 from pathlib import Path
 
 from ccrecall.parsing import (
+    aggregate_branch_content,
+    build_aggregated_content,
     compute_branch_metadata,
     extract_session_metadata,
     extract_session_uuid,
@@ -10,6 +13,7 @@ from ccrecall.parsing import (
     parse_all_with_uuids,
     parse_jsonl_file,
 )
+from ccrecall.schema import SCHEMA
 
 
 class TestExtractSessionUuid:
@@ -285,3 +289,108 @@ class TestComputeBranchMetadata:
         assert count == 0
         assert files == []
         assert commits == []
+
+
+class TestAggregateBranchContent:
+    """Tests for aggregate_branch_content and build_aggregated_content's
+    tool_content handling — the (msg_text, tool_text) split and __tools__ section.
+    """
+
+    def _make_db_with_messages(self, messages: list[tuple[str, str, str]]) -> tuple[sqlite3.Connection, int]:
+        """messages: list of (role, content, tool_content) tuples, in timestamp order."""
+        conn = sqlite3.connect(":memory:")
+        conn.executescript(SCHEMA)
+        conn.commit()
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO projects (path, key, name) VALUES (?, ?, ?)",
+            ("/test/proj", "-test-proj", "proj"),
+        )
+        cursor.execute("INSERT INTO sessions (uuid, project_id) VALUES (?, ?)", ("sess-1", 1))
+        cursor.execute(
+            "INSERT INTO branches (session_id, leaf_uuid, is_active) VALUES (1, 'leaf-1', 1)",
+        )
+        branch_id = cursor.lastrowid
+        for i, (role, content, tool_content) in enumerate(messages):
+            cursor.execute(
+                """
+                INSERT INTO messages (session_id, uuid, timestamp, role, content, tool_content, is_notification)
+                VALUES (1, ?, ?, ?, ?, ?, 0)
+                """,
+                (f"uuid-{i}", f"2025-01-15T10:0{i}:00Z", role, content, tool_content),
+            )
+            msg_id = cursor.lastrowid
+            cursor.execute(
+                "INSERT INTO branch_messages (branch_id, message_id) VALUES (?, ?)",
+                (branch_id, msg_id),
+            )
+        conn.commit()
+        return conn, branch_id
+
+    def test_aggregate_returns_tuple_with_tool_text(self):
+        conn, branch_id = self._make_db_with_messages(
+            [
+                ("user", "list the files", None),
+                ("assistant", "", "[Bash: ls -la]"),
+            ]
+        )
+        cursor = conn.cursor()
+        msg_text, tool_text = aggregate_branch_content(cursor, branch_id)
+        assert "list the files" in msg_text
+        assert "[Bash: ls -la]" in tool_text
+        conn.close()
+
+    def test_aggregate_empty_tool_content_omitted(self):
+        conn, branch_id = self._make_db_with_messages(
+            [
+                ("user", "hello", None),
+                ("assistant", "hi there", ""),
+            ]
+        )
+        cursor = conn.cursor()
+        msg_text, tool_text = aggregate_branch_content(cursor, branch_id)
+        assert "hi there" in msg_text
+        assert tool_text == ""
+        conn.close()
+
+    def test_build_aggregated_content_includes_tools_section(self):
+        conn, branch_id = self._make_db_with_messages(
+            [
+                ("user", "run the tests and ask if unsure", None),
+                ("assistant", "", "[Bash: pytest]\n[AskUserQuestion: proceed?]"),
+            ]
+        )
+        cursor = conn.cursor()
+        result = build_aggregated_content(cursor, branch_id, files=None, commits=None)
+        assert "__tools__" in result
+        assert "[Bash: pytest]" in result
+        assert "[AskUserQuestion: proceed?]" in result
+        conn.close()
+
+    def test_build_aggregated_content_omits_tools_section_when_no_tool_content(self):
+        conn, branch_id = self._make_db_with_messages(
+            [
+                ("user", "hello", None),
+                ("assistant", "hi", None),
+            ]
+        )
+        cursor = conn.cursor()
+        result = build_aggregated_content(cursor, branch_id, files=None, commits=None)
+        assert "__tools__" not in result
+        conn.close()
+
+    def test_build_aggregated_content_tools_section_after_commits(self):
+        """__tools__ appears after __commits__, matching the __files__/__commits__/__tools__ order."""
+        conn, branch_id = self._make_db_with_messages(
+            [
+                ("user", "commit and run", None),
+                ("assistant", "", "[Bash: git commit]"),
+            ]
+        )
+        cursor = conn.cursor()
+        result = build_aggregated_content(cursor, branch_id, files=["/a.py"], commits=["fix: bug"])
+        files_idx = result.index("__files__")
+        commits_idx = result.index("__commits__")
+        tools_idx = result.index("__tools__")
+        assert files_idx < commits_idx < tools_idx
+        conn.close()

@@ -291,6 +291,50 @@ class TestFormatMarkdownSession:
         assert "**User:** Hello" in md
         assert "Subagent Result" not in md
 
+    def test_tool_content_appended_after_prose(self):
+        session = {
+            "uuid": "abcdef12",
+            "project": "proj",
+            "started_at": None,
+            "messages": [
+                {"role": "user", "content": "list the files"},
+                {
+                    "role": "assistant",
+                    "content": "Here you go.",
+                    "tool_content": "[Bash: ls -la]",
+                },
+            ],
+        }
+        md = format_markdown_session(session)
+        assert "**Assistant:** Here you go.\n[Bash: ls -la]" in md
+
+    def test_tool_only_turn_renders_tool_content(self):
+        """Empty prose content with non-empty tool_content still renders the tool markers."""
+        session = {
+            "uuid": "abcdef12",
+            "project": "proj",
+            "started_at": None,
+            "messages": [
+                {"role": "user", "content": "list the files"},
+                {"role": "assistant", "content": "", "tool_content": "[Bash: ls -la]"},
+            ],
+        }
+        md = format_markdown_session(session)
+        assert "[Bash: ls -la]" in md
+
+    def test_missing_tool_content_key_omits_line(self):
+        """Messages without a tool_content key render unchanged (backward compat)."""
+        session = {
+            "uuid": "abcdef12",
+            "project": "proj",
+            "started_at": None,
+            "messages": [
+                {"role": "assistant", "content": "No tools used."},
+            ],
+        }
+        md = format_markdown_session(session)
+        assert "**Assistant:** No tools used." in md
+
 
 # Fixtures
 

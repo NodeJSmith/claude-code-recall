@@ -153,6 +153,18 @@ class TestToolContentExtraction:
         _, _, _, _, tool_content = extract_text_content(content)
         assert tool_content == "[Bash: ls -la]"
 
+    def test_multiline_command_produces_single_line_marker(self):
+        content = [
+            {
+                "type": "tool_use",
+                "name": "Bash",
+                "input": {"command": "echo hi\necho bye"},
+            }
+        ]
+        _, _, _, _, tool_content = extract_text_content(content)
+        assert tool_content == "[Bash: echo hi echo bye]"
+        assert "\n" not in tool_content
+
     def test_ask_user_question(self):
         content = [
             {

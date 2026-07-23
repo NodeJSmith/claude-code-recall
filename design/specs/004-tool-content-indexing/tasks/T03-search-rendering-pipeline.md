@@ -1,7 +1,7 @@
 ---
 task_id: "T03"
 title: "Wire tool content into FTS, embedding, and rendering paths"
-status: "planned"
+status: "done"
 depends_on: ["T02"]
 implements: ["FR#5", "FR#6", "FR#7", "FR#10", "AC#3", "AC#5", "AC#9"]
 ---
