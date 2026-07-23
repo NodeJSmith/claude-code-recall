@@ -37,6 +37,18 @@ def extract_session_uuid(filepath: Path) -> str:
     return stem.removeprefix("agent-")
 
 
+def is_insertable_message(entry: dict) -> bool:
+    """True if a parsed transcript entry should become (or update) a ``messages`` row.
+
+    Excludes anything that isn't a user/assistant turn, and meta entries
+    without an ``origin`` (untagged notifications). Single source of truth for
+    this predicate — `parse_jsonl_file` below and the tool-content backfill's
+    INSERT-candidate filter both call this rather than re-typing the boolean
+    expression, so the two can't drift.
+    """
+    return entry.get("type") in ("user", "assistant") and not (entry.get("isMeta") and not entry.get("origin"))
+
+
 def parse_jsonl_file(filepath: Path) -> Generator[dict, None, None]:
     """Parse JSONL file, yielding user/assistant entries for import."""
     with open(filepath, encoding="utf-8", errors="replace") as f:
@@ -50,9 +62,7 @@ def parse_jsonl_file(filepath: Path) -> Generator[dict, None, None]:
                 continue
             if not is_valid_entry(entry):
                 continue
-            if entry.get("isMeta") and not entry.get("origin"):
-                continue
-            if entry.get("type") in ("user", "assistant"):
+            if is_insertable_message(entry):
                 yield entry
 
 
@@ -209,18 +219,26 @@ def compute_branch_metadata(
     return exchange_count, unique_files, all_commits, tool_counts
 
 
-def aggregate_branch_content(cursor: sqlite3.Cursor, branch_db_id: int) -> str:
-    """Concatenate all message content for a branch in timestamp order, excluding notifications."""
+def aggregate_branch_content(cursor: sqlite3.Cursor, branch_db_id: int) -> tuple[str, str]:
+    """Concatenate a branch's message content and tool content, in timestamp order,
+    excluding notifications.
+
+    Returns (msg_text, tool_text) — prose and tool markers kept separate so the
+    caller can place tool content in its own aggregated-content section.
+    """
     cursor.execute(
         """
-        SELECT m.content FROM branch_messages bm
+        SELECT m.content, m.tool_content FROM branch_messages bm
         JOIN messages m ON bm.message_id = m.id
         WHERE bm.branch_id = ? AND COALESCE(m.is_notification, 0) = 0
         ORDER BY m.timestamp ASC
     """,
         (branch_db_id,),
     )
-    return "\n".join(row[0] for row in cursor.fetchall())
+    rows = cursor.fetchall()
+    msg_text = "\n".join(row[0] for row in rows)
+    tool_texts = [row[1] for row in rows if row[1]]
+    return msg_text, "\n".join(tool_texts)
 
 
 def build_aggregated_content(
@@ -232,14 +250,16 @@ def build_aggregated_content(
     """Build aggregated FTS content for a branch using SET semantics.
 
     Concatenates message text (excluding notifications), deduplicated full file
-    paths, and commit text.  Shared by the live sync and import paths to ensure
-    format consistency.
+    paths, commit text, and tool content.  Shared by the live sync and import
+    paths to ensure format consistency.
     """
-    msg_text = aggregate_branch_content(cursor, branch_db_id)
+    msg_text, tool_text = aggregate_branch_content(cursor, branch_db_id)
     parts = [msg_text]
     if files:
         deduped_paths = list(dict.fromkeys(files))
         parts.append("\n__files__\n" + "\n".join(deduped_paths))
     if commits:
         parts.append("\n__commits__\n" + "\n".join(commits))
+    if tool_text:
+        parts.append("\n__tools__\n" + tool_text)
     return "".join(parts)

@@ -1,5 +1,6 @@
 """Shared fixtures for ccrecall tests."""
 
+import json
 import sqlite3
 from pathlib import Path
 
@@ -80,3 +81,41 @@ def memory_db():
 def jsonl_fixture(request):
     """Parameterized fixture yielding each JSONL file path."""
     return request.param
+
+
+def make_jsonl_entry(uuid: str, parent_uuid: str | None, ts: str, role: str, content) -> dict:
+    return {
+        "uuid": uuid,
+        "parentUuid": parent_uuid,
+        "type": role,
+        "timestamp": ts,
+        "message": {"role": role, "content": content},
+    }
+
+
+def write_jsonl(path: Path, lines: list[dict]) -> None:
+    path.write_text("\n".join(json.dumps(line) for line in lines) + "\n")
+
+
+class NoCloseConn:
+    """Wrapper delegating to a sqlite3.Connection but making close() a no-op.
+
+    Stands in for get_connection() (a @contextlib.contextmanager) via
+    `patch(..., return_value=NoCloseConn(conn))` so the test keeps access to
+    the same connection (and its rows) after run() returns.
+    """
+
+    def __init__(self, conn: sqlite3.Connection):
+        self._conn = conn
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def close(self):
+        pass
+
+    def __getattr__(self, name: str):
+        return getattr(self._conn, name)

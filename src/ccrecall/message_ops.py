@@ -46,7 +46,9 @@ def build_message_row(
     """Build the INSERT params for one message entry, or return None to skip.
 
     Skips: non-user/assistant types, tool-result user entries, missing/unclaimed
-    UUIDs, empty extracted text, and already-inserted UUIDs.
+    UUIDs, entries with neither text nor tool content, and already-inserted UUIDs.
+    A tool-only assistant turn (no prose, just tool_use blocks) still produces a
+    row — content is '' and tool_content carries the searchable marker text.
     """
     entry_type = entry.get("type")
     if entry_type not in ("user", "assistant"):
@@ -57,8 +59,8 @@ def build_message_row(
     uuid = entry.get("uuid")
     if not uuid or uuid not in valid_branch_uuids or uuid in existing_uuids:
         return None
-    text, _has_tool_use, has_thinking, _tool_summary = extract_text_content(content)
-    if not text:
+    text, _has_tool_use, has_thinking, _tool_summary, tool_content = extract_text_content(content)
+    if not text and not tool_content:
         return None
     is_notification = entry_type == "user" and (is_task_notification(content) or is_teammate_message(content))
     return (
@@ -71,6 +73,7 @@ def build_message_row(
         has_thinking,
         int(is_notification),
         parse_origin(entry),
+        tool_content,
     )
 
 
@@ -94,8 +97,9 @@ def insert_new_messages(
         cursor.execute(
             """
             INSERT INTO messages
-                (session_id, uuid, parent_uuid, timestamp, role, content, has_thinking, is_notification, origin)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (session_id, uuid, parent_uuid, timestamp, role, content, has_thinking, is_notification, origin,
+                 tool_content)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(session_id, uuid) DO NOTHING
             """,
             row,

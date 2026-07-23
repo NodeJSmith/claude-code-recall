@@ -15,7 +15,7 @@ from ccrecall.serialization import decode_json_field
 
 # Schema version stamped on each generated summary. Bumped when the JSON shape
 # or extraction logic changes so the backfill path can detect stale summaries.
-SUMMARY_VERSION = 5
+SUMMARY_VERSION = 6
 
 # Truncation limits
 _FRONT_CHARS = 300
@@ -55,6 +55,55 @@ _MAX_TOOLS_SHOWN = 8
 # Compact file-basename previews (gap summary and footer).
 _MAX_FILE_PREVIEW = 3
 
+# Consecutive-type collapsing: matches content.py's "[ToolName: ...]" /
+# "[ToolName]" marker format. Runs of _COLLAPSE_THRESHOLD or more consecutive
+# same-tool markers collapse into one summary line before embedding, so a
+# tool-heavy exchange (e.g. 50 Bash calls in an orchestration session) doesn't
+# push prose out of cap_for_embedding's head+tail truncation window.
+_TOOL_MARKER_RE = re.compile(r"^\[(\w+)(?::\s(.*))?\]$")
+_COLLAPSE_THRESHOLD = 3
+_COLLAPSE_EXAMPLES = 2
+
+
+def _collapse_consecutive_tool_markers(tool_text: str) -> str:
+    """Collapse runs of consecutive identical-tool markers into a summary line.
+
+    Non-marker lines and runs shorter than ``_COLLAPSE_THRESHOLD`` pass through
+    unchanged. A qualifying run collapses to a count plus the detail text of its
+    first ``_COLLAPSE_EXAMPLES`` markers, e.g. 15 consecutive
+    ``[Read: src/a.py]`` lines become
+    ``[Read: 15 calls including src/a.py, src/b.py, ...]``.
+    """
+    if not tool_text:
+        return tool_text
+
+    groups: list[tuple[str | None, list[str]]] = []
+    for line in tool_text.split("\n"):
+        match = _TOOL_MARKER_RE.match(line)
+        name = match.group(1) if match else None
+        if name is not None and groups and groups[-1][0] == name:
+            groups[-1][1].append(line)
+        else:
+            groups.append((name, [line]))
+
+    collapsed: list[str] = []
+    for name, group_lines in groups:
+        if name is None or len(group_lines) < _COLLAPSE_THRESHOLD:
+            collapsed.extend(group_lines)
+            continue
+        examples = []
+        for line in group_lines[:_COLLAPSE_EXAMPLES]:
+            detail_match = _TOOL_MARKER_RE.match(line)
+            detail = detail_match.group(2) if detail_match and detail_match.group(2) else ""
+            if detail:
+                examples.append(detail)
+        if examples:
+            collapsed.append(f"[{name}: {len(group_lines)} calls including {', '.join(examples)}, ...]")
+        else:
+            collapsed.append(f"[{name}: {len(group_lines)} calls]")
+
+    return "\n".join(collapsed)
+
 
 def truncate_mid(text: str, front: int = _FRONT_CHARS, back: int = _BACK_CHARS) -> str:
     """Mid-truncate text, keeping front and back portions."""
@@ -68,6 +117,10 @@ def build_exchange_pairs(messages: list[dict]) -> list[dict]:
 
     All assistant parts following a user message accumulate into that exchange's
     single ``assistant`` string (joined with blank lines) until the next user turn.
+    Each assistant message contributes its prose ``content`` and, separately, its
+    ``tool_content`` (collapsed via ``_collapse_consecutive_tool_markers`` first) —
+    this is what makes tool-only turns (empty content, non-empty tool_content)
+    show up in the exchange text instead of being silently dropped.
 
     Each exchange carries ``first_message_uuid`` — the ``uuid`` of the opening
     user message — for use as a Track B locator anchor. Messages that lack a
@@ -97,9 +150,12 @@ def build_exchange_pairs(messages: list[dict]) -> list[dict]:
             current_user_uuid = m.get("uuid")
             current_asst_parts = []
         elif m["role"] == "assistant" and current_user is not None:
-            cleaned = re.sub(r"\[Tool: \w+\]", "", m["content"]).strip()
+            cleaned = m["content"].strip()
+            tool_text = _collapse_consecutive_tool_markers(m.get("tool_content", "") or "")
             if cleaned:
                 current_asst_parts.append(cleaned)
+            if tool_text:
+                current_asst_parts.append(tool_text)
 
     if current_user is not None:
         exchanges.append(
@@ -355,11 +411,13 @@ def compute_context_summary(cursor: sqlite3.Cursor, branch_db_id: int) -> tuple[
     # Fetch messages for this branch. Standalone (not db.fetch_branch_messages):
     # summarizer sits below db in the import graph, so it can't import db. uuid is
     # intentionally omitted — the summary JSON drops first_message_uuid, so this
-    # path needs only the 3 non-notification columns. The Track B locator uuid
+    # path needs only the 4 non-notification columns. The Track B locator uuid
     # flows through db.fetch_branch_messages (which selects uuid) on the chunk path.
+    # tool_content is included so tool actions reach the SessionStart context
+    # injection via build_exchange_pairs, same as the embedding path.
     cursor.execute(
         """
-        SELECT m.role, m.content, m.timestamp
+        SELECT m.role, m.content, m.timestamp, m.tool_content
         FROM branch_messages bm
         JOIN messages m ON bm.message_id = m.id
         WHERE bm.branch_id = ?
@@ -369,7 +427,7 @@ def compute_context_summary(cursor: sqlite3.Cursor, branch_db_id: int) -> tuple[
         (branch_db_id,),
     )
 
-    messages = [{"role": r, "content": c, "timestamp": t} for r, c, t in cursor.fetchall()]
+    messages = [{"role": r, "content": c, "timestamp": t, "tool_content": tc} for r, c, t, tc in cursor.fetchall()]
 
     if not messages:
         return "", ""

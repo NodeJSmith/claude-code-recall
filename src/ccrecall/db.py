@@ -19,7 +19,7 @@ from ccrecall.schema import SCHEMA_CORE, SCHEMA_FTS4, SCHEMA_FTS5, detect_fts_su
 
 # Current schema version. Bump when adding a migration and wire the new DDL
 # delta into _apply_migrations (see _migrate_to_v1 for the version-1 shape).
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # Shared SQL predicate for "branches that are candidates to embed": active
 # leaves (the query path only returns is_active=1) with a usable summary. This
@@ -154,7 +154,8 @@ def fetch_branch_messages(cursor: sqlite3.Cursor, branch_id: int, include_notifi
     """Return a branch's messages ordered by timestamp; notifications included only when asked."""
     cursor.execute(
         """
-        SELECT m.role, m.content, m.timestamp, COALESCE(m.is_notification, 0) as is_notification, m.uuid
+        SELECT m.role, m.content, m.timestamp, COALESCE(m.is_notification, 0) as is_notification, m.uuid,
+               m.tool_content
         FROM branch_messages bm
         JOIN messages m ON bm.message_id = m.id
         WHERE bm.branch_id = ?
@@ -164,8 +165,8 @@ def fetch_branch_messages(cursor: sqlite3.Cursor, branch_id: int, include_notifi
         (branch_id, include_notifications),
     )
     return [
-        {"role": r, "content": c, "timestamp": t, "is_notification": notif, "uuid": uuid}
-        for r, c, t, notif, uuid in cursor.fetchall()
+        {"role": r, "content": c, "timestamp": t, "is_notification": notif, "uuid": uuid, "tool_content": tc}
+        for r, c, t, notif, uuid, tc in cursor.fetchall()
     ]
 
 
@@ -445,6 +446,26 @@ def _migrate_to_v3(conn: sqlite3.Connection) -> None:
                 raise
 
 
+def _migrate_to_v4(conn: sqlite3.Connection) -> None:
+    """Version-4 migration: add tool_content column and eligibility index to messages.
+
+    Runs outside the version-gated BEGIN IMMEDIATE block, following
+    _migrate_to_v3's pattern exactly: this branch may be behind the installed
+    version (user_version > SCHEMA_VERSION) but the column still needs to
+    exist. Concurrent processes may race on the ALTER — the duplicate-column
+    error is caught as a harmless concurrency signal. No commit here — the
+    caller commits.
+    """
+    try:
+        conn.execute("ALTER TABLE messages ADD COLUMN tool_content TEXT")
+    except sqlite3.OperationalError as e:
+        if "duplicate column name" not in str(e):
+            raise
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_messages_tool_content_null ON messages(session_id) WHERE tool_content IS NULL"
+    )
+
+
 def _apply_migrations(conn: sqlite3.Connection) -> None:
     """Apply version-gated schema migrations up to SCHEMA_VERSION, atomically.
 
@@ -484,11 +505,13 @@ def _apply_migrations(conn: sqlite3.Connection) -> None:
     """
     current = conn.execute("PRAGMA user_version").fetchone()[0]
 
-    # _migrate_to_v3 is additive (ALTER TABLE ADD COLUMN) and self-guarded by
-    # catching the duplicate-column error, so it runs outside the version gate —
-    # this branch may be behind the installed version (user_version >
-    # SCHEMA_VERSION) but the columns still need to exist for this code to work.
+    # _migrate_to_v3 and _migrate_to_v4 are additive (ALTER TABLE ADD COLUMN)
+    # and self-guarded by catching the duplicate-column error, so they run
+    # outside the version gate — this branch may be behind the installed
+    # version (user_version > SCHEMA_VERSION) but the columns still need to
+    # exist for this code to work.
     _migrate_to_v3(conn)
+    _migrate_to_v4(conn)
     conn.commit()
 
     if current >= SCHEMA_VERSION:

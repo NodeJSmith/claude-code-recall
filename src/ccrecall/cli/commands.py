@@ -24,6 +24,7 @@ from ccrecall.embeddings import DEFAULT_EMBED_THREADS
 from ccrecall.hooks import backfill_embeddings as backfill_embeddings_mod
 from ccrecall.hooks import backfill_query as backfill_query_mod
 from ccrecall.hooks import backfill_summaries as backfill_summaries_mod
+from ccrecall.hooks import backfill_tool_content as backfill_tool_content_mod
 from ccrecall.hooks import import_conversations as import_mod
 from ccrecall.hooks import sync_current as sync_current_mod
 from ccrecall.models import LOGGER_NAME
@@ -171,6 +172,41 @@ def cmd_backfill_embeddings(
         # Status is read-only: never disturb a concurrent backfill's PID marker.
         if not status:
             backfill_query_mod.cleanup_pid()
+    raise SystemExit(code)
+
+
+@backfill_app.command(name="tool-content")
+def cmd_backfill_tool_content(
+    *,
+    status: Annotated[bool, _FLAG, Parameter(help="Report progress and exit without backfilling (read-only).")] = False,
+    days: Annotated[
+        int | None,
+        Parameter(
+            validator=Number(gte=1), help="Only backfill sessions with a branch ended within the last N days (>= 1)."
+        ),
+    ] = None,
+    limit: Annotated[
+        int | None,
+        Parameter(validator=Number(gte=1), help="Stop after backfilling at most N sessions this run (>= 1)."),
+    ] = None,
+    progress_every: Annotated[
+        int, Parameter(help="Print a progress line every N newly backfilled sessions.")
+    ] = backfill_query_mod.DEFAULT_PROGRESS_EVERY,
+    ctx: CLIContextParam = DEFAULT_CLI_CONTEXT,
+) -> None:
+    """Re-parse existing sessions' JSONL files to populate tool_content (opt-in)."""
+    # No PID_KEY/cleanup_pid() pair here, unlike cmd_backfill_embeddings above:
+    # that marker is only ever written by _spawn_background, and embeddings
+    # backfill is (like this command) never auto-spawned — so its cleanup_pid()
+    # call is a no-op today too. Not mirroring dead ceremony onto a new command.
+    code = backfill_tool_content_mod.run(
+        status=status,
+        json_mode=ctx.json_mode,
+        days=days,
+        limit=limit,
+        progress_every=progress_every,
+        verbose=ctx.debug,
+    )
     raise SystemExit(code)
 
 

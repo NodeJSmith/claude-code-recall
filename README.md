@@ -135,6 +135,7 @@ These are the `ccrecall` subcommands the `/ccr-*` skills invoke. You can run the
 | `ccrecall search` | Searches sessions by keyword fused with vector similarity (FTS5 → FTS4 → LIKE fallback, RRF-fused with jina embeddings when available). Used by `/ccr-recall` |
 | `ccrecall tail` | Reads the tail of a prior session's transcript to recover the last instruction and any unanswered question. Used by `/ccr-resume` |
 | `ccrecall backfill embeddings` | Opt-in seeding of embeddings for historical active-leaf branches (jina-v2-small-en via fastembed). Not auto-spawned. Supports `--days N` / `--limit N` / `--threads N`; throttled via `nice` + a single inference thread by default. Resumable |
+| `ccrecall backfill tool-content` | Opt-in re-parse of already-synced sessions' JSONL files to populate `messages.tool_content` for rows synced before tool-content extraction existed. Not auto-spawned. Supports `--days N` / `--limit N` / `--status`; resets `embedding_version` on touched branches so `backfill embeddings` re-embeds them. Resumable |
 
 ## Data flow
 

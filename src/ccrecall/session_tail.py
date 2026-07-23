@@ -136,7 +136,7 @@ def typed_instruction(entry: dict) -> str | None:
     content = entry.get("message", {}).get("content")
     if is_tool_result(content) or is_task_notification(content) or is_teammate_message(content):
         return None
-    text, _, _, _ = extract_text_content(content)
+    text, _, _, _, _ = extract_text_content(content)
     if not text:
         return None
     low = text.lstrip().lower()
@@ -169,7 +169,7 @@ def find_pending_question(entries: list[dict]) -> dict | None:
                 tool_use_id = block.get("tool_use_id")
                 if not isinstance(tool_use_id, str):
                     continue
-                text, _, _, _ = extract_text_content(block.get("content"))
+                text, _, _, _, _ = extract_text_content(block.get("content"))
                 results[tool_use_id] = text
 
     last = None
@@ -205,7 +205,7 @@ def last_typed_instruction(entries: list[dict]) -> str | None:
 def last_assistant_text(entries: list[dict]) -> str | None:
     for entry in reversed(entries):
         if entry.get("type") == "assistant":
-            text, _, _, _ = extract_text_content(entry.get("message", {}).get("content"))
+            text, _, _, _, _ = extract_text_content(entry.get("message", {}).get("content"))
             if text:
                 return text
     return None
@@ -266,7 +266,7 @@ def build_tail(entries: list[dict], k: int) -> list[tuple[str, str]]:
             if text:
                 events.append(("user", clip(text)))
         elif kind == "assistant":
-            text, _, _, _ = extract_text_content(content)
+            text, _, _, _, _ = extract_text_content(content)
             if text:
                 events.append(("asst", clip(text)))
             if isinstance(content, list):

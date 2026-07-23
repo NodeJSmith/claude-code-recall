@@ -106,6 +106,35 @@ class TestSyncSessionCreatesBranches:
         rows_with_tool_summary = cursor.fetchone()[0]
         assert rows_with_tool_summary == 0, "session_ops INSERT must not populate tool_summary column"
 
+    def test_tool_only_turns_produce_rows_with_tool_content(self, memory_db):
+        """A tool-only assistant turn (no text, only tool_use blocks) must still
+        produce a messages row: content = '' and tool_content populated with
+        '[ToolName: ...]' markers.
+
+        tool_heavy.jsonl's assistant entries include several ``['tool_use']``-only
+        turns (no accompanying text block) — before this fix, build_message_row's
+        `if not text: return None` guard skipped these entirely.
+        """
+
+        fixture_path = FIXTURE_DIR / "tool_heavy.jsonl"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project_dir = Path(tmpdir)
+            sync_session(memory_db, fixture_path, project_dir)
+            memory_db.commit()
+
+        cursor = memory_db.cursor()
+        cursor.execute(
+            "SELECT COUNT(*) FROM messages WHERE role = 'assistant' AND content = '' AND tool_content IS NOT NULL AND tool_content != ''"
+        )
+        tool_only_rows = cursor.fetchone()[0]
+        assert tool_only_rows > 0, "tool-only assistant turns must produce rows with empty content and set tool_content"
+
+        cursor.execute(
+            "SELECT tool_content FROM messages WHERE role = 'assistant' AND content = '' AND tool_content IS NOT NULL AND tool_content != '' LIMIT 1"
+        )
+        sample = cursor.fetchone()[0]
+        assert sample.startswith("["), "tool_content should carry a '[ToolName: ...]' marker"
+
 
 class TestSyncSessionWritesNullHashImportLog:
     """Verify sync path writes import_log with file_hash = NULL."""
