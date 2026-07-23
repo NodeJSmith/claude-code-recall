@@ -3,6 +3,7 @@
 import json
 
 from ccrecall.content import (
+    _MAX_EXTRACT_ITEMS,
     TOOL_CONTENT_CAP,
     TOOL_FIELD_CAP,
     extract_commits,
@@ -351,6 +352,41 @@ class TestToolContentMalformedInput:
         content = [{"type": "tool_use", "input": {"command": "ls"}}]
         _, _, _, _, tool_content = extract_text_content(content)
         assert tool_content == "[: ls]"
+
+    def test_non_string_name_list(self):
+        """name: [1, 2] must not raise TypeError on tool_counts.get()."""
+        content = [{"type": "tool_use", "name": [1, 2], "input": {"command": "ls"}}]
+        _, _, _, summary, tool_content = extract_text_content(content)
+        assert tool_content == "[: ls]"
+        assert summary is None
+
+    def test_non_string_name_dict(self):
+        """name: {"a": 1} must not raise TypeError on tool_counts.get()."""
+        content = [{"type": "tool_use", "name": {"a": 1}, "input": {"command": "ls"}}]
+        _, _, _, summary, tool_content = extract_text_content(content)
+        assert tool_content == "[: ls]"
+        assert summary is None
+
+
+# extract_text_content — wide-input traversal cap
+
+
+class TestToolContentWideInputCap:
+    def test_wide_list_capped(self):
+        """A list with more items than _MAX_EXTRACT_ITEMS must not collect unbounded strings."""
+        wide_input = {"items": [f"item-{i}" for i in range(_MAX_EXTRACT_ITEMS * 3)]}
+        content = [{"type": "tool_use", "name": "Bulk", "input": wide_input}]
+        _, _, _, _, tool_content = extract_text_content(content)
+        marker_inner = tool_content[len("[Bulk: ") : -1]
+        items_in_marker = [s for s in marker_inner.split(" ") if s.startswith("item-")]
+        assert len(items_in_marker) <= _MAX_EXTRACT_ITEMS
+
+    def test_wide_dict_capped(self):
+        """A dict with more keys than _MAX_EXTRACT_ITEMS must not collect unbounded strings."""
+        wide_input = {f"field_{i}": f"val-{i}" for i in range(_MAX_EXTRACT_ITEMS * 3)}
+        content = [{"type": "tool_use", "name": "Bulk", "input": wide_input}]
+        _, _, _, _, tool_content = extract_text_content(content)
+        assert len(tool_content) > 0
 
 
 # extract_text_content — cap truncation

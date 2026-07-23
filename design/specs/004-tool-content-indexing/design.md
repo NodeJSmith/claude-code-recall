@@ -22,6 +22,7 @@ The root cause is in `content.py:extract_text_content`, which only pulls `type =
 ## User Scenarios
 
 ### Agent: AI assistant using ccrecall to retrieve past session context
+
 - **Goal:** Find a specific AskUserQuestion prompt from a prior orchestration session
 - **Context:** During a conversation about orchestration retry behavior, needs to reference the exact gate prompt wording used in a past session
 
@@ -33,6 +34,7 @@ The root cause is in `content.py:extract_text_content`, which only pulls `type =
    - Then: Uses the retrieved content to inform the current conversation
 
 ### User: Developer searching conversation history
+
 - **Goal:** Find which Bash command was run to fix a specific issue
 - **Context:** Remembers running a command weeks ago but can't recall the exact syntax
 

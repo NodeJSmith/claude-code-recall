@@ -427,12 +427,17 @@ def _backfill_session(cursor: sqlite3.Cursor, session_id: int, filepaths: list[P
     new_uuids = existing_uuids - before_uuids
 
     if new_uuids:
-        placeholders = ",".join("?" * len(new_uuids))
-        cursor.execute(
-            f"SELECT id, uuid FROM messages WHERE session_id = ? AND uuid IN ({placeholders})",
-            (session_id, *new_uuids),
-        )
-        uuid_to_msg_id = {row[1]: row[0] for row in cursor.fetchall()}
+        new_uuids_list = list(new_uuids)
+        uuid_to_msg_id: dict[str, int] = {}
+        # -1 reserves one slot for the session_id bound parameter
+        for i in range(0, len(new_uuids_list), _MAX_SQL_PARAMS - 1):
+            chunk = new_uuids_list[i : i + _MAX_SQL_PARAMS - 1]
+            placeholders = ",".join("?" * len(chunk))
+            cursor.execute(
+                f"SELECT id, uuid FROM messages WHERE session_id = ? AND uuid IN ({placeholders})",
+                (session_id, *chunk),
+            )
+            uuid_to_msg_id.update({row[1]: row[0] for row in cursor.fetchall()})
         for uuid in new_uuids:
             msg_id = uuid_to_msg_id.get(uuid)
             if msg_id:

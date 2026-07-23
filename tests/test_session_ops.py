@@ -124,13 +124,13 @@ class TestSyncSessionCreatesBranches:
 
         cursor = memory_db.cursor()
         cursor.execute(
-            "SELECT COUNT(*) FROM messages WHERE content = '' AND tool_content IS NOT NULL AND tool_content != ''"
+            "SELECT COUNT(*) FROM messages WHERE role = 'assistant' AND content = '' AND tool_content IS NOT NULL AND tool_content != ''"
         )
         tool_only_rows = cursor.fetchone()[0]
         assert tool_only_rows > 0, "tool-only assistant turns must produce rows with empty content and set tool_content"
 
         cursor.execute(
-            "SELECT tool_content FROM messages WHERE content = '' AND tool_content IS NOT NULL AND tool_content != '' LIMIT 1"
+            "SELECT tool_content FROM messages WHERE role = 'assistant' AND content = '' AND tool_content IS NOT NULL AND tool_content != '' LIMIT 1"
         )
         sample = cursor.fetchone()[0]
         assert sample.startswith("["), "tool_content should carry a '[ToolName: ...]' marker"

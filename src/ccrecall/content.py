@@ -12,6 +12,7 @@ MAX_COMMIT_MESSAGE_LEN = 100
 TOOL_FIELD_CAP = 200
 TOOL_CONTENT_CAP = 300
 _MAX_EXTRACT_DEPTH = 10
+_MAX_EXTRACT_ITEMS = 50
 
 
 def extract_tool_strings(value: object, _depth: int = 0) -> list[str]:
@@ -20,8 +21,8 @@ def extract_tool_strings(value: object, _depth: int = 0) -> list[str]:
     Handles the shapes Claude Code's tool inputs actually take: plain strings,
     lists (e.g. AskUserQuestion's ``questions``), and nested dicts within those
     lists (e.g. each question's ``options``). Anything else (bool, int, None,
-    ...) contributes nothing rather than raising. Depth is capped to avoid
-    ``RecursionError`` on pathological inputs.
+    ...) contributes nothing rather than raising. Depth and item count are
+    capped to bound traversal on pathological inputs.
     """
     if _depth >= _MAX_EXTRACT_DEPTH:
         return []
@@ -30,13 +31,19 @@ def extract_tool_strings(value: object, _depth: int = 0) -> list[str]:
     if isinstance(value, list):
         strings: list[str] = []
         for item in value:
+            if len(strings) >= _MAX_EXTRACT_ITEMS:
+                break
             strings.extend(extract_tool_strings(item, _depth + 1))
-        return strings
+        # Break avoids recursion into further items; slice trims any overshoot
+        # from a single recursive call that returned multiple strings.
+        return strings[:_MAX_EXTRACT_ITEMS]
     if isinstance(value, dict):
         strings = []
         for nested in value.values():
+            if len(strings) >= _MAX_EXTRACT_ITEMS:
+                break
             strings.extend(extract_tool_strings(nested, _depth + 1))
-        return strings
+        return strings[:_MAX_EXTRACT_ITEMS]
     return []
 
 
@@ -50,6 +57,8 @@ def build_tool_use_marker(item: dict) -> str:
     and by extract_tool_strings's own exhaustive type handling.
     """
     name = item.get("name", "")
+    if not isinstance(name, str):
+        name = ""
     inp = item.get("input", {})
     if not isinstance(inp, dict):
         return f"[{name}]"
@@ -99,7 +108,7 @@ def extract_text_content(content) -> tuple[str, bool, bool, str | None, str]:
                 elif item_type == "tool_use":
                     has_tool_use = True
                     tool_name = item.get("name", "")
-                    if tool_name:
+                    if isinstance(tool_name, str) and tool_name:
                         tool_counts[tool_name] = tool_counts.get(tool_name, 0) + 1
                     tool_markers.append(build_tool_use_marker(item))
                 elif item_type == "thinking":
