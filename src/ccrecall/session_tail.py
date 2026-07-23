@@ -47,13 +47,6 @@ from ccrecall.parsing import (
 # no-timestamp tool-result burst, without reading a multi-MB file in full.
 _TIMESTAMP_TAIL_LINES = 20
 
-# A genuinely answered AskUserQuestion produces a tool_result whose text begins
-# "Your questions have been answered: …"; we match the stable substring. A
-# rejection ("The user doesn't want to proceed…"), an interrupt, or no result at
-# all all lack it, and all mean the decision is still open. Kept lowercase — the
-# call site lowercases the result text before matching.
-ANSWER_MARK = "have been answered"
-
 # Harness-injected user content that isn't a typed instruction. command/channel
 # wrappers, task-notifications, and <local-command-caveat> blocks are already
 # handled by extract_text_content / is_task_notification / the "<local-command-"
@@ -151,13 +144,12 @@ def find_pending_question(entries: list[dict]) -> dict | None:
     Returns the tool_use ``input`` payload (``{"questions": [...]}``) when the
     prior session ended on a decision the user never resolved.
     """
-    # Map every tool_use_id to its result *text*, to distinguish a real answer
-    # from a rejection / interrupt / missing result. We scan all entries (sidechain
-    # included) here — a tool_result resolves its id wherever it lives — but only
-    # main-chain questions are considered below. extract_text_content unwraps both
-    # string and list-of-blocks bodies (str(body) would match the marker only by
-    # accident).
-    results: dict[str, str] = {}
+    # Map every tool_use_id to the is_error flag on its tool_result block.
+    # Answered: tool_result with no is_error key. Rejected: is_error=true.
+    # No tool_result at all: the session ended before the harness delivered one.
+    # We scan all entries (sidechain included) — a tool_result resolves its id
+    # wherever it lives — but only main-chain questions are considered below.
+    result_is_error: dict[str, bool] = {}
     for entry in entries:
         if entry.get("type") != "user":
             continue
@@ -167,13 +159,12 @@ def find_pending_question(entries: list[dict]) -> dict | None:
         for block in content:
             if isinstance(block, dict) and block.get("type") == "tool_result":
                 tool_use_id = block.get("tool_use_id")
-                if not isinstance(tool_use_id, str):
-                    continue
-                text, _, _, _, _ = extract_text_content(block.get("content"))
-                results[tool_use_id] = text
+                if isinstance(tool_use_id, str):
+                    result_is_error[tool_use_id] = bool(block.get("is_error"))
 
     last = None
-    for entry in entries:
+    last_entry_idx = -1
+    for i, entry in enumerate(entries):
         if not _is_main_chain(entry) or entry.get("type") != "assistant":
             continue
         content = entry.get("message", {}).get("content")
@@ -182,14 +173,18 @@ def find_pending_question(entries: list[dict]) -> dict | None:
         for block in content:
             if isinstance(block, dict) and block.get("type") == "tool_use" and block.get("name") == "AskUserQuestion":
                 last = (block.get("id"), block.get("input", {}))
+                last_entry_idx = i
 
     if not last:
         return None
     tool_id, payload = last
-    # A non-str id can't index results; treat the question as unanswered and surface it.
     if not isinstance(tool_id, str):
         return payload
-    if ANSWER_MARK in results.get(tool_id, "").lower():
+    if result_is_error.get(tool_id) is False:
+        return None
+    # No result or is_error=true — only pending if the user didn't move on.
+    tail = entries[last_entry_idx + 1 :]
+    if any(typed_instruction(e) for e in tail if _is_main_chain(e)):
         return None
     return payload
 
