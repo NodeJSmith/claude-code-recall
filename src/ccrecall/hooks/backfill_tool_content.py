@@ -80,6 +80,21 @@ from ccrecall.parsing import (
 _PRINT_PREFIX = "ccrecall backfill tool-content"
 _LOG_PREFIX = "Backfill tool-content"
 _SAVEPOINT_NAME = "session"
+_MAX_SQL_PARAMS = 900
+
+
+@contextlib.contextmanager
+def _savepoint(cursor: sqlite3.Cursor):
+    """SAVEPOINT wrapper: releases on success, rolls back + releases on error."""
+    cursor.execute(f"SAVEPOINT {_SAVEPOINT_NAME}")
+    try:
+        yield
+    except BaseException:
+        cursor.execute(f"ROLLBACK TO SAVEPOINT {_SAVEPOINT_NAME}")
+        cursor.execute(f"RELEASE SAVEPOINT {_SAVEPOINT_NAME}")
+        raise
+    cursor.execute(f"RELEASE SAVEPOINT {_SAVEPOINT_NAME}")
+
 
 # Shared FROM clause for every "sessions needing tool_content backfill" query
 # (the eligible-count, the per-batch selection, and --status) so the join
@@ -173,19 +188,15 @@ def run(
                             exclude_ids.add(session_id)
                             continue
 
-                        cursor.execute(f"SAVEPOINT {_SAVEPOINT_NAME}")
                         try:
-                            made_change = _backfill_session(cursor, session_id, filepaths)
+                            with _savepoint(cursor):
+                                made_change = _backfill_session(cursor, session_id, filepaths)
                         except OSError:
-                            cursor.execute(f"ROLLBACK TO SAVEPOINT {_SAVEPOINT_NAME}")
-                            cursor.execute(f"RELEASE SAVEPOINT {_SAVEPOINT_NAME}")
                             logger.warning("%s: session %s JSONL vanished mid-run, skipping", _LOG_PREFIX, session_uuid)
                             skipped_missing += 1
                             exclude_ids.add(session_id)
                             continue
                         except (json.JSONDecodeError, ValueError, TypeError, KeyError):
-                            cursor.execute(f"ROLLBACK TO SAVEPOINT {_SAVEPOINT_NAME}")
-                            cursor.execute(f"RELEASE SAVEPOINT {_SAVEPOINT_NAME}")
                             logger.exception(
                                 "%s: session %s (id=%s) content error, skipping",
                                 _LOG_PREFIX,
@@ -195,11 +206,6 @@ def run(
                             skipped_content_error += 1
                             exclude_ids.add(session_id)
                             continue
-                        except Exception:
-                            cursor.execute(f"ROLLBACK TO SAVEPOINT {_SAVEPOINT_NAME}")
-                            cursor.execute(f"RELEASE SAVEPOINT {_SAVEPOINT_NAME}")
-                            raise
-                        cursor.execute(f"RELEASE SAVEPOINT {_SAVEPOINT_NAME}")
                         if not made_change:
                             # Entries/branch/branch-row absent: tool_content stays
                             # NULL, so the eligibility WHERE clause alone would keep
@@ -299,9 +305,6 @@ def _build_filepath_index(cursor: sqlite3.Cursor, logger: logging.Logger) -> dic
         else:
             logger.warning("%s: JSONL missing on disk: %s", _LOG_PREFIX, file_path)
     return mapping
-
-
-_MAX_SQL_PARAMS = 900
 
 
 def _eligibility_clause(days: int | None, exclude_ids: set[int] | None = None) -> tuple[str, list]:
