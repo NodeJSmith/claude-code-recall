@@ -10,6 +10,7 @@ from ccrecall.parsing import (
     extract_session_metadata,
     extract_session_uuid,
     find_all_branches,
+    is_insertable_message,
     parse_all_with_uuids,
     parse_jsonl_file,
 )
@@ -121,6 +122,27 @@ class TestParseJsonlFile:
         for entry in parse_jsonl_file(fixture):
             if entry.get("isMeta"):
                 assert entry.get("origin") is not None
+
+
+class TestIsInsertableMessage:
+    """Direct unit coverage for the predicate parse_jsonl_file and the
+    tool-content backfill's INSERT-candidate filter both delegate to."""
+
+    def test_plain_user_message_is_insertable(self):
+        assert is_insertable_message({"type": "user", "message": {"content": "hi"}}) is True
+
+    def test_plain_assistant_message_is_insertable(self):
+        assert is_insertable_message({"type": "assistant", "message": {"content": "hi"}}) is True
+
+    def test_non_user_assistant_type_is_excluded(self):
+        assert is_insertable_message({"type": "system", "message": {"content": "hi"}}) is False
+
+    def test_meta_without_origin_is_excluded(self):
+        assert is_insertable_message({"type": "user", "isMeta": True, "message": {"content": "notif"}}) is False
+
+    def test_meta_with_origin_is_insertable(self):
+        entry = {"type": "user", "isMeta": True, "origin": "telegram", "message": {"content": "hi"}}
+        assert is_insertable_message(entry) is True
 
 
 class TestExtractSessionMetadata:

@@ -37,6 +37,18 @@ def extract_session_uuid(filepath: Path) -> str:
     return stem.removeprefix("agent-")
 
 
+def is_insertable_message(entry: dict) -> bool:
+    """True if a parsed transcript entry should become (or update) a ``messages`` row.
+
+    Excludes anything that isn't a user/assistant turn, and meta entries
+    without an ``origin`` (untagged notifications). Single source of truth for
+    this predicate — `parse_jsonl_file` below and the tool-content backfill's
+    INSERT-candidate filter both call this rather than re-typing the boolean
+    expression, so the two can't drift.
+    """
+    return entry.get("type") in ("user", "assistant") and not (entry.get("isMeta") and not entry.get("origin"))
+
+
 def parse_jsonl_file(filepath: Path) -> Generator[dict, None, None]:
     """Parse JSONL file, yielding user/assistant entries for import."""
     with open(filepath, encoding="utf-8", errors="replace") as f:
@@ -50,9 +62,7 @@ def parse_jsonl_file(filepath: Path) -> Generator[dict, None, None]:
                 continue
             if not is_valid_entry(entry):
                 continue
-            if entry.get("isMeta") and not entry.get("origin"):
-                continue
-            if entry.get("type") in ("user", "assistant"):
+            if is_insertable_message(entry):
                 yield entry
 
 
