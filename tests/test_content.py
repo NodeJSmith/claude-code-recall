@@ -351,7 +351,7 @@ class TestToolContentMalformedInput:
         assert tool_content == "[: ls]"
 
 
-# extract_text_content — cap truncation (FR#9)
+# extract_text_content — cap truncation
 
 
 class TestToolContentCapTruncation:

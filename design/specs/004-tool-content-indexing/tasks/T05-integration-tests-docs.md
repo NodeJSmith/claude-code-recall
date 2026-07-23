@@ -1,7 +1,7 @@
 ---
 task_id: "T05"
 title: "Add integration tests and update documentation"
-status: "planned"
+status: "done"
 depends_on: ["T01", "T02", "T03", "T04"]
 implements: ["AC#2", "AC#3", "AC#4", "AC#5", "AC#6", "AC#10", "AC#11"]
 ---

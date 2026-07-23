@@ -13,6 +13,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from conftest import NoCloseConn
+from conftest import make_jsonl_entry as _entry
+from conftest import write_jsonl as _write_jsonl
 
 from ccrecall.hooks.backfill_query import BATCH_SIZE, EXIT_OK
 from ccrecall.hooks.backfill_tool_content import run
@@ -21,50 +24,12 @@ from ccrecall.schema import SCHEMA
 pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
 
 
-class _NoCloseConn:
-    """Wrapper delegating to a sqlite3.Connection but making close() a no-op.
-
-    Stands in for get_connection() (a @contextlib.contextmanager) via
-    `patch(..., return_value=_NoCloseConn(conn))` so the test keeps access to
-    the same connection (and its rows) after run() returns.
-    """
-
-    def __init__(self, conn: sqlite3.Connection):
-        self._conn = conn
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc, tb):
-        return False
-
-    def close(self):
-        pass  # intentional no-op
-
-    def __getattr__(self, name: str):
-        return getattr(self._conn, name)
-
-
 def _make_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(SCHEMA)
     conn.commit()
     return conn
-
-
-def _write_jsonl(path: Path, lines: list[dict]) -> None:
-    path.write_text("\n".join(json.dumps(line) for line in lines) + "\n")
-
-
-def _entry(uuid: str, parent_uuid: str | None, ts: str, role: str, content) -> dict:
-    return {
-        "uuid": uuid,
-        "parentUuid": parent_uuid,
-        "type": role,
-        "timestamp": ts,
-        "message": {"role": role, "content": content},
-    }
 
 
 def _seed_session(
@@ -115,7 +80,7 @@ def _seed_session(
 
 def _run_backfill(conn: sqlite3.Connection, *, days=None, limit=None, status=False, json_mode=False):
     with (
-        patch("ccrecall.hooks.backfill_tool_content.get_connection", return_value=_NoCloseConn(conn)),
+        patch("ccrecall.hooks.backfill_tool_content.get_connection", return_value=NoCloseConn(conn)),
         patch("ccrecall.hooks.backfill_tool_content.load_settings", return_value={}),
         patch("ccrecall.hooks.backfill_tool_content.time.sleep"),
     ):
@@ -367,7 +332,7 @@ class TestBackfillEmptyEntries:
         assert row[0] is None, "no-op session's row must stay untouched"
 
         with (
-            patch("ccrecall.hooks.backfill_tool_content.get_connection", return_value=_NoCloseConn(conn)),
+            patch("ccrecall.hooks.backfill_tool_content.get_connection", return_value=NoCloseConn(conn)),
             patch("ccrecall.hooks.backfill_tool_content.load_settings", return_value={}),
         ):
             run(status=True, json_mode=True)
@@ -458,7 +423,7 @@ class TestBackfillStatus:
         _seed_session(conn, filepath=filepath, existing_messages=[("u1", "user", "hi", "2026-01-01T10:00:00Z")])
 
         with (
-            patch("ccrecall.hooks.backfill_tool_content.get_connection", return_value=_NoCloseConn(conn)),
+            patch("ccrecall.hooks.backfill_tool_content.get_connection", return_value=NoCloseConn(conn)),
             patch("ccrecall.hooks.backfill_tool_content.load_settings", return_value={}),
         ):
             code = run(status=True, json_mode=True)
@@ -477,7 +442,7 @@ class TestBackfillStatus:
         _seed_session(conn, filepath=filepath, existing_messages=[("u1", "user", "hi", "2026-01-01T10:00:00Z")])
 
         with (
-            patch("ccrecall.hooks.backfill_tool_content.get_connection", return_value=_NoCloseConn(conn)),
+            patch("ccrecall.hooks.backfill_tool_content.get_connection", return_value=NoCloseConn(conn)),
             patch("ccrecall.hooks.backfill_tool_content.load_settings", return_value={}),
         ):
             run(status=True, json_mode=True)
@@ -494,7 +459,7 @@ class TestBackfillStatus:
         _run_backfill(conn)
 
         with (
-            patch("ccrecall.hooks.backfill_tool_content.get_connection", return_value=_NoCloseConn(conn)),
+            patch("ccrecall.hooks.backfill_tool_content.get_connection", return_value=NoCloseConn(conn)),
             patch("ccrecall.hooks.backfill_tool_content.load_settings", return_value={}),
         ):
             run(status=True, json_mode=True)

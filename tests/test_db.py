@@ -1402,7 +1402,7 @@ class TestFetchBranchMessagesUuid:
 
 
 class TestFetchBranchMessagesToolContent:
-    """fetch_branch_messages must return the tool_content field — additive extension (T02/FR#3)."""
+    """fetch_branch_messages must return the tool_content field."""
 
     def test_returns_tool_content_field(self, memory_db):
         """fetch_branch_messages returns a 'tool_content' key in each message dict."""

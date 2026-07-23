@@ -109,7 +109,7 @@ class TestSyncSessionCreatesBranches:
     def test_tool_only_turns_produce_rows_with_tool_content(self, memory_db):
         """A tool-only assistant turn (no text, only tool_use blocks) must still
         produce a messages row: content = '' and tool_content populated with
-        '[ToolName: ...]' markers (FR#4, AC#2).
+        '[ToolName: ...]' markers.
 
         tool_heavy.jsonl's assistant entries include several ``['tool_use']``-only
         turns (no accompanying text block) — before this fix, build_message_row's
