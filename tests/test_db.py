@@ -985,9 +985,10 @@ class TestSchemaEquivalencePin:
             (6, "content", "TEXT", 1, None, 0),
             (7, "tool_summary", "TEXT", 0, None, 0),
             (8, "has_tool_use", "INTEGER", 0, "0", 0),
-            (9, "has_thinking", "INTEGER", 0, "0", 0),
-            (10, "is_notification", "INTEGER", 0, "0", 0),
-            (11, "origin", "TEXT", 0, None, 0),
+            (9, "tool_content", "TEXT", 0, None, 0),
+            (10, "has_thinking", "INTEGER", 0, "0", 0),
+            (11, "is_notification", "INTEGER", 0, "0", 0),
+            (12, "origin", "TEXT", 0, None, 0),
         ],
         "projects": [
             (0, "id", "INTEGER", 0, None, 1),
@@ -1398,6 +1399,36 @@ class TestFetchBranchMessagesUuid:
         assert len(messages) == 1
         assert "uuid" in messages[0], "fetch_branch_messages must include 'uuid' key in each message dict"
         assert messages[0]["uuid"] == "msg-uuid-test"
+
+
+class TestFetchBranchMessagesToolContent:
+    """fetch_branch_messages must return the tool_content field — additive extension (T02/FR#3)."""
+
+    def test_returns_tool_content_field(self, memory_db):
+        """fetch_branch_messages returns a 'tool_content' key in each message dict."""
+        cursor = memory_db.cursor()
+
+        cursor.execute("INSERT INTO projects (path, key, name) VALUES (?, ?, ?)", ("/p-tc", "-p-tc", "p-tc"))
+        proj_id = cursor.lastrowid
+        cursor.execute("INSERT INTO sessions (uuid, project_id) VALUES (?, ?)", ("sess-tc", proj_id))
+        sess_id = cursor.lastrowid
+        cursor.execute("INSERT INTO branches (session_id, leaf_uuid) VALUES (?, ?)", (sess_id, "leaf-tc"))
+        branch_id = cursor.lastrowid
+        cursor.execute(
+            "INSERT INTO messages (session_id, uuid, role, content, tool_content) VALUES (?, ?, ?, ?, ?)",
+            (sess_id, "msg-tool-content-test", "assistant", "", "[Bash: ls -la]"),
+        )
+        msg_id = cursor.lastrowid
+        cursor.execute("INSERT INTO branch_messages (branch_id, message_id) VALUES (?, ?)", (branch_id, msg_id))
+        memory_db.commit()
+
+        messages = fetch_branch_messages(cursor, branch_id, include_notifications=False)
+
+        assert len(messages) == 1
+        assert "tool_content" in messages[0], (
+            "fetch_branch_messages must include 'tool_content' key in each message dict"
+        )
+        assert messages[0]["tool_content"] == "[Bash: ls -la]"
 
 
 class TestTransitiveImportIsolation:

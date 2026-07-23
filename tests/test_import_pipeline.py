@@ -121,9 +121,12 @@ class TestEmptySessionGuard:
             f.write(
                 '{"uuid":"msg1","parentUuid":"root-uuid","type":"user","timestamp":"2026-02-14T00:00:01Z","sessionId":"test","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool1","content":"result"}]}}\n'
             )
-            # Write assistant message with only tool_use (no text)
+            # Write assistant message with only a thinking block (no text, no
+            # tool_use) — genuinely no extractable content. A tool_use-only
+            # turn no longer qualifies (FR#4): it now produces a row via
+            # tool_content, so it would no longer trigger guard 1.
             f.write(
-                '{"uuid":"msg2","parentUuid":"msg1","type":"assistant","timestamp":"2026-02-14T00:00:02Z","sessionId":"test","message":{"role":"assistant","content":[{"type":"tool_use","id":"tool2","name":"Bash","input":{"placeholder":true}}]}}\n'
+                '{"uuid":"msg2","parentUuid":"msg1","type":"assistant","timestamp":"2026-02-14T00:00:02Z","sessionId":"test","message":{"role":"assistant","content":[{"type":"thinking","thinking":"internal only"}]}}\n'
             )
 
         try:
@@ -874,10 +877,14 @@ class TestEmptySessionCascadeRegression:
             f'"timestamp":"2026-01-01T00:00:01Z","sessionId":"{session_uuid}",'
             f'"message":{{"role":"user","content":[{{"type":"tool_result",'
             f'"tool_use_id":"t1","content":"result"}}]}}}}\n'
+            # Thinking-only content (no text, no tool_use) — genuinely no
+            # extractable content. A tool_use-only turn no longer qualifies
+            # (FR#4): it now produces a row via tool_content, so it would no
+            # longer trigger the empty-session cleanup this test targets.
             f'{{"uuid":"msg2","parentUuid":"msg1","type":"assistant",'
             f'"timestamp":"2026-01-01T00:00:02Z","sessionId":"{session_uuid}",'
-            f'"message":{{"role":"assistant","content":[{{"type":"tool_use",'
-            f'"id":"t2","name":"Bash","input":{{"placeholder":true}}}}]}}}}\n'
+            f'"message":{{"role":"assistant","content":[{{"type":"thinking",'
+            f'"thinking":"internal only"}}]}}}}\n'
         )
 
         # Without the fix this raises:

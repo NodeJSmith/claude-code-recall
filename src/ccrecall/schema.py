@@ -70,6 +70,7 @@ CREATE TABLE IF NOT EXISTS messages (
   content TEXT NOT NULL,
   tool_summary TEXT,
   has_tool_use INTEGER DEFAULT 0,
+  tool_content TEXT,
   has_thinking INTEGER DEFAULT 0,
   is_notification INTEGER DEFAULT 0,
   origin TEXT,
