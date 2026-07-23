@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.19.1](https://github.com/NodeJSmith/claude-code-recall/compare/v0.19.0...v0.19.1) (2026-07-23)
+
+
+### Bug Fixes
+
+* use structural is_error field for pending question detection ([#79](https://github.com/NodeJSmith/claude-code-recall/issues/79)) ([f9cc098](https://github.com/NodeJSmith/claude-code-recall/commit/f9cc0981a4de9219141f74d7d86a3770d4d58628))
+
 ## [0.19.0](https://github.com/NodeJSmith/claude-code-recall/compare/v0.18.1...v0.19.0) (2026-07-23)
 
 
