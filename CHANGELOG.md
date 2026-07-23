@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.19.0](https://github.com/NodeJSmith/claude-code-recall/compare/v0.18.1...v0.19.0) (2026-07-23)
+
+
+### Features
+
+* index tool_use content for search and recall ([#77](https://github.com/NodeJSmith/claude-code-recall/issues/77)) ([fa5dd4c](https://github.com/NodeJSmith/claude-code-recall/commit/fa5dd4ca680086af1336b609d381d60df5886778))
+
 ## [0.18.1](https://github.com/NodeJSmith/claude-code-recall/compare/v0.18.0...v0.18.1) (2026-07-20)
 
 
