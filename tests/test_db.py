@@ -1019,6 +1019,7 @@ class TestSchemaEquivalencePin:
         "idx_messages_session",
         "idx_messages_session_uuid",
         "idx_messages_timestamp",
+        "idx_messages_tool_content_null",
         "idx_projects_key",
         "idx_sessions_project",
     ]

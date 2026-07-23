@@ -447,7 +447,7 @@ def _migrate_to_v3(conn: sqlite3.Connection) -> None:
 
 
 def _migrate_to_v4(conn: sqlite3.Connection) -> None:
-    """Version-4 migration: add tool_content column to messages.
+    """Version-4 migration: add tool_content column and eligibility index to messages.
 
     Runs outside the version-gated BEGIN IMMEDIATE block, following
     _migrate_to_v3's pattern exactly: this branch may be behind the installed
@@ -461,6 +461,9 @@ def _migrate_to_v4(conn: sqlite3.Connection) -> None:
     except sqlite3.OperationalError as e:
         if "duplicate column name" not in str(e):
             raise
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_messages_tool_content_null ON messages(session_id) WHERE tool_content IS NULL"
+    )
 
 
 def _apply_migrations(conn: sqlite3.Connection) -> None:

@@ -11,27 +11,31 @@ MAX_COMMIT_MESSAGE_LEN = 100
 # capped so a single oversized field or tool_use block can't dominate a message row.
 TOOL_FIELD_CAP = 200
 TOOL_CONTENT_CAP = 300
+_MAX_EXTRACT_DEPTH = 10
 
 
-def extract_tool_strings(value: object) -> list[str]:
+def extract_tool_strings(value: object, _depth: int = 0) -> list[str]:
     """Recursively collect string values out of a tool_use input value.
 
     Handles the shapes Claude Code's tool inputs actually take: plain strings,
     lists (e.g. AskUserQuestion's ``questions``), and nested dicts within those
     lists (e.g. each question's ``options``). Anything else (bool, int, None,
-    ...) contributes nothing rather than raising.
+    ...) contributes nothing rather than raising. Depth is capped to avoid
+    ``RecursionError`` on pathological inputs.
     """
+    if _depth >= _MAX_EXTRACT_DEPTH:
+        return []
     if isinstance(value, str):
         return [value[:TOOL_FIELD_CAP]]
     if isinstance(value, list):
         strings: list[str] = []
         for item in value:
-            strings.extend(extract_tool_strings(item))
+            strings.extend(extract_tool_strings(item, _depth + 1))
         return strings
     if isinstance(value, dict):
         strings = []
         for nested in value.values():
-            strings.extend(extract_tool_strings(nested))
+            strings.extend(extract_tool_strings(nested, _depth + 1))
         return strings
     return []
 

@@ -1,7 +1,7 @@
 # Design: Tool Content Indexing
 
 **Date:** 2026-07-22
-**Status:** approved
+**Status:** archived
 **Scope-mode:** hold
 
 ## Problem

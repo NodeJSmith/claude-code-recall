@@ -37,6 +37,7 @@ def _seed_session(
     *,
     filepath: Path,
     existing_messages: list[tuple[str, str, str, str]],
+    leaf_uuid: str | None = None,
     embedding_version: int | None = 5,  # any non-NULL value; asserts it gets reset to NULL
     ended_at: str = "2026-01-01T10:00:10Z",
 ) -> tuple[int, int]:
@@ -44,6 +45,10 @@ def _seed_session(
     rows for a session whose only messages are those already known before this
     backfill exists (tool_content NULL). `existing_messages` is a list of
     (uuid, role, content, timestamp).
+
+    ``leaf_uuid`` defaults to the last existing message's uuid, but should be
+    set to the JSONL's actual latest entry uuid (matching what forward sync
+    records — even for tool-only entries that produce no message row).
 
     Returns (session_id, branch_id).
     """
@@ -60,10 +65,11 @@ def _seed_session(
         )
         msg_ids.append(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
 
+    resolved_leaf = leaf_uuid or (existing_messages[-1][0] if existing_messages else "leaf")
     conn.execute(
         "INSERT INTO branches (session_id, leaf_uuid, is_active, embedding_version, ended_at, aggregated_content)"
         " VALUES (?, ?, 1, ?, ?, ?)",
-        (session_id, existing_messages[-1][0] if existing_messages else "leaf", embedding_version, ended_at, "stale"),
+        (session_id, resolved_leaf, embedding_version, ended_at, "stale"),
     )
     branch_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
@@ -128,6 +134,7 @@ class TestBackfillCore:
                 ("u1", "user", "Please check the logs", "2026-01-01T10:00:00Z"),
                 ("a1", "assistant", "Let me check", "2026-01-01T10:00:05Z"),
             ],
+            leaf_uuid="a2",
         )
 
         code = _run_backfill(conn)
@@ -229,6 +236,7 @@ class TestBackfillMetaExclusion:
             conn,
             filepath=filepath,
             existing_messages=[("u1", "user", "hello", "2026-01-01T10:00:00Z")],
+            leaf_uuid="a1",
         )
 
         code = _run_backfill(conn)
@@ -281,6 +289,7 @@ class TestBackfillMissingFile:
             conn,
             filepath=real_path,
             existing_messages=[("u1", "user", "run this", "2026-01-01T10:00:00Z")],
+            leaf_uuid="a1",
         )
 
         code = _run_backfill(conn)
@@ -489,7 +498,12 @@ class TestBackfillResume:
                 ),
             ],
         )
-        _seed_session(conn, filepath=filepath, existing_messages=[("u1", "user", "hi", "2026-01-01T10:00:00Z")])
+        _seed_session(
+            conn,
+            filepath=filepath,
+            existing_messages=[("u1", "user", "hi", "2026-01-01T10:00:00Z")],
+            leaf_uuid="a1",
+        )
 
         first_code = _run_backfill(conn)
         assert first_code == EXIT_OK
@@ -513,3 +527,138 @@ class TestBackfillResume:
 
         remaining = conn.execute("SELECT COUNT(*) FROM messages WHERE tool_content IS NULL").fetchone()[0]
         assert remaining == 0
+
+
+class TestBackfillMultiFile:
+    def test_multi_file_session_merges_entries_from_parent_and_agent(self, tmp_path):
+        """A session backed by a parent + agent-*.jsonl merges entries from
+        both files, so tool_content is populated for messages from either."""
+        parent = tmp_path / "abc123.jsonl"
+        agent = tmp_path / "agent-abc123.jsonl"
+
+        _write_jsonl(
+            parent,
+            [
+                _entry("u1", None, "2026-01-01T10:00:00Z", "user", "deploy it"),
+                _entry(
+                    "a1",
+                    "u1",
+                    "2026-01-01T10:00:05Z",
+                    "assistant",
+                    [{"type": "tool_use", "name": "Bash", "input": {"command": "deploy.sh"}}],
+                ),
+                _entry(
+                    "a3",
+                    "a1",
+                    "2026-01-01T10:00:20Z",
+                    "assistant",
+                    [{"type": "text", "text": "Done"}],
+                ),
+            ],
+        )
+        _write_jsonl(
+            agent,
+            [
+                _entry(
+                    "a2",
+                    "u1",
+                    "2026-01-01T10:00:10Z",
+                    "assistant",
+                    [{"type": "tool_use", "name": "Read", "input": {"file_path": "/etc/config"}}],
+                ),
+            ],
+        )
+
+        conn = _make_conn()
+        session_uuid = "abc123"
+        conn.execute("INSERT INTO sessions (uuid) VALUES (?)", (session_uuid,))
+        session_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+        for uuid, role, content, ts in [
+            ("u1", "user", "deploy it", "2026-01-01T10:00:00Z"),
+            ("a1", "assistant", "", "2026-01-01T10:00:05Z"),
+            ("a2", "assistant", "", "2026-01-01T10:00:10Z"),
+        ]:
+            conn.execute(
+                "INSERT INTO messages (session_id, uuid, role, content, timestamp, tool_content)"
+                " VALUES (?, ?, ?, ?, ?, NULL)",
+                (session_id, uuid, role, content, ts),
+            )
+        conn.execute(
+            "INSERT INTO branches (session_id, leaf_uuid, is_active, embedding_version, ended_at, aggregated_content)"
+            " VALUES (?, 'a3', 1, 5, '2026-01-01T10:00:20Z', 'stale')",
+            (session_id,),
+        )
+        branch_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        for mid in conn.execute("SELECT id FROM messages WHERE session_id = ?", (session_id,)).fetchall():
+            conn.execute("INSERT INTO branch_messages (branch_id, message_id) VALUES (?, ?)", (branch_id, mid[0]))
+        conn.execute("INSERT INTO import_log (file_path, file_hash) VALUES (?, 'h1')", (str(parent),))
+        conn.execute("INSERT INTO import_log (file_path, file_hash) VALUES (?, 'h2')", (str(agent),))
+        conn.commit()
+
+        code = _run_backfill(conn)
+        assert code == EXIT_OK
+
+        a1_tc = conn.execute(
+            "SELECT tool_content FROM messages WHERE session_id = ? AND uuid = 'a1'", (session_id,)
+        ).fetchone()[0]
+        assert "[Bash: deploy.sh]" in a1_tc
+
+        a2_tc = conn.execute(
+            "SELECT tool_content FROM messages WHERE session_id = ? AND uuid = 'a2'", (session_id,)
+        ).fetchone()[0]
+        assert "[Read: /etc/config]" in a2_tc
+
+    def test_multi_file_with_mismatched_db_leaf_still_inserts(self, tmp_path):
+        """When the DB's leaf_uuid differs from the merged leaf (common for
+        multi-file sessions where forward sync stored whichever file's leaf
+        synced last), both UPDATE and INSERT passes still run correctly."""
+        filepath = tmp_path / "sess-leaf.jsonl"
+        _write_jsonl(
+            filepath,
+            [
+                _entry("u1", None, "2026-01-01T10:00:00Z", "user", "hello"),
+                _entry(
+                    "a1",
+                    "u1",
+                    "2026-01-01T10:00:05Z",
+                    "assistant",
+                    [
+                        {"type": "text", "text": "hi"},
+                        {"type": "tool_use", "name": "Bash", "input": {"command": "ls"}},
+                    ],
+                ),
+                _entry(
+                    "a2",
+                    "a1",
+                    "2026-01-01T10:00:10Z",
+                    "assistant",
+                    [{"type": "tool_use", "name": "Read", "input": {"file_path": "/tmp/x"}}],
+                ),
+            ],
+        )
+
+        conn = _make_conn()
+        session_id, _ = _seed_session(
+            conn,
+            filepath=filepath,
+            existing_messages=[
+                ("u1", "user", "hello", "2026-01-01T10:00:00Z"),
+                ("a1", "assistant", "hi", "2026-01-01T10:00:05Z"),
+            ],
+            leaf_uuid="a1",
+        )
+
+        code = _run_backfill(conn)
+        assert code == EXIT_OK
+
+        a1_tc = conn.execute(
+            "SELECT tool_content FROM messages WHERE session_id = ? AND uuid = 'a1'", (session_id,)
+        ).fetchone()[0]
+        assert "[Bash: ls]" in a1_tc, "UPDATE pass must run"
+
+        a2_row = conn.execute(
+            "SELECT tool_content FROM messages WHERE session_id = ? AND uuid = 'a2'", (session_id,)
+        ).fetchone()
+        assert a2_row is not None, "INSERT pass must run even when leaf_uuid mismatches"
+        assert "[Read: /tmp/x]" in a2_row[0]

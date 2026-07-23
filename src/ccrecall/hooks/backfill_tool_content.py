@@ -120,6 +120,7 @@ def run(
     total_updated = 0
     skipped_missing = 0
     skipped_empty = 0
+    skipped_content_error = 0
     last_progress = 0
     last_batch_ids: list[int] | None = None
     exclude_ids: set[int] = set()
@@ -149,10 +150,12 @@ def run(
                 current_ids = [r[0] for r in rows]
                 if current_ids == last_batch_ids:
                     logger.error(
-                        "%s: no progress — same batch re-selected; aborting to avoid infinite loop", _LOG_PREFIX
+                        "%s: no progress — same batch re-selected (session ids: %s); aborting",
+                        _LOG_PREFIX,
+                        current_ids,
                     )
                     print(
-                        f"{_PRINT_PREFIX}: no progress — same batch re-selected, aborting",
+                        f"{_PRINT_PREFIX}: no progress — same batch re-selected (session ids: {current_ids}), aborting",
                         file=sys.stderr,
                     )
                     return EXIT_ABORT
@@ -163,8 +166,8 @@ def run(
                         if limit is not None and total_updated >= limit:
                             break
 
-                        filepath = filepath_by_uuid.get(session_uuid)
-                        if filepath is None:
+                        filepaths = filepath_by_uuid.get(session_uuid)
+                        if filepaths is None:
                             logger.warning("%s: session %s has no on-disk JSONL, skipping", _LOG_PREFIX, session_uuid)
                             skipped_missing += 1
                             exclude_ids.add(session_id)
@@ -172,12 +175,24 @@ def run(
 
                         cursor.execute(f"SAVEPOINT {_SAVEPOINT_NAME}")
                         try:
-                            made_change = _backfill_session(cursor, session_id, filepath)
+                            made_change = _backfill_session(cursor, session_id, filepaths)
                         except OSError:
                             cursor.execute(f"ROLLBACK TO SAVEPOINT {_SAVEPOINT_NAME}")
                             cursor.execute(f"RELEASE SAVEPOINT {_SAVEPOINT_NAME}")
                             logger.warning("%s: session %s JSONL vanished mid-run, skipping", _LOG_PREFIX, session_uuid)
                             skipped_missing += 1
+                            exclude_ids.add(session_id)
+                            continue
+                        except (json.JSONDecodeError, ValueError, TypeError, KeyError):
+                            cursor.execute(f"ROLLBACK TO SAVEPOINT {_SAVEPOINT_NAME}")
+                            cursor.execute(f"RELEASE SAVEPOINT {_SAVEPOINT_NAME}")
+                            logger.exception(
+                                "%s: session %s (id=%s) content error, skipping",
+                                _LOG_PREFIX,
+                                session_uuid,
+                                session_id,
+                            )
+                            skipped_content_error += 1
                             exclude_ids.add(session_id)
                             continue
                         except Exception:
@@ -197,11 +212,10 @@ def run(
                             exclude_ids.add(session_id)
                             continue
                         total_updated += 1
-                        # No exclude_ids entry needed here: a real backfill sets
-                        # tool_content on every matched row, so the eligibility
-                        # clause's own `m.tool_content IS NULL` predicate already
-                        # keeps this session out of future batches this run —
-                        # unlike the two skip paths above, whose rows stay NULL.
+                        # No exclude_ids entry: all files for this session were
+                        # merged, so every row now has tool_content set — the
+                        # eligibility predicate (`tool_content IS NULL`) already
+                        # keeps it out of future batches.
 
                         if total_updated - last_progress >= progress_every:
                             elapsed = time.monotonic() - started
@@ -216,10 +230,11 @@ def run(
                             print(f"{_PRINT_PREFIX}: {msg}", file=sys.stderr)
                             last_progress = total_updated
                 except Exception:
-                    # Infra/session failure (sqlite3.Error, unexpected bug): abort the
-                    # whole run without marking further rows — they stay eligible on
-                    # the next invocation. Commit whatever prior batches landed.
-                    logger.exception("%s: session failure, aborting", _LOG_PREFIX)
+                    logger.exception(
+                        "%s: session failure (batch session ids: %s), aborting",
+                        _LOG_PREFIX,
+                        current_ids,
+                    )
                     conn.commit()
                     return EXIT_ABORT
 
@@ -232,11 +247,13 @@ def run(
 
     elapsed = time.monotonic() - started
     logger.info(
-        "%s complete: %s sessions backfilled, %s skipped (missing JSONL), %s skipped (no usable branch) in %s",
+        "%s complete: %s sessions backfilled, %s skipped (missing JSONL), "
+        "%s skipped (no usable branch), %s skipped (content error) in %s",
         _LOG_PREFIX,
         total_updated,
         skipped_missing,
         skipped_empty,
+        skipped_content_error,
         format_duration(elapsed),
     )
     if json_mode:
@@ -247,6 +264,7 @@ def run(
                     "backfilled": total_updated,
                     "skipped_missing": skipped_missing,
                     "skipped_empty": skipped_empty,
+                    "skipped_content_error": skipped_content_error,
                     "elapsed_seconds": round(elapsed, 1),
                 }
             )
@@ -254,32 +272,36 @@ def run(
     else:
         print(
             f"{_PRINT_PREFIX}: complete — {total_updated} sessions backfilled, "
-            f"{skipped_missing} skipped (missing JSONL), {skipped_empty} skipped (no usable branch) "
-            f"in {format_duration(elapsed)}",
+            f"{skipped_missing} skipped (missing JSONL), {skipped_empty} skipped (no usable branch), "
+            f"{skipped_content_error} skipped (content error) in {format_duration(elapsed)}",
             file=sys.stderr,
         )
     return EXIT_OK
 
 
-def _build_filepath_index(cursor: sqlite3.Cursor, logger: logging.Logger) -> dict[str, Path]:
-    """Map session_uuid -> file_path for every ``import_log`` entry whose JSONL
-    still exists on disk.
+def _build_filepath_index(cursor: sqlite3.Cursor, logger: logging.Logger) -> dict[str, list[Path]]:
+    """Map session_uuid -> list of file paths for every ``import_log`` entry
+    whose JSONL still exists on disk.
 
-    A missing file is logged once here (not per re-selection); the caller
-    treats a missing index entry as "no file to backfill this session from"
-    and skips it. Subagent transcripts (``agent-<uuid>.jsonl``) resolve to the
-    same session_uuid as their parent (``extract_session_uuid`` strips the
-    prefix) — whichever import_log row is read last for a given uuid wins,
-    harmless since both describe the same session.
+    A session backed by the Agent tool produces N files (a parent ``.jsonl``
+    plus one ``agent-*.jsonl`` per subagent invocation), all resolving to the
+    same session_uuid via ``extract_session_uuid``.  Every file is kept so
+    ``_backfill_session`` can merge entries from the full set.
+
+    A missing file is logged once here (not per re-selection); a session_uuid
+    with zero surviving files gets no index entry, and the caller skips it.
     """
-    mapping: dict[str, Path] = {}
+    mapping: dict[str, list[Path]] = {}
     for (file_path,) in cursor.execute("SELECT file_path FROM import_log").fetchall():
         path = Path(file_path)
         if path.exists():
-            mapping[extract_session_uuid(path)] = path
+            mapping.setdefault(extract_session_uuid(path), []).append(path)
         else:
             logger.warning("%s: JSONL missing on disk: %s", _LOG_PREFIX, file_path)
     return mapping
+
+
+_MAX_SQL_PARAMS = 900
 
 
 def _eligibility_clause(days: int | None, exclude_ids: set[int] | None = None) -> tuple[str, list]:
@@ -290,13 +312,20 @@ def _eligibility_clause(days: int | None, exclude_ids: set[int] | None = None) -
     two can't drift. ``exclude_ids`` removes sessions this run already
     attempted (succeeded, errored, or had no on-disk file) so a stalled
     session can't force the no-progress guard to fire on every batch.
+
+    The NOT IN clause is chunked to stay under SQLite's bound-parameter limit.
     """
     where = "WHERE m.tool_content IS NULL"
     params: list = []
     if exclude_ids:
-        placeholders = ",".join("?" * len(exclude_ids))
-        where += f" AND s.id NOT IN ({placeholders})"
-        params.extend(exclude_ids)
+        ids = sorted(exclude_ids)
+        not_in_parts: list[str] = []
+        for i in range(0, len(ids), _MAX_SQL_PARAMS):
+            chunk = ids[i : i + _MAX_SQL_PARAMS]
+            placeholders = ",".join("?" * len(chunk))
+            not_in_parts.append(f"s.id NOT IN ({placeholders})")
+            params.extend(chunk)
+        where += " AND " + " AND ".join(not_in_parts)
     if days is not None:
         where += " AND b.ended_at > datetime('now', ?)"
         params.append(days_modifier(days))
@@ -327,24 +356,29 @@ def _select_batch(cursor: sqlite3.Cursor, exclude_ids: set[int], days: int | Non
     return cursor.execute(query, params).fetchall()
 
 
-def _backfill_session(cursor: sqlite3.Cursor, session_id: int, filepath: Path) -> bool:
-    """Re-parse one session's JSONL and backfill tool_content for its messages.
+def _backfill_session(cursor: sqlite3.Cursor, session_id: int, filepaths: list[Path]) -> bool:
+    """Re-parse one session's JSONL file(s) and backfill tool_content.
+
+    A session may be backed by multiple files (parent + subagent transcripts);
+    entries from all files are merged before the update/insert passes.
 
     Updates tool_content for existing rows, inserts previously-skipped
     tool-only rows (linked to the session's branch via branch_messages),
     rebuilds aggregated_content, and resets embedding_version to NULL so the
     branch re-enters `backfill embeddings`'s eligible set.
 
-    Returns False (a no-op) when the file parses to no entries, no branch, or
+    Returns False (a no-op) when all files parse to no entries, no branch, or
     the session has no active branch row in the DB — in these cases nothing
     was written and ``messages.tool_content`` stays NULL, so the caller must
     not count it as backfilled. Returns True once the write pipeline actually
     ran.
 
-    Raises OSError if the file can no longer be opened (race with a concurrent
+    Raises OSError if a file can no longer be opened (race with a concurrent
     delete) — the caller treats that like the missing-file case.
     """
-    all_entries = list(parse_all_with_uuids(filepath))
+    all_entries: list[dict] = []
+    for filepath in filepaths:
+        all_entries.extend(parse_all_with_uuids(filepath))
     if not all_entries:
         return False
 
@@ -382,7 +416,7 @@ def _backfill_session(cursor: sqlite3.Cursor, session_id: int, filepath: Path) -
     # INSERT pass: tool-only turns previously skipped for lack of any content.
     # insert_new_messages/build_message_row already skip uuids present in
     # existing_uuids, so calling it on the full message list only inserts
-    # genuinely new rows -- the row-construction logic isn't reimplemented here.
+    # genuinely new rows — the row-construction logic isn't reimplemented here.
     messages = [e for e in all_entries if is_insertable_message(e)]
     valid_branch_uuids = branch["uuids"]
     before_uuids = set(existing_uuids)
@@ -406,16 +440,18 @@ def _backfill_session(cursor: sqlite3.Cursor, session_id: int, filepath: Path) -
 
     # Rebuild aggregated_content from the branch's existing files/commits
     # metadata (unchanged by this backfill) plus the newly-populated tool
-    # content, then reset the embedding watermark so `backfill embeddings`
-    # re-selects this branch -- without the reset an already-embedded branch
-    # would silently never pick up the new text.
+    # content, then reset the embedding and summary watermarks so both
+    # `backfill embeddings` and `backfill summaries` re-select this branch —
+    # without the resets an already-processed branch would silently never pick
+    # up the new tool text. A concurrent sync during backfill may transiently
+    # regress aggregated_content; the next sync corrects it.
     cursor.execute("SELECT files_modified, commits FROM branches WHERE id = ?", (branch_db_id,))
     files_json, commits_json = cursor.fetchone()
     files = json.loads(files_json) if files_json else None
     commits = json.loads(commits_json) if commits_json else None
     agg_content = build_aggregated_content(cursor, branch_db_id, files, commits)
     cursor.execute(
-        "UPDATE branches SET aggregated_content = ?, embedding_version = NULL WHERE id = ?",
+        "UPDATE branches SET aggregated_content = ?, embedding_version = NULL, summary_version = NULL WHERE id = ?",
         (agg_content, branch_db_id),
     )
     return True
