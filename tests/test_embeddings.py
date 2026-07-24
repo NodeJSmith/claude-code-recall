@@ -14,7 +14,6 @@ from ccrecall.embeddings import (
     cap_for_embedding,
     embed_batch,
     embed_text,
-    embed_texts,
     model_available,
     resolve_thread_count,
 )
@@ -179,21 +178,6 @@ class TestEmbedRealModel:
         v = embed_text("normalization check")
         magnitude = math.sqrt(sum(x * x for x in v))
         assert abs(magnitude - 1.0) < 1e-4
-
-    def test_batch(self):
-        """embed_texts returns one vector per input, each EMBEDDING_DIM and normalized."""
-        texts = ["first text", "second text", "third text"]
-        results = embed_texts(texts)
-        assert len(results) == len(texts)
-        for v in results:
-            assert len(v) == EMBEDDING_DIM
-            magnitude = math.sqrt(sum(x * x for x in v))
-            assert abs(magnitude - 1.0) < 1e-4
-
-    def test_batch_matches_single(self):
-        """embed_texts produces the same vectors as calling embed_text individually."""
-        texts = ["alpha", "beta"]
-        assert embed_texts(texts) == [embed_text(t) for t in texts]
 
     def test_different_texts_differ(self):
         """Different texts produce different vectors."""

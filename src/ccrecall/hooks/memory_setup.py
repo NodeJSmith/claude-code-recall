@@ -124,9 +124,6 @@ def _reap_stale_temp_files() -> None:
 
 
 def main():
-    # Initialized before the try so the output block below always runs, even if
-    # the body raises — the hook must print a valid response, never crash start.
-    additional_context: str | None = None
     try:
         ensure_parent_dir(DEFAULT_DB_PATH)
 
@@ -159,13 +156,7 @@ def main():
         # best-effort (no-op unless logging_enabled) so the failure isn't silent.
         log_hook_exception("setup")
 
-    output: dict = {"continue": True}
-    if additional_context is not None:
-        output["hookSpecificOutput"] = {
-            "hookEventName": "SessionStart",
-            "additionalContext": additional_context,
-        }
-    print(json.dumps(output))
+    print(json.dumps({"continue": True}))
 
 
 if __name__ == "__main__":

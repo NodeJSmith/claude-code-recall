@@ -18,7 +18,7 @@ from conftest import make_jsonl_entry as _entry
 from conftest import write_jsonl as _write_jsonl
 
 from ccrecall.hooks.backfill_query import BATCH_SIZE, EXIT_OK
-from ccrecall.hooks.backfill_tool_content import _backfill_session, _select_batch, run
+from ccrecall.hooks.backfill_tool_content import backfill_session, run, select_batch
 from ccrecall.schema import SCHEMA
 
 pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
@@ -687,7 +687,7 @@ class TestTransientDbLock:
             existing_messages=[("u1", "user", "hello", "2026-01-01T10:00:00Z")],
         )
 
-        real_backfill = _backfill_session
+        real_backfill = backfill_session
         call_count = 0
 
         def _bombing_backfill(cursor, session_id, filepaths):
@@ -701,7 +701,7 @@ class TestTransientDbLock:
             patch("ccrecall.hooks.backfill_tool_content.get_connection", return_value=NoCloseConn(conn)),
             patch("ccrecall.hooks.backfill_tool_content.load_settings", return_value={}),
             patch("ccrecall.hooks.backfill_tool_content.time.sleep"),
-            patch("ccrecall.hooks.backfill_tool_content._backfill_session", side_effect=_bombing_backfill),
+            patch("ccrecall.hooks.backfill_tool_content.backfill_session", side_effect=_bombing_backfill),
         ):
             code = run()
 
@@ -747,13 +747,13 @@ class TestTransientDbLock:
             attempt_count += 1
             if attempt_count == 1:
                 raise sqlite3.OperationalError("database is locked")
-            return _backfill_session(cursor, session_id, filepaths)
+            return backfill_session(cursor, session_id, filepaths)
 
         with (
             patch("ccrecall.hooks.backfill_tool_content.get_connection", return_value=NoCloseConn(conn)),
             patch("ccrecall.hooks.backfill_tool_content.load_settings", return_value={}),
             patch("ccrecall.hooks.backfill_tool_content.time.sleep"),
-            patch("ccrecall.hooks.backfill_tool_content._backfill_session", side_effect=_flaky_backfill),
+            patch("ccrecall.hooks.backfill_tool_content.backfill_session", side_effect=_flaky_backfill),
         ):
             code = run()
 
@@ -794,19 +794,19 @@ class TestStuckSessionExclusion:
             batch_call += 1
             if batch_call <= 2 and stuck_sid not in exclude_ids:
                 return [(stuck_sid, stuck_path.stem)]
-            return _select_batch(cursor, exclude_ids, days)
+            return select_batch(cursor, exclude_ids, days)
 
         def _noop_backfill(cursor, session_id, filepaths):
             if session_id == stuck_sid:
                 return False
-            return _backfill_session(cursor, session_id, filepaths)
+            return backfill_session(cursor, session_id, filepaths)
 
         with (
             patch("ccrecall.hooks.backfill_tool_content.get_connection", return_value=NoCloseConn(conn)),
             patch("ccrecall.hooks.backfill_tool_content.load_settings", return_value={}),
             patch("ccrecall.hooks.backfill_tool_content.time.sleep"),
-            patch("ccrecall.hooks.backfill_tool_content._select_batch", side_effect=_rigged_select),
-            patch("ccrecall.hooks.backfill_tool_content._backfill_session", side_effect=_noop_backfill),
+            patch("ccrecall.hooks.backfill_tool_content.select_batch", side_effect=_rigged_select),
+            patch("ccrecall.hooks.backfill_tool_content.backfill_session", side_effect=_noop_backfill),
         ):
             code = run()
 

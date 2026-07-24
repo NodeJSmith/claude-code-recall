@@ -42,7 +42,7 @@ of which has a session-grain tool_content equivalent (there's no "errored"
 concept for a re-parse backfill, and the universe is sessions, not chunks).
 Only ``format_duration`` — the one grain-agnostic piece — is shared from
 ``backfill_status``; the counting and report shape are re-derived here from
-``_ELIGIBILITY_FROM``/``_eligibility_clause``, this module's own single
+``_ELIGIBILITY_FROM``/``eligibility_clause``, this module's own single
 source of truth.
 """
 
@@ -86,7 +86,7 @@ _LOCK_BACKOFF_SECONDS = 2.0
 
 
 @contextlib.contextmanager
-def _savepoint(cursor: sqlite3.Cursor):
+def savepoint(cursor: sqlite3.Cursor):
     """SAVEPOINT wrapper: releases on success, rolls back + releases on error."""
     cursor.execute(f"SAVEPOINT {_SAVEPOINT_NAME}")
     try:
@@ -98,27 +98,27 @@ def _savepoint(cursor: sqlite3.Cursor):
     cursor.execute(f"RELEASE SAVEPOINT {_SAVEPOINT_NAME}")
 
 
-class _LockExhaustedError(Exception):
+class LockExhaustedError(Exception):
     """Raised when all retry attempts for a transient DB lock are exhausted."""
 
 
-def _backfill_with_retry(
+def backfill_with_retry(
     cursor: sqlite3.Cursor,
     session_id: int,
     session_uuid: str,
     filepaths: list[Path],
     logger: logging.Logger,
 ) -> bool:
-    """Run _backfill_session with bounded retry on transient DB locks.
+    """Run backfill_session with bounded retry on transient DB locks.
 
-    Returns the result of _backfill_session on success. Raises _LockExhaustedError
+    Returns the result of backfill_session on success. Raises LockExhaustedError
     if all retries are exhausted. Other exceptions (OSError, content errors)
     propagate unchanged.
     """
     for attempt in range(_LOCK_RETRIES):
         try:
-            with _savepoint(cursor):
-                return _backfill_session(cursor, session_id, filepaths)
+            with savepoint(cursor):
+                return backfill_session(cursor, session_id, filepaths)
         except sqlite3.OperationalError as exc:
             logger.warning(
                 "%s: session %s transient DB error (attempt %s/%s): %s",
@@ -130,7 +130,7 @@ def _backfill_with_retry(
             )
             if attempt < _LOCK_RETRIES - 1:
                 time.sleep(_LOCK_BACKOFF_SECONDS * (attempt + 1))
-    raise _LockExhaustedError(session_uuid)
+    raise LockExhaustedError(session_uuid)
 
 
 # Shared FROM clause for every "sessions needing tool_content backfill" query
@@ -162,7 +162,7 @@ def run(
     logger = setup_logging(settings, process_name="backfill-tool-content", verbose=verbose)
 
     if status:
-        return _run_status(days=days, json_mode=json_mode, settings=settings, logger=logger)
+        return run_status(days=days, json_mode=json_mode, settings=settings, logger=logger)
 
     # Background I/O-bound job: lower scheduling priority so interactive work
     # wins (machines.md thrash risk). Best-effort — os.nice is POSIX-only.
@@ -187,9 +187,9 @@ def run(
             conn.execute(f"PRAGMA busy_timeout = {VEC_BUSY_TIMEOUT_MS}")
             cursor = conn.cursor()
 
-            filepath_by_uuid = _build_filepath_index(cursor, logger)
+            filepath_by_uuid = build_filepath_index(cursor, logger)
 
-            total_eligible = _count_eligible(cursor, days)
+            total_eligible = count_eligible(cursor, days)
             if limit is not None:
                 total_eligible = min(total_eligible, limit)
 
@@ -200,7 +200,7 @@ def run(
                 if limit is not None and total_updated >= limit:
                     break
 
-                rows = _select_batch(cursor, exclude_ids, days)
+                rows = select_batch(cursor, exclude_ids, days)
                 if not rows:
                     break
 
@@ -228,8 +228,8 @@ def run(
                             continue
 
                         try:
-                            made_change = _backfill_with_retry(cursor, session_id, session_uuid, filepaths, logger)
-                        except _LockExhaustedError:
+                            made_change = backfill_with_retry(cursor, session_id, session_uuid, filepaths, logger)
+                        except LockExhaustedError:
                             logger.warning(
                                 "%s: session %s (id=%s) DB lock persisted after %s retries, skipping",
                                 _LOG_PREFIX,
@@ -338,14 +338,14 @@ def run(
     return EXIT_OK
 
 
-def _build_filepath_index(cursor: sqlite3.Cursor, logger: logging.Logger) -> dict[str, list[Path]]:
+def build_filepath_index(cursor: sqlite3.Cursor, logger: logging.Logger) -> dict[str, list[Path]]:
     """Map session_uuid -> list of file paths for every ``import_log`` entry
     whose JSONL still exists on disk.
 
     A session backed by the Agent tool produces N files (a parent ``.jsonl``
     plus one ``agent-*.jsonl`` per subagent invocation), all resolving to the
     same session_uuid via ``extract_session_uuid``.  Every file is kept so
-    ``_backfill_session`` can merge entries from the full set.
+    ``backfill_session`` can merge entries from the full set.
 
     A missing file is logged once here (not per re-selection); a session_uuid
     with zero surviving files gets no index entry, and the caller skips it.
@@ -360,7 +360,7 @@ def _build_filepath_index(cursor: sqlite3.Cursor, logger: logging.Logger) -> dic
     return mapping
 
 
-def _eligibility_clause(days: int | None, exclude_ids: set[int] | None = None) -> tuple[str, list]:
+def eligibility_clause(days: int | None, exclude_ids: set[int] | None = None) -> tuple[str, list]:
     """WHERE clause (+ params) for "sessions still needing tool_content backfill".
 
     Single source of truth for the one-time eligible count and the per-batch
@@ -388,12 +388,12 @@ def _eligibility_clause(days: int | None, exclude_ids: set[int] | None = None) -
     return where, params
 
 
-def _count_eligible(cursor: sqlite3.Cursor, days: int | None) -> int:
-    where, params = _eligibility_clause(days)
+def count_eligible(cursor: sqlite3.Cursor, days: int | None) -> int:
+    where, params = eligibility_clause(days)
     return cursor.execute(f"SELECT COUNT(DISTINCT s.id) {_ELIGIBILITY_FROM} {where}", params).fetchone()[0]
 
 
-def _count_total_sessions(cursor: sqlite3.Cursor, days: int | None) -> int:
+def count_total_sessions(cursor: sqlite3.Cursor, days: int | None) -> int:
     """Count every session with messages (the backfill's universe), for --status."""
     where = "WHERE 1=1"
     params: list = []
@@ -403,16 +403,16 @@ def _count_total_sessions(cursor: sqlite3.Cursor, days: int | None) -> int:
     return cursor.execute(f"SELECT COUNT(DISTINCT s.id) {_ELIGIBILITY_FROM} {where}", params).fetchone()[0]
 
 
-def _select_batch(cursor: sqlite3.Cursor, exclude_ids: set[int], days: int | None) -> list[tuple[int, str]]:
+def select_batch(cursor: sqlite3.Cursor, exclude_ids: set[int], days: int | None) -> list[tuple[int, str]]:
     """Return up to BATCH_SIZE (session_id, session_uuid) pairs still needing
     tool_content backfill, oldest session id first."""
-    where, params = _eligibility_clause(days, exclude_ids)
+    where, params = eligibility_clause(days, exclude_ids)
     query = f"SELECT DISTINCT s.id, s.uuid {_ELIGIBILITY_FROM} {where} ORDER BY s.id LIMIT ?"
     params = [*params, BATCH_SIZE]
     return cursor.execute(query, params).fetchall()
 
 
-def _backfill_session(cursor: sqlite3.Cursor, session_id: int, filepaths: list[Path]) -> bool:
+def backfill_session(cursor: sqlite3.Cursor, session_id: int, filepaths: list[Path]) -> bool:
     """Re-parse one session's JSONL file(s) and backfill tool_content.
 
     A session may be backed by multiple files (parent + subagent transcripts);
@@ -518,7 +518,7 @@ def _backfill_session(cursor: sqlite3.Cursor, session_id: int, filepaths: list[P
     return True
 
 
-def _run_status(
+def run_status(
     *,
     days: int | None,
     json_mode: bool,
@@ -529,8 +529,8 @@ def _run_status(
     try:
         with get_connection(settings, load_vec=False) as conn:
             cursor = conn.cursor()
-            pending = _count_eligible(cursor, days)
-            total = _count_total_sessions(cursor, days)
+            pending = count_eligible(cursor, days)
+            total = count_total_sessions(cursor, days)
     except (sqlite3.Error, OSError) as e:
         logger.exception("%s: status aborted", _LOG_PREFIX)
         print(f"{_PRINT_PREFIX}: aborted: {e}", file=sys.stderr)

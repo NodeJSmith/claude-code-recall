@@ -51,6 +51,15 @@ MODEL_TOKEN_LIMIT = 8192
 # on an idle machine; interactive write/query paths always use the default.
 DEFAULT_EMBED_THREADS = 1
 
+# cap_for_embedding tuning: dense-token texts start at DENSE_SPLIT_RATIO of
+# total length for head and tail each (40% + 40% = 80%, dropping the middle
+# 20%). The SHRINK_FACTOR tightens on each iteration when still over the token
+# limit, keeping 75% of the previous head/tail each pass.
+DENSE_SPLIT_NUMERATOR = 2
+DENSE_SPLIT_DENOMINATOR = 5
+SHRINK_NUMERATOR = 3
+SHRINK_DENOMINATOR = 4
+
 # Module-level singleton — lazily constructed, reused within a process.
 _model = None
 
@@ -149,18 +158,6 @@ def embed_text(text: str) -> list[float]:
     return embed_one(get_model(), text)
 
 
-def embed_texts(texts: list[str]) -> list[list[float]]:
-    """Embed texts sequentially (one inference call per text), reusing the model.
-
-    Not true batched inference — it loops, but avoids per-call model
-    construction and keeps batch results bit-identical to per-text calls (no
-    padding-dependent drift). Convenience batch wrapper. Raises on failure —
-    callers should wrap in their own guard.
-    """
-    model = get_model()
-    return [embed_one(model, text) for text in texts]
-
-
 def embed_batch(texts: list[str]) -> list[list[float]]:
     """Embed multiple texts in a single batched inference call.
 
@@ -211,14 +208,14 @@ def cap_for_embedding(text: str) -> tuple[str, bool]:
         head = EMBED_CHAR_BUDGET // 2
         tail = EMBED_CHAR_BUDGET // 2
     else:
-        head = max(len(text) * 2 // 5, 1)
-        tail = max(len(text) * 2 // 5, 1)
+        head = max(len(text) * DENSE_SPLIT_NUMERATOR // DENSE_SPLIT_DENOMINATOR, 1)
+        tail = max(len(text) * DENSE_SPLIT_NUMERATOR // DENSE_SPLIT_DENOMINATOR, 1)
 
     capped = text[:head] + "\n\n[...]\n\n" + text[-tail:]
 
     while model.token_count([capped]) > MODEL_TOKEN_LIMIT:
-        head = max(head * 3 // 4, 1)
-        tail = max(tail * 3 // 4, 1)
+        head = max(head * SHRINK_NUMERATOR // SHRINK_DENOMINATOR, 1)
+        tail = max(tail * SHRINK_NUMERATOR // SHRINK_DENOMINATOR, 1)
         next_capped = text[:head] + "\n\n[...]\n\n" + text[-tail:]
         if next_capped == capped:
             break  # no further reduction possible; pathological — let embed_text raise
