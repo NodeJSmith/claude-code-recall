@@ -677,7 +677,7 @@ class TestTransientDbLock:
         _write_jsonl(bad_path, [_entry("u2", None, "2026-01-01T10:00:00Z", "user", "world")])
 
         conn = _make_conn()
-        _seed_session(
+        bad_sid, _ = _seed_session(
             conn,
             filepath=bad_path,
             existing_messages=[("u2", "user", "world", "2026-01-01T10:00:00Z")],
@@ -693,7 +693,7 @@ class TestTransientDbLock:
 
         def _bombing_backfill(cursor, session_id, filepaths):
             nonlocal call_count
-            if session_id == 1:
+            if session_id == bad_sid:
                 call_count += 1
                 raise sqlite3.OperationalError("database is locked")
             return real_backfill(cursor, session_id, filepaths)
@@ -793,13 +793,15 @@ class TestStuckSessionExclusion:
         def _rigged_select(cursor, exclude_ids, days):
             nonlocal batch_call
             batch_call += 1
-            if batch_call <= 2 and stuck_sid not in exclude_ids:
+            if batch_call <= 2:
                 return [(stuck_sid, stuck_path.stem)]
             return select_batch(cursor, exclude_ids, days)
 
         def _noop_backfill(cursor, session_id, filepaths):
             if session_id == stuck_sid:
-                return False
+                # Reports success without leaving eligibility, so the identical
+                # batch comes back and the re-selection guard fires.
+                return True
             return backfill_session(cursor, session_id, filepaths)
 
         with (
