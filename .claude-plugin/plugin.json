@@ -2,7 +2,7 @@
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "ccrecall",
   "displayName": "ccrecall",
-  "version": "0.19.1",
+  "version": "0.19.2",
   "description": "Conversation history and semantic search for Claude Code",
   "author": {
     "name": "Jessica Smith",

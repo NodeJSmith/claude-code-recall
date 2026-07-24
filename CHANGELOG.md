@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.19.2](https://github.com/NodeJSmith/claude-code-recall/compare/v0.19.1...v0.19.2) (2026-07-24)
+
+
+### Bug Fixes
+
+* backfill resilience, batched embedding, and coverage nudge ([#85](https://github.com/NodeJSmith/claude-code-recall/issues/85)) ([4bfb9c8](https://github.com/NodeJSmith/claude-code-recall/commit/4bfb9c850b8ef6357eec5a7a8fcd77ac2f7703cf))
+
 ## [0.19.1](https://github.com/NodeJSmith/claude-code-recall/compare/v0.19.0...v0.19.1) (2026-07-23)
 
 

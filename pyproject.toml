@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ccrecall"
-version = "0.19.1"
+version = "0.19.2"
 description = "Conversation history and semantic search for Claude Code"
 readme = "README.md"
 requires-python = ">=3.11"
