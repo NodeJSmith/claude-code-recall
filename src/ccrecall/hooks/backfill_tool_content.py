@@ -29,10 +29,14 @@ Eligibility (a session "still needs tool_content backfill") is defined as
 having at least one ``messages`` row with ``tool_content IS NULL`` — the same
 condition the v4 migration leaves existing rows in and that forward-sync
 never produces (``extract_text_content`` always returns a string, never
-None). This module owns that selection predicate; it doesn't fit
-``backfill_query.build_selection`` (the chunk-embedding branch universe), so
-only the batch/no-progress-guard constants and ``--days`` helper are shared
-from there.
+None). ``tool_content_eligibility.py`` owns that selection predicate
+(``ELIGIBILITY_FROM``/``eligibility_clause``) — factored out into its own
+dependency-free module rather than defined here, so ``context_alerts.py``'s
+SessionStart sampling check can import it without pulling in this module's
+``ccrecall.db`` import chain (and therefore fastembed/onnxruntime) onto the
+hot path. It doesn't fit ``backfill_query.build_selection`` (the
+chunk-embedding branch universe) either, so only the batch/no-progress-guard
+constants are shared from there.
 
 For the same reason, ``--status`` here doesn't call
 ``backfill_status.run_status``/``count_status``: those are hard-wired to the
@@ -42,8 +46,7 @@ of which has a session-grain tool_content equivalent (there's no "errored"
 concept for a re-parse backfill, and the universe is sessions, not chunks).
 Only ``format_duration`` — the one grain-agnostic piece — is shared from
 ``backfill_status``; the counting and report shape are re-derived here from
-``_ELIGIBILITY_FROM``/``eligibility_clause``, this module's own single
-source of truth.
+``tool_content_eligibility``.
 """
 
 import contextlib
@@ -65,9 +68,14 @@ from ccrecall.hooks.backfill_query import (
     DEFAULT_PROGRESS_EVERY,
     EXIT_ABORT,
     EXIT_OK,
-    days_modifier,
 )
 from ccrecall.hooks.backfill_status import format_duration
+from ccrecall.hooks.tool_content_eligibility import (
+    ELIGIBILITY_FROM,
+    MAX_SQL_PARAMS,
+    days_modifier,
+    eligibility_clause,
+)
 from ccrecall.message_ops import insert_new_messages
 from ccrecall.models import LOGGER_NAME
 from ccrecall.parsing import (
@@ -81,7 +89,6 @@ from ccrecall.parsing import (
 _PRINT_PREFIX = "ccrecall backfill tool-content"
 _LOG_PREFIX = "Backfill tool-content"
 _SAVEPOINT_NAME = "session"
-_MAX_SQL_PARAMS = 900
 _LOCK_RETRIES = 3
 _LOCK_BACKOFF_SECONDS = 2.0
 
@@ -123,7 +130,7 @@ def backfill_with_retry(
         try:
             with savepoint(cursor):
                 return backfill_session(cursor, session_id, filepaths)
-        except sqlite3.OperationalError as exc:
+        except sqlite3.OperationalError as exc:  # noqa: PERF203 — retry loop; the try/except IS the mechanism, not incidental control flow
             msg = str(exc).lower()
             if "locked" not in msg and "busy" not in msg:
                 raise
@@ -138,16 +145,6 @@ def backfill_with_retry(
             if attempt < _LOCK_RETRIES - 1:
                 time.sleep(_LOCK_BACKOFF_SECONDS * (attempt + 1))
     raise LockExhaustedError(session_uuid)
-
-
-# Shared FROM clause for every "sessions needing tool_content backfill" query
-# (the eligible-count, the per-batch selection, and --status) so the join
-# shape can't drift between them.
-_ELIGIBILITY_FROM = """
-    FROM messages m
-    JOIN sessions s ON s.id = m.session_id
-    JOIN branches b ON b.session_id = s.id AND b.is_active = 1
-"""
 
 
 def run(
@@ -379,37 +376,9 @@ def build_filepath_index(cursor: sqlite3.Cursor, logger: logging.Logger) -> dict
     return mapping
 
 
-def eligibility_clause(days: int | None, exclude_ids: set[int] | None = None) -> tuple[str, list]:
-    """WHERE clause (+ params) for "sessions still needing tool_content backfill".
-
-    Single source of truth for the one-time eligible count and the per-batch
-    selection query, mirroring backfill_query.build_selection's pattern so the
-    two can't drift. ``exclude_ids`` removes sessions this run already
-    attempted (succeeded, errored, or had no on-disk file) so a stalled
-    session can't force the no-progress guard to fire on every batch.
-
-    The NOT IN clause is chunked to stay under SQLite's bound-parameter limit.
-    """
-    where = "WHERE m.tool_content IS NULL"
-    params: list = []
-    if exclude_ids:
-        ids = sorted(exclude_ids)
-        not_in_parts: list[str] = []
-        for i in range(0, len(ids), _MAX_SQL_PARAMS):
-            chunk = ids[i : i + _MAX_SQL_PARAMS]
-            placeholders = ",".join("?" * len(chunk))
-            not_in_parts.append(f"s.id NOT IN ({placeholders})")
-            params.extend(chunk)
-        where += " AND " + " AND ".join(not_in_parts)
-    if days is not None:
-        where += " AND b.ended_at > datetime('now', ?)"
-        params.append(days_modifier(days))
-    return where, params
-
-
 def count_eligible(cursor: sqlite3.Cursor, days: int | None) -> int:
     where, params = eligibility_clause(days)
-    return cursor.execute(f"SELECT COUNT(DISTINCT s.id) {_ELIGIBILITY_FROM} {where}", params).fetchone()[0]
+    return cursor.execute(f"SELECT COUNT(DISTINCT s.id) {ELIGIBILITY_FROM} {where}", params).fetchone()[0]
 
 
 def count_total_sessions(cursor: sqlite3.Cursor, days: int | None) -> int:
@@ -419,14 +388,14 @@ def count_total_sessions(cursor: sqlite3.Cursor, days: int | None) -> int:
     if days is not None:
         where += " AND b.ended_at > datetime('now', ?)"
         params.append(days_modifier(days))
-    return cursor.execute(f"SELECT COUNT(DISTINCT s.id) {_ELIGIBILITY_FROM} {where}", params).fetchone()[0]
+    return cursor.execute(f"SELECT COUNT(DISTINCT s.id) {ELIGIBILITY_FROM} {where}", params).fetchone()[0]
 
 
 def select_batch(cursor: sqlite3.Cursor, exclude_ids: set[int], days: int | None) -> list[tuple[int, str]]:
     """Return up to BATCH_SIZE (session_id, session_uuid) pairs still needing
     tool_content backfill, oldest session id first."""
     where, params = eligibility_clause(days, exclude_ids)
-    query = f"SELECT DISTINCT s.id, s.uuid {_ELIGIBILITY_FROM} {where} ORDER BY s.id LIMIT ?"
+    query = f"SELECT DISTINCT s.id, s.uuid {ELIGIBILITY_FROM} {where} ORDER BY s.id LIMIT ?"
     params = [*params, BATCH_SIZE]
     return cursor.execute(query, params).fetchall()
 
@@ -509,8 +478,8 @@ def backfill_session(cursor: sqlite3.Cursor, session_id: int, filepaths: list[Pa
         new_uuids_list = list(new_uuids)
         uuid_to_msg_id: dict[str, int] = {}
         # -1 reserves one slot for the session_id bound parameter
-        for i in range(0, len(new_uuids_list), _MAX_SQL_PARAMS - 1):
-            chunk = new_uuids_list[i : i + _MAX_SQL_PARAMS - 1]
+        for i in range(0, len(new_uuids_list), MAX_SQL_PARAMS - 1):
+            chunk = new_uuids_list[i : i + MAX_SQL_PARAMS - 1]
             placeholders = ",".join("?" * len(chunk))
             cursor.execute(
                 f"SELECT id, uuid FROM messages WHERE session_id = ? AND uuid IN ({placeholders})",

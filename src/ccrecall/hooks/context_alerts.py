@@ -21,6 +21,7 @@ from ccrecall.health import (
     probe_filesystem,
     read_embedding_status,
 )
+from ccrecall.hooks.tool_content_eligibility import eligibility_clause
 from ccrecall.models import LOGGER_NAME
 
 _TOOL_CONTENT_SAMPLE_SIZE = 5
@@ -119,9 +120,16 @@ def has_backfillable_tool_content(conn: sqlite3.Connection) -> bool:
     """Check if there are sessions with NULL tool_content whose JSONL still exists.
 
     Two-phase cheap check for the hot path:
-    1. SQL: sample a few session UUIDs with tool_content IS NULL.
-    2. For each, LIKE-match import_log for a file containing that UUID and
-       check Path.exists() — caps at _TOOL_CONTENT_SAMPLE_SIZE queries + stat calls.
+    1. SQL: sample a few session UUIDs still eligible for tool_content backfill
+       (eligibility_clause is tool_content_eligibility's single source of truth
+       for this predicate, shared with backfill_tool_content.py so the two
+       can't drift — imported from that dependency-free module, not from
+       backfill_tool_content.py itself, so this hot-path hook never pulls in
+       ccrecall.db's fastembed/onnxruntime import chain).
+    2. One batched LIKE query across all sampled uuids against import_log,
+       then Path.exists() — caps at _TOOL_CONTENT_SAMPLE_SIZE session lookups
+       but only ONE query against import_log (leading-wildcard LIKE is
+       unindexable, so a per-uuid query would mean N full scans on the hot path).
 
     Returns False for fresh installs (no NULL-tool_content sessions) and for
     databases where all remaining NULL sessions have lost their JSONL on disk.
@@ -134,25 +142,23 @@ def has_backfillable_tool_content(conn: sqlite3.Connection) -> bool:
     but re-parses to no usable entries/branch (backfill_session returns False,
     a genuine no-op that leaves the row NULL).
     """
+    where, params = eligibility_clause(days=None)
     rows = conn.execute(
-        """SELECT DISTINCT s.uuid
+        f"""SELECT DISTINCT s.uuid
            FROM sessions s
            JOIN messages m ON m.session_id = s.id
            JOIN branches b ON b.session_id = s.id AND b.is_active = 1
-           WHERE m.tool_content IS NULL
+           {where}
            LIMIT ?""",
-        (_TOOL_CONTENT_SAMPLE_SIZE,),
+        (*params, _TOOL_CONTENT_SAMPLE_SIZE),
     ).fetchall()
     if not rows:
         return False
 
-    for (uuid,) in rows:
-        # Mirrors the agent- prefix convention in parsing.extract_session_uuid.
-        file_rows = conn.execute(
-            "SELECT file_path FROM import_log WHERE file_path LIKE ? OR file_path LIKE ?",
-            (f"%/{uuid}.jsonl", f"%/agent-{uuid}.jsonl"),
-        ).fetchall()
-        if any(Path(r[0]).exists() for r in file_rows):
-            return True
-
-    return False
+    # Mirrors the agent- prefix convention in parsing.extract_session_uuid.
+    # One scan for every sampled uuid: the leading-wildcard LIKE is unindexable,
+    # so a per-uuid query would mean N full scans of import_log on the hot path.
+    patterns = [p for (uuid,) in rows for p in (f"%/{uuid}.jsonl", f"%/agent-{uuid}.jsonl")]
+    clause = " OR ".join(["file_path LIKE ?"] * len(patterns))
+    file_rows = conn.execute(f"SELECT file_path FROM import_log WHERE {clause}", patterns).fetchall()
+    return any(Path(file_path).exists() for (file_path,) in file_rows)

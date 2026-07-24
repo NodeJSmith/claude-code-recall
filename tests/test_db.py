@@ -1433,7 +1433,8 @@ class TestFetchBranchMessagesToolContent:
 
 
 class TestTransitiveImportIsolation:
-    """config.py, health.py, and hooks/memory_sync.py must stay free of the heavy
+    """config.py, health.py, hooks/memory_sync.py, hooks/context_alerts.py, and
+    hooks/tool_content_eligibility.py must stay free of the heavy
     fastembed/onnxruntime/sqlite_vec stack.
 
     Each module is imported in a fresh subprocess (not the test process, which
@@ -1473,6 +1474,20 @@ class TestTransitiveImportIsolation:
     def test_clear_handoff_does_not_import_heavy_deps(self):
         """clear_handoff.py imports only from config.py."""
         self._assert_no_heavy_imports("ccrecall.hooks.clear_handoff")
+
+    def test_context_alerts_does_not_import_heavy_deps(self):
+        """context_alerts.py is imported on the SessionStart hot path (via
+        memory_context.py) — its eligibility_clause import must come from the
+        dependency-free tool_content_eligibility.py, never from
+        backfill_tool_content.py (which pulls in ccrecall.db -> ccrecall.embeddings
+        -> fastembed/onnxruntime)."""
+        self._assert_no_heavy_imports("ccrecall.hooks.context_alerts")
+
+    def test_tool_content_eligibility_does_not_import_heavy_deps(self):
+        """tool_content_eligibility.py is the shared eligibility predicate consumed
+        by both context_alerts.py (hot path) and backfill_tool_content.py (opt-in
+        backfill) — it must have zero imports beyond stdlib."""
+        self._assert_no_heavy_imports("ccrecall.hooks.tool_content_eligibility")
 
 
 class TestClaudeConfigDir:
