@@ -4,11 +4,6 @@ on:
     push:
         branches: [main]
     workflow_dispatch:
-        inputs:
-            publish_tag:
-                description: "Tag to publish (e.g. v0.19.2). Leave empty for normal release-please run."
-                required: false
-                default: ""
 
 # release-please opens/updates the release PR and, when that PR merges, creates
 # the GitHub release + tag and bumps the version in pyproject.toml. It authenticates
@@ -124,7 +119,7 @@ jobs:
 
     publish-pypi:
         needs: release-please
-        if: needs.release-please.outputs.release_created == 'true' || (github.event_name == 'workflow_dispatch' && github.event.inputs.publish_tag != '')
+        if: needs.release-please.outputs.release_created == 'true'
         runs-on: ubuntu-latest
         timeout-minutes: 15
         # Trusted Publishing exchanges this OIDC token for a short-lived PyPI
@@ -140,7 +135,7 @@ jobs:
             - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
               with:
                   persist-credentials: false
-                  ref: ${{ needs.release-please.outputs.tag_name || github.event.inputs.publish_tag }}
+                  ref: ${{ needs.release-please.outputs.tag_name }}
 
             - name: Install uv
               uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
