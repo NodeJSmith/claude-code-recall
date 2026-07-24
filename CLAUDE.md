@@ -1,3 +1,9 @@
+---
+audience: open-source library
+developers: solo
+data-sensitivity: user-local Claude Code transcripts — content varies with what the user typed, so treat as potentially sensitive; stays on the user's machine, never transmitted
+---
+
 # CLAUDE.md
 
 Guidance for Claude Code (and humans) working in this repository.
