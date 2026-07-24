@@ -57,7 +57,7 @@ from pathlib import Path
 
 from ccrecall.config import load_settings, setup_logging
 from ccrecall.content import extract_text_content
-from ccrecall.db import get_connection
+from ccrecall.db import VEC_BUSY_TIMEOUT_MS, get_connection
 from ccrecall.hooks.backfill_query import (
     BACKFILL_BATCH_DELAY_SECONDS,
     BACKFILL_NICE_LEVEL,
@@ -81,6 +81,8 @@ _PRINT_PREFIX = "ccrecall backfill tool-content"
 _LOG_PREFIX = "Backfill tool-content"
 _SAVEPOINT_NAME = "session"
 _MAX_SQL_PARAMS = 900
+_LOCK_RETRIES = 3
+_LOCK_BACKOFF_SECONDS = 2.0
 
 
 @contextlib.contextmanager
@@ -94,6 +96,41 @@ def _savepoint(cursor: sqlite3.Cursor):
         cursor.execute(f"RELEASE SAVEPOINT {_SAVEPOINT_NAME}")
         raise
     cursor.execute(f"RELEASE SAVEPOINT {_SAVEPOINT_NAME}")
+
+
+class _LockExhaustedError(Exception):
+    """Raised when all retry attempts for a transient DB lock are exhausted."""
+
+
+def _backfill_with_retry(
+    cursor: sqlite3.Cursor,
+    session_id: int,
+    session_uuid: str,
+    filepaths: list[Path],
+    logger: logging.Logger,
+) -> bool:
+    """Run _backfill_session with bounded retry on transient DB locks.
+
+    Returns the result of _backfill_session on success. Raises _LockExhaustedError
+    if all retries are exhausted. Other exceptions (OSError, content errors)
+    propagate unchanged.
+    """
+    for attempt in range(_LOCK_RETRIES):
+        try:
+            with _savepoint(cursor):
+                return _backfill_session(cursor, session_id, filepaths)
+        except sqlite3.OperationalError as exc:
+            logger.warning(
+                "%s: session %s transient DB error (attempt %s/%s): %s",
+                _LOG_PREFIX,
+                session_uuid,
+                attempt + 1,
+                _LOCK_RETRIES,
+                exc,
+            )
+            if attempt < _LOCK_RETRIES - 1:
+                time.sleep(_LOCK_BACKOFF_SECONDS * (attempt + 1))
+    raise _LockExhaustedError(session_uuid)
 
 
 # Shared FROM clause for every "sessions needing tool_content backfill" query
@@ -136,6 +173,7 @@ def run(
     skipped_missing = 0
     skipped_empty = 0
     skipped_content_error = 0
+    skipped_db_lock = 0
     last_progress = 0
     last_batch_ids: list[int] | None = None
     exclude_ids: set[int] = set()
@@ -143,6 +181,10 @@ def run(
 
     try:
         with get_connection(settings, load_vec=False) as conn:
+            # Raise busy_timeout: this backfill contends with the sync hook the
+            # same way vec writers do. Reuses VEC_BUSY_TIMEOUT_MS (30s) rather
+            # than the base 5s that load_vec=False connections get.
+            conn.execute(f"PRAGMA busy_timeout = {VEC_BUSY_TIMEOUT_MS}")
             cursor = conn.cursor()
 
             filepath_by_uuid = _build_filepath_index(cursor, logger)
@@ -164,16 +206,13 @@ def run(
 
                 current_ids = [r[0] for r in rows]
                 if current_ids == last_batch_ids:
-                    logger.error(
-                        "%s: no progress — same batch re-selected (session ids: %s); aborting",
+                    logger.warning(
+                        "%s: same batch re-selected (session ids: %s); excluding and continuing",
                         _LOG_PREFIX,
                         current_ids,
                     )
-                    print(
-                        f"{_PRINT_PREFIX}: no progress — same batch re-selected (session ids: {current_ids}), aborting",
-                        file=sys.stderr,
-                    )
-                    return EXIT_ABORT
+                    exclude_ids.update(current_ids)
+                    continue
                 last_batch_ids = current_ids
 
                 try:
@@ -189,8 +228,18 @@ def run(
                             continue
 
                         try:
-                            with _savepoint(cursor):
-                                made_change = _backfill_session(cursor, session_id, filepaths)
+                            made_change = _backfill_with_retry(cursor, session_id, session_uuid, filepaths, logger)
+                        except _LockExhaustedError:
+                            logger.warning(
+                                "%s: session %s (id=%s) DB lock persisted after %s retries, skipping",
+                                _LOG_PREFIX,
+                                session_uuid,
+                                session_id,
+                                _LOCK_RETRIES,
+                            )
+                            skipped_db_lock += 1
+                            exclude_ids.add(session_id)
+                            continue
                         except OSError:
                             logger.warning("%s: session %s JSONL vanished mid-run, skipping", _LOG_PREFIX, session_uuid)
                             skipped_missing += 1
@@ -254,12 +303,14 @@ def run(
     elapsed = time.monotonic() - started
     logger.info(
         "%s complete: %s sessions backfilled, %s skipped (missing JSONL), "
-        "%s skipped (no usable branch), %s skipped (content error) in %s",
+        "%s skipped (no usable branch), %s skipped (content error), "
+        "%s skipped (DB lock) in %s",
         _LOG_PREFIX,
         total_updated,
         skipped_missing,
         skipped_empty,
         skipped_content_error,
+        skipped_db_lock,
         format_duration(elapsed),
     )
     if json_mode:
@@ -271,6 +322,7 @@ def run(
                     "skipped_missing": skipped_missing,
                     "skipped_empty": skipped_empty,
                     "skipped_content_error": skipped_content_error,
+                    "skipped_db_lock": skipped_db_lock,
                     "elapsed_seconds": round(elapsed, 1),
                 }
             )
@@ -279,7 +331,8 @@ def run(
         print(
             f"{_PRINT_PREFIX}: complete — {total_updated} sessions backfilled, "
             f"{skipped_missing} skipped (missing JSONL), {skipped_empty} skipped (no usable branch), "
-            f"{skipped_content_error} skipped (content error) in {format_duration(elapsed)}",
+            f"{skipped_content_error} skipped (content error), "
+            f"{skipped_db_lock} skipped (DB lock) in {format_duration(elapsed)}",
             file=sys.stderr,
         )
     return EXIT_OK

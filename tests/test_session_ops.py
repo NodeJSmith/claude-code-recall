@@ -590,10 +590,11 @@ class TestEmbedBranchChunks:
         msgs_2 = _make_msgs(("Hello", "Hi there"), ("How are you?", "Fine thanks"))
         fake_vec = [0.1] * EMBEDDING_DIM
 
-        with patch("ccrecall.embed_ops.embed_text", return_value=fake_vec) as mock_embed:
+        with patch("ccrecall.embed_ops.embed_batch", side_effect=lambda texts: [fake_vec] * len(texts)) as mock_embed:
             embed_branch_chunks(cursor, branch_id, msgs_2, is_active=True, vec_writable=True)
 
-        assert mock_embed.call_count == 2, "first sync should embed 2 exchanges"
+        total = sum(len(c.args[0]) for c in mock_embed.call_args_list)
+        assert total == 2, "first sync should embed 2 exchanges"
 
         cursor.execute("SELECT COUNT(*) FROM chunks WHERE branch_id = ?", (branch_id,))
         assert cursor.fetchone()[0] == 2
@@ -601,10 +602,11 @@ class TestEmbedBranchChunks:
         # Now add a 3rd exchange
         msgs_3 = _make_msgs(("Hello", "Hi there"), ("How are you?", "Fine thanks"), ("New q?", "New a"))
 
-        with patch("ccrecall.embed_ops.embed_text", return_value=fake_vec) as mock_embed2:
+        with patch("ccrecall.embed_ops.embed_batch", side_effect=lambda texts: [fake_vec] * len(texts)) as mock_embed2:
             embed_branch_chunks(cursor, branch_id, msgs_3, is_active=True, vec_writable=True)
 
-        assert mock_embed2.call_count == 1, "re-sync should embed only the 1 new exchange"
+        total2 = sum(len(c.args[0]) for c in mock_embed2.call_args_list)
+        assert total2 == 1, "re-sync should embed only the 1 new exchange"
 
         cursor.execute("SELECT COUNT(*) FROM chunks WHERE branch_id = ?", (branch_id,))
         assert cursor.fetchone()[0] == 3
@@ -627,11 +629,11 @@ class TestEmbedBranchChunks:
         msgs = _make_msgs(("Hello", "Hi"), ("What's up?", "Nothing much"))
         fake_vec = [0.1] * EMBEDDING_DIM
 
-        with patch("ccrecall.embed_ops.embed_text", return_value=fake_vec):
+        with patch("ccrecall.embed_ops.embed_batch", side_effect=lambda texts: [fake_vec] * len(texts)):
             embed_branch_chunks(cursor, branch_id, msgs, is_active=True, vec_writable=True)
 
         # Re-sync with exactly the same messages
-        with patch("ccrecall.embed_ops.embed_text", return_value=fake_vec) as mock_embed:
+        with patch("ccrecall.embed_ops.embed_batch", side_effect=lambda texts: [fake_vec] * len(texts)) as mock_embed:
             embed_branch_chunks(cursor, branch_id, msgs, is_active=True, vec_writable=True)
 
         assert mock_embed.call_count == 0, "unchanged content must not trigger re-embedding"
@@ -653,7 +655,7 @@ class TestEmbedBranchChunks:
         # Assistant-only messages form no user->assistant exchange pair.
         msgs = [{"role": "assistant", "content": "sidechain output", "timestamp": "2024-01-01T00:00:30", "uuid": None}]
 
-        with patch("ccrecall.embed_ops.embed_text") as mock_embed:
+        with patch("ccrecall.embed_ops.embed_batch") as mock_embed:
             returned = embed_branch_chunks(cursor, branch_id, msgs, is_active=True, vec_writable=True)
 
         assert returned == 0
@@ -698,7 +700,7 @@ class TestEmbedBranchChunks:
         msgs_3 = _make_msgs(("q1", "a1"), ("q2", "a2"), ("q3", "a3"))
         fake_vec = [0.1] * EMBEDDING_DIM
 
-        with patch("ccrecall.embed_ops.embed_text", return_value=fake_vec):
+        with patch("ccrecall.embed_ops.embed_batch", side_effect=lambda texts: [fake_vec] * len(texts)):
             embed_branch_chunks(cursor, branch_id, msgs_3, is_active=True, vec_writable=True)
 
         cursor.execute("SELECT COUNT(*) FROM chunks WHERE branch_id = ?", (branch_id,))
@@ -707,7 +709,7 @@ class TestEmbedBranchChunks:
         # Shrink: remove the 3rd exchange
         msgs_2 = _make_msgs(("q1", "a1"), ("q2", "a2"))
 
-        with patch("ccrecall.embed_ops.embed_text", return_value=fake_vec):
+        with patch("ccrecall.embed_ops.embed_batch", side_effect=lambda texts: [fake_vec] * len(texts)):
             embed_branch_chunks(cursor, branch_id, msgs_2, is_active=True, vec_writable=True)
 
         cursor.execute("SELECT COUNT(*) FROM chunks WHERE branch_id = ?", (branch_id,))
@@ -733,7 +735,7 @@ class TestEmbedBranchChunks:
 
         # Simulate sync_branch's contextlib.suppress wrapper
         with (
-            patch("ccrecall.embed_ops.embed_text", side_effect=RuntimeError("embed failed")),
+            patch("ccrecall.embed_ops.embed_batch", side_effect=RuntimeError("embed failed")),
             contextlib.suppress(Exception),
         ):
             embed_branch_chunks(cursor, branch_id, msgs, is_active=True, vec_writable=True)
@@ -760,11 +762,12 @@ class TestEmbedBranchChunks:
         msgs = _make_msgs(*[(f"question {i}", f"answer {i}") for i in range(n_exchanges)])
         fake_vec = [0.1] * EMBEDDING_DIM
 
-        with patch("ccrecall.embed_ops.embed_text", return_value=fake_vec) as mock_embed:
+        with patch("ccrecall.embed_ops.embed_batch", side_effect=lambda texts: [fake_vec] * len(texts)) as mock_embed:
             embed_branch_chunks(cursor, branch_id, msgs, is_active=True, vec_writable=True)
 
-        assert mock_embed.call_count <= MAX_WRITE_PATH_EMBEDS_PER_SYNC, (
-            f"write path must embed at most {MAX_WRITE_PATH_EMBEDS_PER_SYNC} per sync, got {mock_embed.call_count}"
+        total_embedded = sum(len(c.args[0]) for c in mock_embed.call_args_list)
+        assert total_embedded <= MAX_WRITE_PATH_EMBEDS_PER_SYNC, (
+            f"write path must embed at most {MAX_WRITE_PATH_EMBEDS_PER_SYNC} per sync, got {total_embedded}"
         )
 
         cursor.execute("SELECT COUNT(*) FROM chunk_vec")
@@ -795,7 +798,7 @@ class TestEmbedOnWriteModelUnavailable:
         conn.commit()
 
         with (
-            patch("ccrecall.embed_ops.embed_text", side_effect=RuntimeError("no model")),
+            patch("ccrecall.embed_ops.embed_batch", side_effect=RuntimeError("no model")),
             tempfile.TemporaryDirectory() as tmpdir,
         ):
             result = sync_session(conn, fixture_path, Path(tmpdir))
@@ -841,7 +844,7 @@ class TestEmbedOnWriteOrderingInvariant:
         # embed_text succeeds, but the vec upsert (called first by write_chunk_embedding)
         # raises — simulating a vec-write failure after a successful embed.
         with (
-            patch("ccrecall.embed_ops.embed_text", return_value=fake_vec),
+            patch("ccrecall.embed_ops.embed_batch", side_effect=lambda texts: [fake_vec] * len(texts)),
             patch("ccrecall.db.upsert_chunk_vec", side_effect=RuntimeError("vec write failed")),
             contextlib.suppress(Exception),
         ):
@@ -886,7 +889,7 @@ class TestEmbedOnWriteSuccess:
         fake_vec = [0.1] * EMBEDDING_DIM
 
         with (
-            patch("ccrecall.embed_ops.embed_text", return_value=fake_vec),
+            patch("ccrecall.embed_ops.embed_batch", side_effect=lambda texts: [fake_vec] * len(texts)),
             tempfile.TemporaryDirectory() as tmpdir,
         ):
             result = sync_session(conn, fixture_path, Path(tmpdir))

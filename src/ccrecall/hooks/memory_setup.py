@@ -45,7 +45,7 @@ def _spawn_background(argv: list[str], pid_key: str) -> None:
         try:
             # Atomic create — fails with FileExistsError if file already exists
             fd = os.open(str(pid_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, PID_FILE_MODE)
-        except FileExistsError:  # noqa: PERF203 — the try/except IS the retry mechanism for atomic PID-file creation
+        except FileExistsError:
             # File exists — check if the owning process is alive
             try:
                 existing_pid = int(pid_path.read_text().strip())

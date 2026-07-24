@@ -68,7 +68,7 @@ def _main(*, verbose: bool = False):
                                 (summary_md, summary_json, SUMMARY_VERSION, branch_id),
                             )
                             total_updated += 1
-                        except (ValueError, TypeError, KeyError) as e:  # noqa: PERF203 — per-row error isolation
+                        except (ValueError, TypeError, KeyError) as e:
                             # Per-row content error (malformed summary data): mark the
                             # sentinel so it isn't retried forever. Infra errors fall
                             # through to the outer handler instead of poisoning the row.

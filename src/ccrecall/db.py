@@ -441,7 +441,7 @@ def _migrate_to_v3(conn: sqlite3.Connection) -> None:
     for column, decl in (("file_size", "INTEGER"), ("file_mtime", "REAL")):
         try:
             conn.execute(f"ALTER TABLE import_log ADD COLUMN {column} {decl}")
-        except sqlite3.OperationalError as e:  # noqa: PERF203 — 2-iteration loop, concurrency guard
+        except sqlite3.OperationalError as e:
             if "duplicate column name" not in str(e):
                 raise
 

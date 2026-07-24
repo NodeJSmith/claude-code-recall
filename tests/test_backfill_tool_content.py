@@ -662,3 +662,164 @@ class TestBackfillMultiFile:
         ).fetchone()
         assert a2_row is not None, "INSERT pass must run even when leaf_uuid mismatches"
         assert "[Read: /tmp/x]" in a2_row[0]
+
+
+class TestTransientDbLock:
+    """#81: transient sqlite3.OperationalError no longer aborts the entire run."""
+
+    def test_operational_error_retries_and_skips_session(self, tmp_path):
+        """A transient DB lock on one session retries, then skips that session
+        and continues processing the rest of the batch."""
+        good_path = tmp_path / "sess-good.jsonl"
+        bad_path = tmp_path / "sess-bad.jsonl"
+        _write_jsonl(good_path, [_entry("u1", None, "2026-01-01T10:00:00Z", "user", "hello")])
+        _write_jsonl(bad_path, [_entry("u2", None, "2026-01-01T10:00:00Z", "user", "world")])
+
+        conn = _make_conn()
+        _seed_session(
+            conn,
+            filepath=bad_path,
+            existing_messages=[("u2", "user", "world", "2026-01-01T10:00:00Z")],
+        )
+        _seed_session(
+            conn,
+            filepath=good_path,
+            existing_messages=[("u1", "user", "hello", "2026-01-01T10:00:00Z")],
+        )
+
+        from ccrecall.hooks.backfill_tool_content import _backfill_session
+
+        real_backfill = _backfill_session
+        call_count = 0
+
+        def _bombing_backfill(cursor, session_id, filepaths):
+            nonlocal call_count
+            if session_id == 1:
+                call_count += 1
+                raise sqlite3.OperationalError("database is locked")
+            return real_backfill(cursor, session_id, filepaths)
+
+        with (
+            patch("ccrecall.hooks.backfill_tool_content.get_connection", return_value=NoCloseConn(conn)),
+            patch("ccrecall.hooks.backfill_tool_content.load_settings", return_value={}),
+            patch("ccrecall.hooks.backfill_tool_content.time.sleep"),
+            patch("ccrecall.hooks.backfill_tool_content._backfill_session", side_effect=_bombing_backfill),
+        ):
+            code = run()
+
+        assert code == EXIT_OK
+        assert call_count == 3  # 3 retries on the bad session
+
+        # Good session still got backfilled
+        good_tc = conn.execute("SELECT tool_content FROM messages WHERE uuid = 'u1'").fetchone()[0]
+        assert good_tc is not None
+
+    def test_operational_error_succeeds_on_retry(self, tmp_path):
+        """A transient lock that clears on the second attempt succeeds without skipping."""
+        filepath = tmp_path / "sess-retry.jsonl"
+        _write_jsonl(
+            filepath,
+            [
+                _entry("u1", None, "2026-01-01T10:00:00Z", "user", "hi"),
+                _entry(
+                    "a1",
+                    "u1",
+                    "2026-01-01T10:00:05Z",
+                    "assistant",
+                    [{"type": "tool_use", "name": "Bash", "input": {"command": "ls"}}],
+                ),
+            ],
+        )
+
+        conn = _make_conn()
+        _seed_session(
+            conn,
+            filepath=filepath,
+            existing_messages=[
+                ("u1", "user", "hi", "2026-01-01T10:00:00Z"),
+                ("a1", "assistant", "", "2026-01-01T10:00:05Z"),
+            ],
+            leaf_uuid="a1",
+        )
+
+        from ccrecall.hooks.backfill_tool_content import _backfill_session as real_bf
+
+        attempt_count = 0
+
+        def _flaky_backfill(cursor, session_id, filepaths):
+            nonlocal attempt_count
+            attempt_count += 1
+            if attempt_count == 1:
+                raise sqlite3.OperationalError("database is locked")
+            return real_bf(cursor, session_id, filepaths)
+
+        with (
+            patch("ccrecall.hooks.backfill_tool_content.get_connection", return_value=NoCloseConn(conn)),
+            patch("ccrecall.hooks.backfill_tool_content.load_settings", return_value={}),
+            patch("ccrecall.hooks.backfill_tool_content.time.sleep"),
+            patch("ccrecall.hooks.backfill_tool_content._backfill_session", side_effect=_flaky_backfill),
+        ):
+            code = run()
+
+        assert code == EXIT_OK
+        assert attempt_count == 2
+
+        a1_tc = conn.execute("SELECT tool_content FROM messages WHERE uuid = 'a1'").fetchone()[0]
+        assert "[Bash: ls]" in a1_tc
+
+
+class TestStuckSessionExclusion:
+    """#81: a stuck session no longer aborts the run via the no-progress guard."""
+
+    def test_same_batch_reselected_excludes_and_continues(self, tmp_path):
+        """When the same batch is re-selected (stuck session), the IDs are
+        excluded and the run continues rather than aborting."""
+        stuck_path = tmp_path / "sess-stuck.jsonl"
+        good_path = tmp_path / "sess-ok.jsonl"
+        _write_jsonl(stuck_path, [_entry("u1", None, "2026-01-01T10:00:00Z", "user", "stuck")])
+        _write_jsonl(good_path, [_entry("u2", None, "2026-01-01T10:00:00Z", "user", "fine")])
+
+        conn = _make_conn()
+        stuck_sid, _ = _seed_session(
+            conn,
+            filepath=stuck_path,
+            existing_messages=[("u1", "user", "stuck", "2026-01-01T10:00:00Z")],
+        )
+        _seed_session(
+            conn,
+            filepath=good_path,
+            existing_messages=[("u2", "user", "fine", "2026-01-01T10:00:00Z")],
+        )
+
+        from ccrecall.hooks.backfill_tool_content import (
+            _backfill_session as real_bs,
+        )
+        from ccrecall.hooks.backfill_tool_content import (
+            _select_batch as real_select,
+        )
+
+        batch_call = 0
+
+        def _rigged_select(cursor, exclude_ids, days):
+            nonlocal batch_call
+            batch_call += 1
+            if batch_call <= 2 and stuck_sid not in exclude_ids:
+                return [(stuck_sid, stuck_path.stem)]
+            return real_select(cursor, exclude_ids, days)
+
+        def _noop_backfill(cursor, session_id, filepaths):
+            if session_id == stuck_sid:
+                return False
+            return real_bs(cursor, session_id, filepaths)
+
+        with (
+            patch("ccrecall.hooks.backfill_tool_content.get_connection", return_value=NoCloseConn(conn)),
+            patch("ccrecall.hooks.backfill_tool_content.load_settings", return_value={}),
+            patch("ccrecall.hooks.backfill_tool_content.time.sleep"),
+            patch("ccrecall.hooks.backfill_tool_content._select_batch", side_effect=_rigged_select),
+            patch("ccrecall.hooks.backfill_tool_content._backfill_session", side_effect=_noop_backfill),
+        ):
+            code = run()
+
+        # Must NOT abort — continues past the stuck session
+        assert code == EXIT_OK

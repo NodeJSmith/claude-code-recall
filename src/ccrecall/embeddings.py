@@ -154,12 +154,25 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
 
     Not true batched inference — it loops, but avoids per-call model
     construction and keeps batch results bit-identical to per-text calls (no
-    padding-dependent drift). Convenience batch wrapper; the backfill hot path
-    calls embed_text per-row directly. Raises on failure — callers should wrap
-    in their own guard.
+    padding-dependent drift). Convenience batch wrapper. Raises on failure —
+    callers should wrap in their own guard.
     """
     model = get_model()
     return [embed_one(model, text) for text in texts]
+
+
+def embed_batch(texts: list[str]) -> list[list[float]]:
+    """Embed multiple texts in a single batched inference call.
+
+    True batched inference: passes the full list to model.embed() so the
+    underlying onnxruntime processes them as one batch. Returns vectors in the
+    same order as the input texts. Raises on failure.
+    """
+    if not texts:
+        return []
+    model = get_model()
+    vecs = list(model.embed(texts))
+    return [normalize(v.astype(np.float32)).tolist() for v in vecs]
 
 
 def cap_for_embedding(text: str) -> tuple[str, bool]:

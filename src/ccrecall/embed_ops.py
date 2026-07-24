@@ -10,7 +10,7 @@ import logging
 import sqlite3
 
 from ccrecall.db import write_chunk_embedding
-from ccrecall.embeddings import EMBEDDING_MODEL, EMBEDDING_VERSION, cap_for_embedding, embed_text
+from ccrecall.embeddings import EMBEDDING_MODEL, EMBEDDING_VERSION, cap_for_embedding, embed_batch
 from ccrecall.models import LOGGER_NAME
 from ccrecall.summarizer import SUMMARY_VERSION, build_exchange_pairs, compute_context_summary
 
@@ -184,12 +184,14 @@ def embed_branch_chunks(
     # backfill passes max_embeds=None to embed the whole branch in one call.
     needing_embed = needing_embed_full if max_embeds is None else needing_embed_full[:max_embeds]
 
-    # Step 6 — embed loop: for each needing-embed exchange, upsert the chunks row,
-    # embed the text, then write the vector (order invariant: vector FIRST,
-    # bookkeeping LAST — so a mid-loop exception leaves the chunk eligible for
-    # backfill rather than marked done-without-vector).
+    # Step 6 — embed + write: upsert chunk rows, batch-embed all texts, then
+    # write vectors (order invariant: vector FIRST, bookkeeping LAST — so a
+    # mid-loop exception leaves the chunk eligible for backfill rather than
+    # marked done-without-vector).
+
+    # 6a — upsert chunk rows and collect chunk_ids for the vector write pass.
+    chunk_ids: list[int] = []
     for ed in needing_embed:
-        # Upsert chunks row via DELETE+INSERT (vec0 rejects INSERT OR REPLACE)
         cursor.execute(
             "DELETE FROM chunks WHERE branch_id = ? AND exchange_index = ?",
             (branch_db_id, ed["index"]),
@@ -215,8 +217,18 @@ def embed_branch_chunks(
         )
         chunk_id = cursor.lastrowid
         assert chunk_id is not None  # noqa: S101 — lastrowid is non-None after a successful INSERT
-        # Vector FIRST (order invariant), bookkeeping LAST
-        vec = embed_text(ed["text"])
+        chunk_ids.append(chunk_id)
+
+    # 6b — batch embed: single model.embed() call for all texts.
+    # Trade-off: a content error in any text fails the whole batch (the
+    # per-exchange loop can't catch mid-batch). cap_for_embedding already
+    # bounds text length, so content errors should be rare; a failed batch
+    # leaves all chunks eligible for backfill per the clear-first protocol.
+    texts = [ed["text"] for ed in needing_embed]
+    vecs = embed_batch(texts)
+
+    # 6c — write vectors (order invariant: vector FIRST, bookkeeping LAST).
+    for chunk_id, vec in zip(chunk_ids, vecs, strict=True):
         write_chunk_embedding(cursor, chunk_id, vec, EMBEDDING_VERSION, EMBEDDING_MODEL)
 
     # Step 7 — prune: delete chunks whose exchange_index no longer exists.

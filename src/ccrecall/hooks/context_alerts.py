@@ -1,9 +1,9 @@
 """Proactive health-alert block builder for the SessionStart context hook.
 
-Evaluates the filesystem-writability probe, the embedding-status sidecar, and
-the DB write-lock probe, then builds a single combined alert block for
-whatever fires. Split out of memory_context.py so the alert-evaluation
-concern has its own module.
+Evaluates the filesystem-writability probe, the embedding-status sidecar, the
+DB write-lock probe, and the tool-content backfill coverage check, then builds
+a single combined alert block for whatever fires. Split out of
+memory_context.py so the alert-evaluation concern has its own module.
 """
 
 import logging
@@ -14,6 +14,7 @@ from ccrecall.config import DEFAULT_SETTINGS
 from ccrecall.health import (
     ALERT_CANT_PERSIST,
     ALERT_EMBEDDINGS_FAILING,
+    ALERT_TOOL_CONTENT_INCOMPLETE,
     build_alert_block,
     evaluate_alerts,
     probe_db,
@@ -21,6 +22,8 @@ from ccrecall.health import (
     read_embedding_status,
 )
 from ccrecall.models import LOGGER_NAME
+
+_TOOL_CONTENT_SAMPLE_SIZE = 5
 
 
 def proactive_alert_block(
@@ -84,6 +87,9 @@ def proactive_alert_block(
             # (the mapping lives in health.py beside the REASON_* constants).
             embedding_reason = embedding_status.get("reason", "")
 
+        if conn is not None and _has_backfillable_tool_content(conn):
+            active_keys.add(ALERT_TOOL_CONTENT_INCOMPLETE)
+
         # 5. Evaluate snooze ledger: fire / suppress / auto-clear.
         # load_settings() always carries alert_snooze_hours from DEFAULT_SETTINGS;
         # fall back to the canonical default only for sparse (test) settings dicts.
@@ -107,3 +113,38 @@ def proactive_alert_block(
         # logging_enabled) so the failure isn't silently lost.
         logging.getLogger(LOGGER_NAME).exception("proactive alert block failed")
         return ""
+
+
+def _has_backfillable_tool_content(conn: sqlite3.Connection) -> bool:
+    """Check if there are sessions with NULL tool_content whose JSONL still exists.
+
+    Two-phase cheap check for the hot path:
+    1. SQL: sample a few session UUIDs with tool_content IS NULL.
+    2. For each, LIKE-match import_log for a file containing that UUID and
+       check Path.exists() — caps at _TOOL_CONTENT_SAMPLE_SIZE queries + stat calls.
+
+    Returns False for fresh installs (no NULL-tool_content sessions) and for
+    databases where all remaining NULL sessions have lost their JSONL on disk.
+    """
+    rows = conn.execute(
+        """SELECT DISTINCT s.uuid
+           FROM sessions s
+           JOIN messages m ON m.session_id = s.id
+           JOIN branches b ON b.session_id = s.id AND b.is_active = 1
+           WHERE m.tool_content IS NULL
+           LIMIT ?""",
+        (_TOOL_CONTENT_SAMPLE_SIZE,),
+    ).fetchall()
+    if not rows:
+        return False
+
+    for (uuid,) in rows:
+        # Mirrors the agent- prefix convention in parsing.extract_session_uuid.
+        file_rows = conn.execute(
+            "SELECT file_path FROM import_log WHERE file_path LIKE ? OR file_path LIKE ?",
+            (f"%/{uuid}.jsonl", f"%/agent-{uuid}.jsonl"),
+        ).fetchall()
+        if any(Path(r[0]).exists() for r in file_rows):
+            return True
+
+    return False

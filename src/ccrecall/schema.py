@@ -79,6 +79,7 @@ CREATE TABLE IF NOT EXISTS messages (
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
 CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);
 CREATE INDEX IF NOT EXISTS idx_messages_session_uuid ON messages(session_id, uuid);
+CREATE INDEX IF NOT EXISTS idx_messages_tool_content_null ON messages(session_id) WHERE tool_content IS NULL;
 
 -- Branch-messages mapping (many-to-many)
 CREATE TABLE IF NOT EXISTS branch_messages (

@@ -71,6 +71,7 @@ ignore = [
     # predicate — never user data, which always flows through ? params. The
     # check is pure false-positive noise for this parameterized-SQLite codebase.
     "S608",   # hardcoded-sql-expression
+    "PERF203", # try-except-in-loop — unavoidable in retry loops
 ]
 
 # Allow fix for all enabled rules (when `--fix`) is provided.

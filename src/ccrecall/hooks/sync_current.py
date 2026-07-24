@@ -135,7 +135,7 @@ def run(input_file: Path | None = None) -> None:
         try:
             # Atomic create — fails with FileExistsError if file already exists
             lock_fd = os.open(str(pid_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, PID_FILE_MODE)
-        except FileExistsError:  # noqa: PERF203 — try/except IS the retry mechanism
+        except FileExistsError:
             try:
                 existing_pid = int(pid_path.read_text().strip())
                 os.kill(existing_pid, 0)  # signal 0: liveness probe, no signal sent

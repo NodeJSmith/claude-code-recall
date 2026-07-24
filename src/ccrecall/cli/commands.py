@@ -154,7 +154,7 @@ def cmd_backfill_embeddings(
     progress_every: Annotated[
         int, Parameter(help="Print a progress line every N newly embedded branches.")
     ] = backfill_query_mod.DEFAULT_PROGRESS_EVERY,
-    threads: Annotated[int, Parameter(help="Inference threads.")] = DEFAULT_EMBED_THREADS,
+    threads: Annotated[int, Parameter(help="ONNX intra-op threads per inference call.")] = DEFAULT_EMBED_THREADS,
     ctx: CLIContextParam = DEFAULT_CLI_CONTEXT,
 ) -> None:
     """Seed historical embeddings for active-leaf branch summaries (opt-in)."""

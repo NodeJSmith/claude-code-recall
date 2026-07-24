@@ -495,7 +495,7 @@ class TestSearchMessagesToolContentMatch:
         )
 
         fake_vec = [1.0 / EMBEDDING_DIM**0.5] * EMBEDDING_DIM
-        with patch("ccrecall.embed_ops.embed_text", return_value=fake_vec):
+        with patch("ccrecall.embed_ops.embed_batch", side_effect=lambda texts: [fake_vec] * len(texts)):
             sync_session(conn, filepath, tmp_path)
 
         with (
