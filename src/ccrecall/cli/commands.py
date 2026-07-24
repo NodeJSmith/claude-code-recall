@@ -94,7 +94,7 @@ def cmd_import(
     import_mod.run(db=db, projects_dir=projects_dir, project=project, verbose=ctx.debug)
 
 
-def _count_multi_active_branch_sessions(db: Path) -> int:
+def count_multi_active_branch_sessions(db: Path) -> int:
     """Return the count of sessions with more than one active branch.
 
     Session-keyed branch identity (branch_ops.upsert_branch) should make this
@@ -122,7 +122,7 @@ def cmd_stats(
     # import.run(), so it can't disturb a concurrent background import.
     import_mod.print_stats(db=db)
 
-    violations = _count_multi_active_branch_sessions(db)
+    violations = count_multi_active_branch_sessions(db)
     print(f"Branch invariant violations: {violations} session(s) with multiple active branches")
     if violations:
         logging.getLogger(LOGGER_NAME).warning(
@@ -154,7 +154,7 @@ def cmd_backfill_embeddings(
     progress_every: Annotated[
         int, Parameter(help="Print a progress line every N newly embedded branches.")
     ] = backfill_query_mod.DEFAULT_PROGRESS_EVERY,
-    threads: Annotated[int, Parameter(help="Inference threads.")] = DEFAULT_EMBED_THREADS,
+    threads: Annotated[int, Parameter(help="ONNX intra-op threads per inference call.")] = DEFAULT_EMBED_THREADS,
     ctx: CLIContextParam = DEFAULT_CLI_CONTEXT,
 ) -> None:
     """Seed historical embeddings for active-leaf branch summaries (opt-in)."""

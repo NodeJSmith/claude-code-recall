@@ -8,6 +8,7 @@ status reporter (`backfill_status`) need to agree on.
 from ccrecall.config import remove_pid_file
 from ccrecall.db import CHUNK_EMBEDDABLE_BRANCH_FILTER, CONTENT_ERROR_VERSION
 from ccrecall.embeddings import EMBEDDING_MODEL, EMBEDDING_VERSION
+from ccrecall.hooks.tool_content_eligibility import days_modifier
 
 BATCH_SIZE = 20
 BACKFILL_BATCH_DELAY_SECONDS = 0.05
@@ -27,15 +28,6 @@ PID_KEY = "ccrecall-backfill-embeddings"
 def cleanup_pid() -> None:
     """Remove the self-concurrency PID marker (no-op if absent)."""
     remove_pid_file(PID_KEY)
-
-
-def days_modifier(days: int) -> str:
-    """SQLite datetime() modifier for an N-day lookback (days=7 -> '-7 days').
-
-    Single source of truth for the --days recency bound so build_selection()
-    (eligibility) and count_status() (progress) can't construct it differently.
-    """
-    return f"-{days} days"
 
 
 def build_selection(days: int | None) -> tuple[str, list]:

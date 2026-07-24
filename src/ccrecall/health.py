@@ -42,6 +42,7 @@ RECALL_CAVEAT_COVERAGE_THRESHOLD = 0.95
 # Alert key constants — one per proactive alert class.
 ALERT_CANT_PERSIST = "cant_persist"
 ALERT_EMBEDDINGS_FAILING = "embeddings_failing"
+ALERT_TOOL_CONTENT_INCOMPLETE = "tool_content_incomplete"
 
 # Embedding-capability failure reason codes (the sub-protocol the detached embedding
 # process writes into the embedding-status sidecar; the SessionStart hook reads them back). Shared here
@@ -256,6 +257,11 @@ _ALERT_PROSE: dict[str, tuple[str, str, str]] = {
         "ccrecall's embedding pipeline is failing — semantic search is unavailable or degraded.",
         "the vector extension (sqlite-vec) or embedding model is unavailable",
         "verify sqlite-vec is installed and the embedding model is accessible, then restart the session",
+    ),
+    ALERT_TOOL_CONTENT_INCOMPLETE: (
+        "ccrecall's tool-content index is incomplete — tool_use content from older sessions is not yet searchable.",
+        "sessions synced before tool-content extraction was added have not been backfilled",
+        "run `ccrecall backfill tool-content` to index historical tool_use content (one-time, opt-in)",
     ),
 }
 

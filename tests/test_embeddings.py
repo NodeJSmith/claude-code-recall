@@ -12,8 +12,8 @@ from ccrecall.embeddings import (
     EMBEDDING_MODEL,
     EMBEDDING_VERSION,
     cap_for_embedding,
+    embed_batch,
     embed_text,
-    embed_texts,
     model_available,
     resolve_thread_count,
 )
@@ -179,21 +179,17 @@ class TestEmbedRealModel:
         magnitude = math.sqrt(sum(x * x for x in v))
         assert abs(magnitude - 1.0) < 1e-4
 
-    def test_batch(self):
-        """embed_texts returns one vector per input, each EMBEDDING_DIM and normalized."""
-        texts = ["first text", "second text", "third text"]
-        results = embed_texts(texts)
-        assert len(results) == len(texts)
-        for v in results:
-            assert len(v) == EMBEDDING_DIM
-            magnitude = math.sqrt(sum(x * x for x in v))
-            assert abs(magnitude - 1.0) < 1e-4
-
-    def test_batch_matches_single(self):
-        """embed_texts produces the same vectors as calling embed_text individually."""
-        texts = ["alpha", "beta"]
-        assert embed_texts(texts) == [embed_text(t) for t in texts]
-
     def test_different_texts_differ(self):
         """Different texts produce different vectors."""
         assert embed_text("cat") != embed_text("quantum mechanics")
+
+    def test_embed_batch_matches_single(self):
+        """embed_batch produces the same vectors as calling embed_text individually."""
+        texts = ["alpha", "beta", "gamma"]
+        batch_results = embed_batch(texts)
+        single_results = [embed_text(t) for t in texts]
+        assert batch_results == single_results
+
+    def test_embed_batch_empty(self):
+        """embed_batch with empty list returns empty list."""
+        assert embed_batch([]) == []

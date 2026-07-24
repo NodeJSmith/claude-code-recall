@@ -8,6 +8,7 @@ from whenever import Instant
 from ccrecall.health import (
     ALERT_CANT_PERSIST,
     ALERT_EMBEDDINGS_FAILING,
+    ALERT_TOOL_CONTENT_INCOMPLETE,
     RECALL_CAVEAT_COVERAGE_THRESHOLD,
     ProbeResult,
     _read_snooze_ledger,
@@ -412,6 +413,17 @@ class TestBlockBuilder:
         lower = result.lower()
         assert "disk" in lower or "permission" in lower or "unavailable" in lower
 
+    def test_tool_content_block_mentions_backfill_command(self):
+        """tool_content_incomplete block names the backfill command."""
+        result = build_alert_block([ALERT_TOOL_CONTENT_INCOMPLETE])
+        assert "ccrecall backfill tool-content" in result
+
+    def test_tool_content_block_has_relay_instruction(self):
+        """tool_content_incomplete block instructs relay without hard-coded prominence."""
+        result = build_alert_block([ALERT_TOOL_CONTENT_INCOMPLETE])
+        lower = result.lower()
+        assert "surface" in lower
+
 
 class TestConstants:
     """Module-level constants are correct."""
@@ -420,11 +432,9 @@ class TestConstants:
         assert RECALL_CAVEAT_COVERAGE_THRESHOLD == 0.95
 
     def test_alert_keys_are_distinct_nonempty_strings(self):
-        assert isinstance(ALERT_CANT_PERSIST, str)
-        assert isinstance(ALERT_EMBEDDINGS_FAILING, str)
-        assert ALERT_CANT_PERSIST != ALERT_EMBEDDINGS_FAILING
-        assert ALERT_CANT_PERSIST
-        assert ALERT_EMBEDDINGS_FAILING
+        keys = {ALERT_CANT_PERSIST, ALERT_EMBEDDINGS_FAILING, ALERT_TOOL_CONTENT_INCOMPLETE}
+        assert all(isinstance(k, str) and k for k in keys)
+        assert len(keys) == 3
 
     def test_probe_result_frozen_dataclass(self):
         """ProbeResult is frozen and carries ok + reason fields."""

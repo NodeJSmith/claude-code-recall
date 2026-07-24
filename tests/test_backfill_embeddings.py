@@ -206,7 +206,7 @@ def _run_backfill_with_stub(conn: sqlite3.Connection, *, days=None, limit=None):
     """Run run() with embed_text stubbed via session_ops to _FIXED_VEC."""
     with (
         patch("ccrecall.hooks.backfill_embeddings.model_available", return_value=True),
-        patch("ccrecall.embed_ops.embed_text", return_value=_FIXED_VEC),
+        patch("ccrecall.embed_ops.embed_batch", side_effect=lambda texts: [_FIXED_VEC] * len(texts)),
         patch(
             "ccrecall.hooks.backfill_embeddings.get_connection",
             return_value=_NoCloseConn(conn),
@@ -252,7 +252,7 @@ class TestBackfillEmbedsFull:
         exit_code = None
         with (
             patch("ccrecall.hooks.backfill_embeddings.model_available", return_value=True),
-            patch("ccrecall.embed_ops.embed_text", return_value=_FIXED_VEC),
+            patch("ccrecall.embed_ops.embed_batch", side_effect=lambda texts: [_FIXED_VEC] * len(texts)),
             patch("ccrecall.hooks.backfill_embeddings.get_connection", return_value=_NoCloseConn(conn)),
             patch("ccrecall.hooks.backfill_embeddings.load_settings", return_value={}),
             patch("ccrecall.hooks.backfill_embeddings.time.sleep"),
@@ -336,14 +336,14 @@ class TestBackfillResume:
 
         call_count = [0]
 
-        def counting_embed(text: str) -> list[float]:
-            call_count[0] += 1
-            return _FIXED_VEC[:]
+        def counting_embed(texts: list[str]) -> list[list[float]]:
+            call_count[0] += len(texts)
+            return [_FIXED_VEC[:]] * len(texts)
 
         def _run_counting(conn):
             with (
                 patch("ccrecall.hooks.backfill_embeddings.model_available", return_value=True),
-                patch("ccrecall.embed_ops.embed_text", side_effect=counting_embed),
+                patch("ccrecall.embed_ops.embed_batch", side_effect=counting_embed),
                 patch("ccrecall.hooks.backfill_embeddings.get_connection", return_value=_NoCloseConn(conn)),
                 patch("ccrecall.hooks.backfill_embeddings.load_settings", return_value={}),
                 patch("ccrecall.hooks.backfill_embeddings.time.sleep"),
@@ -545,15 +545,15 @@ class TestBackfillFailureModes:
         # Raise on the second call (bad_id was inserted second)
         call_no = [0]
 
-        def counting_embed(text: str) -> list[float]:
+        def counting_embed(texts: list[str]) -> list[list[float]]:
             call_no[0] += 1
             if call_no[0] == 2:  # second branch's embed raises
                 raise ValueError("simulated tokenizer overflow")
-            return _FIXED_VEC
+            return [_FIXED_VEC] * len(texts)
 
         with (
             patch("ccrecall.hooks.backfill_embeddings.model_available", return_value=True),
-            patch("ccrecall.embed_ops.embed_text", side_effect=counting_embed),
+            patch("ccrecall.embed_ops.embed_batch", side_effect=counting_embed),
             patch("ccrecall.hooks.backfill_embeddings.get_connection", return_value=_NoCloseConn(conn)),
             patch("ccrecall.hooks.backfill_embeddings.load_settings", return_value={}),
             patch("ccrecall.hooks.backfill_embeddings.time.sleep"),
@@ -575,12 +575,12 @@ class TestBackfillFailureModes:
         conn = make_vec_conn()
         ids = [_insert_branch_with_messages(conn) for _ in range(3)]
 
-        def infra_fail(text: str) -> list[float]:
+        def infra_fail(texts: list[str]) -> list[list[float]]:
             raise RuntimeError("ONNX session crashed")
 
         with (
             patch("ccrecall.hooks.backfill_embeddings.model_available", return_value=True),
-            patch("ccrecall.embed_ops.embed_text", side_effect=infra_fail),
+            patch("ccrecall.embed_ops.embed_batch", side_effect=infra_fail),
             patch("ccrecall.hooks.backfill_embeddings.get_connection", return_value=_NoCloseConn(conn)),
             patch("ccrecall.hooks.backfill_embeddings.load_settings", return_value={}),
             patch("ccrecall.hooks.backfill_embeddings.time.sleep"),
@@ -601,13 +601,13 @@ class TestBackfillFailureModes:
 
         call_count = [0]
 
-        def counting_embed(text: str) -> list[float]:
-            call_count[0] += 1
-            return _FIXED_VEC
+        def counting_embed(texts: list[str]) -> list[list[float]]:
+            call_count[0] += len(texts)
+            return [_FIXED_VEC] * len(texts)
 
         with (
             patch("ccrecall.hooks.backfill_embeddings.model_available", return_value=True),
-            patch("ccrecall.embed_ops.embed_text", side_effect=counting_embed),
+            patch("ccrecall.embed_ops.embed_batch", side_effect=counting_embed),
             patch("ccrecall.hooks.backfill_embeddings.get_connection", return_value=_NoCloseConn(conn)),
             patch("ccrecall.hooks.backfill_embeddings.load_settings", return_value={}),
             patch("ccrecall.hooks.backfill_embeddings.time.sleep"),
@@ -864,7 +864,7 @@ class TestBackfillInferencesCounter:
 
         with (
             patch("ccrecall.hooks.backfill_embeddings.model_available", return_value=True),
-            patch("ccrecall.embed_ops.embed_text", return_value=_FIXED_VEC),
+            patch("ccrecall.embed_ops.embed_batch", side_effect=lambda texts: [_FIXED_VEC] * len(texts)),
             patch("ccrecall.hooks.backfill_embeddings.get_connection", return_value=_NoCloseConn(conn)),
             patch("ccrecall.hooks.backfill_embeddings.load_settings", return_value={}),
             patch("ccrecall.hooks.backfill_embeddings.time.sleep"),
@@ -946,7 +946,7 @@ class TestBackfillEmbeddingStatusRecording:
 
         with (
             patch("ccrecall.hooks.backfill_embeddings.model_available", return_value=True),
-            patch("ccrecall.embed_ops.embed_text", return_value=_FIXED_VEC),
+            patch("ccrecall.embed_ops.embed_batch", side_effect=lambda texts: [_FIXED_VEC] * len(texts)),
             patch("ccrecall.hooks.backfill_embeddings.get_connection", return_value=_NoCloseConn(conn)),
             patch("ccrecall.hooks.backfill_embeddings.load_settings", return_value={}),
             patch("ccrecall.hooks.backfill_embeddings.time.sleep"),
@@ -985,3 +985,84 @@ class TestBackfillEmbeddingStatusRecording:
         assert record_calls == [], (
             f"run_status() (--status path) must never call record_embedding_failure; got calls: {record_calls}"
         )
+
+
+class TestBackfillETAProgress:
+    """#84: ETA uses message-proportional work units and windowed rate."""
+
+    def test_progress_shows_warming_up_for_initial_branches(self, capsys):
+        """During the first few branches, ETA shows 'warming up' instead of
+        a misleading extrapolation from warm-up throughput."""
+        conn = make_vec_conn()
+        # Create 3 branches — below the warmup threshold
+        for _ in range(3):
+            _insert_branch_with_messages(conn, num_exchanges=2)
+
+        with (
+            patch("ccrecall.hooks.backfill_embeddings.model_available", return_value=True),
+            patch("ccrecall.embed_ops.embed_batch", side_effect=lambda texts: [_FIXED_VEC] * len(texts)),
+            patch("ccrecall.hooks.backfill_embeddings.get_connection", return_value=_NoCloseConn(conn)),
+            patch("ccrecall.hooks.backfill_embeddings.load_settings", return_value={}),
+            patch("ccrecall.hooks.backfill_embeddings.time.sleep"),
+            patch("ccrecall.hooks.backfill_embeddings.clear_embedding_failure"),
+        ):
+            code = run(progress_every=1)
+
+        assert code == EXIT_OK
+        captured = capsys.readouterr()
+        # First progress lines should say "warming up" since < _WARMUP_BRANCHES
+        lines = [line for line in captured.err.splitlines() if "ETA" in line]
+        assert any("warming up" in line for line in lines)
+
+    def test_progress_shows_numeric_eta_after_warmup(self, capsys):
+        """After enough branches, ETA switches from 'warming up' to a numeric estimate."""
+        conn = make_vec_conn()
+        for _ in range(10):
+            _insert_branch_with_messages(conn, num_exchanges=2)
+
+        with (
+            patch("ccrecall.hooks.backfill_embeddings.model_available", return_value=True),
+            patch("ccrecall.embed_ops.embed_batch", side_effect=lambda texts: [_FIXED_VEC] * len(texts)),
+            patch("ccrecall.hooks.backfill_embeddings.get_connection", return_value=_NoCloseConn(conn)),
+            patch("ccrecall.hooks.backfill_embeddings.load_settings", return_value={}),
+            patch("ccrecall.hooks.backfill_embeddings.time.sleep"),
+            patch("ccrecall.hooks.backfill_embeddings.clear_embedding_failure"),
+        ):
+            code = run(progress_every=1)
+
+        assert code == EXIT_OK
+        captured = capsys.readouterr()
+        lines = [line for line in captured.err.splitlines() if "ETA" in line]
+        # After warmup, at least some lines should have a numeric ETA (not "warming up")
+        numeric_eta_lines = [line for line in lines if "warming up" not in line]
+        assert len(numeric_eta_lines) > 0
+
+    def test_progress_reported_despite_all_content_errors(self, capsys):
+        """A run where every branch hits a content error still emits progress
+        lines, because the gate counts branches processed (success or
+        content-error), not total_updated (successes only)."""
+        conn = make_vec_conn()
+        ids = [_insert_branch_with_messages(conn, num_exchanges=2) for _ in range(3)]
+
+        def always_fail(texts: list[str]) -> list[list[float]]:
+            raise ValueError("simulated tokenizer overflow")
+
+        with (
+            patch("ccrecall.hooks.backfill_embeddings.model_available", return_value=True),
+            patch("ccrecall.embed_ops.embed_batch", side_effect=always_fail),
+            patch("ccrecall.hooks.backfill_embeddings.get_connection", return_value=_NoCloseConn(conn)),
+            patch("ccrecall.hooks.backfill_embeddings.load_settings", return_value={}),
+            patch("ccrecall.hooks.backfill_embeddings.time.sleep"),
+            patch("ccrecall.hooks.backfill_embeddings.clear_embedding_failure"),
+        ):
+            code = run(progress_every=1)
+
+        assert code == EXIT_OK
+        # Every branch content-errored — total_updated (successes) stayed 0.
+        for bid in ids:
+            assert _branch_embedding_version(conn, bid) == CONTENT_ERROR_VERSION
+        assert _chunk_count(conn) == 0
+
+        captured = capsys.readouterr()
+        eta_lines = [line for line in captured.err.splitlines() if "ETA" in line]
+        assert len(eta_lines) > 0, "progress line should print even though every branch content-errored"

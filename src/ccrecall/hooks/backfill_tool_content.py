@@ -29,10 +29,14 @@ Eligibility (a session "still needs tool_content backfill") is defined as
 having at least one ``messages`` row with ``tool_content IS NULL`` — the same
 condition the v4 migration leaves existing rows in and that forward-sync
 never produces (``extract_text_content`` always returns a string, never
-None). This module owns that selection predicate; it doesn't fit
-``backfill_query.build_selection`` (the chunk-embedding branch universe), so
-only the batch/no-progress-guard constants and ``--days`` helper are shared
-from there.
+None). ``tool_content_eligibility.py`` owns that selection predicate
+(``ELIGIBILITY_FROM``/``eligibility_clause``) — factored out into its own
+dependency-free module rather than defined here, so ``context_alerts.py``'s
+SessionStart sampling check can import it without pulling in this module's
+``ccrecall.db`` import chain (and therefore fastembed/onnxruntime) onto the
+hot path. It doesn't fit ``backfill_query.build_selection`` (the
+chunk-embedding branch universe) either, so only the batch/no-progress-guard
+constants are shared from there.
 
 For the same reason, ``--status`` here doesn't call
 ``backfill_status.run_status``/``count_status``: those are hard-wired to the
@@ -42,8 +46,7 @@ of which has a session-grain tool_content equivalent (there's no "errored"
 concept for a re-parse backfill, and the universe is sessions, not chunks).
 Only ``format_duration`` — the one grain-agnostic piece — is shared from
 ``backfill_status``; the counting and report shape are re-derived here from
-``_ELIGIBILITY_FROM``/``_eligibility_clause``, this module's own single
-source of truth.
+``tool_content_eligibility``.
 """
 
 import contextlib
@@ -57,7 +60,7 @@ from pathlib import Path
 
 from ccrecall.config import load_settings, setup_logging
 from ccrecall.content import extract_text_content
-from ccrecall.db import get_connection
+from ccrecall.db import VEC_BUSY_TIMEOUT_MS, get_connection
 from ccrecall.hooks.backfill_query import (
     BACKFILL_BATCH_DELAY_SECONDS,
     BACKFILL_NICE_LEVEL,
@@ -65,10 +68,16 @@ from ccrecall.hooks.backfill_query import (
     DEFAULT_PROGRESS_EVERY,
     EXIT_ABORT,
     EXIT_OK,
-    days_modifier,
 )
 from ccrecall.hooks.backfill_status import format_duration
+from ccrecall.hooks.tool_content_eligibility import (
+    ELIGIBILITY_FROM,
+    MAX_SQL_PARAMS,
+    days_modifier,
+    eligibility_clause,
+)
 from ccrecall.message_ops import insert_new_messages
+from ccrecall.models import LOGGER_NAME
 from ccrecall.parsing import (
     build_aggregated_content,
     extract_session_uuid,
@@ -80,11 +89,12 @@ from ccrecall.parsing import (
 _PRINT_PREFIX = "ccrecall backfill tool-content"
 _LOG_PREFIX = "Backfill tool-content"
 _SAVEPOINT_NAME = "session"
-_MAX_SQL_PARAMS = 900
+_LOCK_RETRIES = 3
+_LOCK_BACKOFF_SECONDS = 2.0
 
 
 @contextlib.contextmanager
-def _savepoint(cursor: sqlite3.Cursor):
+def savepoint(cursor: sqlite3.Cursor):
     """SAVEPOINT wrapper: releases on success, rolls back + releases on error."""
     cursor.execute(f"SAVEPOINT {_SAVEPOINT_NAME}")
     try:
@@ -96,14 +106,45 @@ def _savepoint(cursor: sqlite3.Cursor):
     cursor.execute(f"RELEASE SAVEPOINT {_SAVEPOINT_NAME}")
 
 
-# Shared FROM clause for every "sessions needing tool_content backfill" query
-# (the eligible-count, the per-batch selection, and --status) so the join
-# shape can't drift between them.
-_ELIGIBILITY_FROM = """
-    FROM messages m
-    JOIN sessions s ON s.id = m.session_id
-    JOIN branches b ON b.session_id = s.id AND b.is_active = 1
-"""
+class LockExhaustedError(Exception):
+    """Raised when all retry attempts for a transient DB lock are exhausted."""
+
+
+def backfill_with_retry(
+    cursor: sqlite3.Cursor,
+    session_id: int,
+    session_uuid: str,
+    filepaths: list[Path],
+    logger: logging.Logger,
+) -> bool:
+    """Run backfill_session with bounded retry on transient DB locks.
+
+    Returns the result of backfill_session on success. Raises LockExhaustedError
+    if all retries are exhausted. Non-lock OperationalErrors (e.g. schema errors
+    like "no such column") are not transient, so they're re-raised immediately
+    instead of being retried and misreported as a DB-lock skip — they propagate
+    to the batch-level abort handler in run(). Other exceptions (OSError,
+    content errors) propagate unchanged.
+    """
+    for attempt in range(_LOCK_RETRIES):
+        try:
+            with savepoint(cursor):
+                return backfill_session(cursor, session_id, filepaths)
+        except sqlite3.OperationalError as exc:  # noqa: PERF203 — retry loop; the try/except IS the mechanism, not incidental control flow
+            msg = str(exc).lower()
+            if "locked" not in msg and "busy" not in msg:
+                raise
+            logger.warning(
+                "%s: session %s transient DB error (attempt %s/%s): %s",
+                _LOG_PREFIX,
+                session_uuid,
+                attempt + 1,
+                _LOCK_RETRIES,
+                exc,
+            )
+            if attempt < _LOCK_RETRIES - 1:
+                time.sleep(_LOCK_BACKOFF_SECONDS * (attempt + 1))
+    raise LockExhaustedError(session_uuid)
 
 
 def run(
@@ -125,7 +166,7 @@ def run(
     logger = setup_logging(settings, process_name="backfill-tool-content", verbose=verbose)
 
     if status:
-        return _run_status(days=days, json_mode=json_mode, settings=settings, logger=logger)
+        return run_status(days=days, json_mode=json_mode, settings=settings, logger=logger)
 
     # Background I/O-bound job: lower scheduling priority so interactive work
     # wins (machines.md thrash risk). Best-effort — os.nice is POSIX-only.
@@ -136,6 +177,8 @@ def run(
     skipped_missing = 0
     skipped_empty = 0
     skipped_content_error = 0
+    skipped_db_lock = 0
+    skipped_stuck = 0
     last_progress = 0
     last_batch_ids: list[int] | None = None
     exclude_ids: set[int] = set()
@@ -143,11 +186,15 @@ def run(
 
     try:
         with get_connection(settings, load_vec=False) as conn:
+            # Raise busy_timeout: this backfill contends with the sync hook the
+            # same way vec writers do. Reuses VEC_BUSY_TIMEOUT_MS (30s) rather
+            # than the base 5s that load_vec=False connections get.
+            conn.execute(f"PRAGMA busy_timeout = {VEC_BUSY_TIMEOUT_MS}")
             cursor = conn.cursor()
 
-            filepath_by_uuid = _build_filepath_index(cursor, logger)
+            filepath_by_uuid = build_filepath_index(cursor, logger)
 
-            total_eligible = _count_eligible(cursor, days)
+            total_eligible = count_eligible(cursor, days)
             if limit is not None:
                 total_eligible = min(total_eligible, limit)
 
@@ -158,22 +205,26 @@ def run(
                 if limit is not None and total_updated >= limit:
                     break
 
-                rows = _select_batch(cursor, exclude_ids, days)
+                rows = select_batch(cursor, exclude_ids, days)
                 if not rows:
                     break
 
                 current_ids = [r[0] for r in rows]
                 if current_ids == last_batch_ids:
-                    logger.error(
-                        "%s: no progress — same batch re-selected (session ids: %s); aborting",
+                    # Defense-in-depth: with Fix 1 (backfill_session unconditionally
+                    # stamping remaining NULL rows to '' before returning True), a
+                    # session should always leave the eligible set on its first
+                    # attempt, making this path nearly unreachable. Kept as a guard
+                    # against any future regression that reintroduces a re-selectable
+                    # no-op session.
+                    logger.warning(
+                        "%s: same batch re-selected (session ids: %s); excluding and continuing",
                         _LOG_PREFIX,
                         current_ids,
                     )
-                    print(
-                        f"{_PRINT_PREFIX}: no progress — same batch re-selected (session ids: {current_ids}), aborting",
-                        file=sys.stderr,
-                    )
-                    return EXIT_ABORT
+                    exclude_ids.update(current_ids)
+                    skipped_stuck += len(current_ids)
+                    continue
                 last_batch_ids = current_ids
 
                 try:
@@ -189,8 +240,18 @@ def run(
                             continue
 
                         try:
-                            with _savepoint(cursor):
-                                made_change = _backfill_session(cursor, session_id, filepaths)
+                            made_change = backfill_with_retry(cursor, session_id, session_uuid, filepaths, logger)
+                        except LockExhaustedError:
+                            logger.warning(
+                                "%s: session %s (id=%s) DB lock persisted after %s retries, skipping",
+                                _LOG_PREFIX,
+                                session_uuid,
+                                session_id,
+                                _LOCK_RETRIES,
+                            )
+                            skipped_db_lock += 1
+                            exclude_ids.add(session_id)
+                            continue
                         except OSError:
                             logger.warning("%s: session %s JSONL vanished mid-run, skipping", _LOG_PREFIX, session_uuid)
                             skipped_missing += 1
@@ -218,10 +279,12 @@ def run(
                             exclude_ids.add(session_id)
                             continue
                         total_updated += 1
-                        # No exclude_ids entry: all files for this session were
-                        # merged, so every row now has tool_content set — the
-                        # eligibility predicate (`tool_content IS NULL`) already
-                        # keeps it out of future batches.
+                        # No exclude_ids entry needed: backfill_session guarantees
+                        # (#81 Fix 1) that a True return means every messages row for
+                        # this session has left the eligibility predicate's NULL
+                        # set — either backfilled with real content or stamped '' for
+                        # a uuid absent from the surviving JSONL — so the session
+                        # cannot be re-selected in a later batch.
 
                         if total_updated - last_progress >= progress_every:
                             elapsed = time.monotonic() - started
@@ -254,12 +317,15 @@ def run(
     elapsed = time.monotonic() - started
     logger.info(
         "%s complete: %s sessions backfilled, %s skipped (missing JSONL), "
-        "%s skipped (no usable branch), %s skipped (content error) in %s",
+        "%s skipped (no usable branch), %s skipped (content error), "
+        "%s skipped (DB lock), %s skipped (stuck) in %s",
         _LOG_PREFIX,
         total_updated,
         skipped_missing,
         skipped_empty,
         skipped_content_error,
+        skipped_db_lock,
+        skipped_stuck,
         format_duration(elapsed),
     )
     if json_mode:
@@ -271,6 +337,8 @@ def run(
                     "skipped_missing": skipped_missing,
                     "skipped_empty": skipped_empty,
                     "skipped_content_error": skipped_content_error,
+                    "skipped_db_lock": skipped_db_lock,
+                    "skipped_stuck": skipped_stuck,
                     "elapsed_seconds": round(elapsed, 1),
                 }
             )
@@ -279,20 +347,21 @@ def run(
         print(
             f"{_PRINT_PREFIX}: complete — {total_updated} sessions backfilled, "
             f"{skipped_missing} skipped (missing JSONL), {skipped_empty} skipped (no usable branch), "
-            f"{skipped_content_error} skipped (content error) in {format_duration(elapsed)}",
+            f"{skipped_content_error} skipped (content error), "
+            f"{skipped_db_lock} skipped (DB lock), {skipped_stuck} skipped (stuck) in {format_duration(elapsed)}",
             file=sys.stderr,
         )
     return EXIT_OK
 
 
-def _build_filepath_index(cursor: sqlite3.Cursor, logger: logging.Logger) -> dict[str, list[Path]]:
+def build_filepath_index(cursor: sqlite3.Cursor, logger: logging.Logger) -> dict[str, list[Path]]:
     """Map session_uuid -> list of file paths for every ``import_log`` entry
     whose JSONL still exists on disk.
 
     A session backed by the Agent tool produces N files (a parent ``.jsonl``
     plus one ``agent-*.jsonl`` per subagent invocation), all resolving to the
     same session_uuid via ``extract_session_uuid``.  Every file is kept so
-    ``_backfill_session`` can merge entries from the full set.
+    ``backfill_session`` can merge entries from the full set.
 
     A missing file is logged once here (not per re-selection); a session_uuid
     with zero surviving files gets no index entry, and the caller skips it.
@@ -307,59 +376,31 @@ def _build_filepath_index(cursor: sqlite3.Cursor, logger: logging.Logger) -> dic
     return mapping
 
 
-def _eligibility_clause(days: int | None, exclude_ids: set[int] | None = None) -> tuple[str, list]:
-    """WHERE clause (+ params) for "sessions still needing tool_content backfill".
-
-    Single source of truth for the one-time eligible count and the per-batch
-    selection query, mirroring backfill_query.build_selection's pattern so the
-    two can't drift. ``exclude_ids`` removes sessions this run already
-    attempted (succeeded, errored, or had no on-disk file) so a stalled
-    session can't force the no-progress guard to fire on every batch.
-
-    The NOT IN clause is chunked to stay under SQLite's bound-parameter limit.
-    """
-    where = "WHERE m.tool_content IS NULL"
-    params: list = []
-    if exclude_ids:
-        ids = sorted(exclude_ids)
-        not_in_parts: list[str] = []
-        for i in range(0, len(ids), _MAX_SQL_PARAMS):
-            chunk = ids[i : i + _MAX_SQL_PARAMS]
-            placeholders = ",".join("?" * len(chunk))
-            not_in_parts.append(f"s.id NOT IN ({placeholders})")
-            params.extend(chunk)
-        where += " AND " + " AND ".join(not_in_parts)
-    if days is not None:
-        where += " AND b.ended_at > datetime('now', ?)"
-        params.append(days_modifier(days))
-    return where, params
+def count_eligible(cursor: sqlite3.Cursor, days: int | None) -> int:
+    where, params = eligibility_clause(days)
+    return cursor.execute(f"SELECT COUNT(DISTINCT s.id) {ELIGIBILITY_FROM} {where}", params).fetchone()[0]
 
 
-def _count_eligible(cursor: sqlite3.Cursor, days: int | None) -> int:
-    where, params = _eligibility_clause(days)
-    return cursor.execute(f"SELECT COUNT(DISTINCT s.id) {_ELIGIBILITY_FROM} {where}", params).fetchone()[0]
-
-
-def _count_total_sessions(cursor: sqlite3.Cursor, days: int | None) -> int:
+def count_total_sessions(cursor: sqlite3.Cursor, days: int | None) -> int:
     """Count every session with messages (the backfill's universe), for --status."""
     where = "WHERE 1=1"
     params: list = []
     if days is not None:
         where += " AND b.ended_at > datetime('now', ?)"
         params.append(days_modifier(days))
-    return cursor.execute(f"SELECT COUNT(DISTINCT s.id) {_ELIGIBILITY_FROM} {where}", params).fetchone()[0]
+    return cursor.execute(f"SELECT COUNT(DISTINCT s.id) {ELIGIBILITY_FROM} {where}", params).fetchone()[0]
 
 
-def _select_batch(cursor: sqlite3.Cursor, exclude_ids: set[int], days: int | None) -> list[tuple[int, str]]:
+def select_batch(cursor: sqlite3.Cursor, exclude_ids: set[int], days: int | None) -> list[tuple[int, str]]:
     """Return up to BATCH_SIZE (session_id, session_uuid) pairs still needing
     tool_content backfill, oldest session id first."""
-    where, params = _eligibility_clause(days, exclude_ids)
-    query = f"SELECT DISTINCT s.id, s.uuid {_ELIGIBILITY_FROM} {where} ORDER BY s.id LIMIT ?"
+    where, params = eligibility_clause(days, exclude_ids)
+    query = f"SELECT DISTINCT s.id, s.uuid {ELIGIBILITY_FROM} {where} ORDER BY s.id LIMIT ?"
     params = [*params, BATCH_SIZE]
     return cursor.execute(query, params).fetchall()
 
 
-def _backfill_session(cursor: sqlite3.Cursor, session_id: int, filepaths: list[Path]) -> bool:
+def backfill_session(cursor: sqlite3.Cursor, session_id: int, filepaths: list[Path]) -> bool:
     """Re-parse one session's JSONL file(s) and backfill tool_content.
 
     A session may be backed by multiple files (parent + subagent transcripts);
@@ -373,8 +414,15 @@ def _backfill_session(cursor: sqlite3.Cursor, session_id: int, filepaths: list[P
     Returns False (a no-op) when all files parse to no entries, no branch, or
     the session has no active branch row in the DB — in these cases nothing
     was written and ``messages.tool_content`` stays NULL, so the caller must
-    not count it as backfilled. Returns True once the write pipeline actually
-    ran.
+    not count it as backfilled.
+
+    Returns True once the write pipeline actually ran. A True return
+    guarantees the session has left the eligible set: any ``messages`` row
+    still NULL after the update/insert passes (a uuid absent from every
+    surviving JSONL file) is stamped to ``''`` before returning, so this
+    session's ``tool_content IS NULL`` count is always zero afterward — it
+    cannot be re-selected in a later batch, and it stops re-firing the
+    SessionStart tool-content alert (issue #81).
 
     Raises OSError if a file can no longer be opened (race with a concurrent
     delete) — the caller treats that like the missing-file case.
@@ -430,8 +478,8 @@ def _backfill_session(cursor: sqlite3.Cursor, session_id: int, filepaths: list[P
         new_uuids_list = list(new_uuids)
         uuid_to_msg_id: dict[str, int] = {}
         # -1 reserves one slot for the session_id bound parameter
-        for i in range(0, len(new_uuids_list), _MAX_SQL_PARAMS - 1):
-            chunk = new_uuids_list[i : i + _MAX_SQL_PARAMS - 1]
+        for i in range(0, len(new_uuids_list), MAX_SQL_PARAMS - 1):
+            chunk = new_uuids_list[i : i + MAX_SQL_PARAMS - 1]
             placeholders = ",".join("?" * len(chunk))
             cursor.execute(
                 f"SELECT id, uuid FROM messages WHERE session_id = ? AND uuid IN ({placeholders})",
@@ -462,10 +510,33 @@ def _backfill_session(cursor: sqlite3.Cursor, session_id: int, filepaths: list[P
         "UPDATE branches SET aggregated_content = ?, embedding_version = NULL, summary_version = NULL WHERE id = ?",
         (agg_content, branch_db_id),
     )
+
+    # Guarantee (#81 Fix 1): a session must leave the eligible set once this
+    # function returns True, or it gets re-selected and re-parsed forever and
+    # keeps re-firing the SessionStart alert. Any messages row still NULL here
+    # has a uuid absent from every surviving JSONL file for this session (the
+    # UPDATE pass above only touches uuids it finds in all_entries) — transcript
+    # files are append-only, so that uuid can never reappear in a later run.
+    # '' is the codebase's existing meaning for "no tool content"; stamping it
+    # structurally removes the row from both the backfill eligibility predicate
+    # and the alert's coverage check. This runs inside the caller's SAVEPOINT,
+    # so it's atomic with the rest of this session's writes.
+    cursor.execute(
+        "UPDATE messages SET tool_content = '' WHERE session_id = ? AND tool_content IS NULL",
+        (session_id,),
+    )
+    if cursor.rowcount > 0:
+        logging.getLogger(LOGGER_NAME).warning(
+            "%s: session id=%s had %s row(s) with uuids absent from the surviving JSONL; "
+            "marked tool_content='' (unrecoverable)",
+            _LOG_PREFIX,
+            session_id,
+            cursor.rowcount,
+        )
     return True
 
 
-def _run_status(
+def run_status(
     *,
     days: int | None,
     json_mode: bool,
@@ -476,8 +547,8 @@ def _run_status(
     try:
         with get_connection(settings, load_vec=False) as conn:
             cursor = conn.cursor()
-            pending = _count_eligible(cursor, days)
-            total = _count_total_sessions(cursor, days)
+            pending = count_eligible(cursor, days)
+            total = count_total_sessions(cursor, days)
     except (sqlite3.Error, OSError) as e:
         logger.exception("%s: status aborted", _LOG_PREFIX)
         print(f"{_PRINT_PREFIX}: aborted: {e}", file=sys.stderr)

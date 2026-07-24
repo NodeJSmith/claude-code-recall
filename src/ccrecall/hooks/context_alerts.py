@@ -1,9 +1,9 @@
 """Proactive health-alert block builder for the SessionStart context hook.
 
-Evaluates the filesystem-writability probe, the embedding-status sidecar, and
-the DB write-lock probe, then builds a single combined alert block for
-whatever fires. Split out of memory_context.py so the alert-evaluation
-concern has its own module.
+Evaluates the filesystem-writability probe, the embedding-status sidecar, the
+DB write-lock probe, and the tool-content backfill coverage check, then builds
+a single combined alert block for whatever fires. Split out of
+memory_context.py so the alert-evaluation concern has its own module.
 """
 
 import logging
@@ -14,13 +14,17 @@ from ccrecall.config import DEFAULT_SETTINGS
 from ccrecall.health import (
     ALERT_CANT_PERSIST,
     ALERT_EMBEDDINGS_FAILING,
+    ALERT_TOOL_CONTENT_INCOMPLETE,
     build_alert_block,
     evaluate_alerts,
     probe_db,
     probe_filesystem,
     read_embedding_status,
 )
+from ccrecall.hooks.tool_content_eligibility import eligibility_clause
 from ccrecall.models import LOGGER_NAME
+
+_TOOL_CONTENT_SAMPLE_SIZE = 5
 
 
 def proactive_alert_block(
@@ -84,6 +88,9 @@ def proactive_alert_block(
             # (the mapping lives in health.py beside the REASON_* constants).
             embedding_reason = embedding_status.get("reason", "")
 
+        if conn is not None and has_backfillable_tool_content(conn):
+            active_keys.add(ALERT_TOOL_CONTENT_INCOMPLETE)
+
         # 5. Evaluate snooze ledger: fire / suppress / auto-clear.
         # load_settings() always carries alert_snooze_hours from DEFAULT_SETTINGS;
         # fall back to the canonical default only for sparse (test) settings dicts.
@@ -107,3 +114,51 @@ def proactive_alert_block(
         # logging_enabled) so the failure isn't silently lost.
         logging.getLogger(LOGGER_NAME).exception("proactive alert block failed")
         return ""
+
+
+def has_backfillable_tool_content(conn: sqlite3.Connection) -> bool:
+    """Check if there are sessions with NULL tool_content whose JSONL still exists.
+
+    Two-phase cheap check for the hot path:
+    1. SQL: sample a few session UUIDs still eligible for tool_content backfill
+       (eligibility_clause is tool_content_eligibility's single source of truth
+       for this predicate, shared with backfill_tool_content.py so the two
+       can't drift — imported from that dependency-free module, not from
+       backfill_tool_content.py itself, so this hot-path hook never pulls in
+       ccrecall.db's fastembed/onnxruntime import chain).
+    2. One batched LIKE query across all sampled uuids against import_log,
+       then Path.exists() — caps at _TOOL_CONTENT_SAMPLE_SIZE session lookups
+       but only ONE query against import_log (leading-wildcard LIKE is
+       unindexable, so a per-uuid query would mean N full scans on the hot path).
+
+    Returns False for fresh installs (no NULL-tool_content sessions) and for
+    databases where all remaining NULL sessions have lost their JSONL on disk.
+
+    A completed `ccrecall backfill tool-content` run now guarantees quiescence
+    for every session it processes (backfill_session unconditionally stamps
+    any remaining NULL rows to '' before returning True — issue #81 Fix 1), so
+    this predicate no longer fires forever on a stuck session. The only
+    residual firing case is a session whose JSONL file still exists on disk
+    but re-parses to no usable entries/branch (backfill_session returns False,
+    a genuine no-op that leaves the row NULL).
+    """
+    where, params = eligibility_clause(days=None)
+    rows = conn.execute(
+        f"""SELECT DISTINCT s.uuid
+           FROM sessions s
+           JOIN messages m ON m.session_id = s.id
+           JOIN branches b ON b.session_id = s.id AND b.is_active = 1
+           {where}
+           LIMIT ?""",
+        (*params, _TOOL_CONTENT_SAMPLE_SIZE),
+    ).fetchall()
+    if not rows:
+        return False
+
+    # Mirrors the agent- prefix convention in parsing.extract_session_uuid.
+    # One scan for every sampled uuid: the leading-wildcard LIKE is unindexable,
+    # so a per-uuid query would mean N full scans of import_log on the hot path.
+    patterns = [p for (uuid,) in rows for p in (f"%/{uuid}.jsonl", f"%/agent-{uuid}.jsonl")]
+    clause = " OR ".join(["file_path LIKE ?"] * len(patterns))
+    file_rows = conn.execute(f"SELECT file_path FROM import_log WHERE {clause}", patterns).fetchall()
+    return any(Path(file_path).exists() for (file_path,) in file_rows)

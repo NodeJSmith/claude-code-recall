@@ -25,6 +25,7 @@ import os
 import sqlite3
 import sys
 import time
+from collections import deque
 
 from ccrecall.config import load_settings, setup_logging
 from ccrecall.db import CONTENT_ERROR_VERSION, chunk_vec_queryable, fetch_branch_messages, get_connection
@@ -50,6 +51,8 @@ from ccrecall.hooks.backfill_status import format_duration, run_status
 _PRINT_PREFIX = "ccrecall backfill embeddings"
 _LOG_PREFIX = "Backfill embeddings"
 _SAVEPOINT_NAME = "row"
+_WARMUP_BRANCHES = 5
+_RATE_WINDOW = 30
 
 
 def run(
@@ -98,9 +101,12 @@ def run(
         return EXIT_ABORT
 
     total_updated = 0
+    total_processed = 0
     total_inferences = 0
     last_progress = 0
     last_batch_ids: list[int] | None = None
+    work_done = 0
+    rate_samples: deque[tuple[float, int]] = deque(maxlen=_RATE_WINDOW)
     started = time.monotonic()
 
     where, params = build_selection(days)
@@ -128,6 +134,22 @@ def run(
             total_eligible = cursor.fetchone()[0]
             if limit is not None:
                 total_eligible = min(total_eligible, limit)
+
+            # Cost-proportional total: non-notification message count across
+            # eligible branches. Excludes notifications to match the
+            # include_notifications=False filter on fetch_branch_messages, so
+            # total_work and work_done are in the same units.
+            # When --limit is active, restrict to the first `limit` branches
+            # (by id) so the ETA reflects the limited run, not the full backlog.
+            limit_clause = f"ORDER BY id LIMIT {limit}" if limit is not None else ""
+            cursor.execute(
+                f"""SELECT COUNT(*) FROM branch_messages bm
+                    JOIN messages m ON m.id = bm.message_id
+                    WHERE bm.branch_id IN (SELECT id FROM branches {where} {limit_clause})
+                      AND COALESCE(m.is_notification, 0) = 0""",
+                params,
+            )
+            total_work = cursor.fetchone()[0]
 
             logger.info("%s: starting, %s branches to embed", _LOG_PREFIX, total_eligible)
             print(
@@ -221,11 +243,28 @@ def run(
                             )
                             logger.exception("%s: branch %s failed", _LOG_PREFIX, branch_id)
 
-                        if total_updated - last_progress >= progress_every:
+                        total_processed += 1
+                        work_done += len(branch_msgs)
+                        rate_samples.append((time.monotonic(), work_done))
+
+                        if total_processed - last_progress >= progress_every:
                             elapsed = time.monotonic() - started
                             remaining = max(0, total_eligible - total_updated)
-                            rate = total_updated / elapsed if elapsed > 0 else 0.0
-                            eta = format_duration(remaining / rate) if rate > 0 else "?"
+                            # Gate on branches processed (success or content-error),
+                            # not total_updated (successes only) — a run with many
+                            # early content-errors would otherwise report "warming
+                            # up" indefinitely even though rate_samples has plenty
+                            # of data to compute a rate from.
+                            if len(rate_samples) >= _WARMUP_BRANCHES:
+                                t0, w0 = rate_samples[0]
+                                t1, w1 = rate_samples[-1]
+                                dt = t1 - t0
+                                dw = w1 - w0
+                                rate = dw / dt if dt > 0 else 0.0
+                                remaining_work = max(0, total_work - work_done)
+                                eta = format_duration(remaining_work / rate) if rate > 0 else "?"
+                            else:
+                                eta = "warming up"
                             msg = (
                                 f"{total_inferences} exchanges embedded across "
                                 f"{total_updated}/{total_eligible} branches, "
@@ -234,7 +273,7 @@ def run(
                             )
                             logger.info("%s: %s", _LOG_PREFIX, msg)
                             print(f"{_PRINT_PREFIX}: {msg}", file=sys.stderr)
-                            last_progress = total_updated
+                            last_progress = total_processed
                 except Exception:
                     # Infra/session failure (e.g. ONNX session crash, sqlite3.Error on
                     # fetch_branch_messages, OOM): abort without marking the content-error

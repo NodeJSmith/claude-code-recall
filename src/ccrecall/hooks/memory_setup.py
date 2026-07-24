@@ -45,7 +45,7 @@ def _spawn_background(argv: list[str], pid_key: str) -> None:
         try:
             # Atomic create — fails with FileExistsError if file already exists
             fd = os.open(str(pid_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, PID_FILE_MODE)
-        except FileExistsError:  # noqa: PERF203 — the try/except IS the retry mechanism for atomic PID-file creation
+        except FileExistsError:  # noqa: PERF203 — PID-file liveness/retry loop; the try/except IS the mechanism, not incidental control flow
             # File exists — check if the owning process is alive
             try:
                 existing_pid = int(pid_path.read_text().strip())
@@ -124,9 +124,6 @@ def _reap_stale_temp_files() -> None:
 
 
 def main():
-    # Initialized before the try so the output block below always runs, even if
-    # the body raises — the hook must print a valid response, never crash start.
-    additional_context: str | None = None
     try:
         ensure_parent_dir(DEFAULT_DB_PATH)
 
@@ -159,13 +156,7 @@ def main():
         # best-effort (no-op unless logging_enabled) so the failure isn't silent.
         log_hook_exception("setup")
 
-    output: dict = {"continue": True}
-    if additional_context is not None:
-        output["hookSpecificOutput"] = {
-            "hookEventName": "SessionStart",
-            "additionalContext": additional_context,
-        }
-    print(json.dumps(output))
+    print(json.dumps({"continue": True}))
 
 
 if __name__ == "__main__":
