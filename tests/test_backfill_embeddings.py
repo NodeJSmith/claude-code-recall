@@ -1036,3 +1036,33 @@ class TestBackfillETAProgress:
         # After warmup, at least some lines should have a numeric ETA (not "warming up")
         numeric_eta_lines = [line for line in lines if "warming up" not in line]
         assert len(numeric_eta_lines) > 0
+
+    def test_progress_reported_despite_all_content_errors(self, capsys):
+        """A run where every branch hits a content error still emits progress
+        lines, because the gate counts branches processed (success or
+        content-error), not total_updated (successes only)."""
+        conn = make_vec_conn()
+        ids = [_insert_branch_with_messages(conn, num_exchanges=2) for _ in range(3)]
+
+        def always_fail(texts: list[str]) -> list[list[float]]:
+            raise ValueError("simulated tokenizer overflow")
+
+        with (
+            patch("ccrecall.hooks.backfill_embeddings.model_available", return_value=True),
+            patch("ccrecall.embed_ops.embed_batch", side_effect=always_fail),
+            patch("ccrecall.hooks.backfill_embeddings.get_connection", return_value=_NoCloseConn(conn)),
+            patch("ccrecall.hooks.backfill_embeddings.load_settings", return_value={}),
+            patch("ccrecall.hooks.backfill_embeddings.time.sleep"),
+            patch("ccrecall.hooks.backfill_embeddings.clear_embedding_failure"),
+        ):
+            code = run(progress_every=1)
+
+        assert code == EXIT_OK
+        # Every branch content-errored — total_updated (successes) stayed 0.
+        for bid in ids:
+            assert _branch_embedding_version(conn, bid) == CONTENT_ERROR_VERSION
+        assert _chunk_count(conn) == 0
+
+        captured = capsys.readouterr()
+        eta_lines = [line for line in captured.err.splitlines() if "ETA" in line]
+        assert len(eta_lines) > 0, "progress line should print even though every branch content-errored"

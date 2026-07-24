@@ -101,6 +101,7 @@ def run(
         return EXIT_ABORT
 
     total_updated = 0
+    total_processed = 0
     total_inferences = 0
     last_progress = 0
     last_batch_ids: list[int] | None = None
@@ -242,10 +243,11 @@ def run(
                             )
                             logger.exception("%s: branch %s failed", _LOG_PREFIX, branch_id)
 
+                        total_processed += 1
                         work_done += len(branch_msgs)
                         rate_samples.append((time.monotonic(), work_done))
 
-                        if total_updated - last_progress >= progress_every:
+                        if total_processed - last_progress >= progress_every:
                             elapsed = time.monotonic() - started
                             remaining = max(0, total_eligible - total_updated)
                             # Gate on branches processed (success or content-error),
@@ -271,7 +273,7 @@ def run(
                             )
                             logger.info("%s: %s", _LOG_PREFIX, msg)
                             print(f"{_PRINT_PREFIX}: {msg}", file=sys.stderr)
-                            last_progress = total_updated
+                            last_progress = total_processed
                 except Exception:
                     # Infra/session failure (e.g. ONNX session crash, sqlite3.Error on
                     # fetch_branch_messages, OOM): abort without marking the content-error
