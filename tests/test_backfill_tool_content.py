@@ -18,7 +18,7 @@ from conftest import make_jsonl_entry as _entry
 from conftest import write_jsonl as _write_jsonl
 
 from ccrecall.hooks.backfill_query import BATCH_SIZE, EXIT_OK
-from ccrecall.hooks.backfill_tool_content import run
+from ccrecall.hooks.backfill_tool_content import _backfill_session, _select_batch, run
 from ccrecall.schema import SCHEMA
 
 pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
@@ -687,8 +687,6 @@ class TestTransientDbLock:
             existing_messages=[("u1", "user", "hello", "2026-01-01T10:00:00Z")],
         )
 
-        from ccrecall.hooks.backfill_tool_content import _backfill_session
-
         real_backfill = _backfill_session
         call_count = 0
 
@@ -742,8 +740,6 @@ class TestTransientDbLock:
             leaf_uuid="a1",
         )
 
-        from ccrecall.hooks.backfill_tool_content import _backfill_session as real_bf
-
         attempt_count = 0
 
         def _flaky_backfill(cursor, session_id, filepaths):
@@ -751,7 +747,7 @@ class TestTransientDbLock:
             attempt_count += 1
             if attempt_count == 1:
                 raise sqlite3.OperationalError("database is locked")
-            return real_bf(cursor, session_id, filepaths)
+            return _backfill_session(cursor, session_id, filepaths)
 
         with (
             patch("ccrecall.hooks.backfill_tool_content.get_connection", return_value=NoCloseConn(conn)),
@@ -791,13 +787,6 @@ class TestStuckSessionExclusion:
             existing_messages=[("u2", "user", "fine", "2026-01-01T10:00:00Z")],
         )
 
-        from ccrecall.hooks.backfill_tool_content import (
-            _backfill_session as real_bs,
-        )
-        from ccrecall.hooks.backfill_tool_content import (
-            _select_batch as real_select,
-        )
-
         batch_call = 0
 
         def _rigged_select(cursor, exclude_ids, days):
@@ -805,12 +794,12 @@ class TestStuckSessionExclusion:
             batch_call += 1
             if batch_call <= 2 and stuck_sid not in exclude_ids:
                 return [(stuck_sid, stuck_path.stem)]
-            return real_select(cursor, exclude_ids, days)
+            return _select_batch(cursor, exclude_ids, days)
 
         def _noop_backfill(cursor, session_id, filepaths):
             if session_id == stuck_sid:
                 return False
-            return real_bs(cursor, session_id, filepaths)
+            return _backfill_session(cursor, session_id, filepaths)
 
         with (
             patch("ccrecall.hooks.backfill_tool_content.get_connection", return_value=NoCloseConn(conn)),
