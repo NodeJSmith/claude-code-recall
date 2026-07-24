@@ -248,7 +248,12 @@ def run(
                         if total_updated - last_progress >= progress_every:
                             elapsed = time.monotonic() - started
                             remaining = max(0, total_eligible - total_updated)
-                            if total_updated >= _WARMUP_BRANCHES and len(rate_samples) >= 2:
+                            # Gate on branches processed (success or content-error),
+                            # not total_updated (successes only) — a run with many
+                            # early content-errors would otherwise report "warming
+                            # up" indefinitely even though rate_samples has plenty
+                            # of data to compute a rate from.
+                            if len(rate_samples) >= _WARMUP_BRANCHES:
                                 t0, w0 = rate_samples[0]
                                 t1, w1 = rate_samples[-1]
                                 dt = t1 - t0

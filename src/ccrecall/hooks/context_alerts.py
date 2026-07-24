@@ -87,7 +87,7 @@ def proactive_alert_block(
             # (the mapping lives in health.py beside the REASON_* constants).
             embedding_reason = embedding_status.get("reason", "")
 
-        if conn is not None and _has_backfillable_tool_content(conn):
+        if conn is not None and has_backfillable_tool_content(conn):
             active_keys.add(ALERT_TOOL_CONTENT_INCOMPLETE)
 
         # 5. Evaluate snooze ledger: fire / suppress / auto-clear.
@@ -115,7 +115,7 @@ def proactive_alert_block(
         return ""
 
 
-def _has_backfillable_tool_content(conn: sqlite3.Connection) -> bool:
+def has_backfillable_tool_content(conn: sqlite3.Connection) -> bool:
     """Check if there are sessions with NULL tool_content whose JSONL still exists.
 
     Two-phase cheap check for the hot path:
@@ -125,6 +125,14 @@ def _has_backfillable_tool_content(conn: sqlite3.Connection) -> bool:
 
     Returns False for fresh installs (no NULL-tool_content sessions) and for
     databases where all remaining NULL sessions have lost their JSONL on disk.
+
+    A completed `ccrecall backfill tool-content` run now guarantees quiescence
+    for every session it processes (backfill_session unconditionally stamps
+    any remaining NULL rows to '' before returning True — issue #81 Fix 1), so
+    this predicate no longer fires forever on a stuck session. The only
+    residual firing case is a session whose JSONL file still exists on disk
+    but re-parses to no usable entries/branch (backfill_session returns False,
+    a genuine no-op that leaves the row NULL).
     """
     rows = conn.execute(
         """SELECT DISTINCT s.uuid

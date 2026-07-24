@@ -69,6 +69,7 @@ from ccrecall.hooks.backfill_query import (
 )
 from ccrecall.hooks.backfill_status import format_duration
 from ccrecall.message_ops import insert_new_messages
+from ccrecall.models import LOGGER_NAME
 from ccrecall.parsing import (
     build_aggregated_content,
     extract_session_uuid,
@@ -112,14 +113,20 @@ def backfill_with_retry(
     """Run backfill_session with bounded retry on transient DB locks.
 
     Returns the result of backfill_session on success. Raises LockExhaustedError
-    if all retries are exhausted. Other exceptions (OSError, content errors)
-    propagate unchanged.
+    if all retries are exhausted. Non-lock OperationalErrors (e.g. schema errors
+    like "no such column") are not transient, so they're re-raised immediately
+    instead of being retried and misreported as a DB-lock skip — they propagate
+    to the batch-level abort handler in run(). Other exceptions (OSError,
+    content errors) propagate unchanged.
     """
     for attempt in range(_LOCK_RETRIES):
         try:
             with savepoint(cursor):
                 return backfill_session(cursor, session_id, filepaths)
         except sqlite3.OperationalError as exc:
+            msg = str(exc).lower()
+            if "locked" not in msg and "busy" not in msg:
+                raise
             logger.warning(
                 "%s: session %s transient DB error (attempt %s/%s): %s",
                 _LOG_PREFIX,
@@ -174,6 +181,7 @@ def run(
     skipped_empty = 0
     skipped_content_error = 0
     skipped_db_lock = 0
+    skipped_stuck = 0
     last_progress = 0
     last_batch_ids: list[int] | None = None
     exclude_ids: set[int] = set()
@@ -206,12 +214,19 @@ def run(
 
                 current_ids = [r[0] for r in rows]
                 if current_ids == last_batch_ids:
+                    # Defense-in-depth: with Fix 1 (backfill_session unconditionally
+                    # stamping remaining NULL rows to '' before returning True), a
+                    # session should always leave the eligible set on its first
+                    # attempt, making this path nearly unreachable. Kept as a guard
+                    # against any future regression that reintroduces a re-selectable
+                    # no-op session.
                     logger.warning(
                         "%s: same batch re-selected (session ids: %s); excluding and continuing",
                         _LOG_PREFIX,
                         current_ids,
                     )
                     exclude_ids.update(current_ids)
+                    skipped_stuck += len(current_ids)
                     continue
                 last_batch_ids = current_ids
 
@@ -267,10 +282,12 @@ def run(
                             exclude_ids.add(session_id)
                             continue
                         total_updated += 1
-                        # No exclude_ids entry: all files for this session were
-                        # merged, so every row now has tool_content set — the
-                        # eligibility predicate (`tool_content IS NULL`) already
-                        # keeps it out of future batches.
+                        # No exclude_ids entry needed: backfill_session guarantees
+                        # (#81 Fix 1) that a True return means every messages row for
+                        # this session has left the eligibility predicate's NULL
+                        # set — either backfilled with real content or stamped '' for
+                        # a uuid absent from the surviving JSONL — so the session
+                        # cannot be re-selected in a later batch.
 
                         if total_updated - last_progress >= progress_every:
                             elapsed = time.monotonic() - started
@@ -304,13 +321,14 @@ def run(
     logger.info(
         "%s complete: %s sessions backfilled, %s skipped (missing JSONL), "
         "%s skipped (no usable branch), %s skipped (content error), "
-        "%s skipped (DB lock) in %s",
+        "%s skipped (DB lock), %s skipped (stuck) in %s",
         _LOG_PREFIX,
         total_updated,
         skipped_missing,
         skipped_empty,
         skipped_content_error,
         skipped_db_lock,
+        skipped_stuck,
         format_duration(elapsed),
     )
     if json_mode:
@@ -323,6 +341,7 @@ def run(
                     "skipped_empty": skipped_empty,
                     "skipped_content_error": skipped_content_error,
                     "skipped_db_lock": skipped_db_lock,
+                    "skipped_stuck": skipped_stuck,
                     "elapsed_seconds": round(elapsed, 1),
                 }
             )
@@ -332,7 +351,7 @@ def run(
             f"{_PRINT_PREFIX}: complete — {total_updated} sessions backfilled, "
             f"{skipped_missing} skipped (missing JSONL), {skipped_empty} skipped (no usable branch), "
             f"{skipped_content_error} skipped (content error), "
-            f"{skipped_db_lock} skipped (DB lock) in {format_duration(elapsed)}",
+            f"{skipped_db_lock} skipped (DB lock), {skipped_stuck} skipped (stuck) in {format_duration(elapsed)}",
             file=sys.stderr,
         )
     return EXIT_OK
@@ -426,8 +445,15 @@ def backfill_session(cursor: sqlite3.Cursor, session_id: int, filepaths: list[Pa
     Returns False (a no-op) when all files parse to no entries, no branch, or
     the session has no active branch row in the DB — in these cases nothing
     was written and ``messages.tool_content`` stays NULL, so the caller must
-    not count it as backfilled. Returns True once the write pipeline actually
-    ran.
+    not count it as backfilled.
+
+    Returns True once the write pipeline actually ran. A True return
+    guarantees the session has left the eligible set: any ``messages`` row
+    still NULL after the update/insert passes (a uuid absent from every
+    surviving JSONL file) is stamped to ``''`` before returning, so this
+    session's ``tool_content IS NULL`` count is always zero afterward — it
+    cannot be re-selected in a later batch, and it stops re-firing the
+    SessionStart tool-content alert (issue #81).
 
     Raises OSError if a file can no longer be opened (race with a concurrent
     delete) — the caller treats that like the missing-file case.
@@ -515,6 +541,29 @@ def backfill_session(cursor: sqlite3.Cursor, session_id: int, filepaths: list[Pa
         "UPDATE branches SET aggregated_content = ?, embedding_version = NULL, summary_version = NULL WHERE id = ?",
         (agg_content, branch_db_id),
     )
+
+    # Guarantee (#81 Fix 1): a session must leave the eligible set once this
+    # function returns True, or it gets re-selected and re-parsed forever and
+    # keeps re-firing the SessionStart alert. Any messages row still NULL here
+    # has a uuid absent from every surviving JSONL file for this session (the
+    # UPDATE pass above only touches uuids it finds in all_entries) — transcript
+    # files are append-only, so that uuid can never reappear in a later run.
+    # '' is the codebase's existing meaning for "no tool content"; stamping it
+    # structurally removes the row from both the backfill eligibility predicate
+    # and the alert's coverage check. This runs inside the caller's SAVEPOINT,
+    # so it's atomic with the rest of this session's writes.
+    cursor.execute(
+        "UPDATE messages SET tool_content = '' WHERE session_id = ? AND tool_content IS NULL",
+        (session_id,),
+    )
+    if cursor.rowcount > 0:
+        logging.getLogger(LOGGER_NAME).warning(
+            "%s: session id=%s had %s row(s) with uuids absent from the surviving JSONL; "
+            "marked tool_content='' (unrecoverable)",
+            _LOG_PREFIX,
+            session_id,
+            cursor.rowcount,
+        )
     return True
 
 

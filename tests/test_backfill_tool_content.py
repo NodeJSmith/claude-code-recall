@@ -8,6 +8,7 @@ touched branch. Sessions whose JSONL file is missing are logged and skipped.
 """
 
 import json
+import logging
 import sqlite3
 from pathlib import Path
 from unittest.mock import patch
@@ -17,7 +18,7 @@ from conftest import NoCloseConn
 from conftest import make_jsonl_entry as _entry
 from conftest import write_jsonl as _write_jsonl
 
-from ccrecall.hooks.backfill_query import BATCH_SIZE, EXIT_OK
+from ccrecall.hooks.backfill_query import BATCH_SIZE, EXIT_ABORT, EXIT_OK
 from ccrecall.hooks.backfill_tool_content import backfill_session, run, select_batch
 from ccrecall.schema import SCHEMA
 
@@ -812,3 +813,150 @@ class TestStuckSessionExclusion:
 
         # Must NOT abort — continues past the stuck session
         assert code == EXIT_OK
+
+    def test_json_payload_reports_stuck_count(self, tmp_path, capsys):
+        """The same-batch-reselected path must count its excluded ids toward
+        skipped_stuck in the JSON summary, not drop them from every counter.
+
+        Simulates the pre-Fix-1 bug directly: backfill_session reports success
+        (True) without ever making the session ineligible, so select_batch
+        returns the identical batch on the very next call."""
+        stuck_path = tmp_path / "sess-stuck.jsonl"
+        _write_jsonl(stuck_path, [_entry("u1", None, "2026-01-01T10:00:00Z", "user", "stuck")])
+
+        conn = _make_conn()
+        stuck_sid, _ = _seed_session(
+            conn,
+            filepath=stuck_path,
+            existing_messages=[("u1", "user", "stuck", "2026-01-01T10:00:00Z")],
+        )
+
+        batch_call = 0
+
+        def _rigged_select(cursor, exclude_ids, days):
+            nonlocal batch_call
+            batch_call += 1
+            if batch_call <= 2:
+                return [(stuck_sid, stuck_path.stem)]
+            return []
+
+        def _fake_backfill(cursor, session_id, filepaths):
+            # Reports success without clearing the NULL row -- the exact bug
+            # Fix 1 closes off in the real backfill_session.
+            return True
+
+        with (
+            patch("ccrecall.hooks.backfill_tool_content.get_connection", return_value=NoCloseConn(conn)),
+            patch("ccrecall.hooks.backfill_tool_content.load_settings", return_value={}),
+            patch("ccrecall.hooks.backfill_tool_content.time.sleep"),
+            patch("ccrecall.hooks.backfill_tool_content.select_batch", side_effect=_rigged_select),
+            patch("ccrecall.hooks.backfill_tool_content.backfill_session", side_effect=_fake_backfill),
+        ):
+            code = run(json_mode=True)
+
+        assert code == EXIT_OK
+        summary = json.loads(capsys.readouterr().out)
+        assert summary["skipped_stuck"] == 1
+
+
+class TestOrphanedUuidQuiescence:
+    """#81 Fix 1: backfill_session must guarantee a session leaves the eligible
+    set, even when a messages row's uuid is absent from the surviving JSONL."""
+
+    def test_orphaned_uuid_stamped_empty_and_session_leaves_eligible_set(self, tmp_path, capsys, caplog):
+        """A session with one row whose uuid IS in the JSONL (gets real
+        tool_content) and one row whose uuid is NOT in the JSONL (unrecoverable
+        -- transcripts are append-only) must have the orphan stamped to '' (not
+        left NULL), and the session must not be re-selected on a later run."""
+        filepath = tmp_path / "sess-orphan.jsonl"
+        _write_jsonl(
+            filepath,
+            [
+                _entry(
+                    "u1",
+                    None,
+                    "2026-01-01T10:00:00Z",
+                    "assistant",
+                    [{"type": "tool_use", "name": "Bash", "input": {"command": "ls"}}],
+                ),
+            ],
+        )
+
+        conn = _make_conn()
+        session_id, _ = _seed_session(
+            conn,
+            filepath=filepath,
+            existing_messages=[
+                ("u1", "assistant", "", "2026-01-01T10:00:00Z"),
+                # "orphan1" is a uuid recorded in the DB (e.g. from a since-truncated
+                # transcript) with no matching entry in any surviving JSONL file.
+                ("orphan1", "user", "ghost content", "2025-12-31T09:00:00Z"),
+            ],
+            leaf_uuid="u1",
+        )
+
+        with caplog.at_level(logging.WARNING, logger="ccrecall"):
+            code = _run_backfill(conn)
+        assert code == EXIT_OK
+
+        present_row = conn.execute(
+            "SELECT tool_content FROM messages WHERE session_id = ? AND uuid = ?", (session_id, "u1")
+        ).fetchone()
+        assert present_row[0] == "[Bash: ls]", "the row present in the JSONL gets real tool_content"
+
+        orphan_row = conn.execute(
+            "SELECT tool_content FROM messages WHERE session_id = ? AND uuid = ?", (session_id, "orphan1")
+        ).fetchone()
+        assert orphan_row[0] == "", "uuid absent from the surviving JSONL must be stamped '' , not left NULL"
+
+        assert "marked tool_content=''" in caplog.text, "an unrecoverable orphaned uuid must log a WARNING"
+
+        # Session has left the eligible set: no NULL rows remain, and a second
+        # run makes no further changes / reports 0 pending.
+        no_null_remaining = conn.execute(
+            "SELECT COUNT(*) FROM messages WHERE session_id = ? AND tool_content IS NULL", (session_id,)
+        ).fetchone()[0]
+        assert no_null_remaining == 0
+
+        second_code = _run_backfill(conn, json_mode=True)
+        assert second_code == EXIT_OK
+        summary = json.loads(capsys.readouterr().out)
+        assert summary["backfilled"] == 0, "an already-quiesced session must not be re-processed"
+
+        with (
+            patch("ccrecall.hooks.backfill_tool_content.get_connection", return_value=NoCloseConn(conn)),
+            patch("ccrecall.hooks.backfill_tool_content.load_settings", return_value={}),
+        ):
+            run(status=True, json_mode=True)
+        status = json.loads(capsys.readouterr().out)
+        assert status["pending_sessions"] == 0
+
+
+class TestNonLockOperationalErrorFailsFast:
+    """#81 Fix 2: only genuine lock/busy errors get retried; schema errors abort
+    immediately instead of being retried 3x and misreported as a DB-lock skip."""
+
+    def test_schema_error_aborts_without_retry(self, tmp_path):
+        filepath = tmp_path / "sess.jsonl"
+        _write_jsonl(filepath, [_entry("u1", None, "2026-01-01T10:00:00Z", "user", "hi")])
+
+        conn = _make_conn()
+        _seed_session(conn, filepath=filepath, existing_messages=[("u1", "user", "hi", "2026-01-01T10:00:00Z")])
+
+        call_count = 0
+
+        def _raise_schema_error(cursor, session_id, filepaths):
+            nonlocal call_count
+            call_count += 1
+            raise sqlite3.OperationalError("no such column: nope")
+
+        with (
+            patch("ccrecall.hooks.backfill_tool_content.get_connection", return_value=NoCloseConn(conn)),
+            patch("ccrecall.hooks.backfill_tool_content.load_settings", return_value={}),
+            patch("ccrecall.hooks.backfill_tool_content.time.sleep"),
+            patch("ccrecall.hooks.backfill_tool_content.backfill_session", side_effect=_raise_schema_error),
+        ):
+            code = run()
+
+        assert code == EXIT_ABORT
+        assert call_count == 1, "a non-lock OperationalError must fail fast, not be retried"

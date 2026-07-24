@@ -1,6 +1,6 @@
 """Tests for context_alerts — the SessionStart proactive alert builder.
 
-Covers the tool-content backfill coverage predicate (_has_backfillable_tool_content)
+Covers the tool-content backfill coverage predicate (has_backfillable_tool_content)
 and its wiring into the proactive_alert_block.
 """
 
@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from ccrecall.hooks.context_alerts import _has_backfillable_tool_content, proactive_alert_block
+from ccrecall.hooks.context_alerts import has_backfillable_tool_content, proactive_alert_block
 from ccrecall.schema import SCHEMA
 
 pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
@@ -68,7 +68,7 @@ class TestHasBackfillableToolContent:
         filepath.touch()
         _seed_session(conn, session_uuid="sess-a", filepath=filepath, tool_content="[Bash: ls]")
 
-        assert _has_backfillable_tool_content(conn) is False
+        assert has_backfillable_tool_content(conn) is False
 
     def test_pending_with_existing_jsonl_returns_true(self, tmp_path):
         """A session with NULL tool_content whose JSONL exists → alert fires."""
@@ -77,7 +77,7 @@ class TestHasBackfillableToolContent:
         filepath.touch()
         _seed_session(conn, session_uuid="sess-b", filepath=filepath, tool_content=None)
 
-        assert _has_backfillable_tool_content(conn) is True
+        assert has_backfillable_tool_content(conn) is True
 
     def test_pending_with_missing_jsonl_returns_false(self, tmp_path):
         """A session with NULL tool_content whose JSONL is gone → no alert."""
@@ -86,7 +86,7 @@ class TestHasBackfillableToolContent:
         # Don't create the file — it's missing on disk
         _seed_session(conn, session_uuid="sess-c", filepath=filepath, tool_content=None)
 
-        assert _has_backfillable_tool_content(conn) is False
+        assert has_backfillable_tool_content(conn) is False
 
     def test_mixed_pending_some_exist_returns_true(self, tmp_path):
         """Multiple pending: some with missing JSONL, one with existing → alert fires."""
@@ -98,7 +98,7 @@ class TestHasBackfillableToolContent:
         existing.touch()
         _seed_session(conn, session_uuid="sess-here", filepath=existing, tool_content=None)
 
-        assert _has_backfillable_tool_content(conn) is True
+        assert has_backfillable_tool_content(conn) is True
 
     def test_agent_prefixed_file_detected(self, tmp_path):
         """A session whose import_log entry is agent-{uuid}.jsonl is still found."""
@@ -107,12 +107,12 @@ class TestHasBackfillableToolContent:
         filepath.touch()
         _seed_session(conn, session_uuid="sess-d", filepath=filepath, tool_content=None)
 
-        assert _has_backfillable_tool_content(conn) is True
+        assert has_backfillable_tool_content(conn) is True
 
     def test_empty_database_returns_false(self):
         """Fresh install with no sessions → no alert."""
         conn = _make_conn()
-        assert _has_backfillable_tool_content(conn) is False
+        assert has_backfillable_tool_content(conn) is False
 
 
 class TestToolContentAlertWiring:
