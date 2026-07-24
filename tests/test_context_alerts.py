@@ -9,7 +9,11 @@ from pathlib import Path
 
 import pytest
 
-from ccrecall.hooks.context_alerts import has_backfillable_tool_content, proactive_alert_block
+from ccrecall.hooks.context_alerts import (
+    _TOOL_CONTENT_SAMPLE_SIZE,
+    has_backfillable_tool_content,
+    proactive_alert_block,
+)
 from ccrecall.schema import SCHEMA
 
 pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
@@ -114,6 +118,32 @@ class TestHasBackfillableToolContent:
         conn = _make_conn()
         assert has_backfillable_tool_content(conn) is False
 
+    def test_sample_cap_misses_later_existing_jsonl(self, tmp_path):
+        """Documents the intentional sampling-cap tradeoff, not a bug.
+
+        has_backfillable_tool_content only samples the first
+        _TOOL_CONTENT_SAMPLE_SIZE pending session uuids (see its docstring:
+        "caps at _TOOL_CONTENT_SAMPLE_SIZE queries + stat calls"). When more
+        than that many sessions are pending and only a session beyond the
+        sample window has a surviving on-disk JSONL, the function returns
+        False even though real backfillable work exists — the sample never
+        reaches that session. This test pins that behavior so it isn't
+        "fixed" by accident, and so anyone surprised by it in production can
+        find the test that explains it.
+        """
+        conn = _make_conn()
+        for i in range(_TOOL_CONTENT_SAMPLE_SIZE + 1):
+            session_uuid = f"sess-{i}"
+            filepath = tmp_path / f"{session_uuid}.jsonl"
+            # Only the last-seeded session's JSONL exists on disk; the rest
+            # (the first _TOOL_CONTENT_SAMPLE_SIZE, which is what gets
+            # sampled) are missing.
+            if i == _TOOL_CONTENT_SAMPLE_SIZE:
+                filepath.touch()
+            _seed_session(conn, session_uuid=session_uuid, filepath=filepath, tool_content=None)
+
+        assert has_backfillable_tool_content(conn) is False
+
 
 class TestToolContentAlertWiring:
     def test_alert_fires_in_proactive_block(self, tmp_path):
@@ -125,12 +155,14 @@ class TestToolContentAlertWiring:
 
         snooze = tmp_path / "snooze.json"
         marker = tmp_path / ".write-probe"
+        status = tmp_path / "embedding-status.json"
         block = proactive_alert_block(
             {"alert_snooze_hours": 0},
             conn,
             db_available=True,
             _marker_path=marker,
             _snooze_path=snooze,
+            _status_path=status,
         )
         assert "ccrecall backfill tool-content" in block
 
@@ -143,14 +175,16 @@ class TestToolContentAlertWiring:
 
         snooze = tmp_path / "snooze.json"
         marker = tmp_path / ".write-probe"
+        status = tmp_path / "embedding-status.json"
         block = proactive_alert_block(
             {"alert_snooze_hours": 0},
             conn,
             db_available=True,
             _marker_path=marker,
             _snooze_path=snooze,
+            _status_path=status,
         )
-        assert "tool-content" not in block
+        assert block == ""
 
     def test_snooze_suppresses_repeat_firing(self, tmp_path):
         """After firing once, the alert is snoozed and doesn't fire again."""
@@ -161,6 +195,7 @@ class TestToolContentAlertWiring:
 
         snooze = tmp_path / "snooze.json"
         marker = tmp_path / ".write-probe"
+        status = tmp_path / "embedding-status.json"
         settings = {"alert_snooze_hours": 24}
 
         block1 = proactive_alert_block(
@@ -169,6 +204,7 @@ class TestToolContentAlertWiring:
             db_available=True,
             _marker_path=marker,
             _snooze_path=snooze,
+            _status_path=status,
         )
         assert "ccrecall backfill tool-content" in block1
 
@@ -178,5 +214,6 @@ class TestToolContentAlertWiring:
             db_available=True,
             _marker_path=marker,
             _snooze_path=snooze,
+            _status_path=status,
         )
-        assert "tool-content" not in block2
+        assert block2 == ""
