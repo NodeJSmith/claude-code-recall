@@ -95,14 +95,6 @@ dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
 ]
 "tools/*.py" = ["S603", "S607"]
 "scripts/**/*.py" = ["S101", "S105", "S310", "S603", "S607"]
-# PERF203 (try-except-in-loop) is unavoidable here: each of these files has a
-# legitimate retry/liveness loop where the try/except IS the mechanism, not
-# incidental control flow inside a loop.
-"src/ccrecall/db.py" = ["PERF203"]
-"src/ccrecall/hooks/backfill_summaries.py" = ["PERF203"]
-"src/ccrecall/hooks/backfill_tool_content.py" = ["PERF203"]
-"src/ccrecall/hooks/memory_setup.py" = ["PERF203"]
-"src/ccrecall/hooks/sync_current.py" = ["PERF203"]
 
 [format]
 quote-style = "double"
