@@ -7,7 +7,9 @@ from ccrecall.session_tail import (
     _brief_path,
     _build_search_dirs,
     _emit_full,
+    _extract_branch,
     _last_event_timestamp,
+    _pick_branch_match,
     _resolve_across_dirs,
     _tool_event,
     build_tail,
@@ -518,46 +520,54 @@ class TestFormatPendingBlock:
 
 class TestBuildSearchDirs:
     def test_not_in_worktree_returns_provided_cwd(self):
-        dirs = _build_search_dirs("/home/user/repo", real_cwd="/home/user/repo")
+        dirs, hint = _build_search_dirs("/home/user/repo", real_cwd="/home/user/repo")
         assert len(dirs) == 1
         assert dirs[0] == transcript_dir("/home/user/repo")
+        assert hint is None
 
     def test_in_worktree_returns_worktree_first(self):
         wt = "/home/user/repo/.claude/worktrees/billing"
-        dirs = _build_search_dirs(wt, real_cwd=wt)
+        dirs, hint = _build_search_dirs(wt, real_cwd=wt)
         assert len(dirs) == 2
         assert dirs[0] == transcript_dir(wt)
         assert dirs[1] == transcript_dir("/home/user/repo")
+        assert hint == "billing"
 
     def test_cwd_is_repo_root_but_in_worktree(self, capsys):
         wt = "/home/user/repo/.claude/worktrees/billing"
-        dirs = _build_search_dirs("/home/user/repo", real_cwd=wt)
+        dirs, hint = _build_search_dirs("/home/user/repo", real_cwd=wt)
         assert len(dirs) == 2
         assert dirs[0] == transcript_dir(wt)
         assert dirs[1] == transcript_dir("/home/user/repo")
+        assert hint == "billing"
         err = capsys.readouterr().err
         assert "running in worktree" in err
 
     def test_unrelated_cwd_skips_worktree_logic(self):
         wt = "/home/user/repo/.claude/worktrees/billing"
-        dirs = _build_search_dirs("/other/project", real_cwd=wt)
+        dirs, hint = _build_search_dirs("/other/project", real_cwd=wt)
         assert len(dirs) == 1
         assert dirs[0] == transcript_dir("/other/project")
+        assert hint is None
 
     def test_sibling_worktree_cwd_searched_first(self):
         wt_a = "/home/user/repo/.claude/worktrees/billing"
         wt_b = "/home/user/repo/.claude/worktrees/genie"
-        dirs = _build_search_dirs(wt_b, real_cwd=wt_a)
+        dirs, hint = _build_search_dirs(wt_b, real_cwd=wt_a)
         assert dirs[0] == transcript_dir(wt_b)
         assert dirs[1] == transcript_dir("/home/user/repo")
         assert len(dirs) == 2
+        assert hint == "genie"
 
 
 class TestResolveAcrossDirs:
-    def _write_transcript(self, pdir, stem, ts):
+    def _write_transcript(self, pdir, stem, ts, branch=None):
         pdir.mkdir(parents=True, exist_ok=True)
         path = pdir / f"{stem}.jsonl"
-        path.write_text(json.dumps({"timestamp": ts}) + "\n")
+        entry = {"timestamp": ts}
+        if branch:
+            entry["gitBranch"] = branch
+        path.write_text(json.dumps(entry) + "\n")
         return path
 
     def test_skips_newest_in_first_dir_only(self, tmp_path):
@@ -586,3 +596,92 @@ class TestResolveAcrossDirs:
 
         result = _resolve_across_dirs([dir1, dir2], "abc12345")
         assert result == target
+
+    def test_fallback_prefers_branch_match(self, tmp_path):
+        dir1 = tmp_path / "primary"
+        dir2 = tmp_path / "fallback"
+        dir1.mkdir(parents=True)
+        self._write_transcript(dir2, "wrong-branch", "2026-07-13T10:00:00Z", branch="main")
+        right = self._write_transcript(dir2, "right-branch", "2026-07-13T09:00:00Z", branch="clydesdales")
+
+        result = _resolve_across_dirs([dir1, dir2], None, branch_hint="clydesdales")
+        assert result == right
+
+    def test_fallback_without_hint_picks_newest(self, tmp_path):
+        dir1 = tmp_path / "primary"
+        dir2 = tmp_path / "fallback"
+        dir1.mkdir(parents=True)
+        newest = self._write_transcript(dir2, "newer", "2026-07-13T10:00:00Z")
+        self._write_transcript(dir2, "older", "2026-07-13T09:00:00Z")
+
+        result = _resolve_across_dirs([dir1, dir2], None, branch_hint=None)
+        assert result == newest
+
+    def test_fallback_no_branch_match_picks_newest(self, tmp_path):
+        dir1 = tmp_path / "primary"
+        dir2 = tmp_path / "fallback"
+        dir1.mkdir(parents=True)
+        newest = self._write_transcript(dir2, "a", "2026-07-13T10:00:00Z", branch="main")
+        self._write_transcript(dir2, "b", "2026-07-13T09:00:00Z", branch="billing")
+
+        result = _resolve_across_dirs([dir1, dir2], None, branch_hint="nonexistent")
+        assert result == newest
+
+
+class TestExtractBranch:
+    def test_finds_branch_in_early_entries(self, tmp_path):
+        path = tmp_path / "s.jsonl"
+        lines = [
+            json.dumps({"type": "custom-title", "sessionId": "abc"}),
+            json.dumps({"type": "mode"}),
+            json.dumps({"type": "attachment", "gitBranch": "clydesdales", "cwd": "/repo"}),
+        ]
+        path.write_text("\n".join(lines) + "\n")
+        assert _extract_branch(path) == "clydesdales"
+
+    def test_returns_none_when_no_branch(self, tmp_path):
+        path = tmp_path / "s.jsonl"
+        lines = [json.dumps({"type": "user", "message": {}})] * 5
+        path.write_text("\n".join(lines) + "\n")
+        assert _extract_branch(path) is None
+
+    def test_stops_after_20_lines(self, tmp_path):
+        path = tmp_path / "s.jsonl"
+        lines = [json.dumps({"type": "filler"})] * 25
+        lines.append(json.dumps({"gitBranch": "late-branch"}))
+        path.write_text("\n".join(lines) + "\n")
+        assert _extract_branch(path) is None
+
+    def test_handles_corrupt_json(self, tmp_path):
+        path = tmp_path / "s.jsonl"
+        path.write_text("not json\n{bad\n" + json.dumps({"gitBranch": "ok"}) + "\n")
+        assert _extract_branch(path) == "ok"
+
+
+class TestPickBranchMatch:
+    def _write(self, pdir, stem, branch=None):
+        pdir.mkdir(parents=True, exist_ok=True)
+        path = pdir / f"{stem}.jsonl"
+        entry = {"type": "user", "timestamp": "2026-01-01T00:00:00Z"}
+        if branch:
+            entry["gitBranch"] = branch
+        path.write_text(json.dumps(entry) + "\n")
+        return path
+
+    def test_returns_none_for_empty_list(self):
+        assert _pick_branch_match([], "main") is None
+
+    def test_returns_first_when_no_hint(self, tmp_path):
+        a = self._write(tmp_path, "a")
+        self._write(tmp_path, "b")
+        assert _pick_branch_match([a, tmp_path / "b.jsonl"], None) == a
+
+    def test_prefers_matching_branch(self, tmp_path):
+        a = self._write(tmp_path, "a", branch="main")
+        b = self._write(tmp_path, "b", branch="feature")
+        assert _pick_branch_match([a, b], "feature") == b
+
+    def test_falls_back_to_first_when_no_match(self, tmp_path):
+        a = self._write(tmp_path, "a", branch="main")
+        b = self._write(tmp_path, "b", branch="other")
+        assert _pick_branch_match([a, b], "nonexistent") == a
