@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.19.3](https://github.com/NodeJSmith/claude-code-recall/compare/v0.19.2...v0.19.3) (2026-07-26)
+
+
+### Bug Fixes
+
+* use branch-aware fallback in ccrecall tail for worktree sessions ([#88](https://github.com/NodeJSmith/claude-code-recall/issues/88)) ([725d21e](https://github.com/NodeJSmith/claude-code-recall/commit/725d21e7f45da4372003469ace0c49ac36784edc))
+
 ## [0.19.2](https://github.com/NodeJSmith/claude-code-recall/compare/v0.19.1...v0.19.2) (2026-07-24)
 
 
