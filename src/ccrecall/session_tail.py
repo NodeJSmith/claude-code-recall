@@ -514,20 +514,23 @@ def _extract_branch(path: Path) -> str | None:
     Cheap head-read used to filter fallback candidates by branch — avoids
     parsing the full file.
     """
-    with open(path, encoding="utf-8", errors="replace") as fh:
-        for i, line in enumerate(fh):
-            if i >= _BRANCH_HEAD_LINES:
-                break
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                entry = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            branch = entry.get("gitBranch")
-            if branch:
-                return branch
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            for i, line in enumerate(fh):
+                if i >= _BRANCH_HEAD_LINES:
+                    break
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                branch = entry.get("gitBranch")
+                if branch:
+                    return branch
+    except OSError:
+        return None
     return None
 
 
