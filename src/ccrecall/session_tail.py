@@ -46,6 +46,7 @@ from ccrecall.parsing import (
 # sessions — enough to find a timestamp even if the trailing lines are a
 # no-timestamp tool-result burst, without reading a multi-MB file in full.
 _TIMESTAMP_TAIL_LINES = 20
+_BRANCH_HEAD_LINES = 20
 
 # Harness-injected user content that isn't a typed instruction. command/channel
 # wrappers, task-notifications, and <local-command-caveat> blocks are already
@@ -457,8 +458,11 @@ def _emit_full(entries: list[dict], pending: dict | None) -> int:
     return 0
 
 
-def _build_search_dirs(provided_cwd: str, *, real_cwd: str | None = None) -> list[Path]:
+def _build_search_dirs(provided_cwd: str, *, real_cwd: str | None = None) -> tuple[list[Path], str | None]:
     """Build ordered list of transcript dirs to search (worktree-specific first).
+
+    Returns ``(dirs, branch_hint)`` where *branch_hint* is the resolved worktree
+    name (used as a branch filter for fallback dirs), or None when not in a worktree.
 
     When the process is running inside a worktree but --cwd was passed pointing at
     the repo root, the worktree dir is still searched first and a warning is emitted.
@@ -470,7 +474,7 @@ def _build_search_dirs(provided_cwd: str, *, real_cwd: str | None = None) -> lis
     real_cwd_normalized = (real_cwd or str(Path.cwd())).replace("\\", "/")
     real_parts = split_worktree_path(real_cwd_normalized)
     if not real_parts:
-        return [transcript_dir(provided_cwd)]
+        return [transcript_dir(provided_cwd)], None
 
     repo_root, worktree_cwd = real_parts
 
@@ -478,7 +482,7 @@ def _build_search_dirs(provided_cwd: str, *, real_cwd: str | None = None) -> lis
     provided_base = provided_parts[0] if provided_parts else provided_cwd.replace("\\", "/")
 
     if provided_base.rstrip("/") != repo_root.rstrip("/"):
-        return [transcript_dir(provided_cwd)]
+        return [transcript_dir(provided_cwd)], None
 
     if provided_parts and provided_parts[1].rstrip("/") != worktree_cwd.rstrip("/"):
         primary = provided_parts[1]
@@ -498,15 +502,58 @@ def _build_search_dirs(provided_cwd: str, *, real_cwd: str | None = None) -> lis
     if root_dir not in dirs:
         dirs.append(root_dir)
 
-    return dirs
+    # Worktree dir name == branch for `claude --worktree <branch>`;
+    # won't match slash-containing branches — falls back to newest.
+    branch_hint = Path(primary).name
+    return dirs, branch_hint
 
 
-def _resolve_across_dirs(dirs: list[Path], selector: str | None) -> Path | None:
+def _extract_branch(path: Path) -> str | None:
+    """Read the first ~20 lines of a transcript to find its git branch.
+
+    Cheap head-read used to filter fallback candidates by branch — avoids
+    parsing the full file.
+    """
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        for i, line in enumerate(fh):
+            if i >= _BRANCH_HEAD_LINES:
+                break
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            branch = entry.get("gitBranch")
+            if branch:
+                return branch
+    return None
+
+
+def _pick_branch_match(sessions: list[Path], branch_hint: str | None) -> Path | None:
+    """From a recency-sorted list, prefer the newest session matching *branch_hint*.
+
+    Falls back to the overall newest if no branch match is found (or no hint).
+    """
+    if not sessions:
+        return None
+    if not branch_hint:
+        return sessions[0]
+    for path in sessions:
+        if _extract_branch(path) == branch_hint:
+            return path
+    return sessions[0]
+
+
+def _resolve_across_dirs(dirs: list[Path], selector: str | None, *, branch_hint: str | None = None) -> Path | None:
     """Search multiple transcript dirs for a target session.
 
     The first dir is the primary (contains the current live session when no
     selector is given), so resolve_target skips the newest file there.
-    Fallback dirs don't contain the current session, so their newest is fair game.
+    Fallback dirs don't contain the current session, so their newest is fair
+    game — but when a *branch_hint* is provided, the fallback prefers a
+    session on the same branch over the globally newest.
     """
     for i, pdir in enumerate(dirs):
         if selector:
@@ -515,7 +562,7 @@ def _resolve_across_dirs(dirs: list[Path], selector: str | None) -> Path | None:
             target = resolve_target(pdir, None)
         else:
             sessions = list_transcripts(pdir)
-            target = sessions[0] if sessions else None
+            target = _pick_branch_match(sessions, branch_hint)
         if target is not None:
             return target
     return None
@@ -540,7 +587,7 @@ def run(
             remediation="Pass a positive integer: ccrecall tail -n 8",
         )
 
-    search_dirs = _build_search_dirs(cwd)
+    search_dirs, branch_hint = _build_search_dirs(cwd)
     valid_dirs = [d for d in search_dirs if d.is_dir()]
 
     if not valid_dirs:
@@ -568,7 +615,7 @@ def run(
             remediation="Run a Claude Code session in this project first, then retry.",
         )
 
-    target = _resolve_across_dirs(valid_dirs, selector)
+    target = _resolve_across_dirs(valid_dirs, selector, branch_hint=branch_hint if not selector else None)
 
     if target is None and selector:
         target = resolve_target_global(selector)

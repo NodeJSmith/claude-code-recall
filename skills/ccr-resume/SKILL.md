@@ -37,6 +37,7 @@ ccrecall tail
 Do **not** pass $ARGUMENTS here — it's a follow-up directive, not a session id (see Arguments).
 
 - Auto-detect picks the second-newest session (the newest is *this* one, live). If the wrong session comes up or you need to choose, run `ccrecall tail --list` and re-run with the right id substring.
+- **Cross-check against injected context:** The SessionStart hook may have already injected a "Session Origin" block at the top of context naming a specific prior session (look for `Session:` followed by a UUID). If `ccrecall tail` returns a *different* session ID, the injected context is more likely correct (it uses DB-backed cwd matching). Re-run with the injected session's ID: `ccrecall tail <id-substring>`.
 - If `ccrecall tail` finds nothing (no project dir, only the current session, or a moved cwd), fall back to `/ccr-recall` to retrieve the tail — never substitute disk artifacts for the transcript.
 - A clear/startup may already have surfaced an "Unresolved Decision From Prior Session" block at the top of context — if so, this confirms and expands it; reconcile and proceed to Phase 2.
 
