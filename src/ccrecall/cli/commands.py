@@ -7,6 +7,7 @@ argument-parsing layer changed (argparse -> cyclopts).
 """
 
 import logging
+import sys
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -18,7 +19,7 @@ from ccrecall import search_cli as search_mod
 from ccrecall import session_tail as session_tail_mod
 from ccrecall.cli import app, backfill_app
 from ccrecall.cli.context import DEFAULT_CLI_CONTEXT, CLIContextParam
-from ccrecall.config import DEFAULT_DB_PATH, load_settings
+from ccrecall.config import DEFAULT_DB_PATH, load_settings, try_acquire_pid_file
 from ccrecall.db import DEFAULT_PROJECTS_DIR, get_connection
 from ccrecall.embeddings import DEFAULT_EMBED_THREADS
 from ccrecall.hooks import backfill_embeddings as backfill_embeddings_mod
@@ -158,6 +159,17 @@ def cmd_backfill_embeddings(
     ctx: CLIContextParam = DEFAULT_CLI_CONTEXT,
 ) -> None:
     """Seed historical embeddings for active-leaf branch summaries (opt-in)."""
+    # Self-concurrency guard: at most one embeddings backfill at a time — a
+    # second instance doubles the onnxruntime memory peak on the same machine.
+    # Skip (not queue) when another instance is alive; exit 0 so a scheduler
+    # (systemd timer) doesn't see a failure. --status is read-only: it neither
+    # acquires nor disturbs the marker.
+    if not status and not try_acquire_pid_file(backfill_query_mod.PID_KEY):
+        print(
+            "ccrecall backfill embeddings: another instance is already running — skipping",
+            file=sys.stderr,
+        )
+        raise SystemExit(backfill_query_mod.EXIT_OK)
     try:
         code = backfill_embeddings_mod.run(
             status=status,
@@ -195,10 +207,10 @@ def cmd_backfill_tool_content(
     ctx: CLIContextParam = DEFAULT_CLI_CONTEXT,
 ) -> None:
     """Re-parse existing sessions' JSONL files to populate tool_content (opt-in)."""
-    # No PID_KEY/cleanup_pid() pair here, unlike cmd_backfill_embeddings above:
-    # that marker is only ever written by _spawn_background, and embeddings
-    # backfill is (like this command) never auto-spawned — so its cleanup_pid()
-    # call is a no-op today too. Not mirroring dead ceremony onto a new command.
+    # No PID guard here, unlike cmd_backfill_embeddings above: that guard exists
+    # because a second instance would double the onnxruntime memory peak. This
+    # command loads no model — its worst case is DB write contention, which the
+    # SAVEPOINT retry + busy_timeout already handle.
     code = backfill_tool_content_mod.run(
         status=status,
         json_mode=ctx.json_mode,

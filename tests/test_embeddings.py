@@ -3,17 +3,23 @@
 import math
 from unittest.mock import MagicMock
 
+import numpy as np
 import pytest
 
 from ccrecall.embeddings import (
     DEFAULT_EMBED_THREADS,
+    EMBED_BATCH_ATTENTION_BUDGET,
+    EMBED_BATCH_MAX_TEXTS,
     EMBED_CHAR_BUDGET,
     EMBEDDING_DIM,
     EMBEDDING_MODEL,
     EMBEDDING_VERSION,
+    MODEL_TOKEN_LIMIT,
+    _plan_embed_batches,
     cap_for_embedding,
     embed_batch,
     embed_text,
+    get_model,
     model_available,
     resolve_thread_count,
 )
@@ -62,6 +68,29 @@ class TestModelAvailable:
         monkeypatch.setattr("ccrecall.embeddings._model", None)
         # Must not raise
         assert model_available() is False
+
+
+class TestGetModel:
+    def test_get_model_disables_cpu_mem_arena(self, monkeypatch):
+        """Regression guard: get_model must forward enable_cpu_mem_arena=False.
+
+        Dropping the kwarg silently reintroduces the RSS-ratcheting arena
+        behavior the batch planner can't bound (see the budget comment in
+        embeddings.py).
+        """
+        captured = {}
+
+        class FakeTextEmbedding:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        monkeypatch.setattr("ccrecall.embeddings.DEPS_AVAILABLE", True)
+        monkeypatch.setattr("ccrecall.embeddings.TextEmbedding", FakeTextEmbedding)
+        monkeypatch.setattr("ccrecall.embeddings._model", None)
+
+        get_model()
+
+        assert captured["enable_cpu_mem_arena"] is False
 
 
 class TestConstants:
@@ -156,6 +185,126 @@ class TestCapForEmbedding:
         assert result == ""
         assert was_capped is False
         mock.token_count.assert_not_called()
+
+
+class TestPlanEmbedBatches:
+    """Batch planning bounds every inference call's attention area.
+
+    The budget is the memory invariant: texts-in-batch x longest-text-in-batch**2
+    must stay <= EMBED_BATCH_ATTENTION_BUDGET (and the count <= EMBED_BATCH_MAX_TEXTS),
+    because onnxruntime's unfused ALiBi attention materializes the full seq x seq
+    score matrix per head — activation memory scales with that product, not with
+    padded token positions (measured: ~1 GB at ~2.2k tokens, ~4 GB at ~4.5k,
+    ~8.4 GB at the 8192 cap for a single text).
+    """
+
+    def test_empty(self):
+        assert _plan_embed_batches([]) == []
+
+    def test_single_text(self):
+        assert _plan_embed_batches([100]) == [[0]]
+
+    def test_every_index_in_exactly_one_batch(self):
+        counts = [8192, 50, 4000, 200, 8192, 10, 1500, 300, 7000, 5]
+        batches = _plan_embed_batches(counts)
+        flat = sorted(i for batch in batches for i in batch)
+        assert flat == list(range(len(counts)))
+
+    def test_budget_respected(self):
+        counts = [8192, 50, 4000, 200, 8192, 10, 1500, 300, 7000, 5]
+        for batch in _plan_embed_batches(counts):
+            longest = max(counts[i] for i in batch)
+            assert len(batch) * longest * longest <= EMBED_BATCH_ATTENTION_BUDGET
+            assert len(batch) <= EMBED_BATCH_MAX_TEXTS
+
+    def test_max_length_texts_embed_alone(self):
+        # One 8192-token text fills the whole attention budget (1 x 8192**2), so
+        # nothing — not even a 100-token text — may ride with it or with another
+        # max-length text.
+        counts = [8192, 8192, 100]
+        batches = _plan_embed_batches(counts)
+        assert batches == [[0], [1], [2]]
+
+    def test_quadratic_packing(self):
+        # Four 4096-token texts exactly fill the budget (4 x 4096**2 == 8192**2);
+        # a fifth starts a new batch. A linear (positions) budget would pack
+        # these four-plus-more — the quadratic rule is what bounds attention memory.
+        counts = [4096] * 5
+        batches = _plan_embed_batches(counts)
+        assert batches == [[0, 1, 2, 3], [4]]
+
+    def test_max_texts_cap(self):
+        counts = [10] * (EMBED_BATCH_MAX_TEXTS + 5)
+        batches = _plan_embed_batches(counts)
+        assert [len(b) for b in batches] == [EMBED_BATCH_MAX_TEXTS, 5]
+
+    def test_oversized_single_text_gets_own_batch(self):
+        # A text whose own attention area exceeds the whole budget can't be
+        # split; it embeds alone (cap_for_embedding keeps real texts <=
+        # MODEL_TOKEN_LIMIT, so this can only arise from uncapped call sites).
+        counts = [MODEL_TOKEN_LIMIT + 1, 10]
+        batches = _plan_embed_batches(counts)
+        assert batches[0] == [0]
+        assert batches[1] == [1]
+
+    def test_zero_count_texts(self):
+        batches = _plan_embed_batches([0, 0, 0])
+        flat = sorted(i for batch in batches for i in batch)
+        assert flat == [0, 1, 2]
+
+
+class TestEmbedBatchBounded:
+    """embed_batch plans bounded batches and restores input order."""
+
+    def _make_model(self, token_counts, recorded_calls):
+        """Mock model: token_count returns the per-text counts in sequence;
+        embed records (texts, batch_size) and yields a one-hot vector per text
+        identifying its input position."""
+        mock = MagicMock()
+        mock.token_count.side_effect = list(token_counts)
+
+        position = {f"t{i}": i for i in range(len(token_counts))}
+
+        def fake_embed(batch_texts, batch_size=256):
+            batch_texts = list(batch_texts)
+            recorded_calls.append((batch_texts, batch_size))
+            vecs = []
+            for text in batch_texts:
+                v = np.zeros(EMBEDDING_DIM, dtype=np.float32)
+                v[position[text]] = 1.0
+                vecs.append(v)
+            return iter(vecs)
+
+        mock.embed.side_effect = fake_embed
+        return mock
+
+    def test_order_restored_and_batch_size_passed(self, monkeypatch):
+        counts = [8192, 100, 8192, 50]
+        texts = [f"t{i}" for i in range(len(counts))]
+        recorded: list = []
+        monkeypatch.setattr("ccrecall.embeddings._model", self._make_model(counts, recorded))
+
+        result = embed_batch(texts)
+
+        # One-hot vectors land back at their input positions despite
+        # longest-first grouping.
+        for i, vec in enumerate(result):
+            assert vec[i] == pytest.approx(1.0)
+            assert all(vec[j] == 0.0 for j in range(len(texts)) if j != i)
+        # Every inference call got batch_size=len(texts-in-call), so fastembed
+        # can't re-slice into its larger default batches.
+        assert recorded, "model.embed was never called"
+        for batch_texts, batch_size in recorded:
+            assert batch_size == len(batch_texts)
+            assert batch_size <= EMBED_BATCH_MAX_TEXTS
+            longest = max(counts[int(t[1:])] for t in batch_texts)
+            assert len(batch_texts) * longest * longest <= EMBED_BATCH_ATTENTION_BUDGET
+
+    def test_empty_list_no_model_call(self, monkeypatch):
+        mock = MagicMock()
+        monkeypatch.setattr("ccrecall.embeddings._model", mock)
+        assert embed_batch([]) == []
+        mock.embed.assert_not_called()
 
 
 @pytest.mark.skipif(not model_available(), reason="fastembed model unavailable (jina-v2-small-en)")

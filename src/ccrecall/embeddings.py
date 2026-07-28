@@ -43,13 +43,38 @@ EMBED_CHAR_BUDGET = 32_000
 MODEL_TOKEN_LIMIT = 8192
 
 # fastembed defaults its inference parallelism to every CPU core, so each
-# single inference briefly saturates the whole machine. Embedding here is always
-# a single short text (write/query/backfill all call embed_one per text), so a
-# low thread count costs interactive paths almost nothing while keeping the
-# opt-in backfill — which can run ~1.9k active-leaf inferences in one go — from
-# thrashing constrained machines. The backfill exposes `--threads` to raise this
-# on an idle machine; interactive write/query paths always use the default.
+# inference call briefly saturates the whole machine. Interactive query/write
+# paths embed one or a few texts at a time; the opt-in backfill runs ~1.9k
+# active-leaf inferences in one go (planned by embed_batch — see below). A low
+# thread count costs interactive paths almost nothing while keeping the
+# backfill from thrashing constrained machines. The backfill exposes
+# `--threads` to raise this on an idle machine; interactive paths always use
+# the default.
 DEFAULT_EMBED_THREADS = 1
+
+# Inference batching bounds for embed_batch. fastembed's own default is
+# batch_size=256, and it pads every batch to its longest text; with texts capped
+# at MODEL_TOKEN_LIMIT (8192), one 256x8192 fp32 batch needs >20 GB of
+# onnxruntime activations — enough to OOM-kill the process and, on WSL, take
+# down the whole VM (observed: 24 GB RAM + 6 GB swap, repeatedly).
+#
+# The dominant term is QUADRATIC in padded sequence length: jina-v2-small's
+# ALiBi attention is not fused in the ONNX export, so onnxruntime materializes
+# the full seq x seq score matrix per head (plus softmax/workspace copies at
+# ~5x the raw tensor). Measured single-text peaks (batch_size=1): ~1 GB at
+# ~2.2k tokens, ~4 GB at ~4.5k tokens, ~8.4 GB at the 8192 cap. embed_batch
+# therefore plans its own batches on the attention-area budget below: no
+# model.embed() call may have texts-in-batch x longest-text-in-batch**2
+# exceeding EMBED_BATCH_ATTENTION_BUDGET (nor more than EMBED_BATCH_MAX_TEXTS
+# texts). Setting the budget to one max-length text's area means packing can
+# never exceed the worst case a single capped text already has (a lone 8192
+# token text) — that residual ~8.4 GB peak is a known, accepted tradeoff of
+# keeping the 8192 cap (lowering it would change vectors and force a full
+# re-embed; revisit if it ever bites outside backfill). get_model disables
+# onnxruntime's CPU arena so the transient is returned to the OS after each
+# call instead of ratcheting RSS across a backfill.
+EMBED_BATCH_ATTENTION_BUDGET = MODEL_TOKEN_LIMIT * MODEL_TOKEN_LIMIT
+EMBED_BATCH_MAX_TEXTS = 32
 
 # cap_for_embedding tuning: dense-token texts start at DENSE_SPLIT_RATIO of
 # total length for head and tail each (40% + 40% = 80%, dropping the middle
@@ -91,7 +116,19 @@ def get_model(threads: int | None = None):
     # DEPS_AVAILABLE is True only when the fastembed import bound TextEmbedding; the
     # assert restates that invariant so the type checker sees a non-None constructor.
     assert TextEmbedding is not None  # noqa: S101 — type-checker narrowing; the real guard is the RuntimeError above
-    _model = TextEmbedding(model_name=EMBEDDING_MODEL, threads=resolve_thread_count(threads))
+    _model = TextEmbedding(
+        model_name=EMBEDDING_MODEL,
+        threads=resolve_thread_count(threads),
+        # onnxruntime's CPU arena retains each run's peak workspace for reuse
+        # and never returns it to the OS, so back-to-back capped texts (8192
+        # tokens, ~8.4 GB transient each) ratchet RSS until the machine OOMs —
+        # malloc_trim can't touch the arena. With the arena off, allocations go
+        # through glibc and the transient is returned after every call
+        # (measured: RSS falls back to ~0.3 GB between calls, HWM flat at
+        # ~8.4 GB across a run of capped texts). Allocation strategy only —
+        # computed vectors are identical.
+        enable_cpu_mem_arena=False,
+    )
     return _model
 
 
@@ -158,18 +195,63 @@ def embed_text(text: str) -> list[float]:
     return embed_one(get_model(), text)
 
 
-def embed_batch(texts: list[str]) -> list[list[float]]:
-    """Embed multiple texts in a single batched inference call.
+def _plan_embed_batches(token_counts: list[int]) -> list[list[int]]:
+    """Group text indices into inference batches under the memory bounds above.
 
-    True batched inference: passes the full list to model.embed() so the
-    underlying onnxruntime processes them as one batch. Returns vectors in the
-    same order as the input texts. Raises on failure.
+    Longest-first ordering packs similar lengths together (tight padding — short
+    texts never ride a batch padded to a long outlier) and makes each batch's
+    longest text its first element, so the attention-area budget check is simply
+    ``(len(batch) + 1) * longest**2 > EMBED_BATCH_ATTENTION_BUDGET``. Every index
+    appears in exactly one batch; a single text larger than the budget gets a
+    batch to itself (cap_for_embedding keeps it <= MODEL_TOKEN_LIMIT, so a lone
+    text is always inferable).
+    """
+    order = sorted(range(len(token_counts)), key=lambda i: token_counts[i], reverse=True)
+    batches: list[list[int]] = []
+    current: list[int] = []
+    longest = 0
+    for i in order:
+        # order is descending, so token_counts[i] <= longest for any non-empty
+        # batch: longest**2 already covers the candidate's area contribution.
+        next_area = (len(current) + 1) * longest * longest
+        if current and (len(current) >= EMBED_BATCH_MAX_TEXTS or next_area > EMBED_BATCH_ATTENTION_BUDGET):
+            batches.append(current)
+            current = []
+        if not current:
+            longest = token_counts[i]
+        current.append(i)
+    if current:
+        batches.append(current)
+    return batches
+
+
+def embed_batch(texts: list[str]) -> list[list[float]]:
+    """Embed multiple texts, returning vectors in the same order as the input.
+
+    Plans memory-bounded batches (see EMBED_BATCH_ATTENTION_BUDGET /
+    EMBED_BATCH_MAX_TEXTS) rather than handing fastembed the full list at its
+    default batch_size=256 — the padding-to-longest behavior of a batch that
+    size at up to 8192 tokens per text allocates tens of GB in onnxruntime.
+    Texts are token-counted, grouped longest-first, and embedded one planned
+    group per model.embed() call with batch_size=len(group) so fastembed does
+    not re-slice the group into larger batches. Batching changes nothing about
+    the output: each text's vector is computed independently (padding is masked
+    out) and restored to input position here. Raises on failure.
     """
     if not texts:
         return []
     model = get_model()
-    vecs = list(model.embed(texts))
-    return [normalize(v.astype(np.float32)).tolist() for v in vecs]
+    # One token_count call per text before inference (the model tokenizes again
+    # during embed). Exact counts beat a char heuristic: dense/CJK text can
+    # exceed 1 token per 2 chars, and an underestimated count is a
+    # memory-budget violation.
+    token_counts = [model.token_count([text]) for text in texts]
+    vectors: dict[int, list[float]] = {}
+    for batch in _plan_embed_batches(token_counts):
+        batch_texts = [texts[i] for i in batch]
+        for i, vec in zip(batch, model.embed(batch_texts, batch_size=len(batch_texts)), strict=True):
+            vectors[i] = normalize(vec.astype(np.float32)).tolist()
+    return [vectors[i] for i in range(len(texts))]
 
 
 def cap_for_embedding(text: str) -> tuple[str, bool]:

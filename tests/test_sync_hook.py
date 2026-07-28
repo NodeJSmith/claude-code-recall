@@ -654,7 +654,7 @@ class TestSyncCurrentExcludeProjects:
     """sync_current.run honors exclude_projects for the live session (matches import)."""
 
     def _run(self, tmp_path, monkeypatch, *, settings, cwd):
-        monkeypatch.setattr(sync_current, "pid_file_path", lambda key: tmp_path / f".pid-{key}")
+        monkeypatch.setattr("ccrecall.config.pid_file_path", lambda key: tmp_path / f".pid-{key}")
         monkeypatch.setattr(sync_current, "remove_pid_file", lambda key: None)
         monkeypatch.setattr(sync_current, "load_settings", lambda: settings)
         synced = []
@@ -700,7 +700,7 @@ class TestSyncCurrentConcurrencyGuard:
         return p
 
     def _run(self, tmp_path, monkeypatch, *, session_id=VALID_SYNC_UUID, extra_patches=None):
-        monkeypatch.setattr(sync_current, "pid_file_path", lambda key: tmp_path / f".pid-{key}")
+        monkeypatch.setattr("ccrecall.config.pid_file_path", lambda key: tmp_path / f".pid-{key}")
         monkeypatch.setattr(sync_current, "remove_pid_file", lambda key: None)
         monkeypatch.setattr(sync_current, "load_settings", lambda: {"exclude_projects": [], "logging_enabled": False})
         monkeypatch.setattr(sync_current, "get_session_file", lambda *a, **k: None)
@@ -715,7 +715,7 @@ class TestSyncCurrentConcurrencyGuard:
 
     def test_second_sync_skips_when_lock_held_by_live_pid(self, tmp_path, monkeypatch):
         """When a live PID file exists, a second sync-current skips without embedding."""
-        monkeypatch.setattr(sync_current, "pid_file_path", lambda key: tmp_path / f".pid-{key}")
+        monkeypatch.setattr("ccrecall.config.pid_file_path", lambda key: tmp_path / f".pid-{key}")
         monkeypatch.setattr(sync_current, "remove_pid_file", lambda key: None)
 
         # Write current process PID as "live" holder
@@ -735,7 +735,7 @@ class TestSyncCurrentConcurrencyGuard:
 
     def test_skip_outputs_exactly_continue_true(self, tmp_path, monkeypatch):
         """Skip path prints exactly the hook-contract JSON: {\"continue\": true}."""
-        monkeypatch.setattr(sync_current, "pid_file_path", lambda key: tmp_path / f".pid-{key}")
+        monkeypatch.setattr("ccrecall.config.pid_file_path", lambda key: tmp_path / f".pid-{key}")
         monkeypatch.setattr(sync_current, "remove_pid_file", lambda key: None)
         (tmp_path / f".pid-{sync_current.PID_KEY}").write_text(str(os.getpid()))
 
@@ -749,7 +749,7 @@ class TestSyncCurrentConcurrencyGuard:
 
     def test_stale_lock_is_reaped_and_run_proceeds(self, tmp_path, monkeypatch):
         """A stale lock (dead PID) is reaped and the sync continues."""
-        monkeypatch.setattr(sync_current, "pid_file_path", lambda key: tmp_path / f".pid-{key}")
+        monkeypatch.setattr("ccrecall.config.pid_file_path", lambda key: tmp_path / f".pid-{key}")
         # Let remove_pid_file actually delete from tmp_path
         monkeypatch.setattr(
             sync_current,
@@ -795,7 +795,7 @@ class TestSyncCurrentConcurrencyGuard:
         # Can't reuse _run here: it pins pid_file_path to tmp_path, which always
         # exists and so wouldn't exercise the missing-dir path.
         runtime_dir = tmp_path / "absent"
-        monkeypatch.setattr(sync_current, "pid_file_path", lambda key: runtime_dir / f".pid-{key}")
+        monkeypatch.setattr("ccrecall.config.pid_file_path", lambda key: runtime_dir / f".pid-{key}")
         monkeypatch.setattr(sync_current, "remove_pid_file", lambda key: None)
         monkeypatch.setattr(sync_current, "load_settings", lambda: {"exclude_projects": [], "logging_enabled": False})
         monkeypatch.setattr(sync_current, "get_session_file", lambda *a, **k: None)
@@ -920,7 +920,7 @@ class TestSyncEmbeddingStatusRecording:
         extra_patches=None,
     ):
         """Run sync_current.run() with mocked infrastructure; return parsed stdout JSON."""
-        monkeypatch.setattr(sync_current, "pid_file_path", lambda key: tmp_path / f".pid-{key}")
+        monkeypatch.setattr("ccrecall.config.pid_file_path", lambda key: tmp_path / f".pid-{key}")
         monkeypatch.setattr(sync_current, "remove_pid_file", lambda key: None)
         monkeypatch.setattr(
             sync_current,
