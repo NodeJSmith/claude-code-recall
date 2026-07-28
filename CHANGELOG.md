@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.19.4](https://github.com/NodeJSmith/claude-code-recall/compare/v0.19.3...v0.19.4) (2026-07-28)
+
+
+### Bug Fixes
+
+* bound embedding inference memory to stop machine-killing OOM ([#90](https://github.com/NodeJSmith/claude-code-recall/issues/90)) ([cd13010](https://github.com/NodeJSmith/claude-code-recall/commit/cd1301063c312214b6a6f2de20937c80a538af07))
+
+
+### Refactoring
+
+* apply mechanical tech-debt cleanup from [#90](https://github.com/NodeJSmith/claude-code-recall/issues/90) review ([#92](https://github.com/NodeJSmith/claude-code-recall/issues/92)) ([e71d6d0](https://github.com/NodeJSmith/claude-code-recall/commit/e71d6d0cd8d7cca5982118b8cb53da098b0d0405))
+
 ## [0.19.3](https://github.com/NodeJSmith/claude-code-recall/compare/v0.19.2...v0.19.3) (2026-07-26)
 
 
