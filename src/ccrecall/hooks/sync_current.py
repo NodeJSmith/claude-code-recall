@@ -46,6 +46,10 @@ PID_KEY = "ccrecall-sync-current"
 # warning isn't suppressed. Do not "normalize" the hyphen — it is load-bearing.
 COLD_MODEL_LOGGER_NAME = "ccrecall.cold-model"
 
+# Hook-contract payload printed at every early-return site, serialized once.
+# The success path is excluded: it may add suppressOutput before dumping.
+_CONTINUE_OUTPUT = json.dumps({"continue": True})
+
 
 def _warn_cold_model() -> None:
     """Best-effort warning when the embedding model is absent from the disk cache.
@@ -130,7 +134,7 @@ def run(input_file: Path | None = None) -> None:
     # accumulates a stuck process per Stop hook.
     if not try_acquire_pid_file(PID_KEY):
         # Another sync-current is alive — skip; recovered on the next Stop
-        print(json.dumps({"continue": True}))
+        print(_CONTINUE_OUTPUT)
         return
 
     try:
@@ -159,7 +163,7 @@ def run(input_file: Path | None = None) -> None:
 
         if not session_id or not validate_session_id(session_id):
             # No session ID or invalid format — exit silently
-            print(json.dumps({"continue": True}))
+            print(_CONTINUE_OUTPUT)
             return
 
         # Honor exclude_projects for the live session too — import applies it on the
@@ -174,13 +178,13 @@ def run(input_file: Path | None = None) -> None:
             project_name = extract_project_name(normalize_cwd(hook_input.cwd))
             if project_name in exclude_projects:
                 logger.info("Skipping sync — project %r is excluded", project_name)
-                print(json.dumps({"continue": True}))
+                print(_CONTINUE_OUTPUT)
                 return
 
         session_file = get_session_file(DEFAULT_PROJECTS_DIR, session_id)
 
         if not session_file:
-            print(json.dumps({"continue": True}))
+            print(_CONTINUE_OUTPUT)
             return
 
         # Warn best-effort if the model hasn't been warmed in this detached process:
@@ -235,7 +239,7 @@ def run(input_file: Path | None = None) -> None:
         except Exception as e:
             logger.error("Sync error: %s", e)
             # Don't block Claude on sync errors
-            print(json.dumps({"continue": True}))
+            print(_CONTINUE_OUTPUT)
             sys.exit(0)
 
     finally:

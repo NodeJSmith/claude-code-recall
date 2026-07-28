@@ -42,6 +42,10 @@ EMBEDDING_MODEL_CACHE_SUBDIR = "models--" + EMBEDDING_MODEL_HF_SOURCE.replace("/
 EMBED_CHAR_BUDGET = 32_000
 MODEL_TOKEN_LIMIT = 8192
 
+# Marker spliced between the kept head and tail when the middle is dropped.
+# Both build sites in cap_for_embedding must agree, so the literal lives here once.
+_CAP_MARKER = "\n\n[...]\n\n"
+
 # fastembed defaults its inference parallelism to every CPU core, so each
 # inference call briefly saturates the whole machine. Interactive query/write
 # paths embed one or a few texts at a time; the opt-in backfill runs ~1.9k
@@ -293,12 +297,12 @@ def cap_for_embedding(text: str) -> tuple[str, bool]:
         head = max(len(text) * DENSE_SPLIT_NUMERATOR // DENSE_SPLIT_DENOMINATOR, 1)
         tail = max(len(text) * DENSE_SPLIT_NUMERATOR // DENSE_SPLIT_DENOMINATOR, 1)
 
-    capped = text[:head] + "\n\n[...]\n\n" + text[-tail:]
+    capped = text[:head] + _CAP_MARKER + text[-tail:]
 
     while model.token_count([capped]) > MODEL_TOKEN_LIMIT:
         head = max(head * SHRINK_NUMERATOR // SHRINK_DENOMINATOR, 1)
         tail = max(tail * SHRINK_NUMERATOR // SHRINK_DENOMINATOR, 1)
-        next_capped = text[:head] + "\n\n[...]\n\n" + text[-tail:]
+        next_capped = text[:head] + _CAP_MARKER + text[-tail:]
         if next_capped == capped:
             break  # no further reduction possible; pathological — let embed_text raise
         capped = next_capped

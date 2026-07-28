@@ -252,7 +252,6 @@ class TestBackfillEmbedsFull:
         n_exchanges = MAX_WRITE_PATH_EMBEDS_PER_SYNC * 2 + 3  # well over the write-path cap
         bid = _insert_branch_with_messages(conn, num_exchanges=n_exchanges)
 
-        exit_code = None
         with (
             patch("ccrecall.hooks.backfill_embeddings.model_available", return_value=True),
             patch("ccrecall.embed_ops.embed_batch", side_effect=lambda texts: [_FIXED_VEC] * len(texts)),
