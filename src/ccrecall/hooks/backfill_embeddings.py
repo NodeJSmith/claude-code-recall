@@ -79,7 +79,11 @@ def _reclaim_memory(libc: ctypes.CDLL | None) -> None:
     """
     gc.collect()
     if libc is not None:
-        libc.malloc_trim(0)
+        # Best-effort: a ctypes/symbol failure here would escape run()'s
+        # sqlite3.Error/OSError normalization and crash the backfill over a
+        # memory-hygiene nicety.
+        with contextlib.suppress(Exception):
+            libc.malloc_trim(0)
 
 
 def run(

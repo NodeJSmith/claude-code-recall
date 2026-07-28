@@ -134,12 +134,17 @@ def try_acquire_pid_file(pid_key: str) -> bool:
                     raise ValueError(f"bogus pid: {existing_pid}")
                 os.kill(existing_pid, 0)  # signal 0: liveness probe, no signal sent
                 return False
-            except ValueError:
-                # Unreadable/corrupt PID file — reap and retry. An unreapable
-                # marker (a directory, EACCES, ...) must raise, not be
-                # suppressed: retrying it would spin the loop forever.
+            except (ValueError, OverflowError):
+                # Unreadable/corrupt PID file (OverflowError: an in-range int()
+                # result that os.kill can't convert to a C pid) — reap and
+                # retry. An unreapable marker (a directory, EACCES, ...) must
+                # raise, not be suppressed: retrying it would spin forever.
+                # FileNotFoundError means a concurrent contender already
+                # reaped it — nothing left to do, just retry.
                 try:
                     pid_path.unlink()
+                except FileNotFoundError:
+                    pass
                 except OSError as e:
                     raise RuntimeError(f"cannot reap corrupt PID marker: {pid_path}") from e
                 continue
@@ -147,11 +152,14 @@ def try_acquire_pid_file(pid_key: str) -> bool:
                 # Process exists but we lack permission to signal it — treat as alive
                 return False
             except OSError:
-                # Dead holder (ESRCH from the probe) or another OS-level
-                # read/probe failure — reap and retry (same raise-on-unreapable
-                # rule as the corrupt branch).
+                # Dead holder (ESRCH from the probe), a marker that vanished
+                # between the link failure and the read, or another OS-level
+                # read/probe failure — reap and retry (same rules as the
+                # corrupt branch).
                 try:
                     pid_path.unlink()
+                except FileNotFoundError:
+                    pass
                 except OSError as e:
                     raise RuntimeError(f"cannot reap stale PID marker: {pid_path}") from e
                 continue

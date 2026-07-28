@@ -1017,6 +1017,14 @@ class TestBackfillPidGuard:
         (tmp_path / f".pid-{PID_KEY}").write_text("not-a-pid")
         assert try_acquire_pid_file(PID_KEY) is True
 
+    def test_out_of_range_pid_reaped(self, monkeypatch, tmp_path):
+        monkeypatch.setattr("ccrecall.config.pid_file_path", lambda key: tmp_path / f".pid-{key}")
+        # int() parses arbitrarily large values, but os.kill raises
+        # OverflowError for anything outside C's pid range — that must be
+        # treated as corrupt and reaped, not escape the guard.
+        (tmp_path / f".pid-{PID_KEY}").write_text("9" * 40)
+        assert try_acquire_pid_file(PID_KEY) is True
+
     def test_nonpositive_pid_reaped(self, monkeypatch, tmp_path):
         monkeypatch.setattr("ccrecall.config.pid_file_path", lambda key: tmp_path / f".pid-{key}")
         # kill(0, 0) probes the caller's own process group — a non-positive PID

@@ -19,6 +19,7 @@ from ccrecall.embeddings import (
     cap_for_embedding,
     embed_batch,
     embed_text,
+    get_model,
     model_available,
     resolve_thread_count,
 )
@@ -67,6 +68,29 @@ class TestModelAvailable:
         monkeypatch.setattr("ccrecall.embeddings._model", None)
         # Must not raise
         assert model_available() is False
+
+
+class TestGetModel:
+    def test_get_model_disables_cpu_mem_arena(self, monkeypatch):
+        """Regression guard: get_model must forward enable_cpu_mem_arena=False.
+
+        Dropping the kwarg silently reintroduces the RSS-ratcheting arena
+        behavior the batch planner can't bound (see the budget comment in
+        embeddings.py).
+        """
+        captured = {}
+
+        class FakeTextEmbedding:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        monkeypatch.setattr("ccrecall.embeddings.DEPS_AVAILABLE", True)
+        monkeypatch.setattr("ccrecall.embeddings.TextEmbedding", FakeTextEmbedding)
+        monkeypatch.setattr("ccrecall.embeddings._model", None)
+
+        get_model()
+
+        assert captured["enable_cpu_mem_arena"] is False
 
 
 class TestConstants:
