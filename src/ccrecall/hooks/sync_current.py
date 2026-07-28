@@ -9,7 +9,6 @@ v3 schema: messages stored once per session, branches as a separate index.
 import contextlib
 import json
 import logging
-import os
 import re
 import sys
 from logging.handlers import RotatingFileHandler
@@ -21,12 +20,11 @@ from ccrecall.config import (
     DEFAULT_LOG_PATH,
     LOG_BACKUP_COUNT,
     LOG_MAX_BYTES,
-    PID_FILE_MODE,
     ensure_parent_dir,
     load_settings,
-    pid_file_path,
     remove_pid_file,
     setup_logging,
+    try_acquire_pid_file,
 )
 from ccrecall.db import DEFAULT_PROJECTS_DIR, chunk_vec_queryable, get_connection
 from ccrecall.embeddings import is_model_cached_on_disk
@@ -124,46 +122,16 @@ def run(input_file: Path | None = None) -> None:
     """Sync only the current session into the memory DB (Stop-hook helper)."""
     # Concurrency guard.
     # At most one sync-current at a time: skip (not queue) if another is alive.
-    # Reap stale locks (dead PID) so a crash doesn't permanently block syncing.
-    pid_path = pid_file_path(PID_KEY)
-    # Ensure the runtime dir exists: on a fresh machine the Stop hook can fire
-    # before anything else creates ~/.ccrecall/. Without this, the os.open() below
-    # raises an uncaught FileNotFoundError (it's before the try/finally), leaving
-    # the hook with no stdout — a violation of the {"continue": true} contract.
-    ensure_parent_dir(pid_path)
-    while True:
-        try:
-            # Atomic create — fails with FileExistsError if file already exists
-            lock_fd = os.open(str(pid_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, PID_FILE_MODE)
-        except FileExistsError:  # noqa: PERF203 — PID-file liveness/retry loop; the try/except IS the mechanism, not incidental control flow
-            try:
-                existing_pid = int(pid_path.read_text().strip())
-                os.kill(existing_pid, 0)  # signal 0: liveness probe, no signal sent
-                # Another sync-current is alive — skip; recovered on the next Stop
-                print(json.dumps({"continue": True}))
-                return
-            except ValueError:
-                # Unreadable PID file — reap and retry
-                with contextlib.suppress(OSError):
-                    pid_path.unlink()
-                continue
-            except PermissionError:
-                # Process exists but we lack permission to signal it — treat as alive, skip
-                print(json.dumps({"continue": True}))
-                return
-            except OSError:
-                # ProcessLookupError (ESRCH) — process is dead — reap and retry
-                with contextlib.suppress(OSError):
-                    pid_path.unlink()
-                continue
-        else:
-            # We hold the exclusive lock — write our PID so the next caller can
-            # detect whether we're still alive via os.kill(pid, 0)
-            try:
-                os.write(lock_fd, str(os.getpid()).encode())
-            finally:
-                os.close(lock_fd)
-            break
+    # try_acquire_pid_file owns the atomic acquire, the runtime-dir ensure (a
+    # fresh machine can fire Stop before anything else creates ~/.ccrecall/),
+    # and stale-marker reaping. An unreapable marker raises instead of spinning
+    # forever — this process runs detached (stdout/stderr are DEVNULL), so a
+    # fast crash and a hang are equally invisible here, but a hang also
+    # accumulates a stuck process per Stop hook.
+    if not try_acquire_pid_file(PID_KEY):
+        # Another sync-current is alive — skip; recovered on the next Stop
+        print(json.dumps({"continue": True}))
+        return
 
     try:
         settings = load_settings()

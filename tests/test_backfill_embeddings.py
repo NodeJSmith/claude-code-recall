@@ -13,18 +13,21 @@ Opt-in: --days bounds by recency, --limit caps the run.
 
 import builtins
 import json
+import os
 import sqlite3
 from unittest.mock import MagicMock, patch
 
 import pytest
 from conftest import VEC_SKIP, make_vec_conn, patched_clear, patched_record
 
+from ccrecall.cli.commands import cmd_backfill_embeddings
+from ccrecall.config import remove_pid_file, try_acquire_pid_file
 from ccrecall.db import CONTENT_ERROR_VERSION
 from ccrecall.embed_ops import MAX_WRITE_PATH_EMBEDS_PER_SYNC
 from ccrecall.embeddings import EMBEDDING_DIM, EMBEDDING_MODEL, EMBEDDING_VERSION
 from ccrecall.health import REASON_VEC_UNAVAILABLE
 from ccrecall.hooks.backfill_embeddings import run
-from ccrecall.hooks.backfill_query import BATCH_SIZE, EXIT_ABORT, EXIT_OK
+from ccrecall.hooks.backfill_query import BATCH_SIZE, EXIT_ABORT, EXIT_OK, PID_KEY
 
 # A fixed EMBEDDING_DIM-dim float vector for stubbing embed_text.
 _FIXED_VEC = [0.001] * EMBEDDING_DIM
@@ -985,6 +988,105 @@ class TestBackfillEmbeddingStatusRecording:
         assert record_calls == [], (
             f"run_status() (--status path) must never call record_embedding_failure; got calls: {record_calls}"
         )
+
+
+class TestBackfillPidGuard:
+    """Self-concurrency guard for the manual embeddings backfill.
+
+    The CLI acquires the PID marker before run() and cleans it up on exit, so a
+    second instance (a systemd timer firing while a previous run is alive, or a
+    double-invoked manual run) skips instead of doubling the onnxruntime memory
+    peak. --status is read-only and never touches the marker.
+    """
+
+    def test_acquire_then_second_instance_fails(self, monkeypatch, tmp_path):
+        monkeypatch.setattr("ccrecall.config.pid_file_path", lambda key: tmp_path / f".pid-{key}")
+        assert try_acquire_pid_file(PID_KEY) is True
+        # Our own live PID holds the marker — a second acquisition must refuse.
+        assert try_acquire_pid_file(PID_KEY) is False
+
+    def test_stale_pid_reaped(self, monkeypatch, tmp_path):
+        monkeypatch.setattr("ccrecall.config.pid_file_path", lambda key: tmp_path / f".pid-{key}")
+        # 99999999 exceeds Linux's max pid (2^22) — guaranteed dead.
+        (tmp_path / f".pid-{PID_KEY}").write_text("99999999")
+        assert try_acquire_pid_file(PID_KEY) is True
+        assert (tmp_path / f".pid-{PID_KEY}").read_text() == str(os.getpid())
+
+    def test_unreadable_pid_file_reaped(self, monkeypatch, tmp_path):
+        monkeypatch.setattr("ccrecall.config.pid_file_path", lambda key: tmp_path / f".pid-{key}")
+        (tmp_path / f".pid-{PID_KEY}").write_text("not-a-pid")
+        assert try_acquire_pid_file(PID_KEY) is True
+
+    def test_nonpositive_pid_reaped(self, monkeypatch, tmp_path):
+        monkeypatch.setattr("ccrecall.config.pid_file_path", lambda key: tmp_path / f".pid-{key}")
+        # kill(0, 0) probes the caller's own process group — a non-positive PID
+        # would read as permanently alive; it must be treated as corrupt.
+        (tmp_path / f".pid-{PID_KEY}").write_text("0")
+        assert try_acquire_pid_file(PID_KEY) is True
+
+    def test_unreapable_marker_raises(self, monkeypatch, tmp_path):
+        monkeypatch.setattr("ccrecall.config.pid_file_path", lambda key: tmp_path / f".pid-{key}")
+        # A marker that can't be unlinked (here: it's a directory) must raise —
+        # a suppressed failure would spin the reap-retry loop forever.
+        (tmp_path / f".pid-{PID_KEY}").mkdir()
+        with pytest.raises(RuntimeError, match="cannot reap"):
+            try_acquire_pid_file(PID_KEY)
+
+    def test_release_allows_reacquire(self, monkeypatch, tmp_path):
+        monkeypatch.setattr("ccrecall.config.pid_file_path", lambda key: tmp_path / f".pid-{key}")
+        assert try_acquire_pid_file(PID_KEY) is True
+        remove_pid_file(PID_KEY)
+        assert try_acquire_pid_file(PID_KEY) is True
+
+    def test_cli_skips_when_instance_alive(self, capsys):
+        with (
+            patch("ccrecall.cli.commands.try_acquire_pid_file", return_value=False),
+            patch("ccrecall.cli.commands.backfill_embeddings_mod.run") as mock_run,
+            patch("ccrecall.cli.commands.backfill_query_mod.cleanup_pid") as mock_cleanup,
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            cmd_backfill_embeddings()
+
+        assert exc_info.value.code == EXIT_OK, "skip is not a failure — a scheduler shouldn't see non-zero"
+        mock_run.assert_not_called()
+        # We never owned the marker, so we must not remove the live run's sentinel.
+        mock_cleanup.assert_not_called()
+        assert "already running" in capsys.readouterr().err
+
+    def test_cli_acquires_and_cleans_up(self):
+        with (
+            patch("ccrecall.cli.commands.try_acquire_pid_file", return_value=True),
+            patch("ccrecall.cli.commands.backfill_embeddings_mod.run", return_value=EXIT_OK),
+            patch("ccrecall.cli.commands.backfill_query_mod.cleanup_pid") as mock_cleanup,
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            cmd_backfill_embeddings()
+
+        assert exc_info.value.code == EXIT_OK
+        mock_cleanup.assert_called_once_with()
+
+    def test_cli_cleans_up_on_run_exception(self):
+        with (
+            patch("ccrecall.cli.commands.try_acquire_pid_file", return_value=True),
+            patch("ccrecall.cli.commands.backfill_embeddings_mod.run", side_effect=RuntimeError("boom")),
+            patch("ccrecall.cli.commands.backfill_query_mod.cleanup_pid") as mock_cleanup,
+            pytest.raises(RuntimeError),
+        ):
+            cmd_backfill_embeddings()
+
+        mock_cleanup.assert_called_once_with()
+
+    def test_cli_status_never_touches_marker(self):
+        with (
+            patch("ccrecall.cli.commands.try_acquire_pid_file") as mock_acquire,
+            patch("ccrecall.cli.commands.backfill_embeddings_mod.run", return_value=EXIT_OK),
+            patch("ccrecall.cli.commands.backfill_query_mod.cleanup_pid") as mock_cleanup,
+            pytest.raises(SystemExit),
+        ):
+            cmd_backfill_embeddings(status=True)
+
+        mock_acquire.assert_not_called()
+        mock_cleanup.assert_not_called()
 
 
 class TestBackfillETAProgress:

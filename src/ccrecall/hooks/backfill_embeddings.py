@@ -16,10 +16,14 @@ without embedding, progress lines carry elapsed/ETA, and abort paths exit
 non-zero so the scheduler sees the failure.
 
 Query construction/constants live in `backfill_query.py`; status reporting
-lives in `backfill_status.py`. This module keeps only the `run()` orchestrator.
+lives in `backfill_status.py`. This module keeps the `run()` orchestrator plus
+the per-batch `_reclaim_memory` helper (gc + malloc_trim between batches, the
+same RSS discipline as import_conversations).
 """
 
 import contextlib
+import ctypes
+import gc
 import json
 import os
 import sqlite3
@@ -53,6 +57,29 @@ _LOG_PREFIX = "Backfill embeddings"
 _SAVEPOINT_NAME = "row"
 _WARMUP_BRANCHES = 5
 _RATE_WINDOW = 30
+
+
+def _try_load_libc() -> ctypes.CDLL | None:
+    """Load glibc for malloc_trim (Linux only); None anywhere else or on failure."""
+    if sys.platform != "linux":
+        return None
+    with contextlib.suppress(OSError):
+        return ctypes.CDLL("libc.so.6")
+    return None
+
+
+def _reclaim_memory(libc: ctypes.CDLL | None) -> None:
+    """Free Python objects and hand freed glibc arena pages back to the OS.
+
+    Same RSS discipline as import_conversations' reclaim_memory: without
+    malloc_trim, a process embedding thousands of branches keeps every arena it
+    ever grew, so its RSS floor ratchets up to the largest historical batch and
+    stays there. Runs once per batch (beside the commit) so peaks don't
+    accumulate across the run.
+    """
+    gc.collect()
+    if libc is not None:
+        libc.malloc_trim(0)
 
 
 def run(
@@ -110,6 +137,7 @@ def run(
     started = time.monotonic()
 
     where, params = build_selection(days)
+    libc = _try_load_libc()
 
     try:
         with get_connection(settings, load_vec=True) as conn:
@@ -285,6 +313,7 @@ def run(
                     return EXIT_ABORT
 
                 conn.commit()
+                _reclaim_memory(libc)
 
                 time.sleep(BACKFILL_BATCH_DELAY_SECONDS)
     except (sqlite3.Error, OSError) as e:

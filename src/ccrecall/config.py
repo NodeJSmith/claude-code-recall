@@ -97,6 +97,69 @@ def remove_pid_file(pid_key: str) -> None:
         pid_file_path(pid_key).unlink(missing_ok=True)
 
 
+def try_acquire_pid_file(pid_key: str) -> bool:
+    """Attempt to become the sole running instance of ``pid_key``'s job.
+
+    Atomic write-then-link acquisition with a liveness probe on any existing
+    sentinel: a live holder means False (caller must skip, not queue); a dead
+    or unreadable sentinel is reaped and acquisition retried. On success the
+    marker holds the caller's PID and True is returned — the caller MUST later
+    call remove_pid_file(pid_key), including on error paths. A holder we lack
+    permission to signal counts as live (PermissionError → False).
+
+    Acquisition is os.link() of a fully written temp file rather than
+    O_CREAT|O_EXCL create-then-write: link fails with EEXIST only when the
+    marker already exists, so a contender can never observe the empty file of
+    an O_EXCL create caught before its PID write (and reap its way into a
+    second concurrent holder). The temp file is per-PID and unlinked in all
+    outcomes.
+    """
+    pid_path = pid_file_path(pid_key)
+    ensure_parent_dir(pid_path)
+    while True:
+        tmp_path = pid_path.with_name(f"{pid_path.name}.tmp-{os.getpid()}")
+        try:
+            fd = os.open(str(tmp_path), os.O_CREAT | os.O_WRONLY | os.O_TRUNC, PID_FILE_MODE)
+            try:
+                os.write(fd, str(os.getpid()).encode())
+            finally:
+                os.close(fd)
+            os.link(tmp_path, pid_path)
+        except FileExistsError:
+            try:
+                existing_pid = int(pid_path.read_text().strip())
+                if existing_pid <= 0:
+                    # 0/negative would probe the caller's own process group and
+                    # read as permanently "alive" — treat as a corrupt marker.
+                    raise ValueError(f"bogus pid: {existing_pid}")
+                os.kill(existing_pid, 0)  # signal 0: liveness probe, no signal sent
+                return False
+            except ValueError:
+                # Unreadable/corrupt PID file — reap and retry. An unreapable
+                # marker (a directory, EACCES, ...) must raise, not be
+                # suppressed: retrying it would spin the loop forever.
+                try:
+                    pid_path.unlink()
+                except OSError as e:
+                    raise RuntimeError(f"cannot reap corrupt PID marker: {pid_path}") from e
+                continue
+            except PermissionError:
+                # Process exists but we lack permission to signal it — treat as alive
+                return False
+            except OSError:
+                # Dead holder (ESRCH from the probe) or another OS-level
+                # read/probe failure — reap and retry (same raise-on-unreapable
+                # rule as the corrupt branch).
+                try:
+                    pid_path.unlink()
+                except OSError as e:
+                    raise RuntimeError(f"cannot reap stale PID marker: {pid_path}") from e
+                continue
+        finally:
+            tmp_path.unlink(missing_ok=True)
+        return True
+
+
 def load_config() -> dict:
     """Read ~/.ccrecall/config.json. Returns empty dict on missing/malformed config."""
     if not CONFIG_PATH.exists():

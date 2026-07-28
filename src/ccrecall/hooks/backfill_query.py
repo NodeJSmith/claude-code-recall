@@ -21,7 +21,8 @@ EXIT_OK = 0
 EXIT_ABORT = 1
 
 # PID key for the self-concurrency guard (this command is manual-only, never
-# auto-spawned; the marker is cleaned up by the CLI command on exit).
+# auto-spawned; the marker is acquired at CLI start via try_acquire_pid_file
+# and cleaned up by the CLI command on exit).
 PID_KEY = "ccrecall-backfill-embeddings"
 
 
