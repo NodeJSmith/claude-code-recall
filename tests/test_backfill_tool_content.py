@@ -442,6 +442,30 @@ class TestBackfillStatus:
         data = json.loads(capsys.readouterr().out)
         assert data["total_sessions"] == 1
         assert data["pending_sessions"] == 1
+        assert data["pending_backfillable_sessions"] == 1
+        assert data["pending_missing_jsonl_sessions"] == 0
+        assert data["done_sessions"] == 0
+
+    def test_status_splits_pending_missing_jsonl(self, tmp_path, capsys):
+        conn = _make_conn()
+        missing_path = tmp_path / "sess-missing.jsonl"
+        _seed_session(
+            conn,
+            filepath=missing_path,
+            existing_messages=[("u1", "user", "hi", "2026-01-01T10:00:00Z")],
+        )
+
+        with (
+            patch("ccrecall.hooks.backfill_tool_content.get_connection", return_value=NoCloseConn(conn)),
+            patch("ccrecall.hooks.backfill_tool_content.load_settings", return_value={}),
+        ):
+            code = run(status=True, json_mode=True)
+        assert code == EXIT_OK
+
+        data = json.loads(capsys.readouterr().out)
+        assert data["pending_sessions"] == 1
+        assert data["pending_backfillable_sessions"] == 0
+        assert data["pending_missing_jsonl_sessions"] == 1
         assert data["done_sessions"] == 0
 
     def test_status_does_not_write(self, tmp_path):

@@ -108,3 +108,31 @@ def insert_new_messages(
             new_count += 1
             existing_uuids.add(row[1])
     return new_count
+
+
+def update_missing_tool_content(
+    cursor: sqlite3.Cursor,
+    session_id: int,
+    messages: list[dict],
+    existing_uuids: set[str],
+) -> int:
+    """Populate tool_content for existing messages that predate the column.
+
+    ``insert_new_messages`` intentionally skips UUIDs already present in the DB.
+    That keeps normal re-syncs idempotent, but it also means a row created before
+    ``messages.tool_content`` existed would stay NULL until the explicit
+    backfill. Repair those rows whenever the transcript is parsed again.
+    """
+    updated = 0
+    for entry in messages:
+        uuid = entry.get("uuid")
+        if not uuid or uuid not in existing_uuids:
+            continue
+        content = entry.get("message", {}).get("content", "")
+        _text, _has_tool_use, _has_thinking, _tool_summary, tool_content = extract_text_content(content)
+        cursor.execute(
+            "UPDATE messages SET tool_content = ? WHERE session_id = ? AND uuid = ? AND tool_content IS NULL",
+            (tool_content, session_id, uuid),
+        )
+        updated += cursor.rowcount
+    return updated

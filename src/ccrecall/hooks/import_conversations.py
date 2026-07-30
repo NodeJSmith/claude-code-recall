@@ -22,15 +22,16 @@ from ccrecall.config import DEFAULT_DB_PATH, get_db_path, load_settings, remove_
 from ccrecall.db import (
     DEFAULT_PROJECTS_DIR,
     TRIGGER_CHUNKS_VEC_AD,
-    branch_embedding_coverage,
     get_connection,
     vec_available,
 )
 from ccrecall.formatting import extract_project_name, normalize_project_key
+from ccrecall.import_log_ops import has_pending_tool_content
 from ccrecall.models import LOGGER_NAME
 from ccrecall.parsing import extract_session_uuid
 from ccrecall.project_ops import upsert_project
 from ccrecall.session_ops import sync_session
+from ccrecall.status import run as run_status
 
 # Chunk size for streaming a file through the change-detection hash (bounded memory).
 HASH_CHUNK_SIZE = 8192
@@ -89,13 +90,23 @@ def import_session(
         (str(filepath),),
     )
     log_row = cursor.fetchone()
-    if log_row and log_row[2] == file_size and log_row[3] == file_mtime:
+    if (
+        log_row
+        and log_row[2] == file_size
+        and log_row[3] == file_mtime
+        and not has_pending_tool_content(cursor, filepath)
+    ):
         log.debug("skip %s (%.1f MB, stat match)", filepath.name, file_size / BYTES_PER_MB)
         return -1, 0
 
     # Stat changed or no prior record — fall back to full hash comparison.
     file_hash = get_file_hash(filepath)
-    if log_row and log_row[1] is not None and log_row[1] == file_hash:
+    if (
+        log_row
+        and log_row[1] is not None
+        and log_row[1] == file_hash
+        and not has_pending_tool_content(cursor, filepath)
+    ):
         # Content unchanged despite stat difference (e.g. touch without edit).
         # Update stored stat so the fast path works next time.
         cursor.execute(
@@ -246,46 +257,8 @@ def import_project(
 
 
 def print_stats(db: Path = DEFAULT_DB_PATH) -> None:
-    """Print row counts and on-disk size for the memory DB to stdout.
-
-    Read-only: deliberately does NOT touch the import PID file (it shares no
-    lifecycle with run()), so `ccrecall stats` can't delete a live background
-    import's PID sentinel and let the session hook spawn a duplicate import.
-    load_vec=False keeps it genuinely read-only — the counts never query
-    chunk_vec, so there's no reason to create and commit the vec schema here.
-    """
-    settings = load_settings()
-    if db != DEFAULT_DB_PATH:
-        settings["db_path"] = str(db)
-    db_path = get_db_path(settings)
-
-    with get_connection(settings, load_vec=False) as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM projects")
-        projects = cursor.fetchone()[0]
-        cursor.execute("SELECT COUNT(*) FROM sessions")
-        sessions = cursor.fetchone()[0]
-        cursor.execute("SELECT COUNT(*) FROM messages")
-        messages = cursor.fetchone()[0]
-        cursor.execute("SELECT COUNT(*) FROM branches")
-        total_branches = cursor.fetchone()[0]
-        cursor.execute("SELECT COUNT(*) FROM branches WHERE is_active = 1")
-        active = cursor.fetchone()[0]
-        # Branch-grain embedding coverage (vec-free watermark count).
-        embedded, embeddable = branch_embedding_coverage(conn)
-
-    db_size = db_path.stat().st_size if db_path.exists() else 0
-
-    print(f"Database: {db_path}")
-    print(f"Size: {db_size / BYTES_PER_MB:.2f} MB")
-    print(f"Projects: {projects}")
-    print(f"Sessions: {sessions}")
-    print(f"Branches: {total_branches} ({active} active)")
-    print(f"Messages: {messages}")
-    if embeddable:
-        print(f"Embeddings: {embedded}/{embeddable} branches ({embedded / embeddable * 100:.0f}%)")
-    else:
-        print("Embeddings: 0/0 branches")
+    """Print consolidated read-only status for backward-compatible ``stats`` callers."""
+    run_status(db=db)
 
 
 def run(

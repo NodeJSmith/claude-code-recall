@@ -68,6 +68,35 @@ class TestImportSessionBasic:
         message_count = cursor.fetchone()[0]
         assert message_count == total_messages, "Message count should match returned value"
 
+    def test_unchanged_import_repairs_pending_tool_content(self, memory_db, project_id):
+        """Import fast-skip paths must not bypass pending tool_content repair."""
+        fixture_file = FIXTURE_DIR / "tool_heavy.jsonl"
+
+        import_session(memory_db, fixture_file, project_id)
+        memory_db.commit()
+
+        cursor = memory_db.cursor()
+        cursor.execute(
+            """
+            SELECT session_id, uuid FROM messages
+            WHERE role = 'assistant' AND tool_content IS NOT NULL AND tool_content != ''
+            LIMIT 1
+            """
+        )
+        session_id, uuid = cursor.fetchone()
+        cursor.execute("UPDATE messages SET tool_content = NULL WHERE session_id = ? AND uuid = ?", (session_id, uuid))
+        memory_db.commit()
+
+        branches_imported, total_messages = import_session(memory_db, fixture_file, project_id)
+        memory_db.commit()
+
+        repaired = cursor.execute(
+            "SELECT tool_content FROM messages WHERE session_id = ? AND uuid = ?", (session_id, uuid)
+        ).fetchone()[0]
+        assert branches_imported >= 0
+        assert total_messages > 0
+        assert repaired, "unchanged import should repair NULL tool_content instead of fast-skipping"
+
 
 class TestImportSessionWithBranches:
     """Test import of a session with a rewind recorded in the JSONL.
@@ -804,7 +833,7 @@ class TestPrintStatsEmbeddingCoverage:
         print_stats(db=db_path)
         out = capsys.readouterr().out
 
-        assert "Embeddings: 2/3 branches (67%)" in out
+        assert "watermark: 2/3 branches" in out
 
     def test_zero_embeddable_branches(self, tmp_path, capsys):
         """A DB with no embeddable branches reports 0/0 without dividing by zero."""
@@ -815,7 +844,7 @@ class TestPrintStatsEmbeddingCoverage:
         print_stats(db=db_path)
         out = capsys.readouterr().out
 
-        assert "Embeddings: 0/0 branches" in out
+        assert "watermark: 0/0 branches" in out
 
 
 class TestEmptySessionCascadeRegression:
