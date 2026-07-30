@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-07-30
+
+### Features
+
+* add consolidated ingestion status ([#93](https://github.com/NodeJSmith/claude-code-recall/issues/93))
+
 ## [0.19.4](https://github.com/NodeJSmith/claude-code-recall/compare/v0.19.3...v0.19.4) (2026-07-28)
 
 
