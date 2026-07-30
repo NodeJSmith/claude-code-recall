@@ -121,23 +121,26 @@ def select_active_leaf_entry(all_entries: list[dict]) -> dict | None:
 
 def sort_session_files(filepaths: list[Path]) -> list[Path]:
     """Order sibling transcript files so parent-chain segments replay before descendants."""
-    entries_by_path = {path: list(parse_all_with_uuids(path)) for path in filepaths}
+    entries_by_path = {
+        path: [
+            (entry.get("uuid"), entry.get("parentUuid"), entry.get("timestamp") or "")
+            for entry in parse_all_with_uuids(path)
+        ]
+        for path in filepaths
+    }
     uuid_to_parent = {
-        entry["uuid"]: entry.get("parentUuid")
-        for entries in entries_by_path.values()
-        for entry in entries
-        if entry.get("uuid")
+        uuid: parent_uuid for entries in entries_by_path.values() for uuid, parent_uuid, _timestamp in entries if uuid
     }
 
     def key(path: Path) -> tuple[str, int, str]:
         entries = entries_by_path[path]
         if not entries:
             return "", 0, path.name
-        latest_timestamp = max(entry.get("timestamp") or "" for entry in entries)
+        latest_timestamp = max(timestamp for _uuid, _parent_uuid, timestamp in entries)
         latest_depth = max(
-            branch_depth(entry["uuid"], uuid_to_parent)
-            for entry in entries
-            if entry.get("uuid") and (entry.get("timestamp") or "") == latest_timestamp
+            branch_depth(uuid, uuid_to_parent)
+            for uuid, _parent_uuid, timestamp in entries
+            if uuid and timestamp == latest_timestamp
         )
         return latest_timestamp, latest_depth, path.name
 
