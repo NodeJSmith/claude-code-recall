@@ -46,6 +46,7 @@ def sync_session(
     embed: bool = True,
     file_size: int | None = None,
     file_mtime: float | None = None,
+    *,
     force: bool = False,
 ) -> int:
     """Import a single JSONL session file, returning the count of new messages inserted (or -1 if skipped).
@@ -59,6 +60,8 @@ def sync_session(
     matches an existing *non-NULL* hash, the file is unchanged and the function
     returns -1; a stored ``NULL`` hash (a sync-written placeholder) with a
     provided ``file_hash`` is treated as stale and re-processed.
+    ``force=True`` bypasses the import_log hash-match skip and reprocesses the
+    transcript.
     ``_project_id``, when provided by the import_conversations.py adapter, is
     used directly so the project upsert step is skipped and no second DB lookup
     runs. ``embed`` controls whether chunk embeddings are written — the import
