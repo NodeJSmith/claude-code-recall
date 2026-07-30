@@ -14,6 +14,7 @@ from ccrecall.db import _ensure_vec_schema, vec_available
 from ccrecall.embed_ops import MAX_WRITE_PATH_EMBEDS_PER_SYNC, embed_branch_chunks
 from ccrecall.embeddings import EMBEDDING_DIM, EMBEDDING_MODEL, EMBEDDING_VERSION
 from ccrecall.hooks.import_conversations import get_file_hash
+from ccrecall.import_log_ops import has_pending_tool_content
 from ccrecall.parsing import extract_session_uuid
 from ccrecall.schema import SCHEMA
 from ccrecall.session_ops import sync_session
@@ -134,6 +135,37 @@ class TestSyncSessionCreatesBranches:
         )
         sample = cursor.fetchone()[0]
         assert sample.startswith("["), "tool_content should carry a '[ToolName: ...]' marker"
+
+    def test_resync_repairs_existing_null_tool_content(self, memory_db):
+        """Re-parsing a session should populate old rows whose tool_content is NULL."""
+
+        fixture_path = FIXTURE_DIR / "tool_heavy.jsonl"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project_dir = Path(tmpdir)
+            sync_session(memory_db, fixture_path, project_dir)
+            memory_db.commit()
+
+            cursor = memory_db.cursor()
+            cursor.execute(
+                """
+                SELECT session_id, uuid FROM messages
+                WHERE role = 'assistant' AND tool_content IS NOT NULL AND tool_content != ''
+                LIMIT 1
+                """
+            )
+            session_id, uuid = cursor.fetchone()
+            cursor.execute(
+                "UPDATE messages SET tool_content = NULL WHERE session_id = ? AND uuid = ?", (session_id, uuid)
+            )
+            memory_db.commit()
+
+            sync_session(memory_db, fixture_path, project_dir)
+            memory_db.commit()
+
+        repaired = memory_db.execute(
+            "SELECT tool_content FROM messages WHERE session_id = ? AND uuid = ?", (session_id, uuid)
+        ).fetchone()[0]
+        assert repaired, "re-sync should repair NULL tool_content without waiting for backfill"
 
 
 class TestSyncSessionWritesNullHashImportLog:
@@ -373,6 +405,66 @@ class TestImportLogExactHashSkip:
         assert import_log_row_after == import_log_row_before, (
             f"import_log row must be unchanged after -1 skip: before={import_log_row_before}, after={import_log_row_after}"
         )
+
+    def test_exact_hash_match_reprocesses_when_tool_content_is_pending(self, memory_db):
+        """Hash dedup must not block repairing old NULL tool_content rows."""
+        fixture_path = FIXTURE_DIR / "tool_heavy.jsonl"
+        real_hash = get_file_hash(fixture_path)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project_dir = Path(tmpdir)
+            sync_session(memory_db, fixture_path, project_dir, file_hash=real_hash)
+            memory_db.commit()
+
+        cursor = memory_db.cursor()
+        cursor.execute(
+            """
+            SELECT session_id, uuid FROM messages
+            WHERE role = 'assistant' AND tool_content IS NOT NULL AND tool_content != ''
+            LIMIT 1
+            """
+        )
+        session_id, uuid = cursor.fetchone()
+        cursor.execute("UPDATE messages SET tool_content = NULL WHERE session_id = ? AND uuid = ?", (session_id, uuid))
+        memory_db.commit()
+
+        with tempfile.TemporaryDirectory() as tmpdir2:
+            project_dir2 = Path(tmpdir2)
+            result = sync_session(memory_db, fixture_path, project_dir2, file_hash=real_hash)
+            memory_db.commit()
+
+        repaired = cursor.execute(
+            "SELECT tool_content FROM messages WHERE session_id = ? AND uuid = ?", (session_id, uuid)
+        ).fetchone()[0]
+        assert result >= 0, "matching hash should reprocess when tool_content is pending"
+        assert repaired, "matching-hash reprocess should repair NULL tool_content"
+
+    def test_pending_tool_content_check_is_file_scoped(self, memory_db, tmp_path):
+        """A pending row from a missing sibling transcript must not keep reparsing this file forever."""
+        parent = tmp_path / "sess-split.jsonl"
+        agent = tmp_path / "agent-sess-split.jsonl"
+        parent.write_text(
+            json.dumps(
+                {
+                    "uuid": "u1",
+                    "parentUuid": None,
+                    "type": "user",
+                    "timestamp": "2026-01-01T10:00:00Z",
+                    "message": {"role": "user", "content": "hi"},
+                }
+            )
+            + "\n"
+        )
+        memory_db.execute("INSERT INTO sessions (uuid) VALUES ('sess-split')")
+        session_id = memory_db.execute("SELECT last_insert_rowid()").fetchone()[0]
+        memory_db.execute(
+            "INSERT INTO messages (session_id, uuid, role, content, tool_content) VALUES (?, 'agent-row', 'assistant', '', NULL)",
+            (session_id,),
+        )
+        memory_db.commit()
+
+        assert has_pending_tool_content(memory_db.cursor(), parent) is False
+        assert not agent.exists()
 
 
 class TestSyncThenImportDedupIntegration:

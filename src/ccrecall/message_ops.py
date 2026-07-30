@@ -14,6 +14,20 @@ from ccrecall.content import (
     is_tool_result,
     parse_origin,
 )
+from ccrecall.parsing import is_insertable_message
+
+
+def message_content_parts(entry: dict) -> tuple[str, bool, str] | None:
+    """Return content fields for entries that should have a messages row."""
+    if not is_insertable_message(entry):
+        return None
+    content = entry.get("message", {}).get("content", "")
+    if entry.get("type") == "user" and is_tool_result(content):
+        return None
+    text, _has_tool_use, has_thinking, _tool_summary, tool_content = extract_text_content(content)
+    if not text and not tool_content:
+        return None
+    return text, has_thinking, tool_content
 
 
 def upsert_session(
@@ -50,18 +64,15 @@ def build_message_row(
     A tool-only assistant turn (no prose, just tool_use blocks) still produces a
     row — content is '' and tool_content carries the searchable marker text.
     """
-    entry_type = entry.get("type")
-    if entry_type not in ("user", "assistant"):
-        return None
-    content = entry.get("message", {}).get("content", "")
-    if entry_type == "user" and is_tool_result(content):
+    parts = message_content_parts(entry)
+    if parts is None:
         return None
     uuid = entry.get("uuid")
     if not uuid or uuid not in valid_branch_uuids or uuid in existing_uuids:
         return None
-    text, _has_tool_use, has_thinking, _tool_summary, tool_content = extract_text_content(content)
-    if not text and not tool_content:
-        return None
+    text, has_thinking, tool_content = parts
+    content = entry.get("message", {}).get("content", "")
+    entry_type = entry.get("type")
     is_notification = entry_type == "user" and (is_task_notification(content) or is_teammate_message(content))
     return (
         session_id,
@@ -108,3 +119,31 @@ def insert_new_messages(
             new_count += 1
             existing_uuids.add(row[1])
     return new_count
+
+
+def update_missing_tool_content(
+    cursor: sqlite3.Cursor,
+    session_id: int,
+    messages: list[dict],
+    existing_uuids: set[str],
+) -> int:
+    """Populate tool_content for existing messages that predate the column.
+
+    ``insert_new_messages`` intentionally skips UUIDs already present in the DB.
+    That keeps normal re-syncs idempotent, but it also means a row created before
+    ``messages.tool_content`` existed would stay NULL until the explicit
+    backfill. Repair those rows whenever the transcript is parsed again.
+    """
+    updated = 0
+    for entry in messages:
+        uuid = entry.get("uuid")
+        if not uuid or uuid not in existing_uuids:
+            continue
+        content = entry.get("message", {}).get("content", "")
+        _text, _has_tool_use, _has_thinking, _tool_summary, tool_content = extract_text_content(content)
+        cursor.execute(
+            "UPDATE messages SET tool_content = ? WHERE session_id = ? AND uuid = ? AND tool_content IS NULL",
+            (tool_content, session_id, uuid),
+        )
+        updated += cursor.rowcount
+    return updated

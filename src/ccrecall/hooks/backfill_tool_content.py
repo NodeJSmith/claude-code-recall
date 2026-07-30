@@ -70,21 +70,17 @@ from ccrecall.hooks.backfill_query import (
     EXIT_OK,
 )
 from ccrecall.hooks.backfill_status import format_duration
-from ccrecall.hooks.tool_content_eligibility import (
-    ELIGIBILITY_FROM,
-    MAX_SQL_PARAMS,
-    days_modifier,
-    eligibility_clause,
-)
+from ccrecall.hooks.tool_content_eligibility import ELIGIBILITY_FROM, MAX_SQL_PARAMS, eligibility_clause
+from ccrecall.import_log_ops import import_log_source_index
 from ccrecall.message_ops import insert_new_messages
 from ccrecall.models import LOGGER_NAME
 from ccrecall.parsing import (
     build_aggregated_content,
-    extract_session_uuid,
     find_all_branches,
     is_insertable_message,
     parse_all_with_uuids,
 )
+from ccrecall.tool_content_status import count_eligible, count_pending_missing_jsonl, count_total_sessions
 
 _PRINT_PREFIX = "ccrecall backfill tool-content"
 _LOG_PREFIX = "Backfill tool-content"
@@ -367,28 +363,12 @@ def build_filepath_index(cursor: sqlite3.Cursor, logger: logging.Logger) -> dict
     with zero surviving files gets no index entry, and the caller skips it.
     """
     mapping: dict[str, list[Path]] = {}
-    for (file_path,) in cursor.execute("SELECT file_path FROM import_log").fetchall():
-        path = Path(file_path)
-        if path.exists():
-            mapping.setdefault(extract_session_uuid(path), []).append(path)
-        else:
-            logger.warning("%s: JSONL missing on disk: %s", _LOG_PREFIX, file_path)
+    for session_uuid, paths in import_log_source_index(cursor).items():
+        if paths["existing"]:
+            mapping[session_uuid] = paths["existing"]
+        for path in paths["missing"]:
+            logger.warning("%s: JSONL missing on disk: %s", _LOG_PREFIX, path)
     return mapping
-
-
-def count_eligible(cursor: sqlite3.Cursor, days: int | None) -> int:
-    where, params = eligibility_clause(days)
-    return cursor.execute(f"SELECT COUNT(DISTINCT s.id) {ELIGIBILITY_FROM} {where}", params).fetchone()[0]
-
-
-def count_total_sessions(cursor: sqlite3.Cursor, days: int | None) -> int:
-    """Count every session with messages (the backfill's universe), for --status."""
-    where = "WHERE 1=1"
-    params: list = []
-    if days is not None:
-        where += " AND b.ended_at > datetime('now', ?)"
-        params.append(days_modifier(days))
-    return cursor.execute(f"SELECT COUNT(DISTINCT s.id) {ELIGIBILITY_FROM} {where}", params).fetchone()[0]
 
 
 def select_batch(cursor: sqlite3.Cursor, exclude_ids: set[int], days: int | None) -> list[tuple[int, str]]:
@@ -548,6 +528,7 @@ def run_status(
         with get_connection(settings, load_vec=False) as conn:
             cursor = conn.cursor()
             pending = count_eligible(cursor, days)
+            pending_missing = count_pending_missing_jsonl(cursor, days) if pending else 0
             total = count_total_sessions(cursor, days)
     except (sqlite3.Error, OSError) as e:
         logger.exception("%s: status aborted", _LOG_PREFIX)
@@ -555,8 +536,20 @@ def run_status(
         return EXIT_ABORT
 
     done = total - pending
+    pending_backfillable = pending - pending_missing
     if json_mode:
-        print(json.dumps({"total_sessions": total, "pending_sessions": pending, "done_sessions": done, "days": days}))
+        print(
+            json.dumps(
+                {
+                    "total_sessions": total,
+                    "pending_sessions": pending,
+                    "pending_backfillable_sessions": pending_backfillable,
+                    "pending_missing_jsonl_sessions": pending_missing,
+                    "done_sessions": done,
+                    "days": days,
+                }
+            )
+        )
         return EXIT_OK
 
     pct = (done / total * 100) if total else 0.0
@@ -564,4 +557,8 @@ def run_status(
     print(f"{_PRINT_PREFIX} status{scope}:")
     print(f"  sessions:  {done} / {total} backfilled  ({pct:.0f}%)")
     print(f"  remaining: {pending} sessions")
+    if pending:
+        print(f"  backfillable: {pending_backfillable} sessions")
+    if pending_missing:
+        print(f"  missing JSONL: {pending_missing} sessions  (some or all source files missing)")
     return EXIT_OK

@@ -10,19 +10,67 @@ import sqlite3
 from pathlib import Path
 
 from ccrecall.models import LOGGER_NAME
+from ccrecall.parsing import extract_session_uuid, parse_all_with_uuids
 
 log = logging.getLogger(LOGGER_NAME)
+
+
+def has_pending_tool_content(cursor: sqlite3.Cursor, filepath: Path) -> bool:
+    """Return True when this transcript file can repair pending tool_content rows."""
+    session_uuid = extract_session_uuid(filepath)
+    return transcript_contains_pending_tool_content(cursor, session_uuid, filepath)
+
+
+def pending_tool_content_uuids(cursor: sqlite3.Cursor, session_uuid: str) -> set[str]:
+    """Return message UUIDs whose tool_content is still NULL for one session."""
+    cursor.execute(
+        """
+        SELECT m.uuid
+        FROM sessions s
+        JOIN messages m ON m.session_id = s.id
+        WHERE s.uuid = ? AND m.tool_content IS NULL
+        """,
+        (session_uuid,),
+    )
+    return {row[0] for row in cursor.fetchall() if row[0]}
+
+
+def transcript_contains_pending_tool_content(cursor: sqlite3.Cursor, session_uuid: str, filepath: Path) -> bool:
+    """Return True when ``filepath`` contains any pending tool_content UUID for ``session_uuid``."""
+    return bool(transcript_pending_tool_content_uuids(filepath, pending_tool_content_uuids(cursor, session_uuid)))
+
+
+def transcript_pending_tool_content_uuids(filepath: Path, pending_uuids: set[str]) -> set[str]:
+    """Return pending tool_content UUIDs present in one transcript file."""
+    if not pending_uuids:
+        return set()
+    file_uuids = {entry["uuid"] for entry in parse_all_with_uuids(filepath) if entry.get("uuid")}
+    return pending_uuids & file_uuids
+
+
+def import_log_source_index(cursor: sqlite3.Cursor) -> dict[str, dict[str, list[Path]]]:
+    """Group import_log paths by session UUID and whether each path still exists."""
+    sources: dict[str, dict[str, list[Path]]] = {}
+    for (file_path,) in cursor.execute("SELECT file_path FROM import_log").fetchall():
+        path = Path(file_path)
+        session_uuid = extract_session_uuid(path)
+        bucket = sources.setdefault(session_uuid, {"existing": [], "missing": []})
+        bucket["existing" if path.exists() else "missing"].append(path)
+    return sources
 
 
 def import_log_skip_check(
     cursor: sqlite3.Cursor,
     filepath: Path,
     file_hash: str | None,
+    *,
+    force: bool = False,
 ) -> tuple[tuple | None, bool]:
     """Probe import_log for an existing row; return (log_row, should_skip).
 
     Returns (log_row, True) when file_hash is provided and the stored hash is
-    non-NULL and matches — caller should return -1.
+    non-NULL and matches, no pending tool_content can be repaired from this
+    file, and force is false — caller should return -1.
     Returns (log_row, False) otherwise (NULL-hash stale or no row).
     Preserves the NULL-hash-stale asymmetry: a stored NULL is never a match.
     """
@@ -31,7 +79,14 @@ def import_log_skip_check(
         (str(filepath),),
     )
     log_row = cursor.fetchone()
-    if log_row and log_row[1] is not None and log_row[1] == file_hash:
+    if force:
+        return log_row, False
+    if (
+        log_row
+        and log_row[1] is not None
+        and log_row[1] == file_hash
+        and not has_pending_tool_content(cursor, filepath)
+    ):
         return log_row, True
     return log_row, False
 

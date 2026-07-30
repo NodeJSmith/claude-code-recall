@@ -6,7 +6,6 @@ PID-file lifecycle are preserved from the former cm-* entry points; only the
 argument-parsing layer changed (argparse -> cyclopts).
 """
 
-import logging
 import sys
 from pathlib import Path
 from typing import Annotated, Literal
@@ -17,10 +16,11 @@ from cyclopts.validators import Number
 from ccrecall import recent_chats as recent_chats_mod
 from ccrecall import search_cli as search_mod
 from ccrecall import session_tail as session_tail_mod
+from ccrecall import status as status_mod
 from ccrecall.cli import app, backfill_app
 from ccrecall.cli.context import DEFAULT_CLI_CONTEXT, CLIContextParam
-from ccrecall.config import DEFAULT_DB_PATH, load_settings, try_acquire_pid_file
-from ccrecall.db import DEFAULT_PROJECTS_DIR, get_connection
+from ccrecall.config import DEFAULT_DB_PATH, try_acquire_pid_file
+from ccrecall.db import DEFAULT_PROJECTS_DIR
 from ccrecall.embeddings import DEFAULT_EMBED_THREADS
 from ccrecall.hooks import backfill_embeddings as backfill_embeddings_mod
 from ccrecall.hooks import backfill_query as backfill_query_mod
@@ -28,7 +28,6 @@ from ccrecall.hooks import backfill_summaries as backfill_summaries_mod
 from ccrecall.hooks import backfill_tool_content as backfill_tool_content_mod
 from ccrecall.hooks import import_conversations as import_mod
 from ccrecall.hooks import sync_current as sync_current_mod
-from ccrecall.models import LOGGER_NAME
 
 # store_true flags carry no --no-<flag> negation, matching the former argparse.
 _FLAG = Parameter(negative=[])
@@ -95,24 +94,6 @@ def cmd_import(
     import_mod.run(db=db, projects_dir=projects_dir, project=project, verbose=ctx.debug)
 
 
-def count_multi_active_branch_sessions(db: Path) -> int:
-    """Return the count of sessions with more than one active branch.
-
-    Session-keyed branch identity (branch_ops.upsert_branch) should make this
-    always zero going forward — this is a standing invariant check, not an
-    expected condition. Read-only: shares no PID lifecycle with import.run().
-    """
-    settings = load_settings()
-    if db != DEFAULT_DB_PATH:
-        settings["db_path"] = str(db)
-    with get_connection(settings, load_vec=False) as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT session_id, COUNT(*) as cnt FROM branches WHERE is_active = 1 GROUP BY session_id HAVING cnt > 1"
-        )
-        return len(cursor.fetchall())
-
-
 @app.command(name="stats")
 def cmd_stats(
     *,
@@ -123,12 +104,24 @@ def cmd_stats(
     # import.run(), so it can't disturb a concurrent background import.
     import_mod.print_stats(db=db)
 
-    violations = count_multi_active_branch_sessions(db)
-    print(f"Branch invariant violations: {violations} session(s) with multiple active branches")
-    if violations:
-        logging.getLogger(LOGGER_NAME).warning(
-            "branch invariant violated: %d session(s) have more than one active branch", violations
-        )
+
+@app.command(name="status")
+def cmd_status(
+    *,
+    db: Annotated[Path, Parameter(help="Database path.")] = DEFAULT_DB_PATH,
+    days: Annotated[
+        int | None,
+        Parameter(validator=Number(gte=1), help="Only scope tool-content and embedding status to the last N days."),
+    ] = None,
+    check_ingestion: Annotated[
+        bool,
+        _FLAG,
+        Parameter(help="Deep-check JSONL transcripts against DB rows to classify ingestion gaps."),
+    ] = False,
+    ctx: CLIContextParam = DEFAULT_CLI_CONTEXT,
+) -> None:
+    """Show consolidated read-only health and backfill status."""
+    status_mod.run(db=db, days=days, check_ingestion=check_ingestion, output_format=ctx.output_format)
 
 
 @backfill_app.command(name="summaries")
@@ -143,7 +136,11 @@ def cmd_backfill_summaries(
 @backfill_app.command(name="embeddings")
 def cmd_backfill_embeddings(
     *,
-    status: Annotated[bool, _FLAG, Parameter(help="Report progress and exit without embedding (read-only).")] = False,
+    status: Annotated[
+        bool,
+        _FLAG,
+        Parameter(help="Report legacy embedding-only progress and exit; prefer `ccrecall status`."),
+    ] = False,
     days: Annotated[
         int | None,
         Parameter(validator=Number(gte=1), help="Only embed branches ended within the last N days (>= 1)."),
