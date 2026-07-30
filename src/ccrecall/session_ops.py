@@ -46,6 +46,7 @@ def sync_session(
     embed: bool = True,
     file_size: int | None = None,
     file_mtime: float | None = None,
+    force: bool = False,
 ) -> int:
     """Import a single JSONL session file, returning the count of new messages inserted (or -1 if skipped).
 
@@ -66,7 +67,7 @@ def sync_session(
     """
     cursor = conn.cursor()
 
-    log_row, should_skip = import_log_skip_check(cursor, filepath, file_hash)
+    log_row, should_skip = import_log_skip_check(cursor, filepath, file_hash, force=force)
     if should_skip:
         log.debug("sync_session skip %s (import_log hash match)", filepath.name)
         return -1

@@ -528,7 +528,7 @@ def run_status(
         with get_connection(settings, load_vec=False) as conn:
             cursor = conn.cursor()
             pending = count_eligible(cursor, days)
-            pending_missing = count_pending_missing_jsonl(cursor, days)
+            pending_missing = count_pending_missing_jsonl(cursor, days) if pending else 0
             total = count_total_sessions(cursor, days)
     except (sqlite3.Error, OSError) as e:
         logger.exception("%s: status aborted", _LOG_PREFIX)

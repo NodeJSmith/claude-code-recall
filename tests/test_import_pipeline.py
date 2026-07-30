@@ -1,5 +1,6 @@
 """Integration tests for the import pipeline with v3 schema guards."""
 
+import json
 import shutil
 import sqlite3
 import tempfile
@@ -96,6 +97,191 @@ class TestImportSessionBasic:
         assert branches_imported >= 0
         assert total_messages > 0
         assert repaired, "unchanged import should repair NULL tool_content instead of fast-skipping"
+
+    def test_pending_repair_imports_all_session_siblings_to_preserve_active_branch(self, memory_db, tmp_path):
+        """Repairing an earlier sibling must not leave that sibling as the active branch."""
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        parent = project_dir / "sess-split.jsonl"
+        agent = project_dir / "agent-sess-split.jsonl"
+        parent.write_text(
+            "\n".join(
+                json.dumps(entry)
+                for entry in [
+                    {
+                        "uuid": "u1",
+                        "parentUuid": None,
+                        "type": "user",
+                        "timestamp": "2026-01-01T10:00:00Z",
+                        "message": {"role": "user", "content": "please inspect"},
+                    },
+                    {
+                        "uuid": "a1",
+                        "parentUuid": "u1",
+                        "type": "assistant",
+                        "timestamp": "2026-01-01T10:00:01Z",
+                        "message": {
+                            "role": "assistant",
+                            "content": [
+                                {"type": "text", "text": "I will inspect it."},
+                                {"type": "tool_use", "name": "Read", "input": {"file_path": "src/app.py"}},
+                            ],
+                        },
+                    },
+                ]
+            )
+            + "\n"
+        )
+        agent.write_text(
+            "\n".join(
+                json.dumps(entry)
+                for entry in [
+                    {
+                        "uuid": "u2",
+                        "parentUuid": "a1",
+                        "type": "user",
+                        "timestamp": "2026-01-01T10:00:02Z",
+                        "message": {"role": "user", "content": "now fix it"},
+                    },
+                    {
+                        "uuid": "a2",
+                        "parentUuid": "u2",
+                        "type": "assistant",
+                        "timestamp": "2026-01-01T10:00:03Z",
+                        "message": {"role": "assistant", "content": "fixed"},
+                    },
+                ]
+            )
+            + "\n"
+        )
+
+        import_project(memory_db, project_dir)
+        cursor = memory_db.cursor()
+        session_id, tool_uuid = cursor.execute("SELECT session_id, uuid FROM messages WHERE uuid = 'a1'").fetchone()
+        cursor.execute(
+            "UPDATE messages SET tool_content = NULL WHERE session_id = ? AND uuid = ?", (session_id, tool_uuid)
+        )
+        memory_db.commit()
+
+        import_project(memory_db, project_dir)
+
+        repaired, leaf_uuid = cursor.execute(
+            """
+            SELECT m.tool_content, b.leaf_uuid
+            FROM messages m
+            JOIN branches b ON b.session_id = m.session_id
+            WHERE m.session_id = ? AND m.uuid = ? AND b.is_active = 1
+            """,
+            (session_id, tool_uuid),
+        ).fetchone()
+        assert repaired
+        assert leaf_uuid == "a2"
+
+    def test_later_sibling_repair_does_not_reimport_processed_parent(self, memory_db, tmp_path):
+        """A repair discovered in a later sibling should not replay siblings already handled in this run."""
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        parent = project_dir / "sess-later.jsonl"
+        agent = project_dir / "agent-sess-later.jsonl"
+        parent.write_text(
+            json.dumps(
+                {
+                    "uuid": "u1",
+                    "parentUuid": None,
+                    "type": "user",
+                    "timestamp": "2026-01-01T10:00:00Z",
+                    "message": {"role": "user", "content": "start"},
+                }
+            )
+            + "\n"
+        )
+        agent.write_text(
+            json.dumps(
+                {
+                    "uuid": "a1",
+                    "parentUuid": "u1",
+                    "type": "assistant",
+                    "timestamp": "2026-01-01T10:00:01Z",
+                    "message": {
+                        "role": "assistant",
+                        "content": [{"type": "tool_use", "name": "Read", "input": {"file_path": "src/app.py"}}],
+                    },
+                }
+            )
+            + "\n"
+        )
+
+        import_project(memory_db, project_dir)
+        cursor = memory_db.cursor()
+        session_id = cursor.execute("SELECT id FROM sessions WHERE uuid = 'sess-later'").fetchone()[0]
+        cursor.execute("UPDATE messages SET tool_content = NULL WHERE session_id = ? AND uuid = 'a1'", (session_id,))
+        memory_db.commit()
+
+        _sessions, _messages, skipped = import_project(memory_db, project_dir)
+
+        repaired = cursor.execute(
+            "SELECT tool_content FROM messages WHERE session_id = ? AND uuid = 'a1'", (session_id,)
+        ).fetchone()[0]
+        assert repaired
+        assert skipped == 1
+
+    def test_equal_timestamp_repair_keeps_agent_sibling_active(self, memory_db, tmp_path):
+        """Equal latest timestamps must still replay the parent before its agent sibling."""
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        parent = project_dir / "sess-equal.jsonl"
+        agent = project_dir / "agent-sess-equal.jsonl"
+        shared_ts = "2026-01-01T10:00:01Z"
+        parent.write_text(
+            "\n".join(
+                json.dumps(entry)
+                for entry in [
+                    {
+                        "uuid": "u1",
+                        "parentUuid": None,
+                        "type": "user",
+                        "timestamp": "2026-01-01T10:00:00Z",
+                        "message": {"role": "user", "content": "inspect"},
+                    },
+                    {
+                        "uuid": "a1",
+                        "parentUuid": "u1",
+                        "type": "assistant",
+                        "timestamp": shared_ts,
+                        "message": {
+                            "role": "assistant",
+                            "content": [{"type": "tool_use", "name": "Read", "input": {"file_path": "src/app.py"}}],
+                        },
+                    },
+                ]
+            )
+            + "\n"
+        )
+        agent.write_text(
+            json.dumps(
+                {
+                    "uuid": "a2",
+                    "parentUuid": "a1",
+                    "type": "assistant",
+                    "timestamp": shared_ts,
+                    "message": {"role": "assistant", "content": "agent follow-up"},
+                }
+            )
+            + "\n"
+        )
+
+        import_project(memory_db, project_dir)
+        cursor = memory_db.cursor()
+        session_id = cursor.execute("SELECT id FROM sessions WHERE uuid = 'sess-equal'").fetchone()[0]
+        cursor.execute("UPDATE messages SET tool_content = NULL WHERE session_id = ? AND uuid = 'a1'", (session_id,))
+        memory_db.commit()
+
+        import_project(memory_db, project_dir)
+
+        leaf_uuid = cursor.execute(
+            "SELECT leaf_uuid FROM branches WHERE session_id = ? AND is_active = 1", (session_id,)
+        ).fetchone()[0]
+        assert leaf_uuid == "a2"
 
 
 class TestImportSessionWithBranches:

@@ -1,25 +1,20 @@
 """Read-only transcript-vs-DB ingestion coverage diagnostics."""
 
-import time
 from pathlib import Path
 from sqlite3 import Connection
 
-from ccrecall.content import extract_text_content, is_tool_result
+from whenever import Instant
+
 from ccrecall.import_log_ops import import_log_source_index
-from ccrecall.parsing import is_insertable_message, parse_all_with_uuids
+from ccrecall.message_ops import message_content_parts
+from ccrecall.parsing import parse_all_with_uuids, select_active_leaf_entry
 
 STALE_TAIL_SECONDS = 15 * 60
 
 
 def _entry_expects_message(entry: dict) -> bool:
-    """Mirror message_ops.build_message_row's content-based skip rules."""
-    if not is_insertable_message(entry):
-        return False
-    content = entry.get("message", {}).get("content", "")
-    if entry.get("type") == "user" and is_tool_result(content):
-        return False
-    text, _has_tool_use, _has_thinking, _tool_summary, tool_content = extract_text_content(content)
-    return bool(text or tool_content)
+    """True when an entry should have a ``messages`` row after ingestion."""
+    return message_content_parts(entry) is not None
 
 
 def _expected_uuids(filepaths: list[Path]) -> list[str]:
@@ -27,11 +22,11 @@ def _expected_uuids(filepaths: list[Path]) -> list[str]:
     entries: list[dict] = []
     for filepath in filepaths:
         entries.extend(parse_all_with_uuids(filepath))
-    uuid_to_entry = {entry["uuid"]: entry for entry in entries if entry.get("uuid")}
-    if not uuid_to_entry:
+    latest = select_active_leaf_entry(entries)
+    if latest is None:
         return []
 
-    latest = max(uuid_to_entry.values(), key=lambda entry: entry.get("timestamp") or "")
+    uuid_to_entry = {entry["uuid"]: entry for entry in entries if entry.get("uuid")}
     ordered_branch: list[dict] = []
     current_uuid: str | None = latest["uuid"]
     while current_uuid:
@@ -50,7 +45,12 @@ def _is_contiguous_suffix(indices: list[int], total: int) -> bool:
     return indices == list(range(indices[0], total))
 
 
-def summarize_ingestion(conn: Connection, *, stale_tail_seconds: int = STALE_TAIL_SECONDS) -> dict[str, int]:
+def summarize_ingestion(
+    conn: Connection,
+    *,
+    stale_tail_seconds: int = STALE_TAIL_SECONDS,
+    sources: dict[str, dict[str, list[Path]]] | None = None,
+) -> dict[str, int]:
     """Classify transcript ingestion gaps by comparing JSONL UUID order to DB rows.
 
     ``pending_tail`` means the DB is missing only a contiguous suffix from an
@@ -61,7 +61,8 @@ def summarize_ingestion(conn: Connection, *, stale_tail_seconds: int = STALE_TAI
     with import-log rows but no surviving JSONL is counted as ``missing_source``.
     """
     cursor = conn.cursor()
-    sources = import_log_source_index(cursor)
+    if sources is None:
+        sources = import_log_source_index(cursor)
 
     summary = {
         "sessions_checked": 0,
@@ -82,7 +83,7 @@ def summarize_ingestion(conn: Connection, *, stale_tail_seconds: int = STALE_TAI
             summary["sessions_checked"] += 1
             summary["missing_source_sessions"] += 1
 
-    now = time.time()
+    now = Instant.now()
     for session_uuid, paths in sources.items():
         if paths["missing"]:
             continue
@@ -107,8 +108,8 @@ def summarize_ingestion(conn: Connection, *, stale_tail_seconds: int = STALE_TAI
             continue
 
         if _is_contiguous_suffix(missing_indices, len(expected)):
-            newest_mtime = max(path.stat().st_mtime for path in filepaths)
-            if now - newest_mtime <= stale_tail_seconds:
+            newest_mtime = max(Instant.from_timestamp(path.stat().st_mtime) for path in filepaths)
+            if (now - newest_mtime).total("seconds") <= stale_tail_seconds:
                 summary["pending_tail_sessions"] += 1
                 summary["pending_tail_turns"] += len(missing_indices)
             else:

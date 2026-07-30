@@ -94,6 +94,56 @@ def parse_all_with_uuids(filepath: Path) -> Generator[dict, None, None]:
         yield from parse_lines_with_uuids(f)
 
 
+def branch_depth(uuid: str, uuid_to_parent: dict[str, str | None]) -> int:
+    """Return ancestry depth for a transcript UUID within a parsed session graph."""
+    depth = 0
+    current: str | None = uuid
+    seen: set[str] = set()
+    while current and current not in seen:
+        seen.add(current)
+        depth += 1
+        current = uuid_to_parent.get(current)
+    return depth
+
+
+def select_active_leaf_entry(all_entries: list[dict]) -> dict | None:
+    """Pick the active leaf, preferring the deepest descendant when timestamps tie."""
+    uuid_to_entry = {entry["uuid"]: entry for entry in all_entries if entry.get("uuid")}
+    if not uuid_to_entry:
+        return None
+    uuid_to_parent = {uuid: entry.get("parentUuid") for uuid, entry in uuid_to_entry.items()}
+    latest_timestamp = max(entry.get("timestamp") or "" for entry in uuid_to_entry.values())
+    latest_candidates = [
+        entry for entry in uuid_to_entry.values() if (entry.get("timestamp") or "") == latest_timestamp
+    ]
+    return max(latest_candidates, key=lambda entry: branch_depth(entry["uuid"], uuid_to_parent))
+
+
+def sort_session_files(filepaths: list[Path]) -> list[Path]:
+    """Order sibling transcript files so parent-chain segments replay before descendants."""
+    entries_by_path = {path: list(parse_all_with_uuids(path)) for path in filepaths}
+    uuid_to_parent = {
+        entry["uuid"]: entry.get("parentUuid")
+        for entries in entries_by_path.values()
+        for entry in entries
+        if entry.get("uuid")
+    }
+
+    def key(path: Path) -> tuple[str, int, str]:
+        entries = entries_by_path[path]
+        if not entries:
+            return "", 0, path.name
+        latest_timestamp = max(entry.get("timestamp") or "" for entry in entries)
+        latest_depth = max(
+            branch_depth(entry["uuid"], uuid_to_parent)
+            for entry in entries
+            if entry.get("uuid") and (entry.get("timestamp") or "") == latest_timestamp
+        )
+        return latest_timestamp, latest_depth, path.name
+
+    return sorted(filepaths, key=key)
+
+
 def extract_session_metadata(entries: list[dict]) -> dict:
     """Extract session metadata from entries."""
     metadata = {
@@ -143,8 +193,10 @@ def find_all_branches(all_entries: list[dict]) -> list[dict]:
     if not uuid_to_entry:
         return []
 
-    # Find active branch (latest -> root)
-    latest = max(uuid_to_entry.values(), key=lambda e: e.get("timestamp") or "")
+    # Find active branch (latest/deepest leaf -> root)
+    latest = select_active_leaf_entry(all_entries)
+    if latest is None:
+        return []
     active_uuids: set[str] = set()
     current: str | None = latest["uuid"]
     while current:

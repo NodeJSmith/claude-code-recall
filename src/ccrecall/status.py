@@ -9,6 +9,7 @@ from pathlib import Path
 from ccrecall.config import DEFAULT_DB_PATH, get_db_path, load_settings
 from ccrecall.db import branch_embedding_coverage, chunk_vec_queryable, vec_available
 from ccrecall.hooks.backfill_status import count_status as count_embedding_status
+from ccrecall.import_log_ops import import_log_source_index
 from ccrecall.ingestion_status import summarize_ingestion
 from ccrecall.tool_content_status import (
     count_eligible as count_tool_content_pending,
@@ -111,10 +112,11 @@ def collect_status(*, db: Path = DEFAULT_DB_PATH, days: int | None = None, check
             }
 
         tool_pending = count_tool_content_pending(cursor, days)
-        tool_missing = count_pending_missing_jsonl(cursor, days) if tool_pending else 0
+        source_index = import_log_source_index(cursor) if check_ingestion or tool_pending else None
+        tool_missing = count_pending_missing_jsonl(cursor, days, source_index) if tool_pending else 0
         tool_total = count_tool_content_total(cursor, days)
         embedded_watermark, embeddable_watermark = branch_embedding_coverage(conn)
-        ingestion = summarize_ingestion(conn) if check_ingestion else None
+        ingestion = summarize_ingestion(conn, sources=source_index) if check_ingestion else None
 
     embedding_backfill: dict = {
         "available": False,

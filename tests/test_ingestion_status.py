@@ -140,6 +140,35 @@ def test_multifile_session_uses_parent_chain_not_import_log_order(memory_db, tmp
     assert status["ingestion_gap_sessions"] == 0
 
 
+def test_multifile_equal_timestamp_prefers_deeper_agent_leaf(memory_db, tmp_path):
+    parent = tmp_path / "sess-equal.jsonl"
+    agent = tmp_path / "agent-sess-equal.jsonl"
+    shared_ts = "2026-01-01T10:00:01Z"
+    _write_jsonl(
+        parent,
+        [
+            _entry("u1", None, "2026-01-01T10:00:00Z", "user", "first"),
+            _entry("a1", "u1", shared_ts, "assistant", "answer"),
+        ],
+    )
+    _write_jsonl(agent, [_entry("a2", "a1", shared_ts, "assistant", "agent follow-up")])
+    memory_db.execute("INSERT INTO sessions (uuid) VALUES ('sess-equal')")
+    session_id = memory_db.execute("SELECT last_insert_rowid()").fetchone()[0]
+    for uuid in ["u1", "a1"]:
+        memory_db.execute(
+            "INSERT INTO messages (session_id, uuid, role, content, tool_content) VALUES (?, ?, 'user', 'x', '')",
+            (session_id, uuid),
+        )
+    _insert_import_log(memory_db, agent, 1)
+    _insert_import_log(memory_db, parent, 2)
+
+    status = summarize_ingestion(memory_db)
+
+    assert status["pending_tail_sessions"] == 1
+    assert status["pending_tail_turns"] == 1
+    assert status["ok_sessions"] == 0
+
+
 def test_import_log_only_session_is_not_counted(memory_db, tmp_path):
     filepath = tmp_path / "filtered-away.jsonl"
     _insert_import_log(memory_db, filepath, 0)

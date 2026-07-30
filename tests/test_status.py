@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 from ccrecall.db import get_connection
 from ccrecall.status import collect_status, run
+from ccrecall.tool_content_status import count_pending_missing_jsonl
 
 
 def test_collect_status_skips_deep_ingestion_by_default(tmp_path):
@@ -104,3 +105,82 @@ def test_run_human_mentions_consolidated_sections(tmp_path, capsys):
     assert "Ingestion:" in out
     assert "Tool content:" in out
     assert "Embeddings:" in out
+
+
+def test_pending_missing_jsonl_counts_only_unrecoverable_pending_rows(memory_db, tmp_path):
+    parent = tmp_path / "sess-partial.jsonl"
+    missing_agent = tmp_path / "agent-sess-partial.jsonl"
+    parent.write_text(
+        json.dumps(
+            {
+                "uuid": "u1",
+                "parentUuid": None,
+                "type": "user",
+                "timestamp": "2026-01-01T10:00:00Z",
+                "message": {"role": "user", "content": "recoverable"},
+            }
+        )
+        + "\n"
+    )
+    memory_db.execute("INSERT INTO sessions (uuid) VALUES ('sess-partial')")
+    session_id = memory_db.execute("SELECT last_insert_rowid()").fetchone()[0]
+    memory_db.execute("INSERT INTO branches (session_id, leaf_uuid, is_active) VALUES (?, 'u1', 1)", (session_id,))
+    memory_db.execute(
+        "INSERT INTO messages (session_id, uuid, role, content, tool_content) VALUES (?, 'u1', 'user', 'x', NULL)",
+        (session_id,),
+    )
+    memory_db.execute(
+        "INSERT INTO import_log (file_path, file_hash, messages_imported) VALUES (?, 'hash', 1)",
+        (str(parent),),
+    )
+    memory_db.execute(
+        "INSERT INTO import_log (file_path, file_hash, messages_imported) VALUES (?, 'hash', 0)",
+        (str(missing_agent),),
+    )
+    memory_db.commit()
+
+    assert count_pending_missing_jsonl(memory_db.cursor(), None) == 0
+
+    memory_db.execute("UPDATE messages SET uuid = 'agent-only' WHERE session_id = ?", (session_id,))
+    memory_db.commit()
+
+    assert count_pending_missing_jsonl(memory_db.cursor(), None) == 1
+
+
+def test_pending_missing_jsonl_requires_all_pending_rows_recoverable(memory_db, tmp_path):
+    parent = tmp_path / "sess-mixed.jsonl"
+    missing_agent = tmp_path / "agent-sess-mixed.jsonl"
+    parent.write_text(
+        json.dumps(
+            {
+                "uuid": "u1",
+                "parentUuid": None,
+                "type": "user",
+                "timestamp": "2026-01-01T10:00:00Z",
+                "message": {"role": "user", "content": "recoverable"},
+            }
+        )
+        + "\n"
+    )
+    memory_db.execute("INSERT INTO sessions (uuid) VALUES ('sess-mixed')")
+    session_id = memory_db.execute("SELECT last_insert_rowid()").fetchone()[0]
+    memory_db.execute("INSERT INTO branches (session_id, leaf_uuid, is_active) VALUES (?, 'u1', 1)", (session_id,))
+    memory_db.execute(
+        "INSERT INTO messages (session_id, uuid, role, content, tool_content) VALUES (?, 'u1', 'user', 'x', NULL)",
+        (session_id,),
+    )
+    memory_db.execute(
+        "INSERT INTO messages (session_id, uuid, role, content, tool_content) VALUES (?, 'agent-only', 'assistant', 'x', NULL)",
+        (session_id,),
+    )
+    memory_db.execute(
+        "INSERT INTO import_log (file_path, file_hash, messages_imported) VALUES (?, 'hash', 1)",
+        (str(parent),),
+    )
+    memory_db.execute(
+        "INSERT INTO import_log (file_path, file_hash, messages_imported) VALUES (?, 'hash', 1)",
+        (str(missing_agent),),
+    )
+    memory_db.commit()
+
+    assert count_pending_missing_jsonl(memory_db.cursor(), None) == 1

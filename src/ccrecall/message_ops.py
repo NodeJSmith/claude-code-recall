@@ -14,6 +14,20 @@ from ccrecall.content import (
     is_tool_result,
     parse_origin,
 )
+from ccrecall.parsing import is_insertable_message
+
+
+def message_content_parts(entry: dict) -> tuple[str, bool, str] | None:
+    """Return content fields for entries that should have a messages row."""
+    if not is_insertable_message(entry):
+        return None
+    content = entry.get("message", {}).get("content", "")
+    if entry.get("type") == "user" and is_tool_result(content):
+        return None
+    text, _has_tool_use, has_thinking, _tool_summary, tool_content = extract_text_content(content)
+    if not text and not tool_content:
+        return None
+    return text, has_thinking, tool_content
 
 
 def upsert_session(
@@ -50,18 +64,15 @@ def build_message_row(
     A tool-only assistant turn (no prose, just tool_use blocks) still produces a
     row — content is '' and tool_content carries the searchable marker text.
     """
-    entry_type = entry.get("type")
-    if entry_type not in ("user", "assistant"):
-        return None
-    content = entry.get("message", {}).get("content", "")
-    if entry_type == "user" and is_tool_result(content):
+    parts = message_content_parts(entry)
+    if parts is None:
         return None
     uuid = entry.get("uuid")
     if not uuid or uuid not in valid_branch_uuids or uuid in existing_uuids:
         return None
-    text, _has_tool_use, has_thinking, _tool_summary, tool_content = extract_text_content(content)
-    if not text and not tool_content:
-        return None
+    text, has_thinking, tool_content = parts
+    content = entry.get("message", {}).get("content", "")
+    entry_type = entry.get("type")
     is_notification = entry_type == "user" and (is_task_notification(content) or is_teammate_message(content))
     return (
         session_id,

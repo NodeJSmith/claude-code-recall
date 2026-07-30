@@ -28,7 +28,7 @@ from ccrecall.db import (
 from ccrecall.formatting import extract_project_name, normalize_project_key
 from ccrecall.import_log_ops import has_pending_tool_content
 from ccrecall.models import LOGGER_NAME
-from ccrecall.parsing import extract_session_uuid
+from ccrecall.parsing import extract_session_uuid, sort_session_files
 from ccrecall.project_ops import upsert_project
 from ccrecall.session_ops import sync_session
 from ccrecall.status import run as run_status
@@ -68,6 +68,8 @@ def import_session(
     conn: sqlite3.Connection,
     filepath: Path,
     project_id: int,
+    *,
+    force: bool = False,
 ) -> tuple[int, int]:
     """
     Import a single session JSONL file with v3 schema.
@@ -94,6 +96,7 @@ def import_session(
         log_row
         and log_row[2] == file_size
         and log_row[3] == file_mtime
+        and not force
         and not has_pending_tool_content(cursor, filepath)
     ):
         log.debug("skip %s (%.1f MB, stat match)", filepath.name, file_size / BYTES_PER_MB)
@@ -105,6 +108,7 @@ def import_session(
         log_row
         and log_row[1] is not None
         and log_row[1] == file_hash
+        and not force
         and not has_pending_tool_content(cursor, filepath)
     ):
         # Content unchanged despite stat difference (e.g. touch without edit).
@@ -128,6 +132,7 @@ def import_session(
         embed=False,
         file_size=file_size,
         file_mtime=file_mtime,
+        force=force,
     )
 
     if new_messages == -1:
@@ -202,6 +207,10 @@ def _noop() -> None:
     pass
 
 
+def _project_file_order(filepath: Path) -> tuple[str, bool, str]:
+    return extract_session_uuid(filepath), filepath.name.startswith("agent-"), filepath.name
+
+
 def import_project(
     conn: sqlite3.Connection,
     project_dir: Path,
@@ -230,18 +239,33 @@ def import_project(
     sessions_imported = 0
     messages_imported = 0
     sessions_skipped = 0
-
-    for jsonl_file in sorted(project_dir.glob("*.jsonl")):
+    jsonl_files_by_session: dict[str, list[Path]] = {}
+    for jsonl_file in sorted(project_dir.glob("*.jsonl"), key=_project_file_order):
         if jsonl_file.name.startswith("."):
             continue
+        jsonl_files_by_session.setdefault(extract_session_uuid(jsonl_file), []).append(jsonl_file)
 
-        branches_count, msg_count = import_session(conn, jsonl_file, project_id)
-        if branches_count == -1:
-            sessions_skipped += 1
-        else:
-            sessions_imported += branches_count
-            messages_imported += msg_count
-            reclaim_memory()
+    processed: set[Path] = set()
+    for jsonl_file in [path for files in jsonl_files_by_session.values() for path in files]:
+        if jsonl_file in processed:
+            continue
+
+        repair_group = has_pending_tool_content(cursor, jsonl_file)
+        targets = (
+            sort_session_files(jsonl_files_by_session[extract_session_uuid(jsonl_file)])
+            if repair_group
+            else [jsonl_file]
+        )
+        targets = [target for target in targets if target not in processed]
+        for target in targets:
+            branches_count, msg_count = import_session(conn, target, project_id, force=repair_group)
+            processed.add(target)
+            if branches_count == -1:
+                sessions_skipped += 1
+            else:
+                sessions_imported += branches_count
+                messages_imported += msg_count
+                reclaim_memory()
 
     if sessions_imported or sessions_skipped:
         log.debug(
