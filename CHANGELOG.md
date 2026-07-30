@@ -7,12 +7,6 @@
 
 * add consolidated ingestion status ([#93](https://github.com/NodeJSmith/claude-code-recall/issues/93)) ([b94bcd2](https://github.com/NodeJSmith/claude-code-recall/commit/b94bcd243a98467a6a15b95c3f3553c6a6eed65a))
 
-## 2026-07-30
-
-### Features
-
-* add consolidated ingestion status ([#93](https://github.com/NodeJSmith/claude-code-recall/issues/93))
-
 ## [0.19.4](https://github.com/NodeJSmith/claude-code-recall/compare/v0.19.3...v0.19.4) (2026-07-28)
 
 
