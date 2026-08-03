@@ -30,5 +30,5 @@ Verify no output/help changes are needed by reading `src/ccrecall/search_cli.py`
 - Existing `TestSearchMessages` starts at `tests/test_search.py:1422`; add Track B filtered-retry tests near that class.
 
 ## Verify
-- [ ] FR#7: `search_messages()` preserves distance ordering and applies `max_results` after filtered KNN candidates are recovered.
+- [ ] FR#7: `uv run pytest tests/test_search.py -q` passes with `search_messages()` preserving distance ordering and applying `max_results` after filtered KNN candidates are recovered.
 - [ ] AC#7: `uv run pytest tests/test_search.py -q` confirms Track B ordering and max-results behavior after filtered retry.

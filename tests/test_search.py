@@ -20,7 +20,7 @@ from ccrecall.schema import SCHEMA, SCHEMA_CORE, detect_fts_support
 from ccrecall.search_cli import format_markdown, print_status, run, run_messages
 from ccrecall.search_conversations import compute_caveat, search_messages, search_sessions
 from ccrecall.search_hydrate import dedup_by_session, hydrate_cards
-from ccrecall.search_vector import get_vec_chunk_ids
+from ccrecall.search_vector import execute_chunk_knn, get_vec_chunk_ids
 
 
 @pytest.fixture
@@ -661,6 +661,72 @@ def _seed_branch_with_chunk(
     return sess_id, branch_id, chunk_id
 
 
+def _seed_retry_candidate(
+    conn: sqlite3.Connection,
+    *,
+    uuid: str,
+    content: str,
+    embed_vec: list[float],
+    project: str = "proj",
+    cwd: str = "/home/user/proj",
+    branch_is_active: int = 1,
+    chunk_embedding_version: int = EMBEDDING_VERSION,
+    chunk_embedding_model: str = EMBEDDING_MODEL,
+) -> tuple[int, int, int]:
+    """Seed one chunk candidate for adaptive-KNN tests."""
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT OR IGNORE INTO projects (path, key, name) VALUES (?, ?, ?)",
+        (f"/home/user/{project}", f"-home-user-{project}", project),
+    )
+    cursor.execute("SELECT id FROM projects WHERE key = ?", (f"-home-user-{project}",))
+    project_id = cursor.fetchone()[0]
+    cursor.execute(
+        "INSERT INTO sessions (uuid, project_id, cwd) VALUES (?, ?, ?)",
+        (uuid, project_id, cwd),
+    )
+    session_id = cursor.lastrowid
+    cursor.execute(
+        """
+        INSERT INTO branches (session_id, leaf_uuid, is_active, exchange_count, aggregated_content)
+        VALUES (?, ?, ?, 1, ?)
+        """,
+        (session_id, f"leaf-{uuid}", branch_is_active, content),
+    )
+    branch_id = cursor.lastrowid
+    cursor.execute(
+        """
+        INSERT INTO chunks (branch_id, exchange_index, content_hash,
+                            user_text, embedding_version, embedding_model)
+        VALUES (?, 0, ?, ?, ?, ?)
+        """,
+        (branch_id, f"hash-{uuid}", content, chunk_embedding_version, chunk_embedding_model),
+    )
+    chunk_id = cursor.lastrowid
+    cursor.execute(
+        "INSERT INTO chunk_vec(chunk_id, embedding) VALUES (?, ?)",
+        (chunk_id, sqlite_vec.serialize_float32(embed_vec)),
+    )
+    conn.commit()
+    return session_id, branch_id, chunk_id
+
+
+class _CursorProxy:
+    """Cursor wrapper that can observe or fail selected execute calls."""
+
+    def __init__(self, cursor: sqlite3.Cursor, *, fail_predicate=None, exception=None):
+        self._cursor = cursor
+        self.executed_sql: list[str] = []
+        self._fail_predicate = fail_predicate
+        self._exception = exception
+
+    def execute(self, sql, params=()):
+        self.executed_sql.append(sql)
+        if self._fail_predicate is not None and self._fail_predicate(sql):
+            raise self._exception
+        return self._cursor.execute(sql, params)
+
+
 class TestStaleVersionExclusion:
     """Chunks with old embedding_version must not appear via the chunk-KNN path."""
 
@@ -734,6 +800,156 @@ class TestStaleVersionExclusion:
             results_kw, _ranked = search_sessions(conn, "stale", fts_level, max_results=10, keyword_only=True)
         uuids = {r["session_uuid"] for r in results_kw}
         assert "sess-stale" in uuids, "Stale session must still be reachable via keyword/FTS search"
+
+
+class TestAdaptiveChunkKnn:
+    """Adaptive retry, lazy count, and narrow-error coverage for execute_chunk_knn."""
+
+    @pytest.mark.skipif(
+        not vec_available(sqlite3.connect(":memory:")),
+        reason="sqlite-vec not available",
+    )
+    def test_retry_recovers_farther_current_active_chunk(self):
+        conn = make_vec_conn()
+        query_vec = [1.0 / EMBEDDING_DIM**0.5] * EMBEDDING_DIM
+        near_vec = query_vec
+        far_vec = [0.0] * EMBEDDING_DIM
+        far_vec[0] = 1.0
+
+        _seed_retry_candidate(
+            conn,
+            uuid="sess-near-stale",
+            content="near stale chunk",
+            embed_vec=near_vec,
+            chunk_embedding_version=EMBEDDING_VERSION - 1,
+        )
+        _seed_retry_candidate(
+            conn,
+            uuid="sess-near-wrong-model",
+            content="near wrong model chunk",
+            embed_vec=near_vec,
+            chunk_embedding_model="wrong-model",
+        )
+        _seed_retry_candidate(
+            conn,
+            uuid="sess-near-inactive",
+            content="near inactive chunk",
+            embed_vec=near_vec,
+            branch_is_active=0,
+        )
+        _session_id, valid_branch_id, valid_chunk_id = _seed_retry_candidate(
+            conn,
+            uuid="sess-far-valid",
+            content="far valid chunk",
+            embed_vec=far_vec,
+        )
+
+        results = execute_chunk_knn(conn.cursor(), query_vec, top_k=1)
+
+        assert results == [(valid_chunk_id, valid_branch_id, results[0][2])]
+        conn.close()
+
+    @pytest.mark.skipif(
+        not vec_available(sqlite3.connect(":memory:")),
+        reason="sqlite-vec not available",
+    )
+    def test_unfiltered_filled_query_skips_count_queries(self):
+        conn = make_vec_conn()
+        query_vec = [1.0 / EMBEDDING_DIM**0.5] * EMBEDDING_DIM
+        _seed_retry_candidate(
+            conn,
+            uuid="sess-filled",
+            content="filled path chunk",
+            embed_vec=query_vec,
+        )
+        cursor = _CursorProxy(conn.cursor())
+
+        results = execute_chunk_knn(cursor, query_vec, top_k=1)
+
+        assert len(results) == 1
+        assert not any("COUNT(*)" in sql for sql in cursor.executed_sql)
+        conn.close()
+
+    @pytest.mark.skipif(
+        not vec_available(sqlite3.connect(":memory:")),
+        reason="sqlite-vec not available",
+    )
+    def test_count_query_sqlite_error_returns_empty(self):
+        conn = make_vec_conn()
+        query_vec = [1.0 / EMBEDDING_DIM**0.5] * EMBEDDING_DIM
+        _seed_retry_candidate(
+            conn,
+            uuid="sess-underfill-stale",
+            content="underfill stale chunk",
+            embed_vec=query_vec,
+            chunk_embedding_version=EMBEDDING_VERSION - 1,
+        )
+        _seed_retry_candidate(
+            conn,
+            uuid="sess-underfill-valid",
+            content="underfill valid chunk",
+            embed_vec=[1.0] + [0.0] * (EMBEDDING_DIM - 1),
+        )
+        cursor = _CursorProxy(
+            conn.cursor(),
+            fail_predicate=lambda sql: "COUNT(*)" in sql,
+            exception=sqlite3.OperationalError("count failed"),
+        )
+
+        assert execute_chunk_knn(cursor, query_vec, top_k=1) == []
+        conn.close()
+
+    @pytest.mark.skipif(
+        not vec_available(sqlite3.connect(":memory:")),
+        reason="sqlite-vec not available",
+    )
+    def test_relational_filter_sqlite_error_returns_empty(self):
+        conn = make_vec_conn()
+        query_vec = [1.0 / EMBEDDING_DIM**0.5] * EMBEDDING_DIM
+        _seed_retry_candidate(
+            conn,
+            uuid="sess-filter",
+            content="filter path chunk",
+            embed_vec=query_vec,
+        )
+        cursor = _CursorProxy(
+            conn.cursor(),
+            fail_predicate=lambda sql: "FROM chunks ch" in sql and "WHERE ch.id IN" in sql,
+            exception=sqlite3.OperationalError("filter failed"),
+        )
+
+        assert execute_chunk_knn(cursor, query_vec, top_k=1) == []
+        conn.close()
+
+    @pytest.mark.skipif(
+        not vec_available(sqlite3.connect(":memory:")),
+        reason="sqlite-vec not available",
+    )
+    def test_count_query_non_db_error_propagates(self):
+        conn = make_vec_conn()
+        query_vec = [1.0 / EMBEDDING_DIM**0.5] * EMBEDDING_DIM
+        _seed_retry_candidate(
+            conn,
+            uuid="sess-bug-stale",
+            content="bug stale chunk",
+            embed_vec=query_vec,
+            chunk_embedding_version=EMBEDDING_VERSION - 1,
+        )
+        _seed_retry_candidate(
+            conn,
+            uuid="sess-bug-valid",
+            content="bug valid chunk",
+            embed_vec=[1.0] + [0.0] * (EMBEDDING_DIM - 1),
+        )
+        cursor = _CursorProxy(
+            conn.cursor(),
+            fail_predicate=lambda sql: "COUNT(*)" in sql,
+            exception=RuntimeError("real bug"),
+        )
+
+        with pytest.raises(RuntimeError):
+            execute_chunk_knn(cursor, query_vec, top_k=1)
+        conn.close()
 
 
 # session dedup: two branches of one session → one result

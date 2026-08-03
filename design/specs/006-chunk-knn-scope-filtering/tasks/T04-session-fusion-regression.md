@@ -18,9 +18,11 @@ Add a Track A `search_sessions()` regression proving a scoped vector candidate b
 - read: `src/ccrecall/search_cli.py`
 
 ## Prompt
-In `tests/test_search.py`, add an integration-style sqlite-vec regression for `search_sessions()` where the nearest global chunks are outside the requested scope, a farther scoped chunk exists, and the scoped session card is returned through the existing Track A path. Patch `model_available()` and `embed_text()` as current vector tests do, seed any keyword rows needed by the current fusion path, and assert the returned card keeps the existing session-card shape.
+In `tests/test_search.py`, add an integration-style sqlite-vec regression for `search_sessions()` where the nearest global chunks are outside the requested scope, a farther scoped chunk exists, and the scoped session card is returned through the existing Track A path. Patch `model_available()` and `embed_text()` as current vector tests do, seed keyword rows so both FTS and vector branch IDs participate in RRF fusion, and assert the returned card keeps the existing session-card shape.
 
 Do not change `search_sessions()` unless the test exposes a call-contract bug. Track A should continue to compute `chunk_top_k` with `OVERFETCH_MULTIPLIER * CHUNK_COLLAPSE_FACTOR`, call `get_vec_chunk_ids()`, fuse FTS and vector branch IDs with `rrf_scored()`, deduplicate by session, hydrate cards, and degrade to keyword search only through existing gates or sqlite3 errors.
+
+Add or preserve a local regression proving keyword fallback behavior remains unchanged when the vector path is unavailable or degrades. Existing `TestDegradation` cases may satisfy this if they still pass after the implementation.
 
 Run the targeted test suite and then the full suite. Fix any failures so the full suite passes before the task is complete.
 
@@ -31,6 +33,6 @@ Run the targeted test suite and then the full suite. Fix any failures so the ful
 - Existing duplicate-session and vector tests in `tests/test_search.py` show how to patch `model_available()` / `embed_text()` and seed chunks.
 
 ## Verify
-- [ ] FR#8: `search_sessions()` preserves keyword/vector RRF fusion, best-chunk-per-branch rollup, per-session deduplication, and keyword fallback behavior.
+- [ ] FR#8: `uv run pytest tests/test_search.py -q` passes with `search_sessions()` preserving keyword/vector RRF fusion, best-chunk-per-branch rollup, per-session deduplication, and keyword fallback behavior.
 - [ ] AC#8: `uv run pytest tests/test_search.py -q` confirms a scoped vector result beyond the initial KNN window can surface through Track A fusion.
 - [ ] AC#11: `uv run pytest` passes.

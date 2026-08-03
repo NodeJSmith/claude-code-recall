@@ -1,7 +1,7 @@
 ---
 task_id: "T01"
 title: "Implement adaptive KNN retry core"
-status: "planned"
+status: "done"
 depends_on: []
 implements: ["FR#1", "FR#6", "FR#9", "FR#10", "AC#5", "AC#9", "AC#10"]
 ---
@@ -32,10 +32,10 @@ Keep all `sqlite3.Error` handling narrow in `search_vector.py`: sqlite3 errors i
 - Gap check clean: `search_cli.py`, `cli/commands.py`, and `tests/test_integration.py` call public search functions and do not need output/help updates for this core refactor.
 
 ## Verify
-- [ ] FR#1: A direct `execute_chunk_knn()` or `get_vec_chunk_ids()` regression proves a valid current chunk beyond the initial KNN window is recovered after retry.
-- [ ] FR#6: Stale-version, wrong-model, and inactive nearer chunks remain excluded while a farther current active chunk can still be returned.
-- [ ] FR#9: sqlite3 errors from the new KNN, count, or relational filter path return empty vector results instead of raising.
-- [ ] FR#10: A non-DB exception raised by the cursor or helper path still propagates instead of being caught.
+- [ ] FR#1: `uv run pytest tests/test_search.py -q` passes with a direct `execute_chunk_knn()` or `get_vec_chunk_ids()` regression proving a valid current chunk beyond the initial KNN window is recovered after retry.
+- [ ] FR#6: `uv run pytest tests/test_search.py -q` passes with stale-version, wrong-model, and inactive nearer chunks excluded while a farther current active chunk can still be returned.
+- [ ] FR#9: `uv run pytest tests/test_search.py -q` passes with sqlite3 errors from the new KNN, count, or relational filter path returning empty vector results instead of raising.
+- [ ] FR#10: `uv run pytest tests/test_search.py -q` passes with a non-DB exception raised by the cursor or helper path still propagating instead of being caught.
 - [ ] AC#5: `uv run pytest tests/test_search.py -q` includes stale/currentness coverage where stale or inactive nearer chunks do not block a farther current active chunk.
 - [ ] AC#9: `uv run pytest tests/test_search.py -q` includes sqlite3 degradation and non-DB propagation coverage for the new retry/count path.
 - [ ] AC#10: `uv run pytest tests/test_search.py -q` proves an unfiltered search that fills from the initial KNN window does not issue the new count queries.

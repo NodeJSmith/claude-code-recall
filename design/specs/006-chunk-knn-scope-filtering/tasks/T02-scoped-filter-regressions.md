@@ -29,11 +29,11 @@ Use existing fixtures and helpers when possible, but it is acceptable to add a s
 - sqlite-vec availability is already guarded with `@pytest.mark.skipif(not vec_available(sqlite3.connect(":memory:")), reason="sqlite-vec not available")` in this file.
 
 ## Verify
-- [ ] FR#2: Project-scoped vector filtering still uses project name equality semantics and returns only matching projects.
-- [ ] FR#3: Session-scoped vector filtering still uses escaped UUID prefix semantics and recovers a farther matching session chunk.
-- [ ] FR#4: Path-scoped vector filtering still uses escaped cwd substring semantics and recovers a farther matching path chunk.
-- [ ] FR#5: Date-scoped vector filtering still uses strict branch-level `started_at` before/after comparisons.
-- [ ] FR#6: Scoped regressions continue to require current chunk embedding version/model and active branches.
+- [ ] FR#2: `uv run pytest tests/test_search.py -q` passes with project-scoped vector filtering using project name equality semantics and returning only matching projects.
+- [ ] FR#3: `uv run pytest tests/test_search.py -q` passes with session-scoped vector filtering using escaped UUID prefix semantics and recovering a farther matching session chunk.
+- [ ] FR#4: `uv run pytest tests/test_search.py -q` passes with path-scoped vector filtering using escaped cwd substring semantics and recovering a farther matching path chunk.
+- [ ] FR#5: `uv run pytest tests/test_search.py -q` passes with vector date filters using strict branch-level `started_at` before/after comparisons.
+- [ ] FR#6: `uv run pytest tests/test_search.py -q` passes with scoped regressions requiring current chunk embedding version/model and active branches.
 - [ ] AC#1: `uv run pytest tests/test_search.py -q` includes a project-scoped vector regression beyond the initial KNN window.
 - [ ] AC#2: `uv run pytest tests/test_search.py -q` includes a session-prefix vector regression beyond the initial KNN window.
 - [ ] AC#3: `uv run pytest tests/test_search.py -q` includes a path-substring vector regression beyond the initial KNN window.
