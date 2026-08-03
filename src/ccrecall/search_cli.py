@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 
 from ccrecall.config import DEFAULT_DB_PATH
+from ccrecall.dates import validate_or_exit
 from ccrecall.db import (
     branch_embedding_coverage,
     chunk_vec_queryable,
@@ -67,6 +68,8 @@ def run_messages(
     session: str | None = None,
     project: str | None = None,
     path: str | None = None,
+    before: str | None = None,
+    after: str | None = None,
     output_format: str = "markdown",
     include_notifications: bool = False,  # noqa: ARG001 — accepted for surface symmetry; moot on B (no fetch)
     db: Path = DEFAULT_DB_PATH,
@@ -79,6 +82,11 @@ def run_messages(
     """
     max_results = max(1, min(MAX_SEARCH_RESULTS, max_results))
     projects = parse_project_filter(project)
+
+    # Reassignment is required, not stylistic: a non-UTC offset instant is
+    # normalized to UTC here, and the original (unnormalized) value would
+    # compare incorrectly against the stored UTC timestamps.
+    before, after = validate_or_exit(before, after)
 
     if not db.exists():
         emit_error(
@@ -98,6 +106,8 @@ def run_messages(
                 projects=projects,
                 session_id=session,
                 path=path,
+                before=before,
+                after=after,
             )
 
         if output_format == "json":
@@ -165,6 +175,8 @@ def run(
     session: str | None = None,
     project: str | None = None,
     path: str | None = None,
+    before: str | None = None,
+    after: str | None = None,
     output_format: str = "markdown",
     verbose: bool = False,
     include_notifications: bool = False,  # noqa: ARG001 — accepted for CLI compat; A-path has no transcript hydration
@@ -190,6 +202,11 @@ def run(
     # --max-results before reaching here. Both sides bound on MAX_SEARCH_RESULTS.
     max_results = max(1, min(MAX_SEARCH_RESULTS, max_results))
     projects = parse_project_filter(project)
+
+    # Reassignment is required, not stylistic: a non-UTC offset instant is
+    # normalized to UTC here, and the original (unnormalized) value would
+    # compare incorrectly against the stored UTC timestamps.
+    before, after = validate_or_exit(before, after)
 
     if not db.exists():
         if status:
@@ -228,6 +245,8 @@ def run(
                 session_id=session,
                 path=path,
                 keyword_only=keyword_only,
+                before=before,
+                after=after,
             )
             caveat = compute_caveat(conn)
 

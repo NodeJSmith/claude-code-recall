@@ -7,12 +7,14 @@ embedding_model, summary_version_at_embed) and the branch_vec virtual table
 are present.
 """
 
+import json
 import sqlite3
 
 import pytest
 from conftest import make_vec_conn
 
 from ccrecall.recent_chats import get_recent_sessions
+from ccrecall.recent_chats import run as recent_chats_run
 
 
 def _seed_sessions(conn: sqlite3.Connection) -> list[str]:
@@ -156,3 +158,81 @@ class TestRecentChatsInvariant:
 
         results_no_match = get_recent_sessions(memory_db, n=10, projects=["nonexistent"])
         assert len(results_no_match) == 0
+
+
+class TestRecentChatsDateFilters:
+    """--before/--after actually filter on started_at, not just accept the flag.
+
+    _seed_sessions gives sess-rc-1/2/3 started_at 2025-01-01/02/03T10:00:00Z
+    respectively. These tests exercise get_recent_sessions (the query layer)
+    directly with exact instants (unambiguous filtering) and bare dates
+    (documenting the inclusive/exclusive-of-that-day semantics that fall out
+    of comparing a short date string against the longer stored timestamps).
+    """
+
+    def test_after_exact_instant_excludes_that_session_and_earlier(self, memory_db):
+        _seed_sessions(memory_db)
+        results = get_recent_sessions(memory_db, n=10, after="2025-01-01T10:00:00Z")
+        assert {r["uuid"] for r in results} == {"sess-rc-2", "sess-rc-3"}
+
+    def test_before_exact_instant_excludes_that_session_and_later(self, memory_db):
+        _seed_sessions(memory_db)
+        results = get_recent_sessions(memory_db, n=10, before="2025-01-03T10:00:00Z")
+        assert {r["uuid"] for r in results} == {"sess-rc-1", "sess-rc-2"}
+
+    def test_before_and_after_combine_to_a_range(self, memory_db):
+        _seed_sessions(memory_db)
+        results = get_recent_sessions(memory_db, n=10, after="2025-01-01T10:00:00Z", before="2025-01-03T10:00:00Z")
+        assert {r["uuid"] for r in results} == {"sess-rc-2"}
+
+    def test_bare_date_after_includes_sessions_starting_that_day_onward(self, memory_db):
+        # "2025-01-02T10:00:00Z" > "2025-01-02" lexicographically, so a bare
+        # date --after is inclusive of that whole day.
+        _seed_sessions(memory_db)
+        results = get_recent_sessions(memory_db, n=10, after="2025-01-02")
+        assert {r["uuid"] for r in results} == {"sess-rc-2", "sess-rc-3"}
+
+    def test_bare_date_before_excludes_sessions_starting_that_day(self, memory_db):
+        # "2025-01-02T10:00:00Z" is NOT < "2025-01-02" lexicographically, so a
+        # bare date --before excludes that whole day (only strictly earlier days).
+        _seed_sessions(memory_db)
+        results = get_recent_sessions(memory_db, n=10, before="2025-01-02")
+        assert {r["uuid"] for r in results} == {"sess-rc-1"}
+
+    def test_no_filter_returns_all_sessions(self, memory_db):
+        _seed_sessions(memory_db)
+        results = get_recent_sessions(memory_db, n=10)
+        assert len(results) == 3
+
+    def test_filter_matching_nothing_returns_empty(self, memory_db):
+        _seed_sessions(memory_db)
+        results = get_recent_sessions(memory_db, n=10, after="2030-01-01")
+        assert results == []
+
+
+class TestRecentChatsInvalidDateRejected:
+    """run() rejects a malformed --before/--after before ever touching the DB.
+
+    Uses a nonexistent db path deliberately: date validation happens before
+    the db.exists() check in run(), so if this test ever started reaching the
+    db-not-found error instead of the invalid-date error, that would itself
+    signal the validation order regressed.
+    """
+
+    def test_malformed_before_exits_2_with_structured_error(self, tmp_path, capsys):
+        missing_db = tmp_path / "does-not-exist.db"
+        with pytest.raises(SystemExit) as exc_info:
+            recent_chats_run(before="2025-8-1", db=missing_db)
+        assert exc_info.value.code == 2
+        envelope = json.loads(capsys.readouterr().err)
+        assert envelope["code"] == "invalid_date"
+        assert "--before" in envelope["error"]
+
+    def test_malformed_after_exits_2_with_structured_error(self, tmp_path, capsys):
+        missing_db = tmp_path / "does-not-exist.db"
+        with pytest.raises(SystemExit) as exc_info:
+            recent_chats_run(after="not-a-date", db=missing_db)
+        assert exc_info.value.code == 2
+        envelope = json.loads(capsys.readouterr().err)
+        assert envelope["code"] == "invalid_date"
+        assert "--after" in envelope["error"]

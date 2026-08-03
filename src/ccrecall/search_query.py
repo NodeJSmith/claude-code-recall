@@ -38,13 +38,22 @@ def scope_filter_clause(
     projects: list[str] | None,
     session_id: str | None,
     path: str | None,
+    before: str | None = None,
+    after: str | None = None,
 ) -> tuple[str, list]:
-    """Return (sql_fragment, params) for the project/session/path WHERE filters.
+    """Return (sql_fragment, params) for the project/session/path/date WHERE filters.
 
-    The fragment assumes the query's FROM aliases sessions as ``s`` and projects
-    as ``p``. The fragment leads with a space when non-empty; params are ordered
-    projects -> session -> path to match the clause order. Single source of truth
-    for the scope predicates shared by the FTS, LIKE, and chunk-KNN queries.
+    The fragment assumes the query's FROM aliases sessions as ``s``, projects
+    as ``p``, and branches as ``b``. The fragment leads with a space when
+    non-empty; params are ordered projects -> session -> path -> before -> after
+    to match the clause order. Single source of truth for the scope predicates
+    shared by the FTS, LIKE, and chunk-KNN queries. before/after filter on
+    b.started_at (branch-level, matching recent_chats.py's convention) and are
+    assumed already validated by dates.validate_date_boundaries — this function
+    does not parse or reformat them, only compares them lexicographically.
+    recent_chats.py's get_recent_sessions builds an equivalent before/after
+    clause inline (it doesn't route its filters through this helper) — keep
+    both in sync if the comparison semantics ever change.
     """
     clauses: list[str] = []
     params: list = []
@@ -58,6 +67,12 @@ def scope_filter_clause(
     if path:
         clauses.append("s.cwd LIKE ? ESCAPE '\\'")
         params.append(f"%{escape_like(path)}%")
+    if before:
+        clauses.append("b.started_at < ?")
+        params.append(before)
+    if after:
+        clauses.append("b.started_at > ?")
+        params.append(after)
     fragment = "".join(f" AND {clause}" for clause in clauses)
     return fragment, params
 
@@ -70,6 +85,8 @@ def get_fts_branch_ids(
     projects: list[str] | None = None,
     session_id: str | None = None,
     path: str | None = None,
+    before: str | None = None,
+    after: str | None = None,
 ) -> list[tuple[int, float | None]]:
     """Return ordered (branch_id, score_raw) pairs from FTS or LIKE search.
 
@@ -108,7 +125,9 @@ def get_fts_branch_ids(
         """
         params.append(fts_query)
 
-        scope_sql, scope_params = scope_filter_clause(projects=projects, session_id=session_id, path=path)
+        scope_sql, scope_params = scope_filter_clause(
+            projects=projects, session_id=session_id, path=path, before=before, after=after
+        )
         sql += scope_sql
         params.extend(scope_params)
 
@@ -131,7 +150,9 @@ def get_fts_branch_ids(
         """
         params.extend(f"%{term}%" for term in terms)
 
-        scope_sql, scope_params = scope_filter_clause(projects=projects, session_id=session_id, path=path)
+        scope_sql, scope_params = scope_filter_clause(
+            projects=projects, session_id=session_id, path=path, before=before, after=after
+        )
         sql += scope_sql
         params.extend(scope_params)
 
