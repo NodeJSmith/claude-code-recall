@@ -8,9 +8,11 @@ filter that silently returns wrong results with no error at all -- exactly
 the failure mode this module exists to close off.
 """
 
+import json
+
 import pytest
 
-from ccrecall.dates import parse_date_boundary, validate_date_boundaries
+from ccrecall.dates import parse_date_boundary, validate_date_boundaries, validate_or_exit
 
 
 class TestParseDateBoundaryAccepts:
@@ -89,3 +91,41 @@ class TestValidateDateBoundaries:
 
     def test_only_after_provided(self):
         assert validate_date_boundaries(None, "2026-08-01") == (None, "2026-08-01")
+
+
+class TestValidateOrExit:
+    """validate_or_exit: the shared validate-then-emit_error helper.
+
+    Extracted after code review flagged the try/except/emit_error block as
+    copy-pasted verbatim across recent_chats.run, search_cli.run, and
+    search_cli.run_messages -- this is now the one place that pairs
+    validate_date_boundaries with the exit-2 behavior all three commands need.
+    """
+
+    def test_valid_pair_returned_normalized(self):
+        assert validate_or_exit("2026-08-10", "2026-08-01") == ("2026-08-10", "2026-08-01")
+
+    def test_both_none_returns_none_none(self):
+        assert validate_or_exit(None, None) == (None, None)
+
+    def test_offset_instant_normalized_on_the_exit_path_too(self):
+        # Confirms validate_or_exit doesn't bypass the normalization that
+        # parse_date_boundary/validate_date_boundaries perform.
+        before, _after = validate_or_exit("2026-08-01T10:00:00+02:00", None)
+        assert before == "2026-08-01T08:00:00Z"
+
+    def test_invalid_before_exits_2_with_structured_error(self, capsys):
+        with pytest.raises(SystemExit) as exc_info:
+            validate_or_exit("2025-8-1", "2026-08-01")
+        assert exc_info.value.code == 2
+        envelope = json.loads(capsys.readouterr().err)
+        assert envelope["code"] == "invalid_date"
+        assert "--before" in envelope["error"]
+
+    def test_invalid_after_exits_2_with_structured_error(self, capsys):
+        with pytest.raises(SystemExit) as exc_info:
+            validate_or_exit("2026-08-10", "not-a-date")
+        assert exc_info.value.code == 2
+        envelope = json.loads(capsys.readouterr().err)
+        assert envelope["code"] == "invalid_date"
+        assert "--after" in envelope["error"]

@@ -12,6 +12,8 @@ stored strings, so a validated value always compares correctly unparsed.
 
 from whenever import Date, Instant
 
+from ccrecall.errors import emit_error
+
 
 def parse_date_boundary(value: str, flag: str) -> str:
     """Validate a --before/--after value; return the string to use in SQL.
@@ -54,3 +56,24 @@ def validate_date_boundaries(before: str | None, after: str | None) -> tuple[str
     normalized_before = parse_date_boundary(before, "--before") if before is not None else None
     normalized_after = parse_date_boundary(after, "--after") if after is not None else None
     return normalized_before, normalized_after
+
+
+def validate_or_exit(before: str | None, after: str | None) -> tuple[str | None, str | None]:
+    """validate_date_boundaries, but exit 2 with a structured error instead of raising.
+
+    Every read command (recent-chats, search, search-messages) needs the same
+    validate-or-exit behavior at the same point in its run() — before the
+    db.exists() check — so this is the one place that pairs
+    validate_date_boundaries with emit_error, rather than each command
+    repeating the try/except.
+    """
+    try:
+        return validate_date_boundaries(before, after)
+    except ValueError as e:
+        emit_error(
+            str(e),
+            code="invalid_date",
+            exit_code=2,
+            remediation="Use YYYY-MM-DD or a full ISO-8601 timestamp like 2026-08-03T12:00:00Z.",
+        )
+        raise AssertionError("unreachable — emit_error always raises SystemExit") from e

@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 
 from ccrecall.config import DEFAULT_DB_PATH
-from ccrecall.dates import validate_date_boundaries
+from ccrecall.dates import validate_or_exit
 from ccrecall.db import (
     branch_embedding_coverage,
     chunk_vec_queryable,
@@ -83,18 +83,10 @@ def run_messages(
     max_results = max(1, min(MAX_SEARCH_RESULTS, max_results))
     projects = parse_project_filter(project)
 
-    try:
-        # Reassignment is required, not stylistic: a non-UTC offset instant is
-        # normalized to UTC here, and the original (unnormalized) value would
-        # compare incorrectly against the stored UTC timestamps.
-        before, after = validate_date_boundaries(before, after)
-    except ValueError as e:
-        emit_error(
-            str(e),
-            code="invalid_date",
-            exit_code=2,
-            remediation="Use YYYY-MM-DD or a full ISO-8601 timestamp like 2026-08-03T12:00:00Z.",
-        )
+    # Reassignment is required, not stylistic: a non-UTC offset instant is
+    # normalized to UTC here, and the original (unnormalized) value would
+    # compare incorrectly against the stored UTC timestamps.
+    before, after = validate_or_exit(before, after)
 
     if not db.exists():
         emit_error(
@@ -211,18 +203,10 @@ def run(
     max_results = max(1, min(MAX_SEARCH_RESULTS, max_results))
     projects = parse_project_filter(project)
 
-    try:
-        # Reassignment is required, not stylistic: a non-UTC offset instant is
-        # normalized to UTC here, and the original (unnormalized) value would
-        # compare incorrectly against the stored UTC timestamps.
-        before, after = validate_date_boundaries(before, after)
-    except ValueError as e:
-        emit_error(
-            str(e),
-            code="invalid_date",
-            exit_code=2,
-            remediation="Use YYYY-MM-DD or a full ISO-8601 timestamp like 2026-08-03T12:00:00Z.",
-        )
+    # Reassignment is required, not stylistic: a non-UTC offset instant is
+    # normalized to UTC here, and the original (unnormalized) value would
+    # compare incorrectly against the stored UTC timestamps.
+    before, after = validate_or_exit(before, after)
 
     if not db.exists():
         if status:
