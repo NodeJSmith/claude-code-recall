@@ -1803,3 +1803,150 @@ class TestRecallCaveat:
         out = capsys.readouterr().out
         assert "unavailable" not in out
         assert "partial" not in out
+
+
+# --before/--after date filters (branch-level, matching recent_chats.py)
+
+
+def _seed_dated_branch(conn: sqlite3.Connection, uuid: str, started_at: str, content: str) -> int:
+    """Seed one session/branch pair with an explicit started_at; return branch_id.
+
+    search_db's fixture branches leave started_at NULL (unused by keyword
+    tests), so date-filter tests seed their own minimal branches instead of
+    touching that shared fixture.
+    """
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT OR IGNORE INTO projects (path, key, name) VALUES (?, ?, ?)", ("/p/dated", "-p-dated", "dated")
+    )
+    cursor.execute("SELECT id FROM projects WHERE key = ?", ("-p-dated",))
+    proj_id = cursor.fetchone()[0]
+    cursor.execute("INSERT INTO sessions (uuid, project_id, cwd) VALUES (?, ?, ?)", (uuid, proj_id, "/p/dated"))
+    sess_id = cursor.lastrowid
+    cursor.execute(
+        """
+        INSERT INTO branches (session_id, leaf_uuid, is_active, exchange_count,
+                               aggregated_content, started_at, ended_at)
+        VALUES (?, ?, 1, 1, ?, ?, ?)
+        """,
+        (sess_id, f"leaf-{uuid}", content, started_at, started_at),
+    )
+    branch_id = cursor.lastrowid
+    conn.commit()
+    return branch_id
+
+
+@pytest.fixture
+def dated_search_db():
+    """DB with two branches matching 'pytest', started 2025-01-01 and 2025-06-01."""
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(SCHEMA)
+    conn.commit()
+    _seed_dated_branch(conn, "sess-dated-old", "2025-01-01T10:00:00Z", "pytest fixtures old session")
+    _seed_dated_branch(conn, "sess-dated-new", "2025-06-01T10:00:00Z", "pytest fixtures new session")
+    yield conn
+    conn.close()
+
+
+class TestSearchSessionsDateFilters:
+    """search_sessions' --before/--after (threaded through scope_filter_clause)."""
+
+    def test_before_excludes_later_session(self, dated_search_db):
+        results, _ranked = search_sessions(
+            dated_search_db, "pytest", fts_level=None, max_results=10, before="2025-03-01"
+        )
+        uuids = {r["session_uuid"] for r in results}
+        assert uuids == {"sess-dated-old"}
+
+    def test_after_excludes_earlier_session(self, dated_search_db):
+        results, _ranked = search_sessions(
+            dated_search_db, "pytest", fts_level=None, max_results=10, after="2025-03-01"
+        )
+        uuids = {r["session_uuid"] for r in results}
+        assert uuids == {"sess-dated-new"}
+
+    def test_before_and_after_range_excludes_both(self, dated_search_db):
+        # Neither branch's started_at (2025-01-01, 2025-06-01) falls inside
+        # this window -- proves the two clauses actually AND together.
+        results, _ranked = search_sessions(
+            dated_search_db, "pytest", fts_level=None, max_results=10, after="2025-02-01", before="2025-03-01"
+        )
+        assert results == []
+
+    def test_no_date_filter_returns_both(self, dated_search_db):
+        results, _ranked = search_sessions(dated_search_db, "pytest", fts_level=None, max_results=10)
+        uuids = {r["session_uuid"] for r in results}
+        assert uuids == {"sess-dated-old", "sess-dated-new"}
+
+
+class TestSearchMessagesDateFilters:
+    """search_messages' --before/--after (threaded through execute_chunk_knn)."""
+
+    @pytest.mark.skipif(
+        not vec_available(sqlite3.connect(":memory:")),
+        reason="sqlite-vec not available",
+    )
+    def test_before_excludes_chunk_from_later_branch(self):
+        conn = make_vec_conn()
+        query_vec = [1.0 / EMBEDDING_DIM**0.5] * EMBEDDING_DIM
+
+        old_branch = _seed_dated_branch(conn, "sess-msg-old", "2025-01-01T10:00:00Z", "old branch content")
+        new_branch = _seed_dated_branch(conn, "sess-msg-new", "2025-06-01T10:00:00Z", "new branch content")
+        for branch_id, tag in [(old_branch, "old"), (new_branch, "new")]:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO chunks (branch_id, exchange_index, content_hash, first_message_uuid,
+                                     timestamp, user_text, assistant_text, embedding_version, embedding_model)
+                VALUES (?, 0, ?, ?, '2025-01-01T10:00:00Z', ?, ?, ?, ?)
+                """,
+                (
+                    branch_id,
+                    f"h-{tag}",
+                    f"uuid-{tag}",
+                    f"{tag} user",
+                    f"{tag} assistant",
+                    EMBEDDING_VERSION,
+                    EMBEDDING_MODEL,
+                ),
+            )
+            chunk_id = cursor.lastrowid
+            upsert_chunk_vec(cursor, chunk_id, query_vec)
+        conn.commit()
+
+        with (
+            patch("ccrecall.search_conversations.model_available", return_value=True),
+            patch("ccrecall.search_conversations.embed_text", return_value=query_vec),
+        ):
+            snippets, ranked = search_messages(conn, "test query", max_results=10, before="2025-03-01")
+
+        assert ranked is True
+        assert {s["session_uuid"] for s in snippets} == {"sess-msg-old"}
+        conn.close()
+
+
+class TestSearchInvalidDateRejected:
+    """run()/run_messages() reject a malformed --before/--after before hitting the DB.
+
+    Same nonexistent-db-path technique as recent_chats' equivalent test: date
+    validation runs before the db.exists() check, so reaching db_not_found
+    instead of invalid_date would itself mean the validation order regressed.
+    """
+
+    def test_run_rejects_malformed_before(self, tmp_path, capsys):
+        missing_db = tmp_path / "does-not-exist.db"
+        with pytest.raises(SystemExit) as exc_info:
+            run(query="test", before="2025-8-1", db=missing_db)
+        assert exc_info.value.code == 2
+        envelope = json.loads(capsys.readouterr().err)
+        assert envelope["code"] == "invalid_date"
+        assert "--before" in envelope["error"]
+
+    def test_run_messages_rejects_malformed_after(self, tmp_path, capsys):
+        missing_db = tmp_path / "does-not-exist.db"
+        with pytest.raises(SystemExit) as exc_info:
+            run_messages(query="test", after="not-a-date", db=missing_db)
+        assert exc_info.value.code == 2
+        envelope = json.loads(capsys.readouterr().err)
+        assert envelope["code"] == "invalid_date"
+        assert "--after" in envelope["error"]

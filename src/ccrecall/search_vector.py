@@ -15,6 +15,8 @@ def execute_chunk_knn(
     projects: list[str] | None = None,
     session_id: str | None = None,
     path: str | None = None,
+    before: str | None = None,
+    after: str | None = None,
 ) -> list[tuple[int, int, float]]:
     """Shared chunk-KNN core: run the vec MATCH query, filter to valid chunks, return in KNN order.
 
@@ -53,7 +55,9 @@ def execute_chunk_knn(
     """
     filter_params: list = [*chunk_ids, EMBEDDING_VERSION, EMBEDDING_MODEL]
 
-    scope_sql, scope_params = scope_filter_clause(projects=projects, session_id=session_id, path=path)
+    scope_sql, scope_params = scope_filter_clause(
+        projects=projects, session_id=session_id, path=path, before=before, after=after
+    )
     filter_sql += scope_sql
     filter_params.extend(scope_params)
 
@@ -75,6 +79,8 @@ def get_vec_chunk_ids(
     projects: list[str] | None = None,
     session_id: str | None = None,
     path: str | None = None,
+    before: str | None = None,
+    after: str | None = None,
 ) -> list[tuple[int, float, int]]:
     """Return ordered (branch_id, distance, chunk_id) from chunk-vec KNN (Entrypoint A).
 
@@ -82,7 +88,9 @@ def get_vec_chunk_ids(
     the first (closest) chunk per branch in KNN order. Returns empty list on DB
     error so the caller degrades to keyword search; non-DB bugs propagate.
     """
-    raw = execute_chunk_knn(cursor, query_vec, top_k, projects, session_id, path)
+    raw = execute_chunk_knn(
+        cursor, query_vec, top_k, projects=projects, session_id=session_id, path=path, before=before, after=after
+    )
     if not raw:
         return []
 

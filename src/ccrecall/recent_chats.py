@@ -8,6 +8,7 @@ import sqlite3
 from pathlib import Path
 
 from ccrecall.config import DEFAULT_DB_PATH
+from ccrecall.dates import validate_date_boundaries
 from ccrecall.db import (
     escape_like,
     fetch_branch_messages,
@@ -61,6 +62,10 @@ def get_recent_sessions(
         sql += " AND s.uuid LIKE ? ESCAPE '\\'"
         params.append(f"{escape_like(session_id)}%")
 
+    # Mirrors search_query.py's scope_filter_clause (before/after clauses) —
+    # not reused because this function already builds its project/session/path
+    # filters inline rather than via that helper. Keep both in sync if the
+    # before/after comparison semantics ever change.
     if before:
         sql += " AND b.started_at < ?"
         params.append(before)
@@ -170,6 +175,19 @@ def run(
     # before reaching here. Both sides bound on MAX_RECENT_SESSIONS.
     n = max(1, min(MAX_RECENT_SESSIONS, n))
     projects = parse_project_filter(project)
+
+    try:
+        # Reassignment is required, not stylistic: a non-UTC offset instant is
+        # normalized to UTC here, and the original (unnormalized) value would
+        # compare incorrectly against the stored UTC timestamps.
+        before, after = validate_date_boundaries(before, after)
+    except ValueError as e:
+        emit_error(
+            str(e),
+            code="invalid_date",
+            exit_code=2,
+            remediation="Use YYYY-MM-DD or a full ISO-8601 timestamp like 2026-08-03T12:00:00Z.",
+        )
 
     if not db.exists():
         emit_error(

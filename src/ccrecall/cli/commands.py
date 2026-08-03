@@ -63,6 +63,12 @@ _NOTIFS = Annotated[
     bool, _FLAG, Parameter(name=["--include-notifications"], help="Include task notification messages.")
 ]
 _DB = Annotated[Path, Parameter(name=["--db"], help="Database path.")]
+# Shared across recent/search/search-messages so help text and semantics can't drift
+# between commands. Validated by ccrecall.dates.validate_date_boundaries at runtime
+# (accepts YYYY-MM-DD or a full ISO-8601 instant); an unparseable value exits 2
+# rather than silently comparing wrong.
+_BEFORE = Annotated[str | None, Parameter(help="Sessions started before this date/datetime (ISO).")]
+_AFTER = Annotated[str | None, Parameter(help="Sessions started after this date/datetime (ISO).")]
 # Default for `tail -n`, sourced from session_tail so the two never drift.
 _TAIL_DEFAULT_N = session_tail_mod.DEFAULT_TAIL_EVENTS
 # Default result counts for the recent/search commands.
@@ -220,8 +226,8 @@ def cmd_recent(
         ),
     ] = _DEFAULT_RECENT_N,
     sort_order: Annotated[Literal["desc", "asc"], Parameter(name=["--sort-order"], help="Sort order.")] = "desc",
-    before: Annotated[str | None, Parameter(help="Sessions before this datetime (ISO).")] = None,
-    after: Annotated[str | None, Parameter(help="Sessions after this datetime (ISO).")] = None,
+    before: _BEFORE = None,
+    after: _AFTER = None,
     session: Annotated[str | None, Parameter(help="Filter by session UUID (prefix match).")] = None,
     project: Annotated[str | None, Parameter(help="Filter by project name(s), comma-separated.")] = None,
     path: Annotated[str | None, Parameter(help="Filter by cwd substring (e.g. worktree name).")] = None,
@@ -267,12 +273,16 @@ def cmd_search(
     session: Annotated[str | None, Parameter(help="Filter by session UUID (prefix match).")] = None,
     project: Annotated[str | None, Parameter(help="Filter by project name(s), comma-separated.")] = None,
     path: Annotated[str | None, Parameter(help="Filter by cwd substring (e.g. worktree name).")] = None,
+    before: _BEFORE = None,
+    after: _AFTER = None,
     verbose: _VERBOSE = False,
     include_notifications: _NOTIFS = False,
     db: _DB = DEFAULT_DB_PATH,
     ctx: CLIContextParam = DEFAULT_CLI_CONTEXT,
 ) -> None:
     """Search conversation sessions (keyword + vector fusion).
+
+    Date filters (--before/--after) are branch-level (session start time).
 
     With --json: {query, ranked, count, results: [{score, session_uuid, handle, project, git_branch, topic, ...}]}
     """
@@ -284,6 +294,8 @@ def cmd_search(
         session=session,
         project=project,
         path=path,
+        before=before,
+        after=after,
         output_format=ctx.output_format,
         verbose=verbose,
         include_notifications=include_notifications,
@@ -306,6 +318,8 @@ def cmd_search_messages(
     session: Annotated[str | None, Parameter(help="Filter by session UUID (prefix match).")] = None,
     project: Annotated[str | None, Parameter(help="Filter by project name(s), comma-separated.")] = None,
     path: Annotated[str | None, Parameter(help="Filter by cwd substring (e.g. worktree name).")] = None,
+    before: _BEFORE = None,
+    after: _AFTER = None,
     include_notifications: _NOTIFS = False,
     db: _DB = DEFAULT_DB_PATH,
     ctx: CLIContextParam = DEFAULT_CLI_CONTEXT,
@@ -315,6 +329,9 @@ def cmd_search_messages(
     Returns matched exchanges ranked by chunk distance — not rolled up to session,
     so multiple matches within one session all appear as separate results.
 
+    Date filters (--before/--after) are branch-level (the exchange's session
+    start time), not per-exchange, matching search and recent-chats.
+
     With --json: {query, ranked, count, results: [{score, session_uuid, handle, exchange_index, user, assistant, ...}]}
     """
     search_mod.run_messages(
@@ -323,6 +340,8 @@ def cmd_search_messages(
         session=session,
         project=project,
         path=path,
+        before=before,
+        after=after,
         output_format=ctx.output_format,
         include_notifications=include_notifications,
         db=db,
