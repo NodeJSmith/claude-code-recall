@@ -98,7 +98,7 @@ def main() -> None:
     summaries/embeddings) call ``setup_logging`` again with their own
     process name, which reconfigures the shared logger to their own log file
     for the rest of this process — this call only "sticks" for direct,
-    interactive commands (search, recent, stats, tail).
+    interactive commands (search, recent, status, tail).
     """
     setup_logging(load_settings(), process_name=_CLI_PROCESS_NAME)
     try:

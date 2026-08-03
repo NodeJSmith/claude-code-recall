@@ -620,7 +620,7 @@ def branch_embedding_coverage(conn: sqlite3.Connection) -> tuple[int, int]:
     watermark (embedding_version/embedding_model) is at the current version and
     model. Vec-free — reads only the branches table, whose embedding columns
     live in the base schema — so coverage reports work even where sqlite-vec
-    can't load. Shared by `ccrecall stats` and search's `print_status` so the
+    can't load. Shared by `ccrecall status` and search's `print_status` so the
     two surfaces can't drift (see CHUNK_EMBEDDABLE_BRANCH_FILTER).
 
     This is the watermark view. `backfill embeddings --status` reports a

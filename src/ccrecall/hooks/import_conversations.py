@@ -31,7 +31,6 @@ from ccrecall.models import LOGGER_NAME
 from ccrecall.parsing import extract_session_uuid, sort_session_files
 from ccrecall.project_ops import upsert_project
 from ccrecall.session_ops import sync_session
-from ccrecall.status import run as run_status
 
 # Chunk size for streaming a file through the change-detection hash (bounded memory).
 HASH_CHUNK_SIZE = 8192
@@ -278,11 +277,6 @@ def import_project(
         )
 
     return sessions_imported, messages_imported, sessions_skipped
-
-
-def print_stats(db: Path = DEFAULT_DB_PATH) -> None:
-    """Print consolidated read-only status for backward-compatible ``stats`` callers."""
-    run_status(db=db)
 
 
 def run(

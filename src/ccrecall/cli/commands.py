@@ -94,17 +94,6 @@ def cmd_import(
     import_mod.run(db=db, projects_dir=projects_dir, project=project, verbose=ctx.debug)
 
 
-@app.command(name="stats")
-def cmd_stats(
-    *,
-    db: Annotated[Path, Parameter(help="Database path.")] = DEFAULT_DB_PATH,
-) -> None:
-    """Show memory database statistics."""
-    # Read-only DB-global counts: print_stats() shares no PID lifecycle with
-    # import.run(), so it can't disturb a concurrent background import.
-    import_mod.print_stats(db=db)
-
-
 @app.command(name="status")
 def cmd_status(
     *,
