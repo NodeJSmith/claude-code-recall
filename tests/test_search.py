@@ -1885,6 +1885,81 @@ def _seed_two_chunks_same_branch(
 class TestSearchMessages:
     """Entrypoint B — chunk-KNN without rollup, snippet shape."""
 
+    def test_passes_max_results_as_chunk_knn_target(self):
+        """Track B asks chunk-KNN for enough filtered snippet hits, not just the raw window."""
+        conn = sqlite3.connect(":memory:")
+
+        with (
+            patch("ccrecall.search_conversations.model_available", return_value=True),
+            patch("ccrecall.search_conversations.chunk_vec_queryable", return_value=True),
+            patch("ccrecall.search_conversations.embed_text", return_value=[0.1] * EMBEDDING_DIM),
+            patch(
+                "ccrecall.search_conversations.execute_chunk_knn",
+                return_value=[(1, 1, 0.1)],
+            ) as execute_mock,
+            patch(
+                "ccrecall.search_conversations.hydrate_snippets",
+                return_value=[{"session_uuid": "sess", "exchange_index": 0}],
+            ),
+        ):
+            search_messages(conn, "test query", max_results=2, projects=["alpha"])
+
+        assert execute_mock.call_args.kwargs["target_results"] == 2
+        assert execute_mock.call_args.args[2] == 20
+        conn.close()
+
+    @pytest.mark.skipif(
+        not vec_available(sqlite3.connect(":memory:")),
+        reason="sqlite-vec not available",
+    )
+    def test_filtered_retry_preserves_distance_order_and_caps_max_results(self):
+        """Track B recovers farther scoped hits, keeps distance order, and caps at max_results."""
+        conn = make_vec_conn()
+        query_vec, near_vec, mid_vec, far_vec = _scope_retry_vectors()
+        extra_far_vec = [-1.0] + [0.0] * (EMBEDDING_DIM - 1)
+
+        for i in range(21):
+            _seed_retry_candidate(
+                conn,
+                uuid=f"sess-out-of-scope-{i}",
+                content=f"near out-of-scope chunk {i}",
+                embed_vec=near_vec,
+                project="beta",
+            )
+
+        _seed_retry_candidate(
+            conn,
+            uuid="sess-alpha-mid",
+            content="mid distance in-scope chunk",
+            embed_vec=mid_vec,
+            project="alpha",
+        )
+        _seed_retry_candidate(
+            conn,
+            uuid="sess-alpha-far",
+            content="far distance in-scope chunk",
+            embed_vec=far_vec,
+            project="alpha",
+        )
+        _seed_retry_candidate(
+            conn,
+            uuid="sess-alpha-extra-far",
+            content="extra far in-scope chunk",
+            embed_vec=extra_far_vec,
+            project="alpha",
+        )
+
+        with (
+            patch("ccrecall.search_conversations.model_available", return_value=True),
+            patch("ccrecall.search_conversations.embed_text", return_value=query_vec),
+        ):
+            snippets, ranked = search_messages(conn, "test query", max_results=2, projects=["alpha"])
+
+        assert ranked is True
+        assert [snippet["session_uuid"] for snippet in snippets] == ["sess-alpha-mid", "sess-alpha-far"]
+        assert len(snippets) == 2
+        conn.close()
+
     @pytest.mark.skipif(
         not vec_available(sqlite3.connect(":memory:")),
         reason="sqlite-vec not available",

@@ -207,7 +207,15 @@ def search_messages(
     cursor = conn.cursor()
 
     raw = execute_chunk_knn(
-        cursor, query_vec, top_k, projects=projects, session_id=session_id, path=path, before=before, after=after
+        cursor,
+        query_vec,
+        top_k,
+        projects=projects,
+        session_id=session_id,
+        path=path,
+        before=before,
+        after=after,
+        target_results=max_results,
     )
     if not raw:
         # Either no matches or a DB error caught inside execute_chunk_knn;
