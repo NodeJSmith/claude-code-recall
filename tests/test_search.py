@@ -15,6 +15,7 @@ from ccrecall.db import (
 )
 from ccrecall.embeddings import EMBEDDING_DIM, EMBEDDING_MODEL, EMBEDDING_VERSION
 from ccrecall.formatting import apply_scores, format_snippet_json, format_snippet_markdown
+from ccrecall.fusion import rrf_scored
 from ccrecall.recent_chats import get_recent_sessions
 from ccrecall.schema import SCHEMA, SCHEMA_CORE, detect_fts_support
 from ccrecall.search_cli import format_markdown, print_status, run, run_messages
@@ -1196,6 +1197,80 @@ class TestAdaptiveChunkKnnScopes:
         )
 
         assert results == [(valid_chunk_id, valid_branch_id, results[0][2])]
+        conn.close()
+
+
+class TestSearchSessionsFusionScopeRetry:
+    """Track A regression: scoped vector hits still surface through fusion into cards."""
+
+    @pytest.mark.skipif(
+        not vec_available(sqlite3.connect(":memory:")),
+        reason="sqlite-vec not available",
+    )
+    def test_search_sessions_returns_scoped_card_beyond_initial_chunk_window(self):
+        conn = make_vec_conn()
+        fts_level = detect_fts_support(conn)
+        if fts_level not in ("fts5", "fts4"):
+            pytest.skip("FTS not available")
+
+        query = "fusion retry target"
+        query_vec, near_vec, _mid_vec, far_vec = _scope_retry_vectors()
+
+        for idx in range(32):
+            _seed_retry_candidate(
+                conn,
+                uuid=f"sess-fusion-confuser-{idx}",
+                content=f"{query} outside requested project {idx}",
+                embed_vec=near_vec,
+                project="beta",
+                cwd="/home/user/beta",
+            )
+
+        _target_session_id, target_branch_id, _target_chunk_id = _seed_retry_candidate(
+            conn,
+            uuid="sess-fusion-target",
+            content=f"{query} inside requested project",
+            embed_vec=far_vec,
+            project="alpha",
+            cwd="/home/user/alpha",
+        )
+
+        cursor = conn.cursor()
+        initial_vec_branch_ids = [
+            branch_id for branch_id, _distance, _chunk_id in get_vec_chunk_ids(cursor, query_vec, top_k=32)
+        ]
+        assert target_branch_id not in initial_vec_branch_ids
+
+        with (
+            patch("ccrecall.search_conversations.model_available", return_value=True),
+            patch("ccrecall.search_conversations.embed_text", return_value=query_vec),
+            patch("ccrecall.search_conversations.rrf_scored", wraps=rrf_scored) as fusion_mock,
+        ):
+            results, ranked = search_sessions(conn, query, fts_level, max_results=1, projects=["alpha"])
+
+        fusion_inputs = fusion_mock.call_args.args[0]
+        assert target_branch_id in fusion_inputs[0]
+        assert target_branch_id in fusion_inputs[1]
+        assert ranked is True
+        assert len(results) == 1
+        assert results[0]["session_uuid"] == "sess-fusion-target"
+        assert set(results[0]) == {
+            "session_uuid",
+            "handle",
+            "project",
+            "git_branch",
+            "started_at",
+            "ended_at",
+            "topic",
+            "exchange_count",
+            "files_modified",
+            "commits",
+            "tool_counts",
+            "score_raw",
+        }
+        assert results[0]["project"] == "alpha"
+        assert results[0]["handle"] == "sess-fus"
+        assert results[0]["score_raw"] is not None
         conn.close()
 
 

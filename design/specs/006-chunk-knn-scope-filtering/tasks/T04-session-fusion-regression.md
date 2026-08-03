@@ -1,7 +1,7 @@
 ---
 task_id: "T04"
 title: "Prove session-search fusion behavior"
-status: "planned"
+status: "done"
 depends_on: ["T01", "T02", "T03"]
 implements: ["FR#8", "AC#8", "AC#11"]
 ---
