@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.21.0](https://github.com/NodeJSmith/claude-code-recall/compare/v0.20.0...v0.21.0) (2026-08-03)
+
+
+### ⚠ BREAKING CHANGES
+
+* remove deprecated ccrecall stats command ([#97](https://github.com/NodeJSmith/claude-code-recall/issues/97))
+
+### Features
+
+* add --before/--after filters to search commands ([#99](https://github.com/NodeJSmith/claude-code-recall/issues/99)) ([af666bd](https://github.com/NodeJSmith/claude-code-recall/commit/af666bd4a9f8c2aac620f1cc6cb6ab8fb7374e46))
+
+
+### Refactoring
+
+* remove deprecated ccrecall stats command ([#97](https://github.com/NodeJSmith/claude-code-recall/issues/97)) ([06f10a6](https://github.com/NodeJSmith/claude-code-recall/commit/06f10a62fb3bf49a25d4cbc87b897cf5c8ca47bb))
+
+
+### Documentation
+
+* remove duplicate changelog entry for 0.20.0 ([0f40f93](https://github.com/NodeJSmith/claude-code-recall/commit/0f40f93eed6d5aec4831a0740bc8a7cd2d9ee39b))
+
 ## [0.20.0](https://github.com/NodeJSmith/claude-code-recall/compare/v0.19.4...v0.20.0) (2026-07-30)
 
 
