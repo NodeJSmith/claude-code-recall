@@ -1,7 +1,7 @@
 ---
 task_id: "T02"
 title: "Cover scoped filtered KNN recall"
-status: "planned"
+status: "done"
 depends_on: ["T01"]
 implements: ["FR#2", "FR#3", "FR#4", "FR#5", "FR#6", "AC#1", "AC#2", "AC#3", "AC#4", "AC#6"]
 ---

@@ -670,6 +670,7 @@ def _seed_retry_candidate(
     project: str = "proj",
     cwd: str = "/home/user/proj",
     branch_is_active: int = 1,
+    started_at: str = "2025-01-01T00:00:00Z",
     chunk_embedding_version: int = EMBEDDING_VERSION,
     chunk_embedding_model: str = EMBEDDING_MODEL,
 ) -> tuple[int, int, int]:
@@ -688,10 +689,18 @@ def _seed_retry_candidate(
     session_id = cursor.lastrowid
     cursor.execute(
         """
-        INSERT INTO branches (session_id, leaf_uuid, is_active, exchange_count, aggregated_content)
-        VALUES (?, ?, ?, 1, ?)
+        INSERT INTO branches (
+            session_id,
+            leaf_uuid,
+            is_active,
+            exchange_count,
+            aggregated_content,
+            started_at,
+            ended_at
+        )
+        VALUES (?, ?, ?, 1, ?, ?, ?)
         """,
-        (session_id, f"leaf-{uuid}", branch_is_active, content),
+        (session_id, f"leaf-{uuid}", branch_is_active, content, started_at, started_at),
     )
     branch_id = cursor.lastrowid
     cursor.execute(
@@ -949,6 +958,244 @@ class TestAdaptiveChunkKnn:
 
         with pytest.raises(RuntimeError):
             execute_chunk_knn(cursor, query_vec, top_k=1)
+        conn.close()
+
+
+def _scope_retry_vectors() -> tuple[list[float], list[float], list[float], list[float]]:
+    """Return query/near/mid/far vectors with deterministic distance ordering."""
+    query_vec = [0.0] * EMBEDDING_DIM
+    query_vec[0] = 1.0
+
+    near_vec = query_vec.copy()
+
+    mid_vec = [0.0] * EMBEDDING_DIM
+    mid_vec[0] = 0.8
+    mid_vec[1] = 0.6
+
+    far_vec = [0.0] * EMBEDDING_DIM
+    far_vec[1] = 1.0
+
+    return query_vec, near_vec, mid_vec, far_vec
+
+
+class TestAdaptiveChunkKnnScopes:
+    """Scoped vector regressions recover farther in-scope rows beyond the initial KNN window."""
+
+    @pytest.mark.skipif(
+        not vec_available(sqlite3.connect(":memory:")),
+        reason="sqlite-vec not available",
+    )
+    def test_retry_recovers_farther_project_scoped_chunk(self):
+        conn = make_vec_conn()
+        query_vec, near_vec, mid_vec, far_vec = _scope_retry_vectors()
+
+        _seed_retry_candidate(
+            conn,
+            uuid="sess-project-near",
+            content="near broader-match confuser",
+            embed_vec=near_vec,
+            project="alpha-tools",
+        )
+        _seed_retry_candidate(
+            conn,
+            uuid="sess-project-stale",
+            content="stale matching project",
+            embed_vec=mid_vec,
+            project="alpha",
+            chunk_embedding_version=EMBEDDING_VERSION - 1,
+        )
+        _seed_retry_candidate(
+            conn,
+            uuid="sess-project-wrong-model",
+            content="wrong-model matching project",
+            embed_vec=mid_vec,
+            project="alpha",
+            chunk_embedding_model="wrong-model",
+        )
+        _seed_retry_candidate(
+            conn,
+            uuid="sess-project-inactive",
+            content="inactive matching project",
+            embed_vec=mid_vec,
+            project="alpha",
+            branch_is_active=0,
+        )
+        _session_id, valid_branch_id, valid_chunk_id = _seed_retry_candidate(
+            conn,
+            uuid="sess-project-far",
+            content="far matching project",
+            embed_vec=far_vec,
+            project="alpha",
+        )
+
+        results = execute_chunk_knn(conn.cursor(), query_vec, top_k=1, projects=["alpha"])
+
+        assert results == [(valid_chunk_id, valid_branch_id, results[0][2])]
+        conn.close()
+
+    @pytest.mark.skipif(
+        not vec_available(sqlite3.connect(":memory:")),
+        reason="sqlite-vec not available",
+    )
+    def test_retry_recovers_farther_session_prefix_chunk_with_escaped_like(self):
+        conn = make_vec_conn()
+        query_vec, near_vec, _mid_vec, far_vec = _scope_retry_vectors()
+
+        _seed_retry_candidate(
+            conn,
+            uuid="sessA100literal-confuser",
+            content="near unescaped-like confuser",
+            embed_vec=near_vec,
+        )
+        _session_id, valid_branch_id, valid_chunk_id = _seed_retry_candidate(
+            conn,
+            uuid="sess_100%farther",
+            content="far matching session prefix",
+            embed_vec=far_vec,
+        )
+
+        results = execute_chunk_knn(conn.cursor(), query_vec, top_k=1, session_id="sess_100%")
+
+        assert results == [(valid_chunk_id, valid_branch_id, results[0][2])]
+        conn.close()
+
+    @pytest.mark.skipif(
+        not vec_available(sqlite3.connect(":memory:")),
+        reason="sqlite-vec not available",
+    )
+    def test_retry_recovers_farther_path_substring_chunk_with_escaped_like(self):
+        conn = make_vec_conn()
+        query_vec, near_vec, _mid_vec, far_vec = _scope_retry_vectors()
+
+        _seed_retry_candidate(
+            conn,
+            uuid="sess-path-near",
+            content="near unescaped-like path confuser",
+            embed_vec=near_vec,
+            cwd="/home/user/worktrees/featureXbranch/repo",
+        )
+        _session_id, valid_branch_id, valid_chunk_id = _seed_retry_candidate(
+            conn,
+            uuid="sess-path-far",
+            content="far matching path",
+            embed_vec=far_vec,
+            cwd="/home/user/worktrees/feature_%/repo",
+        )
+
+        results = execute_chunk_knn(conn.cursor(), query_vec, top_k=1, path="feature_%")
+
+        assert results == [(valid_chunk_id, valid_branch_id, results[0][2])]
+        conn.close()
+
+    @pytest.mark.skipif(
+        not vec_available(sqlite3.connect(":memory:")),
+        reason="sqlite-vec not available",
+    )
+    def test_retry_recovers_farther_before_filtered_chunk(self):
+        conn = make_vec_conn()
+        query_vec, near_vec, _mid_vec, far_vec = _scope_retry_vectors()
+
+        _seed_retry_candidate(
+            conn,
+            uuid="sess-before-near",
+            content="near later branch",
+            embed_vec=near_vec,
+            started_at="2025-06-01T10:00:00Z",
+        )
+        _seed_retry_candidate(
+            conn,
+            uuid="sess-before-boundary",
+            content="boundary branch should be excluded",
+            embed_vec=near_vec,
+            started_at="2025-03-01",
+        )
+        _session_id, valid_branch_id, valid_chunk_id = _seed_retry_candidate(
+            conn,
+            uuid="sess-before-far",
+            content="far earlier branch",
+            embed_vec=far_vec,
+            started_at="2025-01-01T10:00:00Z",
+        )
+
+        results = execute_chunk_knn(conn.cursor(), query_vec, top_k=1, before="2025-03-01")
+
+        assert results == [(valid_chunk_id, valid_branch_id, results[0][2])]
+        conn.close()
+
+    @pytest.mark.skipif(
+        not vec_available(sqlite3.connect(":memory:")),
+        reason="sqlite-vec not available",
+    )
+    def test_retry_recovers_farther_after_filtered_chunk(self):
+        conn = make_vec_conn()
+        query_vec, near_vec, _mid_vec, far_vec = _scope_retry_vectors()
+
+        _seed_retry_candidate(
+            conn,
+            uuid="sess-after-near",
+            content="near earlier branch",
+            embed_vec=near_vec,
+            started_at="2025-01-01T10:00:00Z",
+        )
+        _seed_retry_candidate(
+            conn,
+            uuid="sess-after-boundary",
+            content="boundary branch should be excluded",
+            embed_vec=near_vec,
+            started_at="2025-03-01",
+        )
+        _session_id, valid_branch_id, valid_chunk_id = _seed_retry_candidate(
+            conn,
+            uuid="sess-after-far",
+            content="far later branch",
+            embed_vec=far_vec,
+            started_at="2025-06-01T10:00:00Z",
+        )
+
+        results = execute_chunk_knn(conn.cursor(), query_vec, top_k=1, after="2025-03-01")
+
+        assert results == [(valid_chunk_id, valid_branch_id, results[0][2])]
+        conn.close()
+
+    @pytest.mark.skipif(
+        not vec_available(sqlite3.connect(":memory:")),
+        reason="sqlite-vec not available",
+    )
+    def test_retry_recovers_farther_combined_session_prefix_and_before_chunk(self):
+        conn = make_vec_conn()
+        query_vec, near_vec, mid_vec, far_vec = _scope_retry_vectors()
+
+        _seed_retry_candidate(
+            conn,
+            uuid="other-prefix-near",
+            content="near matching date only",
+            embed_vec=near_vec,
+            started_at="2025-01-01T10:00:00Z",
+        )
+        _seed_retry_candidate(
+            conn,
+            uuid="sess_combo%near",
+            content="mid matching prefix only",
+            embed_vec=mid_vec,
+            started_at="2025-06-01T10:00:00Z",
+        )
+        _session_id, valid_branch_id, valid_chunk_id = _seed_retry_candidate(
+            conn,
+            uuid="sess_combo%far",
+            content="far matching prefix and date",
+            embed_vec=far_vec,
+            started_at="2025-01-01T10:00:00Z",
+        )
+
+        results = execute_chunk_knn(
+            conn.cursor(),
+            query_vec,
+            top_k=1,
+            session_id="sess_combo%",
+            before="2025-03-01",
+        )
+
+        assert results == [(valid_chunk_id, valid_branch_id, results[0][2])]
         conn.close()
 
 
