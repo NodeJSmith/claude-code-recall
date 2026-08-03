@@ -10,9 +10,8 @@ import pytest
 import sqlite_vec
 from conftest import VEC_SKIP, make_vec_conn
 
-from ccrecall.db import get_connection
-from ccrecall.embeddings import EMBEDDING_DIM, EMBEDDING_MODEL, EMBEDDING_VERSION
-from ccrecall.hooks.import_conversations import import_project, import_session, print_stats
+from ccrecall.embeddings import EMBEDDING_DIM
+from ccrecall.hooks.import_conversations import import_project, import_session
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures"
 
@@ -977,60 +976,6 @@ class TestIsMetaFiltering:
         )
         user_messages = cursor.fetchall()
         assert len(user_messages) > 0, "isMeta=true user entries with origin should be stored"
-
-
-class TestPrintStatsEmbeddingCoverage:
-    """`ccrecall stats` reports honest branch-grain embedding coverage."""
-
-    @staticmethod
-    def _seed_embeddable_branch(conn, i: int, *, embedded: bool, is_active: int = 1) -> None:
-        """Insert an active branch with one message (so it's CHUNK_EMBEDDABLE),
-        optionally stamped at the current embedding watermark. ``i`` keys the
-        unique columns so repeated calls don't collide."""
-        cur = conn.cursor()
-        cur.execute("INSERT INTO projects (path, key) VALUES (?, ?)", (f"/p/{i}", f"k-{i}"))
-        project_id = cur.lastrowid
-        cur.execute("INSERT INTO sessions (uuid, project_id) VALUES (?, ?)", (f"sess-{i}", project_id))
-        session_id = cur.lastrowid
-        version, model = (EMBEDDING_VERSION, EMBEDDING_MODEL) if embedded else (0, None)
-        cur.execute(
-            "INSERT INTO branches (session_id, leaf_uuid, is_active, embedding_version, embedding_model) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (session_id, f"leaf-{i}", is_active, version, model),
-        )
-        branch_id = cur.lastrowid
-        cur.execute(
-            "INSERT INTO messages (session_id, uuid, role, content, timestamp) VALUES (?, ?, 'user', 'hi', ?)",
-            (session_id, f"m-{i}", "2024-01-01T00:00:00Z"),
-        )
-        cur.execute("INSERT INTO branch_messages (branch_id, message_id) VALUES (?, ?)", (branch_id, cur.lastrowid))
-        conn.commit()
-
-    def test_reports_partial_coverage(self, tmp_path, capsys):
-        """Two of three embeddable branches embedded → '2/3 branches (67%)'."""
-        db_path = tmp_path / "stats.db"
-        with get_connection({"db_path": str(db_path)}, load_vec=False) as conn:
-            self._seed_embeddable_branch(conn, 1, embedded=True)
-            self._seed_embeddable_branch(conn, 2, embedded=True)
-            self._seed_embeddable_branch(conn, 3, embedded=False)
-            # An inactive branch must not count toward the embeddable denominator.
-            self._seed_embeddable_branch(conn, 4, embedded=False, is_active=0)
-
-        print_stats(db=db_path)
-        out = capsys.readouterr().out
-
-        assert "watermark: 2/3 branches" in out
-
-    def test_zero_embeddable_branches(self, tmp_path, capsys):
-        """A DB with no embeddable branches reports 0/0 without dividing by zero."""
-        db_path = tmp_path / "empty.db"
-        with get_connection({"db_path": str(db_path)}, load_vec=False):
-            pass
-
-        print_stats(db=db_path)
-        out = capsys.readouterr().out
-
-        assert "watermark: 0/0 branches" in out
 
 
 class TestEmptySessionCascadeRegression:

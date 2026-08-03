@@ -205,5 +205,5 @@ def run(
             str(e),
             code="query_error",
             exit_code=1,
-            remediation="Check ccrecall stats for database health.",
+            remediation="Check ccrecall status for database health.",
         )

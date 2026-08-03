@@ -87,7 +87,8 @@ def count_status(cursor: sqlite3.Cursor, days: int | None) -> dict[str, int]:
     # error sentinel). Note this is stricter than the watermark count in
     # db.branch_embedding_coverage(): build_selection's heal clause counts a
     # watermark-current branch with a missing chunk_vec row as eligible, so on a
-    # DB with orphaned vectors `--status` reports fewer embedded than `stats`.
+    # DB with orphaned vectors `--status` reports fewer embedded than
+    # db.branch_embedding_coverage()'s watermark count.
     cursor.execute(
         f"SELECT COUNT(*) FROM branches WHERE {CHUNK_EMBEDDABLE_BRANCH_FILTER}{recency_branch}",
         recency_params,
