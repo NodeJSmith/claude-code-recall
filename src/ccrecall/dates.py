@@ -1,13 +1,20 @@
 """Validation for --before/--after CLI date-range boundaries.
 
-Boundary values are never converted to a different representation — they are
-compared lexicographically, as-is, against the stored ISO-8601 UTC timestamp
-strings (branches.started_at), matching Claude Code's own transcript
-`timestamp` format. This module's only job is to reject, before it reaches
-SQL, anything that would silently corrupt that comparison: an unpadded month
-("2026-8-1"), a missing timezone, a non-ISO format. Both forms this accepts
-(bare date, full instant) share a zero-padded, fixed-width prefix with the
-stored strings, so a validated value always compares correctly unparsed.
+Boundary values are compared lexicographically against the stored ISO-8601
+UTC timestamp strings (branches.started_at), matching Claude Code's own
+transcript `timestamp` format. This module's job is to reject, before it
+reaches SQL, anything that would silently corrupt that comparison: an
+unpadded month ("2026-8-1"), a missing timezone, a non-ISO format — and to
+normalize a full instant to the exact fixed-width form the comparison
+depends on. A bare date is used as-is (it has no timezone to normalize and
+is already a valid prefix). A full instant is re-rendered to UTC with
+millisecond precision (see parse_date_boundary), because real transcript
+timestamps always carry milliseconds and a boundary missing them would sort
+incorrectly against same-second stored values (e.g. "...10Z" would compare
+less than "...10.635Z" purely because "." < "Z", even though ...10Z is
+chronologically earlier). Both normalized forms share a zero-padded,
+fixed-width prefix with the stored strings, so a validated value always
+compares correctly.
 """
 
 from whenever import Date, Instant
@@ -26,11 +33,17 @@ def parse_date_boundary(value: str, flag: str) -> str:
 
     A bare date is returned unchanged — it has no timezone to normalize, and
     compares correctly as a prefix against the stored UTC strings. A full
-    instant is re-rendered via format_iso() into the exact UTC "Z" form the
-    DB stores: a non-UTC offset (e.g. "+02:00") is a *different string* than
-    its UTC equivalent, so passing it through unchanged would silently break
-    the lexicographic comparison against started_at even though the instant
-    itself parsed correctly.
+    instant is re-rendered via format_iso(unit="millisecond") into the exact
+    UTC "Z" form the DB stores, with a fixed 3-digit fractional field: a
+    non-UTC offset (e.g. "+02:00") is a *different string* than its UTC
+    equivalent, and an instant with no fractional seconds (e.g. "...10Z")
+    sorts lexicographically *before* a stored millisecond timestamp in the
+    same second (e.g. "...10.635Z", since "." < "Z") even though it is
+    chronologically earlier — both would silently break the lexicographic
+    comparison against started_at even though the instant itself parsed
+    correctly. Forcing millisecond precision keeps every normalized boundary
+    the same fixed width as the stored strings, which real Claude Code
+    transcript timestamps always carry.
     """
     try:
         Date.parse_iso(value)
@@ -38,7 +51,7 @@ def parse_date_boundary(value: str, flag: str) -> str:
     except ValueError:
         pass
     try:
-        return Instant.parse_iso(value).format_iso()
+        return Instant.parse_iso(value).format_iso(unit="millisecond")
     except ValueError:
         raise ValueError(
             f"{flag} must be an ISO-8601 date (YYYY-MM-DD) or a timezone-aware "

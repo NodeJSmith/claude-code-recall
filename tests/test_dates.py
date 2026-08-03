@@ -19,8 +19,12 @@ class TestParseDateBoundaryAccepts:
     def test_bare_date_returned_unchanged(self):
         assert parse_date_boundary("2026-08-01", "--before") == "2026-08-01"
 
-    def test_full_instant_with_z_returned_unchanged(self):
-        assert parse_date_boundary("2026-08-01T10:00:00Z", "--before") == "2026-08-01T10:00:00Z"
+    def test_full_instant_with_z_normalized_to_millisecond_precision(self):
+        # A boundary with no fractional seconds gains a zero-padded ".000"
+        # field, matching the width of real transcript timestamps (which
+        # always carry milliseconds) -- see the mixed-precision-sorting test
+        # below for why this matters.
+        assert parse_date_boundary("2026-08-01T10:00:00Z", "--before") == "2026-08-01T10:00:00.000Z"
 
     def test_full_instant_with_milliseconds_returned_unchanged(self):
         assert parse_date_boundary("2026-08-01T10:00:00.123Z", "--before") == "2026-08-01T10:00:00.123Z"
@@ -29,18 +33,31 @@ class TestParseDateBoundaryAccepts:
         # +02:00 must be converted to its UTC equivalent, not passed through
         # verbatim -- see the docstring in dates.py for why passthrough would
         # silently corrupt the lexicographic comparison against stored UTC values.
-        assert parse_date_boundary("2026-08-01T10:00:00+02:00", "--before") == "2026-08-01T08:00:00Z"
+        assert parse_date_boundary("2026-08-01T10:00:00+02:00", "--before") == "2026-08-01T08:00:00.000Z"
 
     def test_negative_offset_instant_normalized_to_utc(self):
-        assert parse_date_boundary("2026-08-01T10:00:00-05:00", "--after") == "2026-08-01T15:00:00Z"
+        assert parse_date_boundary("2026-08-01T10:00:00-05:00", "--after") == "2026-08-01T15:00:00.000Z"
 
     def test_normalized_instant_sorts_correctly_against_stored_format(self):
         # The whole point of normalization: after conversion, string comparison
         # must agree with actual chronological order against a Z-format value
         # that represents the same real instant.
         normalized = parse_date_boundary("2026-08-01T10:00:00+02:00", "--before")
-        same_instant_as_z = "2026-08-01T08:00:00Z"
+        same_instant_as_z = "2026-08-01T08:00:00.000Z"
         assert normalized == same_instant_as_z
+
+    def test_no_fractional_boundary_sorts_correctly_against_millisecond_stored_value(self):
+        # Regression for a real bug: before forcing millisecond precision, a
+        # boundary normalized without a fractional field (e.g. "...10Z")
+        # sorted lexicographically *before* a stored value in the same second
+        # that carries milliseconds (e.g. "...10.001Z"), because "." (0x2E)
+        # sorts before "Z" (0x5A) -- even though the stored value is
+        # chronologically *later*. Real Claude Code transcripts always carry
+        # milliseconds, so every full-instant boundary without them was
+        # silently wrong.
+        after_boundary = parse_date_boundary("2026-02-10T04:56:10Z", "--after")
+        stored_value_one_ms_later = "2026-02-10T04:56:10.001Z"
+        assert stored_value_one_ms_later > after_boundary
 
 
 class TestParseDateBoundaryRejects:
@@ -112,7 +129,7 @@ class TestValidateOrExit:
         # Confirms validate_or_exit doesn't bypass the normalization that
         # parse_date_boundary/validate_date_boundaries perform.
         before, _after = validate_or_exit("2026-08-01T10:00:00+02:00", None)
-        assert before == "2026-08-01T08:00:00Z"
+        assert before == "2026-08-01T08:00:00.000Z"
 
     def test_invalid_before_exits_2_with_structured_error(self, capsys):
         with pytest.raises(SystemExit) as exc_info:
