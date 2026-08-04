@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.21.1](https://github.com/NodeJSmith/claude-code-recall/compare/v0.21.0...v0.21.1) (2026-08-04)
+
+
+### Bug Fixes
+
+* recover scoped vector matches beyond initial KNN window ([45b09c4](https://github.com/NodeJSmith/claude-code-recall/commit/45b09c46c8d75843cb562ed4ff427b0c2fb4f642))
+
+
+### Performance Improvements
+
+* cache unchanged ingestion checks ([#105](https://github.com/NodeJSmith/claude-code-recall/issues/105)) ([64e8a39](https://github.com/NodeJSmith/claude-code-recall/commit/64e8a39fd9ad1742ae2170241630bf4c1bb36264))
+
 ## 2026-08-04
 
 - cache confirmed-OK ingestion checks for faster repeated status audits (#105)
