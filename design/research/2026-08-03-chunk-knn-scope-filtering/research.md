@@ -147,7 +147,7 @@ Another variant is brute-force distance computation over scoped vectors using sq
 
 ### Technical risks
 
-- **Exact recall vs bounded work**: Adaptive retry improves recall but is only exact if the ceiling reaches the scoped corpus size. For “best recall,” the implementation should either count scoped chunks and use that as a cap when filters are active, or document/log when the cap is hit.
+- **Exact recall vs bounded work**: Adaptive retry improves recall but is only exact if the ceiling reaches the total global vector corpus. The scoped eligible count is useful for target sizing and no-match short-circuiting, but not as the retry ceiling.
 - **Track A distinctness**: `get_vec_chunk_ids()` rolls up to one chunk per branch, then `search_sessions()` dedups by session. A filtered chunk count target may still underfill session cards. Branch/session-aware retry is more correct but more complex.
 - **Error semantics**: `execute_chunk_knn()` currently catches `sqlite3.Error` and returns `[]`; tests assert non-DB errors propagate through `get_vec_chunk_ids()`. The fix should preserve that boundary.
 - **Ordering**: Track B must remain nearest-distance-first after filtering; Track A vector branch order should remain best chunk per branch in distance order before RRF.
@@ -164,7 +164,7 @@ Another variant is brute-force distance computation over scoped vectors using sq
 
 ## Open Questions
 
-- [ ] What ceiling is acceptable for “best recall”? The code can make filtered searches exact by allowing KNN `k` to grow to the count of current in-scope chunks, but on large histories this may be expensive.
+- [x] What ceiling is acceptable for “best recall”? The approved design uses the total global `chunk_vec` corpus as the exact-recall ceiling because nearer out-of-scope rows can occupy earlier KNN windows.
 - [ ] Should Track A retry until it has enough filtered chunks, distinct branches, or distinct sessions? Current code already accepts some underfill from branch/session collapse, but Issue 100 is specifically about scope filtering.
 - [ ] Does sqlite-vec `0.1.9` support metadata constraints exactly as current docs describe? Web docs for vec0 metadata confirm the concept and mention supported operators, but are published as `0.1.10-alpha.4`; v0.1.9 release notes mention metadata text-column behavior, suggesting support exists, not proving all desired semantics in the pinned version.
 
@@ -177,12 +177,12 @@ Reasoning: Issue 100 is a correctness bug across all scope filters. Predicate pu
 For “best recall,” avoid a tiny fixed ceiling. A strong implementation would:
 
 1. Detect when scope/date filters are active, or when filtering/version/active checks underfill.
-2. Compute the count of eligible scoped current chunks with the same join and `scope_filter_clause()`.
-3. Grow KNN `k` until either enough filtered results are found or `k` reaches that eligible count.
+2. Compute the count of eligible scoped current chunks with the same join and `scope_filter_clause()` as a target/no-match optimization.
+3. Grow KNN `k` until either enough filtered results are found or `k` reaches the total global `chunk_vec` candidate count.
 4. Preserve distance ordering and existing degradation semantics.
 5. For Track A, consider a branch-aware target in `get_vec_chunk_ids()` so retries stop based on distinct branches rather than raw chunks.
 
-This can be exact for filtered searches when the cap is the scoped eligible count. It may be slower for highly selective filters, but the user explicitly prioritizes recall correctness.
+The approved design supersedes the earlier scoped-count ceiling idea: exact filtered recall requires the total global KNN corpus as the cap because nearer out-of-scope rows can occupy the initial windows. This may be slower for highly selective filters, but the user explicitly prioritizes recall correctness.
 
 ### Concrete affected files
 

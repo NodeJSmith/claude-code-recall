@@ -1,7 +1,7 @@
 # Design: Chunk-KNN Scope Filtering
 
 **Date:** 2026-08-03
-**Status:** approved
+**Status:** archived
 **Scope-mode:** hold
 **Research:** `design/research/2026-08-03-chunk-knn-scope-filtering/research.md`
 

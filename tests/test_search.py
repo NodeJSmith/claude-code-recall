@@ -19,7 +19,7 @@ from ccrecall.fusion import rrf_scored
 from ccrecall.recent_chats import get_recent_sessions
 from ccrecall.schema import SCHEMA, SCHEMA_CORE, detect_fts_support
 from ccrecall.search_cli import format_markdown, print_status, run, run_messages
-from ccrecall.search_conversations import compute_caveat, search_messages, search_sessions
+from ccrecall.search_conversations import OVERFETCH_FLOOR, compute_caveat, search_messages, search_sessions
 from ccrecall.search_hydrate import dedup_by_session, hydrate_cards
 from ccrecall.search_vector import execute_chunk_knn, get_vec_chunk_ids
 
@@ -502,28 +502,50 @@ class TestPathFilter:
 # Helpers shared by new vec/fusion tests
 
 
-def _seed_branch(conn: sqlite3.Connection, uuid: str, content: str, summary: str) -> tuple[int, int]:
+def _seed_branch(
+    conn: sqlite3.Connection,
+    uuid: str,
+    content: str,
+    summary: str,
+    *,
+    project: str = "proj",
+    cwd: str | None = None,
+    branch_is_active: int = 1,
+    started_at: str | None = None,
+) -> tuple[int, int]:
     """Seed one project/session/branch; returns (session_id, branch_id)."""
     cursor = conn.cursor()
+    project_path = f"/home/user/{project}"
+    project_key = f"-home-user-{project}"
     cursor.execute(
         "INSERT OR IGNORE INTO projects (path, key, name) VALUES (?, ?, ?)",
-        ("/home/user/proj", "-home-user-proj", "proj"),
+        (project_path, project_key, project),
     )
-    cursor.execute("SELECT id FROM projects WHERE key = ?", ("-home-user-proj",))
+    cursor.execute("SELECT id FROM projects WHERE key = ?", (project_key,))
     proj_id = cursor.fetchone()[0]
     cursor.execute(
         "INSERT INTO sessions (uuid, project_id, cwd) VALUES (?, ?, ?)",
-        (uuid, proj_id, "/home/user/proj"),
+        (uuid, proj_id, cwd or project_path),
     )
     sess_id = cursor.lastrowid
     cursor.execute(
         """
         INSERT INTO branches (session_id, leaf_uuid, is_active, exchange_count,
                                aggregated_content, context_summary,
-                               embedding_version, embedding_model)
-        VALUES (?, ?, 1, 1, ?, ?, ?, ?)
+                               embedding_version, embedding_model, started_at, ended_at)
+        VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?)
         """,
-        (sess_id, f"leaf-{uuid}", content, summary, EMBEDDING_VERSION, EMBEDDING_MODEL),
+        (
+            sess_id,
+            f"leaf-{uuid}",
+            branch_is_active,
+            content,
+            summary,
+            EMBEDDING_VERSION,
+            EMBEDDING_MODEL,
+            started_at,
+            started_at,
+        ),
     )
     branch_id = cursor.lastrowid
     cursor.execute(
@@ -633,6 +655,10 @@ def _seed_branch_with_chunk(
     summary: str,
     *,
     embed_vec: list[float] | None = None,
+    project: str = "proj",
+    cwd: str | None = None,
+    branch_is_active: int = 1,
+    started_at: str | None = None,
     chunk_embedding_version: int = EMBEDDING_VERSION,
     chunk_embedding_model: str = EMBEDDING_MODEL,
 ) -> tuple[int, int, int]:
@@ -642,7 +668,16 @@ def _seed_branch_with_chunk(
     Chunk embedding_version / embedding_model are set per the parameters so
     stale vs current chunks can be distinguished.
     """
-    sess_id, branch_id = _seed_branch(conn, uuid, content, summary)
+    sess_id, branch_id = _seed_branch(
+        conn,
+        uuid,
+        content,
+        summary,
+        project=project,
+        cwd=cwd,
+        branch_is_active=branch_is_active,
+        started_at=started_at,
+    )
     cursor = conn.cursor()
     cursor.execute(
         """
@@ -669,56 +704,26 @@ def _seed_retry_candidate(
     content: str,
     embed_vec: list[float],
     project: str = "proj",
-    cwd: str = "/home/user/proj",
+    cwd: str | None = None,
     branch_is_active: int = 1,
     started_at: str = "2025-01-01T00:00:00Z",
     chunk_embedding_version: int = EMBEDDING_VERSION,
     chunk_embedding_model: str = EMBEDDING_MODEL,
 ) -> tuple[int, int, int]:
     """Seed one chunk candidate for adaptive-KNN tests."""
-    cursor = conn.cursor()
-    cursor.execute(
-        "INSERT OR IGNORE INTO projects (path, key, name) VALUES (?, ?, ?)",
-        (f"/home/user/{project}", f"-home-user-{project}", project),
+    return _seed_branch_with_chunk(
+        conn,
+        uuid,
+        content,
+        content,
+        embed_vec=embed_vec,
+        project=project,
+        cwd=cwd,
+        branch_is_active=branch_is_active,
+        started_at=started_at,
+        chunk_embedding_version=chunk_embedding_version,
+        chunk_embedding_model=chunk_embedding_model,
     )
-    cursor.execute("SELECT id FROM projects WHERE key = ?", (f"-home-user-{project}",))
-    project_id = cursor.fetchone()[0]
-    cursor.execute(
-        "INSERT INTO sessions (uuid, project_id, cwd) VALUES (?, ?, ?)",
-        (uuid, project_id, cwd),
-    )
-    session_id = cursor.lastrowid
-    cursor.execute(
-        """
-        INSERT INTO branches (
-            session_id,
-            leaf_uuid,
-            is_active,
-            exchange_count,
-            aggregated_content,
-            started_at,
-            ended_at
-        )
-        VALUES (?, ?, ?, 1, ?, ?, ?)
-        """,
-        (session_id, f"leaf-{uuid}", branch_is_active, content, started_at, started_at),
-    )
-    branch_id = cursor.lastrowid
-    cursor.execute(
-        """
-        INSERT INTO chunks (branch_id, exchange_index, content_hash,
-                            user_text, embedding_version, embedding_model)
-        VALUES (?, 0, ?, ?, ?, ?)
-        """,
-        (branch_id, f"hash-{uuid}", content, chunk_embedding_version, chunk_embedding_model),
-    )
-    chunk_id = cursor.lastrowid
-    cursor.execute(
-        "INSERT INTO chunk_vec(chunk_id, embedding) VALUES (?, ?)",
-        (chunk_id, sqlite_vec.serialize_float32(embed_vec)),
-    )
-    conn.commit()
-    return session_id, branch_id, chunk_id
 
 
 class _CursorProxy:
@@ -856,7 +861,8 @@ class TestAdaptiveChunkKnn:
 
         results = execute_chunk_knn(conn.cursor(), query_vec, top_k=1)
 
-        assert results == [(valid_chunk_id, valid_branch_id, results[0][2])]
+        assert len(results) == 1
+        assert results[0][:2] == (valid_chunk_id, valid_branch_id)
         conn.close()
 
     @pytest.mark.skipif(
@@ -1031,7 +1037,8 @@ class TestAdaptiveChunkKnnScopes:
 
         results = execute_chunk_knn(conn.cursor(), query_vec, top_k=1, projects=["alpha"])
 
-        assert results == [(valid_chunk_id, valid_branch_id, results[0][2])]
+        assert len(results) == 1
+        assert results[0][:2] == (valid_chunk_id, valid_branch_id)
         conn.close()
 
     @pytest.mark.skipif(
@@ -1057,7 +1064,8 @@ class TestAdaptiveChunkKnnScopes:
 
         results = execute_chunk_knn(conn.cursor(), query_vec, top_k=1, session_id="sess_100%")
 
-        assert results == [(valid_chunk_id, valid_branch_id, results[0][2])]
+        assert len(results) == 1
+        assert results[0][:2] == (valid_chunk_id, valid_branch_id)
         conn.close()
 
     @pytest.mark.skipif(
@@ -1085,7 +1093,8 @@ class TestAdaptiveChunkKnnScopes:
 
         results = execute_chunk_knn(conn.cursor(), query_vec, top_k=1, path="feature_%")
 
-        assert results == [(valid_chunk_id, valid_branch_id, results[0][2])]
+        assert len(results) == 1
+        assert results[0][:2] == (valid_chunk_id, valid_branch_id)
         conn.close()
 
     @pytest.mark.skipif(
@@ -1120,7 +1129,8 @@ class TestAdaptiveChunkKnnScopes:
 
         results = execute_chunk_knn(conn.cursor(), query_vec, top_k=1, before="2025-03-01")
 
-        assert results == [(valid_chunk_id, valid_branch_id, results[0][2])]
+        assert len(results) == 1
+        assert results[0][:2] == (valid_chunk_id, valid_branch_id)
         conn.close()
 
     @pytest.mark.skipif(
@@ -1155,7 +1165,8 @@ class TestAdaptiveChunkKnnScopes:
 
         results = execute_chunk_knn(conn.cursor(), query_vec, top_k=1, after="2025-03-01")
 
-        assert results == [(valid_chunk_id, valid_branch_id, results[0][2])]
+        assert len(results) == 1
+        assert results[0][:2] == (valid_chunk_id, valid_branch_id)
         conn.close()
 
     @pytest.mark.skipif(
@@ -1196,7 +1207,8 @@ class TestAdaptiveChunkKnnScopes:
             before="2025-03-01",
         )
 
-        assert results == [(valid_chunk_id, valid_branch_id, results[0][2])]
+        assert len(results) == 1
+        assert results[0][:2] == (valid_chunk_id, valid_branch_id)
         conn.close()
 
 
@@ -1980,7 +1992,7 @@ class TestSearchMessages:
             search_messages(conn, "test query", max_results=2, projects=["alpha"])
 
         assert execute_mock.call_args.kwargs["target_results"] == 2
-        assert execute_mock.call_args.args[2] == 20
+        assert execute_mock.call_args.args[2] == OVERFETCH_FLOOR
         conn.close()
 
     @pytest.mark.skipif(
@@ -2428,24 +2440,15 @@ def _seed_dated_branch(conn: sqlite3.Connection, uuid: str, started_at: str, con
     tests), so date-filter tests seed their own minimal branches instead of
     touching that shared fixture.
     """
-    cursor = conn.cursor()
-    cursor.execute(
-        "INSERT OR IGNORE INTO projects (path, key, name) VALUES (?, ?, ?)", ("/p/dated", "-p-dated", "dated")
+    _session_id, branch_id = _seed_branch(
+        conn,
+        uuid,
+        content,
+        content,
+        project="dated",
+        cwd="/p/dated",
+        started_at=started_at,
     )
-    cursor.execute("SELECT id FROM projects WHERE key = ?", ("-p-dated",))
-    proj_id = cursor.fetchone()[0]
-    cursor.execute("INSERT INTO sessions (uuid, project_id, cwd) VALUES (?, ?, ?)", (uuid, proj_id, "/p/dated"))
-    sess_id = cursor.lastrowid
-    cursor.execute(
-        """
-        INSERT INTO branches (session_id, leaf_uuid, is_active, exchange_count,
-                               aggregated_content, started_at, ended_at)
-        VALUES (?, ?, 1, 1, ?, ?, ?)
-        """,
-        (sess_id, f"leaf-{uuid}", content, started_at, started_at),
-    )
-    branch_id = cursor.lastrowid
-    conn.commit()
     return branch_id
 
 

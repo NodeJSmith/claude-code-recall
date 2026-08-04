@@ -36,11 +36,11 @@ def _scoped_current_chunk_filters(
         AND b.is_active = 1
     """
     params: list = [EMBEDDING_VERSION, EMBEDDING_MODEL]
-    scope_sql, scope_params = scope_filter_clause(
+    scope_sql, scope_filter_params = scope_filter_clause(
         projects=projects, session_id=session_id, path=path, before=before, after=after
     )
     where_sql += scope_sql
-    params.extend(scope_params)
+    params.extend(scope_filter_params)
     return joins_sql, where_sql, params
 
 
@@ -60,14 +60,14 @@ def _filter_chunk_knn_rows(
     chunk_ids = [row[0] for row in knn_rows]
     chunk_to_dist: dict[int, float] = {row[0]: row[1] for row in knn_rows}
     placeholders = ",".join("?" * len(chunk_ids))
-    joins_sql, where_sql, scope_params = _scoped_current_chunk_filters(
+    joins_sql, where_sql, filter_tail_params = _scoped_current_chunk_filters(
         projects=projects, session_id=session_id, path=path, before=before, after=after
     )
     filter_sql = (
         f"SELECT ch.id as chunk_id, b.id as branch_id FROM chunks ch {joins_sql}"
         f"WHERE ch.id IN ({placeholders}) {where_sql}"
     )
-    filter_params: list = [*chunk_ids, *scope_params]
+    filter_params: list = [*chunk_ids, *filter_tail_params]
 
     valid_rows = cursor.execute(filter_sql, filter_params).fetchall()
     chunk_to_branch: dict[int, int] = {row[0]: row[1] for row in valid_rows}
@@ -107,10 +107,12 @@ def execute_chunk_knn(
     after: str | None = None,
     target_results: int | None = None,
 ) -> list[tuple[int, int, float]]:
-    """Shared chunk-KNN core: run the vec MATCH query, filter to valid chunks, return in KNN order.
+    """Shared chunk-KNN core: adaptively retry vec MATCH until filtered results fill the target.
 
     Returns [(chunk_id, branch_id, distance)] without any per-branch rollup —
     both A's rollup and B's no-rollup path build on this single MATCH query.
+    When target_results is provided, retry growth continues until that many
+    scoped/current chunks are recovered or the global vector corpus is exhausted.
     Filters to current embedding version + model at the chunk grain, so
     a partially re-embedded branch still contributes its already-current chunks.
     Returns empty list on sqlite3.Error so callers can degrade; non-DB bugs propagate.
@@ -169,12 +171,13 @@ def execute_chunk_knn(
         if eligible_candidates == 0:
             return []
 
-        target = min(requested_results, eligible_candidates)
-        if len(filtered_rows) >= target:
-            return filtered_rows[:target]
+        max_possible_results = min(requested_results, eligible_candidates)
+        if len(filtered_rows) >= max_possible_results:
+            return filtered_rows[:max_possible_results]
 
-        if len(knn_rows) < current_k:
-            return filtered_rows[:target]
+        vec_returned_less_than_requested = len(knn_rows) < current_k
+        if vec_returned_less_than_requested:
+            return filtered_rows[:max_possible_results]
 
         if total_candidates is None:
             try:
@@ -182,12 +185,14 @@ def execute_chunk_knn(
             except sqlite3.Error:
                 return []
 
-        if total_candidates == 0 or current_k >= total_candidates:
-            return filtered_rows[:target]
+        reached_global_corpus_ceiling = total_candidates == 0 or current_k >= total_candidates
+        if reached_global_corpus_ceiling:
+            return filtered_rows[:max_possible_results]
 
         next_k = min(current_k * KNN_RETRY_MULTIPLIER, total_candidates)
-        if next_k == current_k:
-            return filtered_rows[:target]
+        retry_window_cannot_grow = next_k == current_k
+        if retry_window_cannot_grow:
+            return filtered_rows[:max_possible_results]
         current_k = next_k
 
 
