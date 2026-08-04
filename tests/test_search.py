@@ -513,7 +513,7 @@ def _seed_branch(
     branch_is_active: int = 1,
     started_at: str | None = None,
 ) -> tuple[int, int]:
-    """Seed one project/session/branch; returns (session_id, branch_id)."""
+    """Seed one searchable branch with the metadata knobs used by search filters."""
     cursor = conn.cursor()
     project_path = f"/home/user/{project}"
     project_key = f"-home-user-{project}"
@@ -662,7 +662,7 @@ def _seed_branch_with_chunk(
     chunk_embedding_version: int = EMBEDDING_VERSION,
     chunk_embedding_model: str = EMBEDDING_MODEL,
 ) -> tuple[int, int, int]:
-    """Seed project/session/branch/messages + a chunk row; returns (sess_id, branch_id, chunk_id).
+    """Seed a searchable branch plus one optional vector-backed chunk.
 
     Inserts the chunk into chunk_vec only if embed_vec is provided.
     Chunk embedding_version / embedding_model are set per the parameters so
