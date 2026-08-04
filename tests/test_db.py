@@ -900,7 +900,7 @@ class TestSchemaVersioning:
         with get_connection(settings={"db_path": str(db_path)}, load_vec=False) as migrated:
             assert migrated.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
             columns = [row[1] for row in migrated.execute("PRAGMA table_info(ingestion_check_cache)").fetchall()]
-            assert columns == ["session_uuid", "source_fingerprint", "checked_at"]
+            assert columns == ["session_uuid", "source_fingerprint", "db_coverage_fingerprint", "checked_at"]
 
     def test_migration_toctou_race_runs_migration_once(self, tmp_path):
         """Two connections racing to open the same v0 DB must not both migrate.
@@ -1077,7 +1077,8 @@ class TestSchemaEquivalencePin:
         "ingestion_check_cache": [
             (0, "session_uuid", "TEXT", 0, None, 1),
             (1, "source_fingerprint", "TEXT", 1, None, 0),
-            (2, "checked_at", "DATETIME", 0, "CURRENT_TIMESTAMP", 0),
+            (2, "db_coverage_fingerprint", "TEXT", 1, "''", 0),
+            (3, "checked_at", "DATETIME", 0, "CURRENT_TIMESTAMP", 0),
         ],
         "messages": [
             (0, "id", "INTEGER", 0, None, 1),

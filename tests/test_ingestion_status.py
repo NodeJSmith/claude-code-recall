@@ -36,9 +36,13 @@ def _insert_import_log(memory_db, filepath: Path, message_count: int = 0) -> Non
     memory_db.commit()
 
 
-def _cache_row(memory_db, session_uuid: str) -> tuple[str, str, str] | None:
+def _cache_row(memory_db, session_uuid: str) -> tuple[str, str, str, str] | None:
     return memory_db.execute(
-        "SELECT session_uuid, source_fingerprint, checked_at FROM ingestion_check_cache WHERE session_uuid = ?",
+        """
+        SELECT session_uuid, source_fingerprint, db_coverage_fingerprint, checked_at
+        FROM ingestion_check_cache
+        WHERE session_uuid = ?
+        """,
         (session_uuid,),
     ).fetchone()
 
@@ -162,6 +166,84 @@ def test_transcript_change_invalidates_cache_and_reparses(memory_db, tmp_path):
     assert parse_all.call_count == 1
     assert status["ok_sessions"] == 1
     assert _cache_row(memory_db, "sess-cache-change")[1] != first_cache[1]
+
+
+def test_mtime_only_change_invalidates_cache_and_reparses(memory_db, tmp_path):
+    filepath = tmp_path / "sess-cache-mtime.jsonl"
+    _write_four_turns(filepath)
+    _seed_session(memory_db, filepath, ["u1", "a1", "u2", "a2"])
+
+    summarize_ingestion(memory_db)
+    first_cache = _cache_row(memory_db, "sess-cache-mtime")
+    assert first_cache is not None
+
+    stat = filepath.stat()
+    os.utime(filepath, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1))
+
+    with patch("ccrecall.ingestion_status.parse_all_with_uuids", wraps=parsing.parse_all_with_uuids) as parse_all:
+        status = summarize_ingestion(memory_db)
+
+    assert parse_all.call_count == 1
+    assert status["ok_sessions"] == 1
+    assert _cache_row(memory_db, "sess-cache-mtime")[1] != first_cache[1]
+
+
+def test_deleted_db_message_invalidates_ok_cache_and_reports_gap(memory_db, tmp_path):
+    filepath = tmp_path / "sess-cache-db-gap.jsonl"
+    _write_four_turns(filepath)
+    _seed_session(memory_db, filepath, ["u1", "a1", "u2", "a2"])
+
+    first = summarize_ingestion(memory_db)
+
+    assert first["ok_sessions"] == 1
+    first_cache = _cache_row(memory_db, "sess-cache-db-gap")
+    assert first_cache is not None
+
+    memory_db.execute(
+        "DELETE FROM messages WHERE session_id = (SELECT id FROM sessions WHERE uuid = ?) AND uuid = ?",
+        ("sess-cache-db-gap", "a1"),
+    )
+    memory_db.commit()
+
+    with patch("ccrecall.ingestion_status.parse_all_with_uuids", wraps=parsing.parse_all_with_uuids) as parse_all:
+        second = summarize_ingestion(memory_db)
+
+    assert parse_all.call_count == 1
+    assert second["ok_sessions"] == 0
+    assert second["ingestion_gap_sessions"] == 1
+    assert second["ingestion_gap_turns"] == 1
+    assert _cache_row(memory_db, "sess-cache-db-gap") == first_cache
+
+
+def test_changed_db_uuid_membership_invalidates_ok_cache_and_reports_gap(memory_db, tmp_path):
+    filepath = tmp_path / "sess-cache-db-membership.jsonl"
+    _write_four_turns(filepath)
+    _seed_session(memory_db, filepath, ["u1", "a1", "u2", "a2"])
+
+    first = summarize_ingestion(memory_db)
+
+    assert first["ok_sessions"] == 1
+    first_cache = _cache_row(memory_db, "sess-cache-db-membership")
+    assert first_cache is not None
+
+    session_id = memory_db.execute("SELECT id FROM sessions WHERE uuid = ?", ("sess-cache-db-membership",)).fetchone()[
+        0
+    ]
+    memory_db.execute("DELETE FROM messages WHERE session_id = ? AND uuid = ?", (session_id, "a1"))
+    memory_db.execute(
+        "INSERT INTO messages (session_id, uuid, role, content, tool_content) VALUES (?, 'bogus', 'user', 'x', '')",
+        (session_id,),
+    )
+    memory_db.commit()
+
+    with patch("ccrecall.ingestion_status.parse_all_with_uuids", wraps=parsing.parse_all_with_uuids) as parse_all:
+        second = summarize_ingestion(memory_db)
+
+    assert parse_all.call_count == 1
+    assert second["ok_sessions"] == 0
+    assert second["ingestion_gap_sessions"] == 1
+    assert second["ingestion_gap_turns"] == 1
+    assert _cache_row(memory_db, "sess-cache-db-membership") == first_cache
 
 
 def test_problem_session_is_not_cached_and_is_reparsed(memory_db, tmp_path):

@@ -104,6 +104,7 @@ CREATE TABLE IF NOT EXISTS import_log (
 CREATE TABLE IF NOT EXISTS ingestion_check_cache (
   session_uuid TEXT PRIMARY KEY,
   source_fingerprint TEXT NOT NULL,
+  db_coverage_fingerprint TEXT NOT NULL DEFAULT '',
   checked_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
