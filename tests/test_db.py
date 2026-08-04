@@ -45,6 +45,7 @@ class TestSchemaCreation:
             "messages",
             "branch_messages",
             "import_log",
+            "ingestion_check_cache",
         }
         assert expected.issubset(tables)
 
@@ -804,6 +805,103 @@ class TestSchemaVersioning:
         assert first_version == second_version == db_module.SCHEMA_VERSION
         assert first_active == second_active == 1
 
+    def test_migration_from_v4_creates_ingestion_check_cache_table(self, tmp_path):
+        """A v4 DB gains the ingestion check cache table and is stamped to v5 on open."""
+        db_path = tmp_path / "v4_to_v5.db"
+        conn = sqlite3.connect(db_path)
+        conn.executescript(
+            """
+            CREATE TABLE projects (
+              id INTEGER PRIMARY KEY,
+              path TEXT UNIQUE NOT NULL,
+              key TEXT UNIQUE NOT NULL,
+              name TEXT,
+              created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE sessions (
+              id INTEGER PRIMARY KEY,
+              uuid TEXT UNIQUE NOT NULL,
+              project_id INTEGER REFERENCES projects(id),
+              parent_session_id INTEGER REFERENCES sessions(id),
+              git_branch TEXT,
+              cwd TEXT,
+              imported_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE branches (
+              id INTEGER PRIMARY KEY,
+              session_id INTEGER NOT NULL REFERENCES sessions(id),
+              leaf_uuid TEXT NOT NULL,
+              is_active INTEGER DEFAULT 1,
+              started_at DATETIME,
+              ended_at DATETIME,
+              exchange_count INTEGER DEFAULT 0,
+              files_modified TEXT,
+              commits TEXT,
+              tool_counts TEXT,
+              aggregated_content TEXT,
+              context_summary TEXT,
+              context_summary_json TEXT,
+              summary_version INTEGER DEFAULT 0,
+              embedding_version INTEGER DEFAULT 0,
+              embedding_model TEXT,
+              summary_version_at_embed INTEGER,
+              UNIQUE(session_id)
+            );
+            CREATE TABLE messages (
+              id INTEGER PRIMARY KEY,
+              session_id INTEGER NOT NULL REFERENCES sessions(id),
+              uuid TEXT,
+              parent_uuid TEXT,
+              timestamp DATETIME,
+              role TEXT CHECK(role IN ('user', 'assistant')),
+              content TEXT NOT NULL,
+              tool_summary TEXT,
+              has_tool_use INTEGER DEFAULT 0,
+              tool_content TEXT,
+              has_thinking INTEGER DEFAULT 0,
+              is_notification INTEGER DEFAULT 0,
+              origin TEXT,
+              UNIQUE(session_id, uuid)
+            );
+            CREATE TABLE branch_messages (
+              branch_id INTEGER NOT NULL REFERENCES branches(id),
+              message_id INTEGER NOT NULL REFERENCES messages(id),
+              PRIMARY KEY (branch_id, message_id)
+            );
+            CREATE TABLE import_log (
+              id INTEGER PRIMARY KEY,
+              file_path TEXT UNIQUE NOT NULL,
+              file_hash TEXT,
+              imported_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+              messages_imported INTEGER DEFAULT 0,
+              file_size INTEGER,
+              file_mtime REAL
+            );
+            CREATE TABLE chunks (
+              id INTEGER PRIMARY KEY,
+              branch_id INTEGER NOT NULL REFERENCES branches(id),
+              exchange_index INTEGER NOT NULL,
+              content_hash TEXT NOT NULL,
+              first_message_uuid TEXT,
+              timestamp TEXT,
+              user_text TEXT,
+              assistant_text TEXT,
+              was_capped INTEGER NOT NULL DEFAULT 0,
+              embedding_version INTEGER NOT NULL DEFAULT 0,
+              embedding_model TEXT,
+              UNIQUE(branch_id, exchange_index)
+            );
+            PRAGMA user_version = 4;
+            """
+        )
+        conn.commit()
+        conn.close()
+
+        with get_connection(settings={"db_path": str(db_path)}, load_vec=False) as migrated:
+            assert migrated.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+            columns = [row[1] for row in migrated.execute("PRAGMA table_info(ingestion_check_cache)").fetchall()]
+            assert columns == ["session_uuid", "source_fingerprint", "db_coverage_fingerprint", "checked_at"]
+
     def test_migration_toctou_race_runs_migration_once(self, tmp_path):
         """Two connections racing to open the same v0 DB must not both migrate.
 
@@ -920,6 +1018,7 @@ class TestSchemaEquivalencePin:
         "branches_fts",
         "chunks",
         "import_log",
+        "ingestion_check_cache",
         "messages",
         "projects",
         "sessions",
@@ -974,6 +1073,12 @@ class TestSchemaEquivalencePin:
             (4, "messages_imported", "INTEGER", 0, "0", 0),
             (5, "file_size", "INTEGER", 0, None, 0),
             (6, "file_mtime", "REAL", 0, None, 0),
+        ],
+        "ingestion_check_cache": [
+            (0, "session_uuid", "TEXT", 0, None, 1),
+            (1, "source_fingerprint", "TEXT", 1, None, 0),
+            (2, "db_coverage_fingerprint", "TEXT", 1, "''", 0),
+            (3, "checked_at", "DATETIME", 0, "CURRENT_TIMESTAMP", 0),
         ],
         "messages": [
             (0, "id", "INTEGER", 0, None, 1),
