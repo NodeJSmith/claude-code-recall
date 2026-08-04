@@ -100,6 +100,13 @@ CREATE TABLE IF NOT EXISTS import_log (
   file_mtime REAL
 );
 
+-- Confirmed-OK ingestion audit cache
+CREATE TABLE IF NOT EXISTS ingestion_check_cache (
+  session_uuid TEXT PRIMARY KEY,
+  source_fingerprint TEXT NOT NULL,
+  checked_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
 -- Chunk metadata table (per-exchange embedding store)
 -- Source of truth for which chunk rowids belong to a branch, and the carrier
 -- of the Track B locator (first_message_uuid, timestamp) plus bounded display

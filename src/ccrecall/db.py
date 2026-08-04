@@ -19,7 +19,7 @@ from ccrecall.schema import SCHEMA_CORE, SCHEMA_FTS4, SCHEMA_FTS5, detect_fts_su
 
 # Current schema version. Bump when adding a migration and wire the new DDL
 # delta into _apply_migrations (see _migrate_to_v1 for the version-1 shape).
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 # Shared SQL predicate for "branches that are candidates to embed": active
 # leaves (the query path only returns is_active=1) with a usable summary. This
@@ -466,6 +466,25 @@ def _migrate_to_v4(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_to_v5(conn: sqlite3.Connection) -> None:
+    """Version-5 migration: add the ingestion check cache table.
+
+    Runs outside the version-gated BEGIN IMMEDIATE block, matching v3/v4's
+    additive style: this branch may be behind the installed version
+    (user_version > SCHEMA_VERSION) but the table still needs to exist for this
+    code to work. Concurrent processes may race on the CREATE TABLE IF NOT
+    EXISTS; SQLite handles that idempotently. No commit here — the caller
+    commits.
+    """
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS ingestion_check_cache ("
+        "session_uuid TEXT PRIMARY KEY, "
+        "source_fingerprint TEXT NOT NULL, "
+        "checked_at DATETIME DEFAULT CURRENT_TIMESTAMP"
+        ")"
+    )
+
+
 def _apply_migrations(conn: sqlite3.Connection) -> None:
     """Apply version-gated schema migrations up to SCHEMA_VERSION, atomically.
 
@@ -505,13 +524,13 @@ def _apply_migrations(conn: sqlite3.Connection) -> None:
     """
     current = conn.execute("PRAGMA user_version").fetchone()[0]
 
-    # _migrate_to_v3 and _migrate_to_v4 are additive (ALTER TABLE ADD COLUMN)
-    # and self-guarded by catching the duplicate-column error, so they run
+    # _migrate_to_v3, _migrate_to_v4, and _migrate_to_v5 are additive and run
     # outside the version gate — this branch may be behind the installed
-    # version (user_version > SCHEMA_VERSION) but the columns still need to
-    # exist for this code to work.
+    # version (user_version > SCHEMA_VERSION) but the columns/table still need
+    # to exist for this code to work.
     _migrate_to_v3(conn)
     _migrate_to_v4(conn)
+    _migrate_to_v5(conn)
     conn.commit()
 
     if current >= SCHEMA_VERSION:

@@ -111,11 +111,11 @@ def cmd_status(
     check_ingestion: Annotated[
         bool,
         _FLAG,
-        Parameter(help="Deep-check JSONL transcripts against DB rows to classify ingestion gaps."),
+        Parameter(help="Deep-check JSONL transcripts and cache confirmed-OK sessions."),
     ] = False,
     ctx: CLIContextParam = DEFAULT_CLI_CONTEXT,
 ) -> None:
-    """Show consolidated read-only health and backfill status."""
+    """Show consolidated health and backfill status."""
     status_mod.run(db=db, days=days, check_ingestion=check_ingestion, output_format=ctx.output_format)
 
 

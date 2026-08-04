@@ -3,10 +3,12 @@
 import os
 import time
 from pathlib import Path
+from unittest.mock import patch
 
 from conftest import make_jsonl_entry as _entry
 from conftest import write_jsonl as _write_jsonl
 
+from ccrecall import parsing
 from ccrecall.ingestion_status import summarize_ingestion
 
 
@@ -32,6 +34,13 @@ def _insert_import_log(memory_db, filepath: Path, message_count: int = 0) -> Non
         (str(filepath), message_count),
     )
     memory_db.commit()
+
+
+def _cache_row(memory_db, session_uuid: str) -> tuple[str, str, str] | None:
+    return memory_db.execute(
+        "SELECT session_uuid, source_fingerprint, checked_at FROM ingestion_check_cache WHERE session_uuid = ?",
+        (session_uuid,),
+    ).fetchone()
 
 
 def _write_four_turns(filepath: Path) -> None:
@@ -104,6 +113,73 @@ def test_complete_session_is_ok(memory_db, tmp_path):
     assert status["ok_sessions"] == 1
     assert status["pending_tail_sessions"] == 0
     assert status["ingestion_gap_sessions"] == 0
+
+
+def test_ok_session_records_cache_and_unchanged_second_run_skips_parsing(memory_db, tmp_path):
+    filepath = tmp_path / "sess-cache.jsonl"
+    _write_four_turns(filepath)
+    _seed_session(memory_db, filepath, ["u1", "a1", "u2", "a2"])
+
+    first = summarize_ingestion(memory_db)
+
+    cached = _cache_row(memory_db, "sess-cache")
+    assert first["sessions_checked"] == 1
+    assert first["ok_sessions"] == 1
+    assert cached is not None
+
+    with patch(
+        "ccrecall.ingestion_status.parse_all_with_uuids", side_effect=AssertionError("cache hit should skip parsing")
+    ):
+        second = summarize_ingestion(memory_db)
+
+    assert second["sessions_checked"] == 1
+    assert second["ok_sessions"] == 1
+    assert _cache_row(memory_db, "sess-cache") == cached
+
+
+def test_transcript_change_invalidates_cache_and_reparses(memory_db, tmp_path):
+    filepath = tmp_path / "sess-cache-change.jsonl"
+    _write_four_turns(filepath)
+    _seed_session(memory_db, filepath, ["u1", "a1", "u2", "a2"])
+
+    summarize_ingestion(memory_db)
+    first_cache = _cache_row(memory_db, "sess-cache-change")
+    assert first_cache is not None
+
+    _write_jsonl(
+        filepath,
+        [
+            _entry("u1", None, "2026-01-01T10:00:00Z", "user", "first"),
+            _entry("a1", "u1", "2026-01-01T10:00:01Z", "assistant", "answer"),
+            _entry("u2", "a1", "2026-01-01T10:00:02Z", "user", "second updated"),
+            _entry("a2", "u2", "2026-01-01T10:00:03Z", "assistant", "answer"),
+        ],
+    )
+
+    with patch("ccrecall.ingestion_status.parse_all_with_uuids", wraps=parsing.parse_all_with_uuids) as parse_all:
+        status = summarize_ingestion(memory_db)
+
+    assert parse_all.call_count == 1
+    assert status["ok_sessions"] == 1
+    assert _cache_row(memory_db, "sess-cache-change")[1] != first_cache[1]
+
+
+def test_problem_session_is_not_cached_and_is_reparsed(memory_db, tmp_path):
+    filepath = tmp_path / "sess-problem.jsonl"
+    _write_four_turns(filepath)
+    _seed_session(memory_db, filepath, ["u1", "a1"])
+
+    first = summarize_ingestion(memory_db)
+
+    assert first["pending_tail_sessions"] == 1
+    assert _cache_row(memory_db, "sess-problem") is None
+
+    with patch("ccrecall.ingestion_status.parse_all_with_uuids", wraps=parsing.parse_all_with_uuids) as parse_all:
+        second = summarize_ingestion(memory_db)
+
+    assert parse_all.call_count == 1
+    assert second["pending_tail_sessions"] == 1
+    assert _cache_row(memory_db, "sess-problem") is None
 
 
 def test_multifile_session_uses_parent_chain_not_import_log_order(memory_db, tmp_path):
@@ -191,3 +267,48 @@ def test_partial_multifile_source_loss_counts_as_missing_source(memory_db, tmp_p
     assert status["sessions_checked"] == 1
     assert status["missing_source_sessions"] == 1
     assert status["ok_sessions"] == 0
+
+
+def test_partial_multifile_source_loss_stays_missing_source_after_prior_ok_cache(memory_db, tmp_path):
+    parent = tmp_path / "sess-partial-cache.jsonl"
+    agent = tmp_path / "agent-sess-partial-cache.jsonl"
+    _write_jsonl(
+        parent,
+        [
+            _entry("u1", None, "2026-01-01T10:00:00Z", "user", "first"),
+            _entry("a1", "u1", "2026-01-01T10:00:01Z", "assistant", "answer"),
+        ],
+    )
+    _write_jsonl(
+        agent,
+        [
+            _entry("u2", "a1", "2026-01-01T10:00:02Z", "user", "second"),
+            _entry("a2", "u2", "2026-01-01T10:00:03Z", "assistant", "answer"),
+        ],
+    )
+    memory_db.execute("INSERT INTO sessions (uuid) VALUES ('sess-partial-cache')")
+    session_id = memory_db.execute("SELECT last_insert_rowid()").fetchone()[0]
+    for uuid in ["u1", "a1", "u2", "a2"]:
+        memory_db.execute(
+            "INSERT INTO messages (session_id, uuid, role, content, tool_content) VALUES (?, ?, 'user', 'x', '')",
+            (session_id, uuid),
+        )
+    _insert_import_log(memory_db, parent, 2)
+    _insert_import_log(memory_db, agent, 2)
+
+    first = summarize_ingestion(memory_db)
+
+    assert first["ok_sessions"] == 1
+    assert _cache_row(memory_db, "sess-partial-cache") is not None
+
+    agent.unlink()
+
+    with patch(
+        "ccrecall.ingestion_status.parse_all_with_uuids",
+        side_effect=AssertionError("missing source should bypass cache and parsing"),
+    ):
+        second = summarize_ingestion(memory_db)
+
+    assert second["sessions_checked"] == 1
+    assert second["missing_source_sessions"] == 1
+    assert second["ok_sessions"] == 0

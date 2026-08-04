@@ -1,4 +1,8 @@
-"""Consolidated read-only health/status reporting for the CLI."""
+"""Consolidated health/status reporting for the CLI.
+
+Default status reads are read-only; ``--check-ingestion`` also records
+confirmed-OK cache metadata for future deep-check runs.
+"""
 
 import contextlib
 import json
@@ -7,7 +11,7 @@ import sys
 from pathlib import Path
 
 from ccrecall.config import DEFAULT_DB_PATH, get_db_path, load_settings
-from ccrecall.db import branch_embedding_coverage, chunk_vec_queryable, vec_available
+from ccrecall.db import branch_embedding_coverage, chunk_vec_queryable, get_connection, vec_available
 from ccrecall.hooks.backfill_status import count_status as count_embedding_status
 from ccrecall.import_log_ops import import_log_source_index
 from ccrecall.ingestion_status import summarize_ingestion
@@ -76,9 +80,10 @@ def count_branch_invariant_violations(conn: sqlite3.Connection) -> int:
 
 
 def collect_status(*, db: Path = DEFAULT_DB_PATH, days: int | None = None, check_ingestion: bool = False) -> dict:
-    """Collect read-only status across DB, ingestion, tool content, and embeddings."""
+    """Collect status across DB, ingestion, tool content, and embeddings."""
     settings = _settings_for_db(db)
     db_path = get_db_path(settings)
+    ingestion = None
 
     with _readonly_connection(db_path, load_vec=False) as conn:
         cursor = conn.cursor()
@@ -112,11 +117,16 @@ def collect_status(*, db: Path = DEFAULT_DB_PATH, days: int | None = None, check
             }
 
         tool_pending = count_tool_content_pending(cursor, days)
-        source_index = import_log_source_index(cursor) if check_ingestion or tool_pending else None
+        source_index = import_log_source_index(cursor) if tool_pending else None
         tool_missing = count_pending_missing_jsonl(cursor, days, source_index) if tool_pending else 0
         tool_total = count_tool_content_total(cursor, days)
         embedded_watermark, embeddable_watermark = branch_embedding_coverage(conn)
-        ingestion = summarize_ingestion(conn, sources=source_index) if check_ingestion else None
+
+    if check_ingestion:
+        if not db_path.exists():
+            raise FileNotFoundError(db_path)
+        with get_connection(settings, load_vec=False) as conn:
+            ingestion = summarize_ingestion(conn, sources=import_log_source_index(conn.cursor()))
 
     embedding_backfill: dict = {
         "available": False,
