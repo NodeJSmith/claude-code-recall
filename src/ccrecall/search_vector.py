@@ -8,6 +8,8 @@ from ccrecall.embeddings import EMBEDDING_MODEL, EMBEDDING_VERSION
 from ccrecall.search_query import scope_filter_clause
 
 KNN_RETRY_MULTIPLIER = 4
+MAX_SQL_BOUND_PARAMS = 900
+FILTER_CHUNK_ID_BATCH_SIZE = 500
 
 
 def _run_chunk_knn(cursor: sqlite3.Cursor, serialized: bytes, k: int) -> list[tuple[int, float]]:
@@ -59,18 +61,27 @@ def _filter_chunk_knn_rows(
 
     chunk_ids = [row[0] for row in knn_rows]
     chunk_to_dist: dict[int, float] = {row[0]: row[1] for row in knn_rows}
-    placeholders = ",".join("?" * len(chunk_ids))
     joins_sql, where_sql, filter_tail_params = _scoped_current_chunk_filters(
         projects=projects, session_id=session_id, path=path, before=before, after=after
     )
-    filter_sql = (
-        f"SELECT ch.id as chunk_id, b.id as branch_id FROM chunks ch {joins_sql}"
-        f"WHERE ch.id IN ({placeholders}) {where_sql}"
-    )
-    filter_params: list = [*chunk_ids, *filter_tail_params]
 
-    valid_rows = cursor.execute(filter_sql, filter_params).fetchall()
-    chunk_to_branch: dict[int, int] = {row[0]: row[1] for row in valid_rows}
+    chunk_to_branch: dict[int, int] = {}
+    param_budget = MAX_SQL_BOUND_PARAMS - len(filter_tail_params)
+    if param_budget <= 0:
+        return []
+
+    batch_size = min(FILTER_CHUNK_ID_BATCH_SIZE, param_budget)
+    for offset in range(0, len(chunk_ids), batch_size):
+        batch_ids = chunk_ids[offset : offset + batch_size]
+        placeholders = ",".join("?" * len(batch_ids))
+        filter_sql = (
+            f"SELECT ch.id as chunk_id, b.id as branch_id FROM chunks ch {joins_sql}"
+            f"WHERE ch.id IN ({placeholders}) {where_sql}"
+        )
+        filter_params: list = [*batch_ids, *filter_tail_params]
+        valid_rows = cursor.execute(filter_sql, filter_params).fetchall()
+        chunk_to_branch.update((row[0], row[1]) for row in valid_rows)
+
     return [(cid, chunk_to_branch[cid], chunk_to_dist[cid]) for cid in chunk_ids if cid in chunk_to_branch]
 
 

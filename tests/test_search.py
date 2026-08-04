@@ -8,6 +8,7 @@ import pytest
 import sqlite_vec
 from conftest import make_vec_conn
 
+from ccrecall import search_vector
 from ccrecall.db import (
     upsert_chunk_vec,
     vec_available,
@@ -732,11 +733,13 @@ class _CursorProxy:
     def __init__(self, cursor: sqlite3.Cursor, *, fail_predicate=None, exception=None):
         self._cursor = cursor
         self.executed_sql: list[str] = []
+        self.executed_params: list[tuple] = []
         self._fail_predicate = fail_predicate
         self._exception = exception
 
     def execute(self, sql, params=()):
         self.executed_sql.append(sql)
+        self.executed_params.append(tuple(params))
         if self._fail_predicate is not None and self._fail_predicate(sql):
             raise self._exception
         return self._cursor.execute(sql, params)
@@ -965,6 +968,76 @@ class TestAdaptiveChunkKnn:
 
         with pytest.raises(RuntimeError):
             execute_chunk_knn(cursor, query_vec, top_k=1)
+        conn.close()
+
+    @pytest.mark.skipif(
+        not vec_available(sqlite3.connect(":memory:")),
+        reason="sqlite-vec not available",
+    )
+    def test_filter_chunk_knn_rows_batches_large_candidate_sets(self, monkeypatch):
+        conn = make_vec_conn()
+        query_vec = [1.0 / EMBEDDING_DIM**0.5] * EMBEDDING_DIM
+        knn_rows = []
+        for idx in range(7):
+            _session_id, _branch_id, chunk_id = _seed_retry_candidate(
+                conn,
+                uuid=f"sess-batched-filter-{idx}",
+                content=f"batched filter candidate {idx}",
+                embed_vec=query_vec,
+            )
+            knn_rows.append((chunk_id, float(idx)))
+        cursor = _CursorProxy(conn.cursor())
+        monkeypatch.setattr(search_vector, "MAX_SQL_BOUND_PARAMS", 5)
+        monkeypatch.setattr(search_vector, "FILTER_CHUNK_ID_BATCH_SIZE", 10)
+
+        results = search_vector._filter_chunk_knn_rows(
+            cursor,
+            knn_rows,
+            projects=["proj"],
+            session_id=None,
+            path=None,
+            before=None,
+            after=None,
+        )
+
+        filter_param_lengths = [
+            len(params)
+            for sql, params in zip(cursor.executed_sql, cursor.executed_params, strict=True)
+            if "FROM chunks ch" in sql and "WHERE ch.id IN" in sql
+        ]
+        assert filter_param_lengths == [5, 5, 5, 4]
+        assert [row[0] for row in results] == [row[0] for row in knn_rows]
+        assert [row[2] for row in results] == [row[1] for row in knn_rows]
+        conn.close()
+
+    @pytest.mark.skipif(
+        not vec_available(sqlite3.connect(":memory:")),
+        reason="sqlite-vec not available",
+    )
+    def test_filter_chunk_knn_rows_returns_empty_when_scope_params_exhaust_budget(self, monkeypatch):
+        conn = make_vec_conn()
+        query_vec = [1.0 / EMBEDDING_DIM**0.5] * EMBEDDING_DIM
+        _session_id, _branch_id, chunk_id = _seed_retry_candidate(
+            conn,
+            uuid="sess-exhausted-filter-budget",
+            content="exhausted filter budget candidate",
+            embed_vec=query_vec,
+        )
+        cursor = _CursorProxy(conn.cursor())
+        monkeypatch.setattr(search_vector, "MAX_SQL_BOUND_PARAMS", 2)
+
+        results = search_vector._filter_chunk_knn_rows(
+            cursor,
+            [(chunk_id, 0.0)],
+            projects=["proj"],
+            session_id=None,
+            path=None,
+            before=None,
+            after=None,
+        )
+
+        assert results == []
+        assert not any("FROM chunks ch" in sql and "WHERE ch.id IN" in sql for sql in cursor.executed_sql)
         conn.close()
 
 
