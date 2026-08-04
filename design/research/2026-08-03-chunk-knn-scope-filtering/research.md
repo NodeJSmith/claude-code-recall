@@ -1,5 +1,3 @@
-# Research Brief: Fix Chunk-KNN Scope Filtering Before Top-K Limiting
-
 ---
 proposal: "Fix ccrecall vector search so project/session/path/date filters cannot exclude valid in-scope chunks before they are considered."
 date: 2026-08-03
@@ -10,6 +8,8 @@ constraints: "Scope is the search subsystem; inspect related search contracts an
 non-goals: "No full search rewrite; no application-code changes in this research pass."
 depth: normal
 ---
+
+# Research Brief: Fix Chunk-KNN Scope Filtering Before Top-K Limiting
 
 ## Context
 
