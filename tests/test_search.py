@@ -8,6 +8,7 @@ import pytest
 import sqlite_vec
 from conftest import make_vec_conn
 
+from ccrecall import search_vector
 from ccrecall.db import (
     upsert_chunk_vec,
     vec_available,
@@ -15,12 +16,13 @@ from ccrecall.db import (
 )
 from ccrecall.embeddings import EMBEDDING_DIM, EMBEDDING_MODEL, EMBEDDING_VERSION
 from ccrecall.formatting import apply_scores, format_snippet_json, format_snippet_markdown
+from ccrecall.fusion import rrf_scored
 from ccrecall.recent_chats import get_recent_sessions
 from ccrecall.schema import SCHEMA, SCHEMA_CORE, detect_fts_support
 from ccrecall.search_cli import format_markdown, print_status, run, run_messages
-from ccrecall.search_conversations import compute_caveat, search_messages, search_sessions
+from ccrecall.search_conversations import OVERFETCH_FLOOR, compute_caveat, search_messages, search_sessions
 from ccrecall.search_hydrate import dedup_by_session, hydrate_cards
-from ccrecall.search_vector import get_vec_chunk_ids
+from ccrecall.search_vector import execute_chunk_knn, get_vec_chunk_ids
 
 
 @pytest.fixture
@@ -501,28 +503,50 @@ class TestPathFilter:
 # Helpers shared by new vec/fusion tests
 
 
-def _seed_branch(conn: sqlite3.Connection, uuid: str, content: str, summary: str) -> tuple[int, int]:
-    """Seed one project/session/branch; returns (session_id, branch_id)."""
+def _seed_branch(
+    conn: sqlite3.Connection,
+    uuid: str,
+    content: str,
+    summary: str,
+    *,
+    project: str = "proj",
+    cwd: str | None = None,
+    branch_is_active: int = 1,
+    started_at: str | None = None,
+) -> tuple[int, int]:
+    """Seed one searchable branch with the metadata knobs used by search filters."""
     cursor = conn.cursor()
+    project_path = f"/home/user/{project}"
+    project_key = f"-home-user-{project}"
     cursor.execute(
         "INSERT OR IGNORE INTO projects (path, key, name) VALUES (?, ?, ?)",
-        ("/home/user/proj", "-home-user-proj", "proj"),
+        (project_path, project_key, project),
     )
-    cursor.execute("SELECT id FROM projects WHERE key = ?", ("-home-user-proj",))
+    cursor.execute("SELECT id FROM projects WHERE key = ?", (project_key,))
     proj_id = cursor.fetchone()[0]
     cursor.execute(
         "INSERT INTO sessions (uuid, project_id, cwd) VALUES (?, ?, ?)",
-        (uuid, proj_id, "/home/user/proj"),
+        (uuid, proj_id, cwd or project_path),
     )
     sess_id = cursor.lastrowid
     cursor.execute(
         """
         INSERT INTO branches (session_id, leaf_uuid, is_active, exchange_count,
                                aggregated_content, context_summary,
-                               embedding_version, embedding_model)
-        VALUES (?, ?, 1, 1, ?, ?, ?, ?)
+                               embedding_version, embedding_model, started_at, ended_at)
+        VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?)
         """,
-        (sess_id, f"leaf-{uuid}", content, summary, EMBEDDING_VERSION, EMBEDDING_MODEL),
+        (
+            sess_id,
+            f"leaf-{uuid}",
+            branch_is_active,
+            content,
+            summary,
+            EMBEDDING_VERSION,
+            EMBEDDING_MODEL,
+            started_at,
+            started_at,
+        ),
     )
     branch_id = cursor.lastrowid
     cursor.execute(
@@ -632,16 +656,29 @@ def _seed_branch_with_chunk(
     summary: str,
     *,
     embed_vec: list[float] | None = None,
+    project: str = "proj",
+    cwd: str | None = None,
+    branch_is_active: int = 1,
+    started_at: str | None = None,
     chunk_embedding_version: int = EMBEDDING_VERSION,
     chunk_embedding_model: str = EMBEDDING_MODEL,
 ) -> tuple[int, int, int]:
-    """Seed project/session/branch/messages + a chunk row; returns (sess_id, branch_id, chunk_id).
+    """Seed a searchable branch plus one optional vector-backed chunk.
 
     Inserts the chunk into chunk_vec only if embed_vec is provided.
     Chunk embedding_version / embedding_model are set per the parameters so
     stale vs current chunks can be distinguished.
     """
-    sess_id, branch_id = _seed_branch(conn, uuid, content, summary)
+    sess_id, branch_id = _seed_branch(
+        conn,
+        uuid,
+        content,
+        summary,
+        project=project,
+        cwd=cwd,
+        branch_is_active=branch_is_active,
+        started_at=started_at,
+    )
     cursor = conn.cursor()
     cursor.execute(
         """
@@ -659,6 +696,53 @@ def _seed_branch_with_chunk(
         )
     conn.commit()
     return sess_id, branch_id, chunk_id
+
+
+def _seed_retry_candidate(
+    conn: sqlite3.Connection,
+    *,
+    uuid: str,
+    content: str,
+    embed_vec: list[float],
+    project: str = "proj",
+    cwd: str | None = None,
+    branch_is_active: int = 1,
+    started_at: str = "2025-01-01T00:00:00Z",
+    chunk_embedding_version: int = EMBEDDING_VERSION,
+    chunk_embedding_model: str = EMBEDDING_MODEL,
+) -> tuple[int, int, int]:
+    """Seed one chunk candidate for adaptive-KNN tests."""
+    return _seed_branch_with_chunk(
+        conn,
+        uuid,
+        content,
+        content,
+        embed_vec=embed_vec,
+        project=project,
+        cwd=cwd,
+        branch_is_active=branch_is_active,
+        started_at=started_at,
+        chunk_embedding_version=chunk_embedding_version,
+        chunk_embedding_model=chunk_embedding_model,
+    )
+
+
+class _CursorProxy:
+    """Cursor wrapper that can observe or fail selected execute calls."""
+
+    def __init__(self, cursor: sqlite3.Cursor, *, fail_predicate=None, exception=None):
+        self._cursor = cursor
+        self.executed_sql: list[str] = []
+        self.executed_params: list[tuple] = []
+        self._fail_predicate = fail_predicate
+        self._exception = exception
+
+    def execute(self, sql, params=()):
+        self.executed_sql.append(sql)
+        self.executed_params.append(tuple(params))
+        if self._fail_predicate is not None and self._fail_predicate(sql):
+            raise self._exception
+        return self._cursor.execute(sql, params)
 
 
 class TestStaleVersionExclusion:
@@ -734,6 +818,545 @@ class TestStaleVersionExclusion:
             results_kw, _ranked = search_sessions(conn, "stale", fts_level, max_results=10, keyword_only=True)
         uuids = {r["session_uuid"] for r in results_kw}
         assert "sess-stale" in uuids, "Stale session must still be reachable via keyword/FTS search"
+
+
+class TestAdaptiveChunkKnn:
+    """Adaptive retry, lazy count, and narrow-error coverage for execute_chunk_knn."""
+
+    @pytest.mark.skipif(
+        not vec_available(sqlite3.connect(":memory:")),
+        reason="sqlite-vec not available",
+    )
+    def test_retry_recovers_farther_current_active_chunk(self):
+        conn = make_vec_conn()
+        query_vec = [1.0 / EMBEDDING_DIM**0.5] * EMBEDDING_DIM
+        near_vec = query_vec
+        far_vec = [0.0] * EMBEDDING_DIM
+        far_vec[0] = 1.0
+
+        _seed_retry_candidate(
+            conn,
+            uuid="sess-near-stale",
+            content="near stale chunk",
+            embed_vec=near_vec,
+            chunk_embedding_version=EMBEDDING_VERSION - 1,
+        )
+        _seed_retry_candidate(
+            conn,
+            uuid="sess-near-wrong-model",
+            content="near wrong model chunk",
+            embed_vec=near_vec,
+            chunk_embedding_model="wrong-model",
+        )
+        _seed_retry_candidate(
+            conn,
+            uuid="sess-near-inactive",
+            content="near inactive chunk",
+            embed_vec=near_vec,
+            branch_is_active=0,
+        )
+        _session_id, valid_branch_id, valid_chunk_id = _seed_retry_candidate(
+            conn,
+            uuid="sess-far-valid",
+            content="far valid chunk",
+            embed_vec=far_vec,
+        )
+
+        results = execute_chunk_knn(conn.cursor(), query_vec, top_k=1)
+
+        assert len(results) == 1
+        assert results[0][:2] == (valid_chunk_id, valid_branch_id)
+        conn.close()
+
+    @pytest.mark.skipif(
+        not vec_available(sqlite3.connect(":memory:")),
+        reason="sqlite-vec not available",
+    )
+    def test_unfiltered_filled_query_skips_count_queries(self):
+        conn = make_vec_conn()
+        query_vec = [1.0 / EMBEDDING_DIM**0.5] * EMBEDDING_DIM
+        _seed_retry_candidate(
+            conn,
+            uuid="sess-filled",
+            content="filled path chunk",
+            embed_vec=query_vec,
+        )
+        cursor = _CursorProxy(conn.cursor())
+
+        results = execute_chunk_knn(cursor, query_vec, top_k=1)
+
+        assert len(results) == 1
+        assert not any("COUNT(*)" in sql for sql in cursor.executed_sql)
+        conn.close()
+
+    @pytest.mark.skipif(
+        not vec_available(sqlite3.connect(":memory:")),
+        reason="sqlite-vec not available",
+    )
+    def test_count_query_sqlite_error_returns_empty(self):
+        conn = make_vec_conn()
+        query_vec = [1.0 / EMBEDDING_DIM**0.5] * EMBEDDING_DIM
+        _seed_retry_candidate(
+            conn,
+            uuid="sess-underfill-stale",
+            content="underfill stale chunk",
+            embed_vec=query_vec,
+            chunk_embedding_version=EMBEDDING_VERSION - 1,
+        )
+        _seed_retry_candidate(
+            conn,
+            uuid="sess-underfill-valid",
+            content="underfill valid chunk",
+            embed_vec=[1.0] + [0.0] * (EMBEDDING_DIM - 1),
+        )
+        cursor = _CursorProxy(
+            conn.cursor(),
+            fail_predicate=lambda sql: "COUNT(*)" in sql,
+            exception=sqlite3.OperationalError("count failed"),
+        )
+
+        assert execute_chunk_knn(cursor, query_vec, top_k=1) == []
+        conn.close()
+
+    @pytest.mark.skipif(
+        not vec_available(sqlite3.connect(":memory:")),
+        reason="sqlite-vec not available",
+    )
+    def test_relational_filter_sqlite_error_returns_empty(self):
+        conn = make_vec_conn()
+        query_vec = [1.0 / EMBEDDING_DIM**0.5] * EMBEDDING_DIM
+        _seed_retry_candidate(
+            conn,
+            uuid="sess-filter",
+            content="filter path chunk",
+            embed_vec=query_vec,
+        )
+        cursor = _CursorProxy(
+            conn.cursor(),
+            fail_predicate=lambda sql: "FROM chunks ch" in sql and "WHERE ch.id IN" in sql,
+            exception=sqlite3.OperationalError("filter failed"),
+        )
+
+        assert execute_chunk_knn(cursor, query_vec, top_k=1) == []
+        conn.close()
+
+    @pytest.mark.skipif(
+        not vec_available(sqlite3.connect(":memory:")),
+        reason="sqlite-vec not available",
+    )
+    def test_count_query_non_db_error_propagates(self):
+        conn = make_vec_conn()
+        query_vec = [1.0 / EMBEDDING_DIM**0.5] * EMBEDDING_DIM
+        _seed_retry_candidate(
+            conn,
+            uuid="sess-bug-stale",
+            content="bug stale chunk",
+            embed_vec=query_vec,
+            chunk_embedding_version=EMBEDDING_VERSION - 1,
+        )
+        _seed_retry_candidate(
+            conn,
+            uuid="sess-bug-valid",
+            content="bug valid chunk",
+            embed_vec=[1.0] + [0.0] * (EMBEDDING_DIM - 1),
+        )
+        cursor = _CursorProxy(
+            conn.cursor(),
+            fail_predicate=lambda sql: "COUNT(*)" in sql,
+            exception=RuntimeError("real bug"),
+        )
+
+        with pytest.raises(RuntimeError):
+            execute_chunk_knn(cursor, query_vec, top_k=1)
+        conn.close()
+
+    @pytest.mark.skipif(
+        not vec_available(sqlite3.connect(":memory:")),
+        reason="sqlite-vec not available",
+    )
+    def test_filter_chunk_knn_rows_batches_large_candidate_sets(self, monkeypatch):
+        conn = make_vec_conn()
+        query_vec = [1.0 / EMBEDDING_DIM**0.5] * EMBEDDING_DIM
+        knn_rows = []
+        for idx in range(7):
+            _session_id, _branch_id, chunk_id = _seed_retry_candidate(
+                conn,
+                uuid=f"sess-batched-filter-{idx}",
+                content=f"batched filter candidate {idx}",
+                embed_vec=query_vec,
+            )
+            knn_rows.append((chunk_id, float(idx)))
+        cursor = _CursorProxy(conn.cursor())
+        monkeypatch.setattr(search_vector, "MAX_SQL_BOUND_PARAMS", 5)
+        monkeypatch.setattr(search_vector, "FILTER_CHUNK_ID_BATCH_SIZE", 10)
+
+        results = search_vector._filter_chunk_knn_rows(
+            cursor,
+            knn_rows,
+            projects=["proj"],
+            session_id=None,
+            path=None,
+            before=None,
+            after=None,
+        )
+
+        filter_param_lengths = [
+            len(params)
+            for sql, params in zip(cursor.executed_sql, cursor.executed_params, strict=True)
+            if "FROM chunks ch" in sql and "WHERE ch.id IN" in sql
+        ]
+        assert filter_param_lengths == [5, 5, 5, 4]
+        assert [row[0] for row in results] == [row[0] for row in knn_rows]
+        assert [row[2] for row in results] == [row[1] for row in knn_rows]
+        conn.close()
+
+    @pytest.mark.skipif(
+        not vec_available(sqlite3.connect(":memory:")),
+        reason="sqlite-vec not available",
+    )
+    def test_filter_chunk_knn_rows_returns_empty_when_scope_params_exhaust_budget(self, monkeypatch):
+        conn = make_vec_conn()
+        query_vec = [1.0 / EMBEDDING_DIM**0.5] * EMBEDDING_DIM
+        _session_id, _branch_id, chunk_id = _seed_retry_candidate(
+            conn,
+            uuid="sess-exhausted-filter-budget",
+            content="exhausted filter budget candidate",
+            embed_vec=query_vec,
+        )
+        cursor = _CursorProxy(conn.cursor())
+        monkeypatch.setattr(search_vector, "MAX_SQL_BOUND_PARAMS", 2)
+
+        results = search_vector._filter_chunk_knn_rows(
+            cursor,
+            [(chunk_id, 0.0)],
+            projects=["proj"],
+            session_id=None,
+            path=None,
+            before=None,
+            after=None,
+        )
+
+        assert results == []
+        assert not any("FROM chunks ch" in sql and "WHERE ch.id IN" in sql for sql in cursor.executed_sql)
+        conn.close()
+
+
+def _scope_retry_vectors() -> tuple[list[float], list[float], list[float], list[float]]:
+    """Return query/near/mid/far vectors with deterministic distance ordering."""
+    query_vec = [0.0] * EMBEDDING_DIM
+    query_vec[0] = 1.0
+
+    near_vec = query_vec.copy()
+
+    mid_vec = [0.0] * EMBEDDING_DIM
+    mid_vec[0] = 0.8
+    mid_vec[1] = 0.6
+
+    far_vec = [0.0] * EMBEDDING_DIM
+    far_vec[1] = 1.0
+
+    return query_vec, near_vec, mid_vec, far_vec
+
+
+class TestAdaptiveChunkKnnScopes:
+    """Scoped vector regressions recover farther in-scope rows beyond the initial KNN window."""
+
+    @pytest.mark.skipif(
+        not vec_available(sqlite3.connect(":memory:")),
+        reason="sqlite-vec not available",
+    )
+    def test_retry_recovers_farther_project_scoped_chunk(self):
+        conn = make_vec_conn()
+        query_vec, near_vec, mid_vec, far_vec = _scope_retry_vectors()
+
+        _seed_retry_candidate(
+            conn,
+            uuid="sess-project-near",
+            content="near broader-match confuser",
+            embed_vec=near_vec,
+            project="alpha-tools",
+        )
+        _seed_retry_candidate(
+            conn,
+            uuid="sess-project-stale",
+            content="stale matching project",
+            embed_vec=mid_vec,
+            project="alpha",
+            chunk_embedding_version=EMBEDDING_VERSION - 1,
+        )
+        _seed_retry_candidate(
+            conn,
+            uuid="sess-project-wrong-model",
+            content="wrong-model matching project",
+            embed_vec=mid_vec,
+            project="alpha",
+            chunk_embedding_model="wrong-model",
+        )
+        _seed_retry_candidate(
+            conn,
+            uuid="sess-project-inactive",
+            content="inactive matching project",
+            embed_vec=mid_vec,
+            project="alpha",
+            branch_is_active=0,
+        )
+        _session_id, valid_branch_id, valid_chunk_id = _seed_retry_candidate(
+            conn,
+            uuid="sess-project-far",
+            content="far matching project",
+            embed_vec=far_vec,
+            project="alpha",
+        )
+
+        results = execute_chunk_knn(conn.cursor(), query_vec, top_k=1, projects=["alpha"])
+
+        assert len(results) == 1
+        assert results[0][:2] == (valid_chunk_id, valid_branch_id)
+        conn.close()
+
+    @pytest.mark.skipif(
+        not vec_available(sqlite3.connect(":memory:")),
+        reason="sqlite-vec not available",
+    )
+    def test_retry_recovers_farther_session_prefix_chunk_with_escaped_like(self):
+        conn = make_vec_conn()
+        query_vec, near_vec, _mid_vec, far_vec = _scope_retry_vectors()
+
+        _seed_retry_candidate(
+            conn,
+            uuid="sessA100literal-confuser",
+            content="near unescaped-like confuser",
+            embed_vec=near_vec,
+        )
+        _session_id, valid_branch_id, valid_chunk_id = _seed_retry_candidate(
+            conn,
+            uuid="sess_100%farther",
+            content="far matching session prefix",
+            embed_vec=far_vec,
+        )
+
+        results = execute_chunk_knn(conn.cursor(), query_vec, top_k=1, session_id="sess_100%")
+
+        assert len(results) == 1
+        assert results[0][:2] == (valid_chunk_id, valid_branch_id)
+        conn.close()
+
+    @pytest.mark.skipif(
+        not vec_available(sqlite3.connect(":memory:")),
+        reason="sqlite-vec not available",
+    )
+    def test_retry_recovers_farther_path_substring_chunk_with_escaped_like(self):
+        conn = make_vec_conn()
+        query_vec, near_vec, _mid_vec, far_vec = _scope_retry_vectors()
+
+        _seed_retry_candidate(
+            conn,
+            uuid="sess-path-near",
+            content="near unescaped-like path confuser",
+            embed_vec=near_vec,
+            cwd="/home/user/worktrees/featureXbranch/repo",
+        )
+        _session_id, valid_branch_id, valid_chunk_id = _seed_retry_candidate(
+            conn,
+            uuid="sess-path-far",
+            content="far matching path",
+            embed_vec=far_vec,
+            cwd="/home/user/worktrees/feature_%/repo",
+        )
+
+        results = execute_chunk_knn(conn.cursor(), query_vec, top_k=1, path="feature_%")
+
+        assert len(results) == 1
+        assert results[0][:2] == (valid_chunk_id, valid_branch_id)
+        conn.close()
+
+    @pytest.mark.skipif(
+        not vec_available(sqlite3.connect(":memory:")),
+        reason="sqlite-vec not available",
+    )
+    def test_retry_recovers_farther_before_filtered_chunk(self):
+        conn = make_vec_conn()
+        query_vec, near_vec, _mid_vec, far_vec = _scope_retry_vectors()
+
+        _seed_retry_candidate(
+            conn,
+            uuid="sess-before-near",
+            content="near later branch",
+            embed_vec=near_vec,
+            started_at="2025-06-01T10:00:00Z",
+        )
+        _seed_retry_candidate(
+            conn,
+            uuid="sess-before-boundary",
+            content="boundary branch should be excluded",
+            embed_vec=near_vec,
+            started_at="2025-03-01",
+        )
+        _session_id, valid_branch_id, valid_chunk_id = _seed_retry_candidate(
+            conn,
+            uuid="sess-before-far",
+            content="far earlier branch",
+            embed_vec=far_vec,
+            started_at="2025-01-01T10:00:00Z",
+        )
+
+        results = execute_chunk_knn(conn.cursor(), query_vec, top_k=1, before="2025-03-01")
+
+        assert len(results) == 1
+        assert results[0][:2] == (valid_chunk_id, valid_branch_id)
+        conn.close()
+
+    @pytest.mark.skipif(
+        not vec_available(sqlite3.connect(":memory:")),
+        reason="sqlite-vec not available",
+    )
+    def test_retry_recovers_farther_after_filtered_chunk(self):
+        conn = make_vec_conn()
+        query_vec, near_vec, _mid_vec, far_vec = _scope_retry_vectors()
+
+        _seed_retry_candidate(
+            conn,
+            uuid="sess-after-near",
+            content="near earlier branch",
+            embed_vec=near_vec,
+            started_at="2025-01-01T10:00:00Z",
+        )
+        _seed_retry_candidate(
+            conn,
+            uuid="sess-after-boundary",
+            content="boundary branch should be excluded",
+            embed_vec=near_vec,
+            started_at="2025-03-01",
+        )
+        _session_id, valid_branch_id, valid_chunk_id = _seed_retry_candidate(
+            conn,
+            uuid="sess-after-far",
+            content="far later branch",
+            embed_vec=far_vec,
+            started_at="2025-06-01T10:00:00Z",
+        )
+
+        results = execute_chunk_knn(conn.cursor(), query_vec, top_k=1, after="2025-03-01")
+
+        assert len(results) == 1
+        assert results[0][:2] == (valid_chunk_id, valid_branch_id)
+        conn.close()
+
+    @pytest.mark.skipif(
+        not vec_available(sqlite3.connect(":memory:")),
+        reason="sqlite-vec not available",
+    )
+    def test_retry_recovers_farther_combined_session_prefix_and_before_chunk(self):
+        conn = make_vec_conn()
+        query_vec, near_vec, mid_vec, far_vec = _scope_retry_vectors()
+
+        _seed_retry_candidate(
+            conn,
+            uuid="other-prefix-near",
+            content="near matching date only",
+            embed_vec=near_vec,
+            started_at="2025-01-01T10:00:00Z",
+        )
+        _seed_retry_candidate(
+            conn,
+            uuid="sess_combo%near",
+            content="mid matching prefix only",
+            embed_vec=mid_vec,
+            started_at="2025-06-01T10:00:00Z",
+        )
+        _session_id, valid_branch_id, valid_chunk_id = _seed_retry_candidate(
+            conn,
+            uuid="sess_combo%far",
+            content="far matching prefix and date",
+            embed_vec=far_vec,
+            started_at="2025-01-01T10:00:00Z",
+        )
+
+        results = execute_chunk_knn(
+            conn.cursor(),
+            query_vec,
+            top_k=1,
+            session_id="sess_combo%",
+            before="2025-03-01",
+        )
+
+        assert len(results) == 1
+        assert results[0][:2] == (valid_chunk_id, valid_branch_id)
+        conn.close()
+
+
+class TestSearchSessionsFusionScopeRetry:
+    """Track A regression: scoped vector hits still surface through fusion into cards."""
+
+    @pytest.mark.skipif(
+        not vec_available(sqlite3.connect(":memory:")),
+        reason="sqlite-vec not available",
+    )
+    def test_search_sessions_returns_scoped_card_beyond_initial_chunk_window(self):
+        conn = make_vec_conn()
+        fts_level = detect_fts_support(conn)
+        if fts_level not in ("fts5", "fts4"):
+            pytest.skip("FTS not available")
+
+        query = "fusion retry target"
+        query_vec, near_vec, _mid_vec, far_vec = _scope_retry_vectors()
+
+        for idx in range(32):
+            _seed_retry_candidate(
+                conn,
+                uuid=f"sess-fusion-confuser-{idx}",
+                content=f"{query} outside requested project {idx}",
+                embed_vec=near_vec,
+                project="beta",
+                cwd="/home/user/beta",
+            )
+
+        _target_session_id, target_branch_id, _target_chunk_id = _seed_retry_candidate(
+            conn,
+            uuid="sess-fusion-target",
+            content=f"{query} inside requested project",
+            embed_vec=far_vec,
+            project="alpha",
+            cwd="/home/user/alpha",
+        )
+
+        cursor = conn.cursor()
+        initial_vec_branch_ids = [
+            branch_id for branch_id, _distance, _chunk_id in get_vec_chunk_ids(cursor, query_vec, top_k=32)
+        ]
+        assert target_branch_id not in initial_vec_branch_ids
+
+        with (
+            patch("ccrecall.search_conversations.model_available", return_value=True),
+            patch("ccrecall.search_conversations.embed_text", return_value=query_vec),
+            patch("ccrecall.search_conversations.rrf_scored", wraps=rrf_scored) as fusion_mock,
+        ):
+            results, ranked = search_sessions(conn, query, fts_level, max_results=1, projects=["alpha"])
+
+        fusion_inputs = fusion_mock.call_args.args[0]
+        assert target_branch_id in fusion_inputs[0]
+        assert target_branch_id in fusion_inputs[1]
+        assert ranked is True
+        assert len(results) == 1
+        assert results[0]["session_uuid"] == "sess-fusion-target"
+        assert set(results[0]) == {
+            "session_uuid",
+            "handle",
+            "project",
+            "git_branch",
+            "started_at",
+            "ended_at",
+            "topic",
+            "exchange_count",
+            "files_modified",
+            "commits",
+            "tool_counts",
+            "score_raw",
+        }
+        assert results[0]["project"] == "alpha"
+        assert results[0]["handle"] == "sess-fus"
+        assert results[0]["score_raw"] is not None
+        conn.close()
 
 
 # session dedup: two branches of one session → one result
@@ -1422,6 +2045,81 @@ def _seed_two_chunks_same_branch(
 class TestSearchMessages:
     """Entrypoint B — chunk-KNN without rollup, snippet shape."""
 
+    def test_passes_max_results_as_chunk_knn_target(self):
+        """Track B asks chunk-KNN for enough filtered snippet hits, not just the raw window."""
+        conn = sqlite3.connect(":memory:")
+
+        with (
+            patch("ccrecall.search_conversations.model_available", return_value=True),
+            patch("ccrecall.search_conversations.chunk_vec_queryable", return_value=True),
+            patch("ccrecall.search_conversations.embed_text", return_value=[0.1] * EMBEDDING_DIM),
+            patch(
+                "ccrecall.search_conversations.execute_chunk_knn",
+                return_value=[(1, 1, 0.1)],
+            ) as execute_mock,
+            patch(
+                "ccrecall.search_conversations.hydrate_snippets",
+                return_value=[{"session_uuid": "sess", "exchange_index": 0}],
+            ),
+        ):
+            search_messages(conn, "test query", max_results=2, projects=["alpha"])
+
+        assert execute_mock.call_args.kwargs["target_results"] == 2
+        assert execute_mock.call_args.args[2] == OVERFETCH_FLOOR
+        conn.close()
+
+    @pytest.mark.skipif(
+        not vec_available(sqlite3.connect(":memory:")),
+        reason="sqlite-vec not available",
+    )
+    def test_filtered_retry_preserves_distance_order_and_caps_max_results(self):
+        """Track B recovers farther scoped hits, keeps distance order, and caps at max_results."""
+        conn = make_vec_conn()
+        query_vec, near_vec, mid_vec, far_vec = _scope_retry_vectors()
+        extra_far_vec = [-1.0] + [0.0] * (EMBEDDING_DIM - 1)
+
+        for i in range(21):
+            _seed_retry_candidate(
+                conn,
+                uuid=f"sess-out-of-scope-{i}",
+                content=f"near out-of-scope chunk {i}",
+                embed_vec=near_vec,
+                project="beta",
+            )
+
+        _seed_retry_candidate(
+            conn,
+            uuid="sess-alpha-mid",
+            content="mid distance in-scope chunk",
+            embed_vec=mid_vec,
+            project="alpha",
+        )
+        _seed_retry_candidate(
+            conn,
+            uuid="sess-alpha-far",
+            content="far distance in-scope chunk",
+            embed_vec=far_vec,
+            project="alpha",
+        )
+        _seed_retry_candidate(
+            conn,
+            uuid="sess-alpha-extra-far",
+            content="extra far in-scope chunk",
+            embed_vec=extra_far_vec,
+            project="alpha",
+        )
+
+        with (
+            patch("ccrecall.search_conversations.model_available", return_value=True),
+            patch("ccrecall.search_conversations.embed_text", return_value=query_vec),
+        ):
+            snippets, ranked = search_messages(conn, "test query", max_results=2, projects=["alpha"])
+
+        assert ranked is True
+        assert [snippet["session_uuid"] for snippet in snippets] == ["sess-alpha-mid", "sess-alpha-far"]
+        assert len(snippets) == 2
+        conn.close()
+
     @pytest.mark.skipif(
         not vec_available(sqlite3.connect(":memory:")),
         reason="sqlite-vec not available",
@@ -1815,24 +2513,15 @@ def _seed_dated_branch(conn: sqlite3.Connection, uuid: str, started_at: str, con
     tests), so date-filter tests seed their own minimal branches instead of
     touching that shared fixture.
     """
-    cursor = conn.cursor()
-    cursor.execute(
-        "INSERT OR IGNORE INTO projects (path, key, name) VALUES (?, ?, ?)", ("/p/dated", "-p-dated", "dated")
+    _session_id, branch_id = _seed_branch(
+        conn,
+        uuid,
+        content,
+        content,
+        project="dated",
+        cwd="/p/dated",
+        started_at=started_at,
     )
-    cursor.execute("SELECT id FROM projects WHERE key = ?", ("-p-dated",))
-    proj_id = cursor.fetchone()[0]
-    cursor.execute("INSERT INTO sessions (uuid, project_id, cwd) VALUES (?, ?, ?)", (uuid, proj_id, "/p/dated"))
-    sess_id = cursor.lastrowid
-    cursor.execute(
-        """
-        INSERT INTO branches (session_id, leaf_uuid, is_active, exchange_count,
-                               aggregated_content, started_at, ended_at)
-        VALUES (?, ?, 1, 1, ?, ?, ?)
-        """,
-        (sess_id, f"leaf-{uuid}", content, started_at, started_at),
-    )
-    branch_id = cursor.lastrowid
-    conn.commit()
     return branch_id
 
 

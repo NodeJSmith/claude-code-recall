@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-08-04
+
+- recover scoped vector matches beyond the initial KNN window (#102)
+
 ## [0.21.0](https://github.com/NodeJSmith/claude-code-recall/compare/v0.20.0...v0.21.0) (2026-08-03)
 
 

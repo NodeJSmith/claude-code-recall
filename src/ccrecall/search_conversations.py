@@ -123,7 +123,7 @@ def search_sessions(
                 ratio = pre_rollup / max(post_rollup, 1)
                 _logger.info(
                     "search under-fill: %d chunks → %d sessions (collapse ratio %.1f); "
-                    "consider increasing CHUNK_COLLAPSE_FACTOR",
+                    "consider retrieval tuning if this persists",
                     pre_rollup,
                     post_rollup,
                     ratio,
@@ -207,7 +207,15 @@ def search_messages(
     cursor = conn.cursor()
 
     raw = execute_chunk_knn(
-        cursor, query_vec, top_k, projects=projects, session_id=session_id, path=path, before=before, after=after
+        cursor,
+        query_vec,
+        top_k,
+        projects=projects,
+        session_id=session_id,
+        path=path,
+        before=before,
+        after=after,
+        target_results=max_results,
     )
     if not raw:
         # Either no matches or a DB error caught inside execute_chunk_knn;
