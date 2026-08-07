@@ -39,6 +39,10 @@ None.
 ## Rendering — primary/supplementary context budgets and search-card compatibility.
 ## Migration and Test Strategy — schema rebuild requirements and automated/manual test obligations.
 
+## Plan Artifacts
+
+Only `T*.md` files are executable work specifications. `.validation-report.md` is generated traceability evidence and must be excluded from future task-file review or comb sweeps.
+
 ## Convention Examples
 
 ### Detached hook helper pattern

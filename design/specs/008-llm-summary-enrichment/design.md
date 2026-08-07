@@ -1,7 +1,7 @@
 # Design: LLM Summary Enrichment
 
 **Date:** 2026-08-07
-**Status:** draft
+**Status:** approved
 **Scope-mode:** hold
 **Research:** design/research/2026-08-07-issue-32-llm-session-summaries/research.md
 
