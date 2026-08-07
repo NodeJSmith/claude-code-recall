@@ -1,7 +1,7 @@
 ---
 task_id: "T02"
 title: "Build enrichment contract and renderer"
-status: "planned"
+status: "done"
 depends_on: []
 implements: ["FR#1", "FR#3", "FR#4", "FR#15", "FR#16", "FR#17", "AC#2", "AC#3", "AC#10"]
 ---
