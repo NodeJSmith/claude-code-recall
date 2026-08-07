@@ -487,7 +487,11 @@ def backfill_session(cursor: sqlite3.Cursor, session_id: int, filepaths: list[Pa
     commits = json.loads(commits_json) if commits_json else None
     agg_content = build_aggregated_content(cursor, branch_db_id, files, commits)
     cursor.execute(
-        "UPDATE branches SET aggregated_content = ?, embedding_version = NULL, summary_version = NULL WHERE id = ?",
+        """
+        UPDATE branches
+        SET aggregated_content = ?, embedding_version = NULL, summary_version = NULL, summary_source_hash = NULL
+        WHERE id = ?
+        """,
         (agg_content, branch_db_id),
     )
 

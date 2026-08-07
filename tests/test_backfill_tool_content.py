@@ -203,6 +203,52 @@ class TestBackfillCore:
         ).fetchone()
         assert row[0] == ""
 
+    def test_backfill_invalidates_summary_source_hash_when_aggregate_changes(self, tmp_path):
+        filepath = tmp_path / "sess-hash.jsonl"
+        _write_jsonl(
+            filepath,
+            [
+                _entry("u1", None, "2026-01-01T10:00:00Z", "user", "Please check the logs"),
+                _entry(
+                    "a1",
+                    "u1",
+                    "2026-01-01T10:00:05Z",
+                    "assistant",
+                    [
+                        {"type": "text", "text": "Let me check"},
+                        {"type": "tool_use", "name": "Bash", "input": {"command": "tail -f /var/log/app.log"}},
+                    ],
+                ),
+            ],
+        )
+
+        conn = _make_conn()
+        session_id, branch_id = _seed_session(
+            conn,
+            filepath=filepath,
+            existing_messages=[
+                ("u1", "user", "Please check the logs", "2026-01-01T10:00:00Z"),
+                ("a1", "assistant", "Let me check", "2026-01-01T10:00:05Z"),
+            ],
+            leaf_uuid="a1",
+        )
+        conn.execute(
+            "UPDATE branches SET summary_version = ?, summary_source_hash = ? WHERE id = ?",
+            (7, "current-hash", branch_id),
+        )
+        conn.commit()
+
+        assert backfill_session(conn.cursor(), session_id, [filepath]) is True
+
+        branch_row = conn.execute(
+            "SELECT aggregated_content, summary_version, summary_source_hash FROM branches WHERE id = ?",
+            (branch_id,),
+        ).fetchone()
+        assert branch_row is not None
+        assert "[Bash: tail -f /var/log/app.log]" in branch_row[0]
+        assert branch_row[1] is None
+        assert branch_row[2] is None
+
 
 class TestBackfillMetaExclusion:
     def test_untagged_meta_entry_does_not_become_a_messages_row(self, tmp_path):

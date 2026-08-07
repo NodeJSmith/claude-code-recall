@@ -1,7 +1,7 @@
 ---
 task_id: "T03"
 title: "Maintain enrichment source fingerprints"
-status: "planned"
+status: "done"
 depends_on: ["T01", "T02"]
 implements: ["FR#1", "FR#12", "AC#1"]
 ---

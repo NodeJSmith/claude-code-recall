@@ -13,6 +13,7 @@ from ccrecall.db import write_chunk_embedding
 from ccrecall.embeddings import EMBEDDING_MODEL, EMBEDDING_VERSION, cap_for_embedding, embed_batch
 from ccrecall.models import LOGGER_NAME
 from ccrecall.summarizer import SUMMARY_VERSION, build_exchange_pairs, compute_context_summary
+from ccrecall.summary_enrichment import compute_branch_summary_source_hash
 
 # Maximum number of exchanges embedded per sync on the write path. Version-stale
 # chunks (those only needing an EMBEDDING_VERSION bump) are deliberately left to
@@ -31,6 +32,7 @@ def write_branch_summary(cursor: sqlite3.Cursor, branch_db_id: int) -> str | Non
     - Any other exception: propagates (genuine bug, not masked).
     """
     summary_md = None
+    cursor.execute("UPDATE branches SET summary_source_hash = NULL WHERE id = ?", (branch_db_id,))
     try:
         summary_md, summary_json = compute_context_summary(cursor, branch_db_id)
         cursor.execute(
@@ -39,6 +41,11 @@ def write_branch_summary(cursor: sqlite3.Cursor, branch_db_id: int) -> str | Non
             WHERE id = ?
             """,
             (summary_md, summary_json, SUMMARY_VERSION, branch_db_id),
+        )
+        summary_source_hash = compute_branch_summary_source_hash(cursor, branch_db_id)
+        cursor.execute(
+            "UPDATE branches SET summary_source_hash = ? WHERE id = ?",
+            (summary_source_hash, branch_db_id),
         )
     except (ValueError, TypeError, KeyError):
         # Content error (malformed summary data) — same classification as

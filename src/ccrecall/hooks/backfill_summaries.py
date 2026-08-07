@@ -10,6 +10,7 @@ import sqlite3
 from ccrecall.config import load_settings, remove_pid_file, setup_logging
 from ccrecall.db import CONTENT_ERROR_VERSION, get_connection
 from ccrecall.summarizer import SUMMARY_VERSION, compute_context_summary
+from ccrecall.summary_enrichment import compute_branch_summary_source_hash
 
 BATCH_SIZE = 50
 
@@ -58,6 +59,7 @@ def _main(*, verbose: bool = False):
 
                 try:
                     for (branch_id,) in rows:
+                        cursor.execute("UPDATE branches SET summary_source_hash = NULL WHERE id = ?", (branch_id,))
                         try:
                             summary_md, summary_json = compute_context_summary(cursor, branch_id)
                             cursor.execute(
@@ -67,8 +69,13 @@ def _main(*, verbose: bool = False):
                             """,
                                 (summary_md, summary_json, SUMMARY_VERSION, branch_id),
                             )
+                            summary_source_hash = compute_branch_summary_source_hash(cursor, branch_id)
+                            cursor.execute(
+                                "UPDATE branches SET summary_source_hash = ? WHERE id = ?",
+                                (summary_source_hash, branch_id),
+                            )
                             total_updated += 1
-                        except (ValueError, TypeError, KeyError) as e:  # noqa: PERF203 — per-row content-error isolation, not a retry; the exception marks one bad row without aborting the batch
+                        except (ValueError, TypeError, KeyError) as e:
                             # Per-row content error (malformed summary data): mark the
                             # sentinel so it isn't retried forever. Infra errors fall
                             # through to the outer handler instead of poisoning the row.

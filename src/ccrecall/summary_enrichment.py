@@ -3,6 +3,7 @@
 import copy
 import hashlib
 import json
+import sqlite3
 import uuid
 from typing import Any
 
@@ -560,6 +561,40 @@ def compute_summary_source_hash(summary_inputs: dict[str, object]) -> str:
     }
     canonical_payload = {key: payload.get(key) for key in _SUMMARY_SOURCE_HASH_FIELDS}
     return hashlib.sha256(_canonical_json_bytes(canonical_payload)).hexdigest()
+
+
+def compute_branch_summary_source_hash(cursor: sqlite3.Cursor, branch_db_id: int) -> str | None:
+    """Load one branch's deterministic-summary inputs and return its source hash."""
+
+    cursor.execute(
+        """
+        SELECT b.leaf_uuid, b.summary_version, b.context_summary_json, b.aggregated_content,
+               b.exchange_count, b.started_at, b.ended_at, b.files_modified,
+               b.tool_counts, b.commits, s.git_branch
+        FROM branches b
+        JOIN sessions s ON b.session_id = s.id
+        WHERE b.id = ?
+        """,
+        (branch_db_id,),
+    )
+    row = cursor.fetchone()
+    if row is None:
+        return None
+    return compute_summary_source_hash(
+        {
+            "leaf_uuid": row[0],
+            "summary_version": row[1],
+            "context_summary_json": row[2],
+            "aggregated_content": row[3],
+            "exchange_count": row[4],
+            "started_at": row[5],
+            "ended_at": row[6],
+            "files_modified": row[7],
+            "tool_counts": row[8],
+            "commits": row[9],
+            "git_branch": row[10],
+        }
+    )
 
 
 def _validated_enrichment_for_render(enrichment: object) -> dict[str, Any] | None:
