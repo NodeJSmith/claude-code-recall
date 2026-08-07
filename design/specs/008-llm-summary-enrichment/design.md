@@ -104,7 +104,7 @@ The user wants richer recall/search-card UX using the user's existing Claude Cod
 - **AC#6** Hook contract tests prove `memory_sync.py`, `memory_context.py`, and `memory_setup.py` still print only their JSON envelopes and do not import the LLM summarizer boundary; `sync_current.py` may spawn the worker but must not run Claude directly or print additional hook-visible stdout.
 - **AC#7** A local command test or mocked command test proves the direct internal `ccrecall-llm-summaries --limit 1` worker entry point invokes the worker path without importing embedding modules, opening vec tables, setting `load_vec=True`, or constructing the embedding model during startup or worker execution.
 - **AC#8** A search hydration test proves the LLM branch-resume title/latest-state preview are preferred on result cards when valid and current for the source fingerprint, and deterministic topic fallback remains when not.
-- **AC#9** A manually reviewed evaluation corpus covers long branches with known decisions, rationale, failed/abandoned approaches, and unresolved work. For each applicable fact, the rendered branch resume brief must surface it, while the stored output retains valid branch UUID citations as validation provenance; each citation must support the claim it accompanies, not merely belong to the active branch. The corpus must include bug investigation, implementation/refactor, and planning/discovery examples.
+- **AC#9** A manually reviewed evaluation corpus covers long branches with known decisions, rationale, failed/abandoned approaches, and unresolved work. For each applicable fact, the rendered branch resume brief must surface it, while the stored output retains valid active-branch message UUID citations as validation provenance; each citation must support the claim it accompanies, not merely belong to the active branch. The corpus must include bug investigation, implementation/refactor, and planning/discovery examples.
 - **AC#10** Rendering tests prove that the primary selected session's branch resume brief stays within its explicit character budget, retains at least one evidenced continuation hint when one exists, supplementary-session briefs use their smaller budget, and the deterministic exchange context remains present below both.
 - **AC#11** Worker invocation tests prove the configured model and `$1.00` default budget threshold are passed to Claude, and documentation explains that the CLI can exceed the threshold before stopping.
 
@@ -659,7 +659,7 @@ Unit tests are required for schema validation, rendering composition and budgets
 
 ### New Test Coverage
 
-- LLM response-body validator accepts a valid schema and rejects invalid/malicious/oversized outputs, including titles without valid branch UUID citations and worker-owned envelope fields. Worker tests prove it adds version, configured model, and generation timestamp after validation. Covers FR#3, FR#16.
+- LLM response-body validator accepts a valid schema and rejects invalid/malicious/oversized outputs, including titles without valid active-branch message UUID citations and worker-owned envelope fields. Worker tests prove it adds version, configured model, and generation timestamp after validation. Covers FR#3, FR#16.
 - Claude subprocess wrapper classifies missing binary, timeout, nonzero exit, invalid JSON, schema failure, and success. Covers FR#7, FR#8, FR#10.
 - Invocation tests pass the configured `llm_summary_model` and `llm_summary_max_budget_usd` unchanged, including the `$1.00` default. Covers FR#18.
 - Worker eligibility uses deterministic summary version, exchange threshold, transcript path existence, source containment, source fingerprint, retry status, and force behavior. Covers FR#2, FR#5, FR#9, FR#12, FR#13.
@@ -680,7 +680,7 @@ No tests to remove.
 - Update README or configuration docs with `llm_summaries_enabled` and related settings.
 - Add CLI help text for `ccrecall backfill llm-summaries` explaining that branch-scoped transcript packet content, branch/session metadata, and source-path provenance are sent through Claude Code auth.
 - Document the configurable `llm_summary_model` (default `sonnet`) and `llm_summary_max_budget_usd` (default `$1.00`), including that the latter is an upstream stop threshold rather than a guaranteed cost ceiling.
-- Update plugin/user-facing docs if SessionStart context can include LLM enrichment.
+- README is the v1 plugin/user-facing documentation surface for SessionStart enrichment; no skill file changes are needed because this release adds no new user-invoked skill.
 - Consider `ccrecall status` additions in a follow-up; do not require status surfacing for v1 unless implementation naturally exposes it.
 
 ## Impact

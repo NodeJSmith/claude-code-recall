@@ -2,7 +2,7 @@
 task_id: "T04"
 title: "Build Claude packet and capability boundary"
 status: "planned"
-depends_on: ["T02"]
+depends_on: ["T01", "T02"]
 implements: ["FR#7", "FR#8", "FR#13", "FR#14", "FR#15", "FR#16", "FR#18", "AC#4"]
 ---
 

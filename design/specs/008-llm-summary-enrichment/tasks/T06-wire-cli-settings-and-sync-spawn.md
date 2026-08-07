@@ -13,7 +13,6 @@ Keep the direct entry point lightweight and hook-visible output unchanged.
 
 ## Target Files
 
-- modify: `src/ccrecall/config.py`
 - modify: `src/ccrecall/cli/commands.py`
 - modify: `src/ccrecall/hooks/sync_current.py`
 - modify: `pyproject.toml`
@@ -24,7 +23,7 @@ Keep the direct entry point lightweight and hook-visible output unchanged.
 
 ## Prompt
 
-Add the six LLM settings using `DEFAULT_SETTINGS`: opt-in boolean, configurable model defaulting to `sonnet`, effort, timeout, `$1.00` budget threshold, and minimum exchange count. Register canonical `ccrecall backfill llm-summaries` flags (`--days`, `--limit`, `--session`, `--force`, `--check-capability`) with existing cyclopts validation style. Make `--check-capability` mutually exclusive with selectors and delegate all paths to T05's worker/capability boundary.
+Use the six LLM settings established by T01: opt-in boolean, configurable model defaulting to `sonnet`, effort, timeout, `$1.00` budget threshold, and minimum exchange count. Register canonical `ccrecall backfill llm-summaries` flags (`--days`, `--limit`, `--session`, `--force`, `--check-capability`) with existing cyclopts validation style. Make `--check-capability` mutually exclusive with selectors and delegate all paths to T05's worker/capability boundary. Manual `ccrecall backfill llm-summaries` is an explicit opt-in and must run even when `llm_summaries_enabled` is false; that setting controls only automatic post-sync spawning.
 
 Add the internal `ccrecall-llm-summaries` console script in `pyproject.toml`. Its import graph must reach only lightweight config/DB/LLM modules, never the full cyclopts command graph or embedding dependencies. In `sync_current.run()`, after `sync_session()` commits/closes and only when new messages arrived and opt-in is true, detached-spawn the internal entry with one session/limit. Reuse the cross-platform detached subprocess pattern; do not run Claude in `sync_current` and do not change any hook stdout envelope.
 
@@ -35,6 +34,7 @@ Add the internal `ccrecall-llm-summaries` console script in `pyproject.toml`. It
 ## Verify
 
 - [ ] FR#5: CLI tests cover the canonical manual command, filters, force, capability-only mode, and delegation to the worker.
+- [ ] FR#5: CLI tests prove manual selected-session backfill runs when `llm_summaries_enabled` is false, while only automatic post-sync spawning is config-gated.
 - [ ] FR#6: Sync-hook tests prove exactly one detached worker spawn only for enabled settings plus new messages, with no extra stdout or inline Claude call.
 - [ ] FR#6: Sync-hook tests prove the enrichment spawn occurs only after the DB context has committed and closed, and a spawn failure remains best-effort without changing the JSON hook envelope.
 - [ ] FR#11: Help/config tests explicitly disclose selected local transcript content, branch/session metadata, and source-path provenance sent through Claude Code auth only after opt-in.
