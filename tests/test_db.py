@@ -99,6 +99,12 @@ class TestLoadSettings:
         assert DEFAULT_SETTINGS["log_level"] == "INFO"
         assert isinstance(DEFAULT_SETTINGS["exclude_projects"], list)
         assert DEFAULT_SETTINGS["alert_snooze_hours"] == 24
+        assert DEFAULT_SETTINGS["llm_summaries_enabled"] is False
+        assert DEFAULT_SETTINGS["llm_summary_model"] == "sonnet"
+        assert DEFAULT_SETTINGS["llm_summary_effort"] == "medium"
+        assert DEFAULT_SETTINGS["llm_summary_timeout_seconds"] == 180
+        assert DEFAULT_SETTINGS["llm_summary_max_budget_usd"] == 1.00
+        assert DEFAULT_SETTINGS["llm_summary_min_exchanges"] == 9
 
 
 class TestLoadConfig:
@@ -250,6 +256,31 @@ class TestLoadSettingsWithConfig:
         result = load_settings()
         assert result["logging_enabled"] is False
         assert result["exclude_projects"] == ["work-secret"]
+
+    def test_llm_settings_overrides_honored(self, tmp_path, monkeypatch):
+        """The LLM summary settings are user-overridable via config.json."""
+        cfg = tmp_path / "config.json"
+        cfg.write_text(
+            json.dumps(
+                {
+                    "llm_summaries_enabled": True,
+                    "llm_summary_model": "haiku",
+                    "llm_summary_effort": "low",
+                    "llm_summary_timeout_seconds": 45,
+                    "llm_summary_max_budget_usd": 2.5,
+                    "llm_summary_min_exchanges": 3,
+                }
+            )
+        )
+        monkeypatch.setattr("ccrecall.config.CONFIG_PATH", cfg)
+
+        result = load_settings()
+        assert result["llm_summaries_enabled"] is True
+        assert result["llm_summary_model"] == "haiku"
+        assert result["llm_summary_effort"] == "low"
+        assert result["llm_summary_timeout_seconds"] == 45
+        assert result["llm_summary_max_budget_usd"] == 2.5
+        assert result["llm_summary_min_exchanges"] == 3
 
     def test_missing_config_returns_defaults(self, tmp_path, monkeypatch):
         """load_settings() returns DEFAULT_SETTINGS when config.json does not exist."""
@@ -562,7 +593,14 @@ def _seed_v0_db_with_dead_branches(db_path) -> None:
     conn.execute("INSERT INTO sessions (uuid, project_id) VALUES ('sess-v0', ?)", (proj_id,))
     sess_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
-    conn.execute("INSERT INTO branches (session_id, leaf_uuid, is_active) VALUES (?, 'leaf-active', 1)", (sess_id,))
+    conn.execute(
+        """
+        INSERT INTO branches (
+            session_id, leaf_uuid, is_active, context_summary, context_summary_json, summary_version
+        ) VALUES (?, 'leaf-active', 1, 'deterministic summary', '{"topic":"keep me"}', 4)
+        """,
+        (sess_id,),
+    )
     active_branch_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
     conn.execute("INSERT INTO branches (session_id, leaf_uuid, is_active) VALUES (?, 'leaf-churn', 0)", (sess_id,))
     inactive_branch_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
@@ -651,7 +689,11 @@ def _seed_v1_db_with_orphan_messages(db_path) -> None:
     sess_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
     conn.execute(
-        "INSERT INTO branches (session_id, leaf_uuid, fork_point_uuid, is_active) VALUES (?, 'leaf-v1', NULL, 1)",
+        """
+        INSERT INTO branches (
+            session_id, leaf_uuid, fork_point_uuid, is_active, context_summary, context_summary_json, summary_version
+        ) VALUES (?, 'leaf-v1', NULL, 1, 'summary v1', '{"topic":"v1"}', 7)
+        """,
         (sess_id,),
     )
     branch_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
@@ -687,6 +729,8 @@ class TestSchemaVersioning:
             assert conn.execute("PRAGMA user_version").fetchone()[0] == db_module.SCHEMA_VERSION
             columns = {row[1] for row in conn.execute("PRAGMA table_info(branches)").fetchall()}
             assert "fork_point_uuid" not in columns
+            assert "summary_enrichment_json" in columns
+            assert "summary_source_hash" in columns
 
     def test_migration_from_v1_drops_fork_point_uuid_and_purges_orphans(self, tmp_path):
         """A v1 DB with fork_point_uuid and an orphan message is migrated to v2 on first connection."""
@@ -705,6 +749,12 @@ class TestSchemaVersioning:
                 " WHERE bm.message_id IS NULL"
             ).fetchone()[0]
             assert orphan_count == 0
+
+            branch = conn.execute(
+                "SELECT context_summary, context_summary_json, summary_version, summary_enrichment_status"
+                " FROM branches WHERE leaf_uuid = 'leaf-v1'"
+            ).fetchone()
+            assert branch == ("summary v1", '{"topic":"v1"}', 7, None)
 
             assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
 
@@ -743,6 +793,11 @@ class TestSchemaVersioning:
             assert conn.execute("SELECT COUNT(*) FROM branches WHERE is_active = 1").fetchone()[0] == 1
             assert conn.execute("SELECT COUNT(*) FROM branch_messages").fetchone()[0] == 1
             assert conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0] == 1
+            branch = conn.execute(
+                "SELECT context_summary, context_summary_json, summary_version, summary_enrichment_status"
+                " FROM branches WHERE is_active = 1"
+            ).fetchone()
+            assert branch == ("deterministic summary", '{"topic":"keep me"}', 4, None)
 
             tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
             assert "messages_fts" not in tables
@@ -804,6 +859,54 @@ class TestSchemaVersioning:
 
         assert first_version == second_version == db_module.SCHEMA_VERSION
         assert first_active == second_active == 1
+
+    def test_migration_from_v6_adds_enrichment_columns_idempotently(self, tmp_path):
+        """A v6 DB gains the additive enrichment columns, and reopening does not disturb them."""
+        db_path = tmp_path / "v6_to_v7.db"
+        conn = sqlite3.connect(db_path)
+        conn.executescript(SCHEMA)
+        conn.execute("INSERT INTO projects (path, key, name) VALUES ('/p-v6', '-p-v6', 'p-v6')")
+        project_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.execute("INSERT INTO sessions (uuid, project_id) VALUES ('sess-v6', ?)", (project_id,))
+        session_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.execute(
+            """
+            INSERT INTO branches (
+                session_id, leaf_uuid, is_active, context_summary, context_summary_json,
+                summary_version, embedding_version, embedding_model, summary_version_at_embed
+            ) VALUES (?, 'leaf-v6', 1, 'legacy summary', '{"topic":"legacy"}', 5, 2, 'embed-model', 5)
+            """,
+            (session_id,),
+        )
+        conn.execute("PRAGMA user_version = 6")
+        conn.commit()
+        conn.close()
+
+        for _ in range(2):
+            with get_connection(settings={"db_path": str(db_path)}) as migrated:
+                assert migrated.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+                branch = migrated.execute(
+                    "SELECT context_summary, context_summary_json, summary_version, embedding_version, "
+                    "embedding_model, summary_version_at_embed, summary_enrichment_json, "
+                    "summary_enrichment_version, summary_enrichment_source_hash, summary_enrichment_status, "
+                    "summary_enrichment_error, summary_enrichment_updated_at, summary_source_hash "
+                    "FROM branches WHERE leaf_uuid = 'leaf-v6'"
+                ).fetchone()
+                assert branch == (
+                    "legacy summary",
+                    '{"topic":"legacy"}',
+                    5,
+                    2,
+                    "embed-model",
+                    5,
+                    None,
+                    0,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
 
     def test_migration_from_v4_creates_ingestion_check_cache_table(self, tmp_path):
         """A v4 DB gains the ingestion check cache table and is stamped to v5 on open."""
@@ -1048,6 +1151,13 @@ class TestSchemaEquivalencePin:
             (14, "embedding_version", "INTEGER", 0, "0", 0),
             (15, "embedding_model", "TEXT", 0, None, 0),
             (16, "summary_version_at_embed", "INTEGER", 0, None, 0),
+            (17, "summary_enrichment_json", "TEXT", 0, None, 0),
+            (18, "summary_enrichment_version", "INTEGER", 0, "0", 0),
+            (19, "summary_enrichment_source_hash", "TEXT", 0, None, 0),
+            (20, "summary_enrichment_status", "TEXT", 0, None, 0),
+            (21, "summary_enrichment_error", "TEXT", 0, None, 0),
+            (22, "summary_enrichment_updated_at", "DATETIME", 0, None, 0),
+            (23, "summary_source_hash", "TEXT", 0, None, 0),
         ],
         "branches_fts": [
             (0, "aggregated_content", "", 0, None, 0),
@@ -1183,14 +1293,14 @@ class TestSchemaEquivalencePin:
 
 
 class TestEmbeddingDDLInSchema:
-    """A fresh DB built from SCHEMA alone has the three embedding columns and index.
+    """A fresh DB built from SCHEMA alone has the embedding and enrichment tail columns.
 
     This verifies that SCHEMA_CORE (and therefore SCHEMA) is the complete schema
     source — SCHEMA alone provides the embedding columns.
     """
 
-    def test_embedding_columns_last_three_in_schema_only_db(self):
-        """SCHEMA-only fresh DB has embedding columns as last three PRAGMA table_info rows."""
+    def test_branches_tail_columns_in_schema_only_db(self):
+        """SCHEMA-only fresh DB has embedding and enrichment columns appended in the expected order."""
         conn = sqlite3.connect(":memory:")
         conn.executescript(SCHEMA)
         conn.commit()
@@ -1198,14 +1308,19 @@ class TestEmbeddingDDLInSchema:
         cursor = conn.cursor()
         cursor.execute("PRAGMA table_info(branches)")
         rows = cursor.fetchall()
-        # Each row: (cid, name, type, notnull, dflt_value, pk)
-        # (name, type, dflt_value, pk) — dflt_value guards the DEFAULT 0 on embedding_version
-        last_three = [(row[1], row[2], row[4], row[5]) for row in rows[-3:]]
-        assert last_three == [
+        tail_columns = [(row[1], row[2], row[4], row[5]) for row in rows[-10:]]
+        assert tail_columns == [
             ("embedding_version", "INTEGER", "0", 0),
             ("embedding_model", "TEXT", None, 0),
             ("summary_version_at_embed", "INTEGER", None, 0),
-        ], f"Last three columns were: {last_three}"
+            ("summary_enrichment_json", "TEXT", None, 0),
+            ("summary_enrichment_version", "INTEGER", "0", 0),
+            ("summary_enrichment_source_hash", "TEXT", None, 0),
+            ("summary_enrichment_status", "TEXT", None, 0),
+            ("summary_enrichment_error", "TEXT", None, 0),
+            ("summary_enrichment_updated_at", "DATETIME", None, 0),
+            ("summary_source_hash", "TEXT", None, 0),
+        ], f"Tail columns were: {tail_columns}"
 
         conn.close()
 
@@ -1593,6 +1708,29 @@ class TestTransitiveImportIsolation:
         by both context_alerts.py (hot path) and backfill_tool_content.py (opt-in
         backfill) — it must have zero imports beyond stdlib."""
         self._assert_no_heavy_imports("ccrecall.hooks.tool_content_eligibility")
+
+    def test_llm_summary_db_opens_without_db_or_heavy_deps(self, tmp_path):
+        """llm_summary_db must open a migrated connection without importing db.py or heavy deps."""
+        db_path = tmp_path / "llm-summary.db"
+        code = (
+            "from ccrecall.llm_summary_db import get_connection\n"
+            "import sys\n"
+            f"heavy = {self.HEAVY_MODULES}\n"
+            f"db_path = {str(db_path)!r}\n"
+            "with get_connection({'db_path': db_path}) as conn:\n"
+            "    assert conn.execute('PRAGMA user_version').fetchone()[0] > 0\n"
+            "loaded = set(sys.modules)\n"
+            "found = heavy & loaded\n"
+            "assert not found, f'Heavy modules loaded: {found}'\n"
+            "assert 'ccrecall.db' not in loaded, 'ccrecall.db should not be imported'\n"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert result.returncode == 0, result.stderr
 
 
 class TestClaudeConfigDir:

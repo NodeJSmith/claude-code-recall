@@ -46,6 +46,12 @@ DEFAULT_SETTINGS = {
     "logging_enabled": True,
     "log_level": "INFO",
     "alert_snooze_hours": 24,
+    "llm_summaries_enabled": False,
+    "llm_summary_model": "sonnet",
+    "llm_summary_effort": "medium",
+    "llm_summary_timeout_seconds": 180,
+    "llm_summary_max_budget_usd": 1.00,
+    "llm_summary_min_exchanges": 9,
 }
 
 # Rotating memory-log handler sizing.
