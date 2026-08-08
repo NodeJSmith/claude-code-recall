@@ -1,7 +1,7 @@
 ---
 task_id: "T08"
 title: "Document enrichment and evaluate quality"
-status: "planned"
+status: "done"
 depends_on: ["T06", "T07"]
 implements: ["FR#11", "AC#9", "AC#11"]
 ---
