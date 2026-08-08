@@ -1,7 +1,7 @@
 ---
 task_id: "T05"
 title: "Orchestrate the enrichment worker"
-status: "planned"
+status: "done"
 depends_on: ["T01", "T02", "T03", "T04"]
 implements: ["FR#2", "FR#9", "FR#10", "FR#12", "AC#4"]
 ---
