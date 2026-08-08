@@ -1,0 +1,750 @@
+"""Background-only Claude summarizer boundary."""
+
+import contextlib
+import hashlib
+import json
+import os
+import shutil
+import subprocess
+import tempfile
+from collections.abc import Mapping, Sequence
+from contextlib import contextmanager
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from whenever import Instant
+
+from ccrecall.config import PID_FILE_MODE, atomic_write_json
+from ccrecall.content import build_tool_use_marker, extract_text_content
+from ccrecall.parsing import extract_session_uuid, parse_all_with_uuids_and_numbers
+from ccrecall.summary_enrichment import (
+    CLAUDE_RESPONSE_SCHEMA,
+    STATUS_AUTH_REQUIRED,
+    STATUS_BUDGET_EXCEEDED,
+    STATUS_CAPABILITY_UNVERIFIED,
+    STATUS_CLAUDE_UNAVAILABLE,
+    STATUS_ERROR,
+    STATUS_INVALID_OUTPUT,
+    STATUS_MISSING_SOURCE,
+    STATUS_OK,
+    STATUS_RATE_LIMITED,
+    STATUS_SOURCE_CHANGED,
+    STATUS_SOURCE_INCOMPLETE,
+    STATUS_SOURCE_UNVERIFIED,
+    STATUS_TIMEOUT,
+    STATUS_UNSUPPORTED_CLI,
+    validate_claude_response_body,
+)
+
+SUMMARIZER_SYSTEM_PROMPT = (
+    "You are ccrecall-summary-enricher. Produce a factual continuation summary for one Claude Code conversation branch."
+)
+CAPABILITY_SIDECAR_VERSION = 1
+DIAGNOSTIC_CAP = 240
+PACKET_DIR_PREFIX = "packet-"
+MANIFEST_FILENAME = "manifest.json"
+
+
+@dataclass(frozen=True)
+class InvocationResult:
+    status: str
+    response_body: dict[str, Any] | None = None
+    diagnostic: str | None = None
+
+
+@dataclass(frozen=True)
+class CapabilityCheckResult:
+    status: str
+    diagnostic: str | None = None
+
+
+@dataclass(frozen=True)
+class SourceResolution:
+    status: str
+    files: list[Path]
+    diagnostic: str | None = None
+
+
+class PacketBuildError(RuntimeError):
+    def __init__(self, status: str, diagnostic: str | None = None):
+        super().__init__(status if diagnostic is None else f"{status}: {diagnostic}")
+        self.status = status
+        self.diagnostic = diagnostic
+
+
+def _cap(text: str | None) -> str | None:
+    if text is None:
+        return None
+    return text[:DIAGNOSTIC_CAP]
+
+
+def _is_under(path: Path, base: Path) -> bool:
+    try:
+        path.resolve().relative_to(base.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def _set_owner_only_dir(path: Path) -> None:
+    path.chmod(0o700)
+
+
+def _write_owner_only_text(path: Path, text: str) -> None:
+    fd, tmp_path = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        os.fchmod(fd, PID_FILE_MODE)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        Path(tmp_path).replace(path)
+    except Exception:
+        with contextlib.suppress(FileNotFoundError):
+            Path(tmp_path).unlink()
+        raise
+
+
+def _canonical_json(value: object) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+
+
+def _file_sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def capability_fingerprint(packet_dir: Path | None = None) -> str:
+    del packet_dir
+    security_shape = [
+        "-p",
+        "--safe-mode",
+        "--disable-slash-commands",
+        "--strict-mcp-config",
+        "--mcp-config",
+        '{"mcpServers":{}}',
+        "--tools",
+        "Read",
+        "--allowedTools",
+        "Read",
+        "--permission-mode",
+        "dontAsk",
+        "--add-dir",
+        "<packet-dir>",
+        "--output-format",
+        "json",
+        "--json-schema",
+        _canonical_json(CLAUDE_RESPONSE_SCHEMA),
+        "--no-session-persistence",
+    ]
+    return hashlib.sha256("\0".join(security_shape).encode("utf-8")).hexdigest()
+
+
+def read_capability_sidecar(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def write_capability_sidecar(
+    path: Path,
+    *,
+    status: str,
+    claude_version: str,
+    fingerprint: str,
+    diagnostic: str | None = None,
+) -> None:
+    atomic_write_json(
+        path,
+        {
+            "version": CAPABILITY_SIDECAR_VERSION,
+            "status": status,
+            "claude_version": claude_version,
+            "fingerprint": fingerprint,
+            "checked_at": Instant.now().format_iso(),
+            "diagnostic": _cap(diagnostic),
+        },
+    )
+
+
+def verify_capability_sidecar(path: Path, *, claude_version: str, fingerprint: str) -> tuple[str, str | None]:
+    data = read_capability_sidecar(path)
+    if data is None:
+        return STATUS_CAPABILITY_UNVERIFIED, "run --check-capability"
+    if data.get("version") != CAPABILITY_SIDECAR_VERSION:
+        return STATUS_CAPABILITY_UNVERIFIED, "run --check-capability"
+    if data.get("claude_version") != claude_version:
+        return STATUS_CAPABILITY_UNVERIFIED, "run --check-capability"
+    if data.get("fingerprint") != fingerprint:
+        return STATUS_CAPABILITY_UNVERIFIED, "run --check-capability"
+    status = data.get("status")
+    if not isinstance(status, str):
+        return STATUS_CAPABILITY_UNVERIFIED, "run --check-capability"
+    diagnostic = data.get("diagnostic")
+    return status, diagnostic if isinstance(diagnostic, str) else None
+
+
+def build_prompt(packet_dir: Path) -> str:
+    return "\n".join(
+        [
+            (
+                "You are ccrecall-summary-enricher. Produce a factual continuation "
+                "summary for one Claude Code conversation branch."
+            ),
+            "",
+            f"Branch packet directory: {packet_dir}",
+            f"Branch outline path: {packet_dir / 'branch-outline.json'}",
+            f"Branch transcript path: {packet_dir / 'branch-transcript.jsonl'}",
+            f"Branch/session metadata path: {packet_dir / 'branch-metadata.json'}",
+            f"Branch message UUID allowlist path: {packet_dir / 'allowed-uuids.txt'}",
+            f"Deterministic summary path: {packet_dir / 'deterministic-summary.json'}",
+            "",
+            "This is a Branch Resume Brief for one active branch, not a whole-session or project-history summary.",
+            "Read branch-outline.json and deterministic-summary.json first.",
+            (
+                "Use the outline to locate relevant detailed transcript entries, especially the last exchanges "
+                "and any middle-branch decision or failure points."
+            ),
+            (
+                "Read the branch transcript packet files as needed to establish evidence; do not infer facts "
+                "only from filenames, tool names, or metadata."
+            ),
+            "Summarize only messages whose uuid appears in the allowlist.",
+            "title must be a short, evidence-backed label for this branch, not a generic or speculative topic.",
+            (
+                "where_we_left_off must describe the latest evidenced state, including blockers or verification "
+                "status when known."
+            ),
+            "how_we_got_here must explain the causal path to that state, not repeat the latest-state text.",
+            "Include a key decision only when its rationale is evidenced.",
+            "Include an attempted path only when it was evidenced as failed, abandoned, or inconclusive.",
+            (
+                "When the branch ends with an evidenced unresolved action, blocker, or handoff, include at least one "
+                "specific continuation hint. Do not add a generic next step when no such evidence exists."
+            ),
+            (
+                "Prefer facts that help a future Claude Code session resume work. Do not invent decisions, "
+                "rationale, failures, unresolved tasks, or generic next steps."
+            ),
+            "Every factual section and list item must cite source_uuids from the allowlist.",
+            "Do not emit version, model, or generated_at; the worker adds them after validation.",
+            "Return only the factual brief body matching the response schema.",
+        ]
+    )
+
+
+def build_claude_argv(packet_dir: Path, settings: dict[str, Any], prompt: str) -> list[str]:
+    return [
+        "claude",
+        "-p",
+        "--safe-mode",
+        "--disable-slash-commands",
+        "--strict-mcp-config",
+        "--mcp-config",
+        '{"mcpServers":{}}',
+        "--append-system-prompt",
+        SUMMARIZER_SYSTEM_PROMPT,
+        "--tools",
+        "Read",
+        "--allowedTools",
+        "Read",
+        "--permission-mode",
+        "dontAsk",
+        "--add-dir",
+        str(packet_dir),
+        "--output-format",
+        "json",
+        "--json-schema",
+        _canonical_json(CLAUDE_RESPONSE_SCHEMA),
+        "--max-budget-usd",
+        str(settings["llm_summary_max_budget_usd"]),
+        "--model",
+        settings["llm_summary_model"],
+        "--effort",
+        settings["llm_summary_effort"],
+        "--no-session-persistence",
+        prompt,
+    ]
+
+
+def _classify_process_failure(stderr: str, stdout: str) -> tuple[str, str | None]:
+    text = "\n".join(bit for bit in (stderr, stdout) if bit).lower()
+    if "unknown option" in text or "unrecognized option" in text or "usage:" in text:
+        return STATUS_UNSUPPORTED_CLI, _cap(stderr or stdout)
+    if "login" in text or "auth" in text:
+        return STATUS_AUTH_REQUIRED, _cap(stderr or stdout)
+    if "rate limit" in text:
+        return STATUS_RATE_LIMITED, _cap(stderr or stdout)
+    if "budget" in text:
+        return STATUS_BUDGET_EXCEEDED, _cap(stderr or stdout)
+    if stdout:
+        try:
+            json.loads(stdout)
+        except ValueError:
+            return STATUS_INVALID_OUTPUT, _cap("invalid json on stdout")
+    return STATUS_ERROR, _cap(stderr or stdout or "claude failed")
+
+
+def _parse_claude_stdout(stdout: str) -> dict[str, Any]:
+    data = json.loads(stdout)
+    if not isinstance(data, dict):
+        raise ValueError("stdout must be a json object")
+    return data
+
+
+def invoke_claude(
+    packet_dir: Path,
+    settings: dict[str, Any],
+    prompt: str,
+    *,
+    active_branch_uuids: set[str],
+    valid_file_paths: set[str],
+    run: Any = subprocess.run,
+) -> InvocationResult:
+    argv = build_claude_argv(packet_dir, settings, prompt)
+    try:
+        completed = run(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=settings["llm_summary_timeout_seconds"],
+            cwd=packet_dir,
+        )
+    except FileNotFoundError as exc:
+        return InvocationResult(status=STATUS_CLAUDE_UNAVAILABLE, diagnostic=_cap(str(exc)))
+    except subprocess.TimeoutExpired as exc:
+        return InvocationResult(status=STATUS_TIMEOUT, diagnostic=_cap(str(exc)))
+
+    if completed.returncode != 0:
+        status, diagnostic = _classify_process_failure(completed.stderr, completed.stdout)
+        return InvocationResult(status=status, diagnostic=diagnostic)
+
+    try:
+        body = _parse_claude_stdout(completed.stdout)
+        validated = validate_claude_response_body(
+            body,
+            active_branch_uuids=active_branch_uuids,
+            valid_file_paths=valid_file_paths,
+        )
+    except Exception as exc:
+        return InvocationResult(status=STATUS_INVALID_OUTPUT, diagnostic=_cap(str(exc)))
+    return InvocationResult(status=STATUS_OK, response_body=validated)
+
+
+def _snapshot_importable_transcripts(projects_dir: Path) -> dict[Path, tuple[int, int]]:
+    if not projects_dir.exists():
+        return {}
+    found: dict[Path, tuple[int, int]] = {}
+    for path in projects_dir.rglob("*.jsonl"):
+        if path.is_file() and not path.is_symlink():
+            with contextlib.suppress(Exception):
+                extract_session_uuid(path)
+                path_stat = path.stat()
+                found[path.resolve()] = (path_stat.st_size, path_stat.st_mtime_ns)
+    return found
+
+
+def _build_capability_check_argv(packet_dir: Path) -> list[str]:
+    prompt = "Read the packet and return an empty JSON object."
+    return [
+        "claude",
+        "-p",
+        "--safe-mode",
+        "--disable-slash-commands",
+        "--strict-mcp-config",
+        "--mcp-config",
+        '{"mcpServers":{}}',
+        "--tools",
+        "Read",
+        "--allowedTools",
+        "Read",
+        "--permission-mode",
+        "dontAsk",
+        "--add-dir",
+        str(packet_dir),
+        "--output-format",
+        "json",
+        "--json-schema",
+        _canonical_json({"type": "object", "additionalProperties": False, "properties": {}}),
+        "--no-session-persistence",
+        prompt,
+    ]
+
+
+def run_capability_check(
+    settings: dict[str, Any],
+    *,
+    sidecar_path: Path,
+    projects_dir: Path,
+    claude_version: str,
+    run: Any = subprocess.run,
+) -> CapabilityCheckResult:
+    fingerprint = capability_fingerprint()
+    packet_dir = Path(tempfile.mkdtemp(prefix="capability-packet-"))
+    cwd_dir = Path(tempfile.mkdtemp(prefix="capability-cwd-"))
+    _set_owner_only_dir(packet_dir)
+    _set_owner_only_dir(cwd_dir)
+    try:
+        _write_owner_only_text(packet_dir / "branch-outline.json", "[]\n")
+        before = _snapshot_importable_transcripts(projects_dir)
+        try:
+            completed = run(
+                _build_capability_check_argv(packet_dir),
+                capture_output=True,
+                text=True,
+                timeout=settings["llm_summary_timeout_seconds"],
+                cwd=cwd_dir,
+            )
+        except FileNotFoundError as exc:
+            write_capability_sidecar(
+                sidecar_path,
+                status=STATUS_CLAUDE_UNAVAILABLE,
+                claude_version=claude_version,
+                fingerprint=fingerprint,
+                diagnostic=str(exc),
+            )
+            return CapabilityCheckResult(status=STATUS_CLAUDE_UNAVAILABLE, diagnostic=_cap(str(exc)))
+        except subprocess.TimeoutExpired as exc:
+            write_capability_sidecar(
+                sidecar_path,
+                status=STATUS_TIMEOUT,
+                claude_version=claude_version,
+                fingerprint=fingerprint,
+                diagnostic=str(exc),
+            )
+            return CapabilityCheckResult(status=STATUS_TIMEOUT, diagnostic=_cap(str(exc)))
+
+        if completed.returncode != 0:
+            status, diagnostic = _classify_process_failure(completed.stderr, completed.stdout)
+            write_capability_sidecar(
+                sidecar_path,
+                status=status,
+                claude_version=claude_version,
+                fingerprint=fingerprint,
+                diagnostic=diagnostic,
+            )
+            return CapabilityCheckResult(status=status, diagnostic=diagnostic)
+
+        after = _snapshot_importable_transcripts(projects_dir)
+        if after != before:
+            diagnostic = "no-session-persistence changed importable transcripts"
+            write_capability_sidecar(
+                sidecar_path,
+                status=STATUS_CAPABILITY_UNVERIFIED,
+                claude_version=claude_version,
+                fingerprint=fingerprint,
+                diagnostic=diagnostic,
+            )
+            return CapabilityCheckResult(status=STATUS_CAPABILITY_UNVERIFIED, diagnostic=diagnostic)
+
+        write_capability_sidecar(
+            sidecar_path,
+            status=STATUS_OK,
+            claude_version=claude_version,
+            fingerprint=fingerprint,
+        )
+        return CapabilityCheckResult(status=STATUS_OK)
+    finally:
+        shutil.rmtree(packet_dir, ignore_errors=True)
+        shutil.rmtree(cwd_dir, ignore_errors=True)
+
+
+def discover_current_session_source_files(projects_dir: Path, session_uuid: str) -> list[Path]:
+    found: list[Path] = []
+    if not projects_dir.exists():
+        return found
+    for project_dir in sorted(projects_dir.iterdir()):
+        if not project_dir.is_dir():
+            continue
+        direct = project_dir / f"{session_uuid}.jsonl"
+        if direct.exists() and direct.is_file() and not direct.is_symlink() and _is_under(direct, projects_dir):
+            found.append(direct)
+        for path in sorted(project_dir.rglob(f"*{session_uuid}*.jsonl")):
+            if "subagents" not in path.parts:
+                continue
+            if path.is_file() and not path.is_symlink() and _is_under(path, projects_dir):
+                found.append(path)
+    unique: list[Path] = []
+    seen: set[Path] = set()
+    for path in found:
+        if path not in seen:
+            seen.add(path)
+            unique.append(path)
+    return unique
+
+
+def _historical_source_row_value(row: Mapping[str, Any] | Sequence[Any], key: str, index: int) -> Any:
+    if isinstance(row, Mapping):
+        return row.get(key)
+    if isinstance(row, Sequence) and not isinstance(row, (str, bytes, bytearray)) and len(row) > index:
+        return row[index]
+    return None
+
+
+def resolve_historical_source_files(
+    session_uuid: str, rows: list[Mapping[str, Any] | Sequence[Any]]
+) -> SourceResolution:
+    valid: list[Path] = []
+    had_existing_mismatch = False
+    had_only_unverified = False
+    for row in rows:
+        file_path = _historical_source_row_value(row, "file_path", 0)
+        if not isinstance(file_path, str):
+            continue
+        path = Path(file_path)
+        if extract_session_uuid(path) != session_uuid or not path.exists() or not path.is_file() or path.is_symlink():
+            continue
+        file_hash = _historical_source_row_value(row, "file_hash", 1)
+        file_size = _historical_source_row_value(row, "file_size", 2)
+        file_mtime = _historical_source_row_value(row, "file_mtime", 3)
+        if file_hash is not None:
+            current = path.stat()
+            if _file_sha256(path) == file_hash and current.st_size == file_size and current.st_mtime == file_mtime:
+                valid.append(path)
+            else:
+                had_existing_mismatch = True
+            continue
+        if file_size is not None and file_mtime is not None:
+            current = path.stat()
+            if current.st_size == file_size and current.st_mtime == file_mtime:
+                valid.append(path)
+            else:
+                had_existing_mismatch = True
+            continue
+        had_only_unverified = True
+    if valid:
+        return SourceResolution(status=STATUS_OK, files=valid)
+    if had_existing_mismatch:
+        return SourceResolution(status=STATUS_SOURCE_CHANGED, files=[])
+    if had_only_unverified:
+        return SourceResolution(status=STATUS_SOURCE_UNVERIFIED, files=[])
+    return SourceResolution(status=STATUS_MISSING_SOURCE, files=[])
+
+
+def _parse_source_entries(path: Path) -> list[tuple[int, dict[str, Any]]]:
+    return [(line_number, entry) for line_number, entry in parse_all_with_uuids_and_numbers(path)]
+
+
+def _preview_result_text(results: list[dict[str, Any]]) -> str:
+    if not results:
+        return ""
+    parts = [result["text"] for result in results if isinstance(result.get("text"), str) and result["text"]]
+    return "\n".join(parts)[:160]
+
+
+def _tool_file_signals(invocations: list[dict[str, Any]]) -> list[str]:
+    files: list[str] = []
+    for invocation in invocations:
+        for signal in invocation.get("file_signals", []):
+            if isinstance(signal, str) and signal and signal not in files:
+                files.append(signal[:160])
+    return files
+
+
+def _tool_invocations(content: object) -> list[dict[str, Any]]:
+    invocations: list[dict[str, Any]] = []
+    if not isinstance(content, list):
+        return invocations
+    for item in content:
+        if isinstance(item, dict) and item.get("type") == "tool_use":
+            name = item.get("name")
+            raw_input = item.get("input")
+            tool_input = raw_input if isinstance(raw_input, dict) else {}
+            file_signals = []
+            for key, value in tool_input.items():
+                if key.endswith("path") and isinstance(value, str):
+                    file_signals.append(value)
+                elif key.endswith("paths") and isinstance(value, list):
+                    file_signals.extend(path for path in value if isinstance(path, str))
+            if isinstance(name, str):
+                invocations.append({"name": name, "summary": build_tool_use_marker(item), "file_signals": file_signals})
+    return invocations
+
+
+def _tool_results(content: object) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    if not isinstance(content, list):
+        return results
+    for item in content:
+        if not isinstance(item, dict) or item.get("type") != "tool_result":
+            continue
+        text = item.get("content", "")
+        if isinstance(text, list):
+            text = "\n".join(part.get("text", "") for part in text if isinstance(part, dict))
+        if not isinstance(text, str):
+            text = ""
+        results.append({"is_error": bool(item.get("is_error", False)), "text": text.strip()})
+    return results
+
+
+def _normalize_entry(entry: dict[str, Any]) -> dict[str, Any]:
+    role = entry.get("type") if isinstance(entry.get("type"), str) else None
+    raw_message = entry.get("message")
+    message: dict[str, Any] = raw_message if isinstance(raw_message, dict) else {}
+    content = message.get("content")
+    text, _has_tool_use, _has_thinking, _tool_summary, _tool_content = extract_text_content(content)
+    normalized = {
+        "uuid": entry.get("uuid"),
+        "parent_uuid": entry.get("parentUuid"),
+        "timestamp": entry.get("timestamp"),
+        "role": role,
+        "request_text": text if role == "user" and not _tool_results(content) else "",
+        "assistant_text": text if role == "assistant" else "",
+        "tool_invocations": _tool_invocations(content),
+        "tool_results": _tool_results(content),
+    }
+    return normalized
+
+
+def _entry_sort_key(item: tuple[dict[str, Any], Path, int]) -> tuple[str, str, int, str]:
+    normalized, path, line_number = item
+    timestamp = normalized.get("timestamp")
+    uuid_value = normalized.get("uuid")
+    return (
+        timestamp if isinstance(timestamp, str) else "",
+        str(path),
+        line_number,
+        uuid_value if isinstance(uuid_value, str) else "",
+    )
+
+
+def _build_outline(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    outline: list[dict[str, Any]] = []
+    current: dict[str, Any] | None = None
+    exchange_order = 0
+    for entry in entries:
+        if entry["role"] == "user" and entry["request_text"]:
+            exchange_order += 1
+            current = {
+                "exchange_order": exchange_order,
+                "timestamp": entry["timestamp"],
+                "user_uuid": entry["uuid"],
+                "assistant_uuids": [],
+                "result_uuids": [],
+                "user_preview": entry["request_text"][:160],
+                "assistant_preview": "",
+                "result_preview": "",
+                "tool_signals": [],
+                "file_signals": [],
+            }
+            outline.append(current)
+            continue
+        if current is None:
+            continue
+        if entry["role"] == "assistant":
+            current["assistant_uuids"].append(entry["uuid"])
+            if not current["assistant_preview"] and entry["assistant_text"]:
+                current["assistant_preview"] = entry["assistant_text"][:160]
+            current["tool_signals"].extend(tool["name"] for tool in entry["tool_invocations"])
+            current["file_signals"].extend(
+                signal
+                for signal in _tool_file_signals(entry["tool_invocations"])
+                if signal not in current["file_signals"]
+            )
+        elif entry["tool_results"]:
+            current["result_uuids"].append(entry["uuid"])
+            if not current["result_preview"]:
+                current["result_preview"] = _preview_result_text(entry["tool_results"])
+    return outline
+
+
+@contextmanager
+def branch_packet(
+    *,
+    packet_parent: Path,
+    session_uuid: str,
+    branch_metadata: dict[str, Any],
+    active_branch_uuids: set[str],
+    source_files: list[Path],
+    deterministic_summary: dict[str, Any],
+):
+    packet_parent.mkdir(parents=True, exist_ok=True)
+    _set_owner_only_dir(packet_parent)
+    reap_stale_packets(packet_parent)
+    packet_dir = Path(tempfile.mkdtemp(prefix=PACKET_DIR_PREFIX, dir=packet_parent))
+    _set_owner_only_dir(packet_dir)
+    try:
+        atomic_write_json(
+            packet_dir / MANIFEST_FILENAME,
+            {"pid": os.getpid(), "created_at": Instant.now().format_iso(), "session_uuid": session_uuid},
+        )
+        (packet_dir / MANIFEST_FILENAME).chmod(PID_FILE_MODE)
+
+        seen: dict[str, dict[str, Any]] = {}
+        ordered: list[tuple[dict[str, Any], Path, int]] = []
+        for path in source_files:
+            for line_number, entry in _parse_source_entries(path):
+                message_uuid = entry.get("uuid")
+                if message_uuid not in active_branch_uuids:
+                    continue
+                normalized = _normalize_entry(entry)
+                existing = seen.get(message_uuid)
+                if existing is not None and _canonical_json(existing) != _canonical_json(normalized):
+                    raise PacketBuildError(STATUS_SOURCE_CHANGED)
+                if existing is None:
+                    seen[message_uuid] = normalized
+                    ordered.append((normalized, path, line_number))
+
+        if set(seen) != active_branch_uuids:
+            raise PacketBuildError(STATUS_SOURCE_INCOMPLETE)
+
+        ordered.sort(key=_entry_sort_key)
+        transcript_entries = [item[0] for item in ordered]
+        outline = _build_outline(transcript_entries)
+
+        _write_owner_only_text(
+            packet_dir / "branch-transcript.jsonl",
+            "\n".join(_canonical_json(entry) for entry in transcript_entries) + "\n",
+        )
+        _write_owner_only_text(packet_dir / "branch-outline.json", json.dumps(outline, indent=2) + "\n")
+        _write_owner_only_text(packet_dir / "branch-metadata.json", json.dumps(branch_metadata, indent=2) + "\n")
+        _write_owner_only_text(
+            packet_dir / "deterministic-summary.json",
+            json.dumps(deterministic_summary, indent=2) + "\n",
+        )
+        _write_owner_only_text(
+            packet_dir / "allowed-uuids.txt",
+            "\n".join(entry["uuid"] for entry in transcript_entries) + "\n",
+        )
+        yield packet_dir
+    finally:
+        shutil.rmtree(packet_dir, ignore_errors=True)
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        if pid <= 0:
+            return False
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def reap_stale_packets(packet_parent: Path, *, min_age_seconds: int = 3600) -> list[Path]:
+    reaped: list[Path] = []
+    if not packet_parent.exists():
+        return reaped
+    now = Instant.now()
+    for path in packet_parent.iterdir():
+        if not path.is_dir():
+            continue
+        manifest_path = path / MANIFEST_FILENAME
+        if not manifest_path.exists():
+            continue
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            created_at = Instant.parse_iso(manifest["created_at"])
+            pid = int(manifest["pid"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        age_seconds = (now - created_at).total("seconds")
+        if age_seconds < min_age_seconds:
+            continue
+        if _pid_alive(pid):
+            continue
+        shutil.rmtree(path, ignore_errors=True)
+        reaped.append(path)
+    return reaped

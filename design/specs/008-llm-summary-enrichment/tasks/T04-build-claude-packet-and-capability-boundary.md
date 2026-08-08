@@ -1,7 +1,7 @@
 ---
 task_id: "T04"
 title: "Build Claude packet and capability boundary"
-status: "planned"
+status: "done"
 depends_on: ["T01", "T02"]
 implements: ["FR#7", "FR#8", "FR#13", "FR#14", "FR#15", "FR#16", "FR#18", "AC#4"]
 ---
@@ -42,7 +42,7 @@ Implement the synthetic capability check and sidecar read/write contract. Its fi
 - [ ] FR#8: Capability-sidecar tests prove model, effort, and budget changes do not invalidate the security/persistence fingerprint, while a capability-check `budget_exceeded` recovers only through a successful rerun of `--check-capability`.
 - [ ] FR#13: Tests prove Claude receives a temporary packet directory and isolated cwd, never original transcript directories.
 - [ ] FR#13: Source resolver tests reject non-regular and symlink paths, discover direct and subagent transcript paths, and classify import-log stat/hash mismatches as `source_changed` or `source_unverified`.
-- [ ] FR#13: Packet lifecycle tests set owner-only modes, reap stale PID-dead packet directories, and remove current packets on success and failure without logging contents.
+- [ ] FR#13: Packet lifecycle tests set owner-only modes, reap stale PID-dead packet directories, and remove current packets on success and failure. The boundary currently has no ccrecall-owned logging surface to assert.
 - [ ] FR#14: Packets contain only active-branch UUIDs and reject missing/duplicate-conflicting source evidence.
 - [ ] FR#14: Multi-source tests deduplicate identical UUID entries, reject conflicting normalized duplicates, and require complete active-branch UUID coverage before writing a packet.
 - [ ] FR#15: Packet outline and prompt direct the model to latest state, causal history, rationale, failures, and evidence-backed next steps.
