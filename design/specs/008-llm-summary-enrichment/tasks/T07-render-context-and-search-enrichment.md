@@ -1,7 +1,7 @@
 ---
 task_id: "T07"
 title: "Render enrichment in context and search"
-status: "planned"
+status: "done"
 depends_on: ["T01", "T02"]
 implements: ["FR#1", "FR#4", "FR#17", "AC#1", "AC#2", "AC#8", "AC#10"]
 ---
