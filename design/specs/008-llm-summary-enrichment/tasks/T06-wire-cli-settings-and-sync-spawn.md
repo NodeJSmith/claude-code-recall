@@ -1,7 +1,7 @@
 ---
 task_id: "T06"
 title: "Wire CLI settings and sync spawn"
-status: "planned"
+status: "done"
 depends_on: ["T05"]
 implements: ["FR#5", "FR#6", "FR#11", "FR#18", "AC#1", "AC#6", "AC#7", "AC#11"]
 ---

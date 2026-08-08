@@ -222,6 +222,43 @@ class TestBackfillLlmSummaries:
         with pytest.raises(ValueError, match="--current-session requires --session"):
             worker._run(current_session=True)
 
+    def test_worker_run_never_requests_load_vec_true(self, tmp_path, monkeypatch):
+        from ccrecall.hooks import backfill_llm_summaries as worker
+
+        connection_kwargs: list[dict[str, object]] = []
+
+        class _Ctx:
+            def __enter__(self):
+                conn = sqlite3.connect(tmp_path / "no-load-vec.db")
+                conn.execute("CREATE TABLE IF NOT EXISTS branches (id INTEGER)")
+                self.conn = conn
+                return conn
+
+            def __exit__(self, exc_type, exc, tb):
+                self.conn.close()
+                return False
+
+        def fake_get_connection(settings, **kwargs):
+            del settings
+            connection_kwargs.append(kwargs)
+            assert kwargs.get("load_vec") is not True
+            return _Ctx()
+
+        monkeypatch.setattr(worker, "get_connection", fake_get_connection)
+        monkeypatch.setattr(
+            worker,
+            "load_settings",
+            lambda: {"db_path": str(tmp_path / "unused.db"), "llm_summary_min_exchanges": 9},
+        )
+        monkeypatch.setattr(worker, "setup_logging", lambda *_args, **_kwargs: logging.getLogger("test-worker"))
+        monkeypatch.setattr(worker, "get_claude_version", lambda run=None: ("1.2.3", None))
+        monkeypatch.setattr(worker, "capability_fingerprint", lambda: "fingerprint")
+        monkeypatch.setattr(worker, "verify_capability_sidecar", lambda *a, **k: (STATUS_OK, None))
+        monkeypatch.setattr(worker, "_select_branch_ids", lambda *a, **k: [])
+
+        assert worker.run() == worker.EXIT_OK
+        assert connection_kwargs == [{}]
+
     def test_run_persists_worker_owned_enrichment_without_rewriting_deterministic_fields(self, tmp_path, monkeypatch):
         from ccrecall.hooks import backfill_llm_summaries as worker
 

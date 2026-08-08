@@ -1691,6 +1691,28 @@ class TestTransitiveImportIsolation:
         """memory_sync.py imports only from config.py."""
         self._assert_no_heavy_imports("ccrecall.hooks.memory_sync")
 
+    def test_memory_context_does_not_import_heavy_deps(self):
+        """memory_context.py must not import the LLM summarizer boundary."""
+        code = "import ccrecall.hooks.memory_context\nimport sys\nassert 'ccrecall.llm_summarizer' not in sys.modules\n"
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert result.returncode == 0, result.stderr
+
+    def test_memory_setup_does_not_import_heavy_deps(self):
+        """memory_setup.py must not import the LLM summarizer boundary."""
+        code = "import ccrecall.hooks.memory_setup\nimport sys\nassert 'ccrecall.llm_summarizer' not in sys.modules\n"
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert result.returncode == 0, result.stderr
+
     def test_clear_handoff_does_not_import_heavy_deps(self):
         """clear_handoff.py imports only from config.py."""
         self._assert_no_heavy_imports("ccrecall.hooks.clear_handoff")
@@ -1723,6 +1745,26 @@ class TestTransitiveImportIsolation:
             "found = heavy & loaded\n"
             "assert not found, f'Heavy modules loaded: {found}'\n"
             "assert 'ccrecall.db' not in loaded, 'ccrecall.db should not be imported'\n"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert result.returncode == 0, result.stderr
+
+    def test_backfill_llm_summaries_entrypoint_imports_no_cli_graph_or_heavy_modules(self):
+        code = (
+            "import ccrecall.hooks.backfill_llm_summaries\n"
+            "import sys\n"
+            f"heavy = {self.HEAVY_MODULES}\n"
+            "loaded = set(sys.modules)\n"
+            "found = heavy & loaded\n"
+            "assert not found, f'Heavy modules loaded: {found}'\n"
+            "assert 'ccrecall.cli' not in loaded\n"
+            "assert 'ccrecall.cli.commands' not in loaded\n"
+            "assert 'ccrecall.db' not in loaded\n"
         )
         result = subprocess.run(
             [sys.executable, "-c", code],

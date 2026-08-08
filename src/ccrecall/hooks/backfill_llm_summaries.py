@@ -29,6 +29,10 @@ from ccrecall.llm_summarizer import (
     invoke_claude,
     resolve_historical_source_files,
     verify_capability_sidecar,
+    write_capability_sidecar,
+)
+from ccrecall.llm_summarizer import (
+    run_capability_check as run_capability_smoke_test,
 )
 from ccrecall.llm_summary_db import get_connection
 from ccrecall.parsing import extract_session_uuid
@@ -338,6 +342,43 @@ def get_claude_version(run: Any = subprocess.run) -> tuple[str | None, str | Non
         return None, _cap(completed.stderr.strip() or completed.stdout.strip() or "claude --version failed")
     output = (completed.stdout or completed.stderr).strip()
     return output.splitlines()[0] if output else "unknown", None
+
+
+def run_capability_check(
+    *,
+    verbose: bool = False,
+    capability_sidecar_path: Path = CAPABILITY_SIDECAR_PATH,
+    projects_dir: Path = DEFAULT_PROJECTS_DIR,
+) -> int:
+    settings = load_settings()
+    setup_logging(settings, process_name="backfill-llm-summary", verbose=verbose)
+
+    claude_version, version_error = get_claude_version()
+    if claude_version is None:
+        diagnostic = _cap(version_error or STATUS_CLAUDE_UNAVAILABLE)
+        write_capability_sidecar(
+            capability_sidecar_path,
+            status=STATUS_CLAUDE_UNAVAILABLE,
+            claude_version="unknown",
+            fingerprint=capability_fingerprint(),
+            diagnostic=diagnostic,
+        )
+        print(f"ccrecall backfill llm-summaries: capability check failed: {diagnostic}")
+        return EXIT_ABORT
+
+    result = run_capability_smoke_test(
+        settings,
+        sidecar_path=capability_sidecar_path,
+        projects_dir=projects_dir,
+        claude_version=claude_version,
+    )
+    if result.status == STATUS_OK:
+        print("ccrecall backfill llm-summaries: capability check passed")
+        return EXIT_OK
+
+    diagnostic = result.diagnostic or result.status
+    print(f"ccrecall backfill llm-summaries: capability check failed: {diagnostic}")
+    return EXIT_ABORT
 
 
 def _process_branch(

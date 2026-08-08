@@ -7,9 +7,9 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any
 
 from ccrecall.config import SYNC_TEMP_PREFIX, log_hook_exception
+from ccrecall.hooks.subprocess_utils import detached_popen_kwargs
 
 
 def main():
@@ -28,17 +28,10 @@ def main():
                 Path(tmp_path).unlink()
             raise
 
-        # Heterogeneous values (DEVNULL ints here, bool/int platform flags added below);
-        # dict[str, Any] lets **kwargs satisfy Popen's individually-typed keyword params.
-        kwargs: dict[str, Any] = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
-        if sys.platform == "win32":
-            kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
-        else:
-            kwargs["start_new_session"] = True
         try:
             subprocess.Popen(  # noqa: S603 — spawns the project's own installed CLI, not untrusted input
                 ["ccrecall", "sync-current", "--input-file", tmp_path],  # noqa: S607 — entrypoint resolved via PATH by design
-                **kwargs,
+                **detached_popen_kwargs(),
             )
         except Exception:
             # Popen failed — clean up the temp file (ccrecall sync-current won't run to do it)
