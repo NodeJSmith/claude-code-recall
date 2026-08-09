@@ -66,18 +66,7 @@ def _check_capability_conflict_message(*, check_capability: bool, selector_suppl
     return f"--check-capability is mutually exclusive with {selectors}, and {_LLM_SUMMARY_SELECTOR_FLAGS[-1]}"
 
 
-def _check_capability_isolated(arguments: ArgumentCollection) -> None:
-    """Group validator: --check-capability cannot be combined with selectors."""
-    provided = [arg for arg in arguments if arg.tokens]
-    error = _check_capability_conflict_message(
-        check_capability=bool(arguments and arguments[0].tokens),
-        selector_supplied=len(provided) > 1,
-    )
-    if error is not None:
-        raise ValueError(error)
-
-
-_LLM_SUMMARY_MODE = Group("Capability / Selection", validator=_check_capability_isolated)
+_LLM_SUMMARY_MODE = Group("Capability / Selection")
 _LLM_SUMMARY_DOC = f"""Backfill opt-in Branch Resume Briefs via Claude Code auth.
 
 Sends selected local transcript content, branch/session metadata, and
@@ -268,7 +257,7 @@ def cmd_backfill_llm_summaries(
     limit: Annotated[
         int | None,
         _LLM_SUMMARY_MODE,
-        Parameter(validator=Number(gte=1), help="Stop after enriching at most N branches this run (>= 1)."),
+        Parameter(validator=Number(gte=1), help="Process at most N eligible branch candidates this run (>= 1)."),
     ] = None,
     session: Annotated[
         str | None,

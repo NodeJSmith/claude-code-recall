@@ -116,3 +116,4 @@ class TestLlmSummaryCli:
         assert "--session" in output
         assert "--force" in output
         assert "--check-capability" in output
+        assert "Process at most N eligible branch candidates" in output

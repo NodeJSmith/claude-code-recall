@@ -13,10 +13,12 @@ from ccrecall.summary_enrichment import (
     SummaryEnrichmentValidationError,
     build_stored_enrichment_envelope,
     compute_summary_source_hash,
+    normalize_project_file_reference,
     render_enriched_context_summary,
     render_llm_block,
     valid_current_enrichment,
     validate_claude_response_body,
+    validate_stored_enrichment_envelope,
 )
 
 
@@ -89,6 +91,22 @@ def _valid_envelope() -> dict:
 
 
 class TestSchemaContract:
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            ("src/main.py", "src/main.py"),
+            (" README.md ", "README.md"),
+            ("/tmp/absolute.py", None),
+            ("./local.py", None),
+            ("../escape.py", None),
+            ("~/home.py", None),
+            ("C:/worktree/file.py", None),
+            ("src/../escape.py", None),
+        ],
+    )
+    def test_normalize_project_file_reference(self, value, expected):
+        assert normalize_project_file_reference(value) == expected
+
     def test_claude_response_schema_matches_top_level_contract(self):
         assert CLAUDE_RESPONSE_SCHEMA["type"] == "object"
         assert CLAUDE_RESPONSE_SCHEMA["additionalProperties"] is False
@@ -158,6 +176,29 @@ class TestSchemaContract:
         assert envelope["model"] == "sonnet"
         assert envelope["generated_at"] == "2026-08-07T12:34:56Z"
         assert envelope["title"]["text"] == _valid_response_body()["title"]["text"]
+
+    @pytest.mark.parametrize("unsafe_path", ["/tmp/absolute.py", "./local.py", "../escape.py", "~/home.py"])
+    def test_build_stored_enrichment_envelope_rejects_unsafe_file_references(self, unsafe_path):
+        body = copy.deepcopy(_valid_response_body())
+        body["files_and_reasons"][0]["path"] = unsafe_path
+
+        with pytest.raises(SummaryEnrichmentValidationError, match="invalid file reference"):
+            build_stored_enrichment_envelope(
+                body,
+                model="sonnet",
+                generated_at="2026-08-07T12:34:56Z",
+                active_branch_uuids=ACTIVE_UUIDS,
+                valid_file_paths={unsafe_path},
+            )
+
+    def test_validate_stored_enrichment_envelope_rejects_persisted_unsafe_file_references_without_membership_context(
+        self,
+    ):
+        envelope = _valid_envelope()
+        envelope["files_and_reasons"][0]["path"] = "/tmp/absolute.py"
+
+        with pytest.raises(SummaryEnrichmentValidationError, match="invalid file reference"):
+            validate_stored_enrichment_envelope(envelope)
 
 
 class TestSummarySourceHash:

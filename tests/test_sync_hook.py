@@ -1172,3 +1172,68 @@ class TestSyncCurrentLlmSummarySpawn:
         assert out == {"continue": True, "suppressOutput": True}
         assert events == ["conn-enter", "conn-exit"]
         assert len(popen_calls) == 1
+
+
+class TestSyncCurrentTranscriptDiscovery:
+    def test_get_session_file_uses_shared_current_session_discovery_semantics(self, tmp_path):
+        session_uuid = VALID_SYNC_UUID
+        projects_dir = tmp_path / "projects"
+        project_a = projects_dir / "a"
+        project_b = projects_dir / "b"
+        subagents = project_b / "state" / "subagents"
+        project_a.mkdir(parents=True)
+        subagents.mkdir(parents=True)
+        direct = project_a / f"{session_uuid}.jsonl"
+        direct.write_text("{}\n", encoding="utf-8")
+        subagent = subagents / f"agent-{session_uuid}.jsonl"
+        subagent.write_text("{}\n", encoding="utf-8")
+        outside = tmp_path / "outside.jsonl"
+        outside.write_text("{}\n", encoding="utf-8")
+        (project_a / f"{session_uuid}-symlink.jsonl").symlink_to(outside)
+
+        found = sync_current.get_session_file(projects_dir, session_uuid)
+
+        assert found == direct
+
+    def test_run_derives_top_level_project_dir_for_arbitrarily_nested_subagent_transcript(self, tmp_path, monkeypatch):
+        projects_dir = tmp_path / "projects"
+        project_dir = projects_dir / "project-a"
+        session_file = project_dir / "state" / "nested" / "deeper" / "subagents" / f"agent-{VALID_SYNC_UUID}.jsonl"
+        session_file.parent.mkdir(parents=True)
+        session_file.write_text("{}", encoding="utf-8")
+
+        monkeypatch.setattr("ccrecall.config.pid_file_path", lambda key: tmp_path / f".pid-{key}")
+        monkeypatch.setattr(sync_current, "DEFAULT_PROJECTS_DIR", projects_dir)
+        monkeypatch.setattr(sync_current, "remove_pid_file", lambda key: None)
+        monkeypatch.setattr(sync_current, "load_settings", lambda: {"exclude_projects": [], "logging_enabled": False})
+        monkeypatch.setattr(sync_current, "setup_logging", lambda *_a, **_k: MagicMock())
+        monkeypatch.setattr(sync_current, "_warn_cold_model", lambda: None)
+        monkeypatch.setattr(sync_current, "record_embedding_failure", lambda *a, **k: None)
+        monkeypatch.setattr(sync_current, "clear_embedding_failure", lambda: None)
+        monkeypatch.setattr(sync_current, "get_session_file", lambda *a, **k: session_file)
+        monkeypatch.setattr(sync_current, "chunk_vec_queryable", lambda conn: True)
+
+        seen_project_dirs = []
+
+        def fake_sync_session(_conn, _session_file, root_dir):
+            seen_project_dirs.append(root_dir)
+            return 0
+
+        class _ConnContext:
+            def __enter__(self):
+                return MagicMock()
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        monkeypatch.setattr(sync_current, "sync_session", fake_sync_session)
+        monkeypatch.setattr(sync_current, "get_connection", lambda *a, **k: _ConnContext())
+
+        input_file = tmp_path / "hook.json"
+        input_file.write_text(json.dumps({"session_id": VALID_SYNC_UUID}), encoding="utf-8")
+        captured = io.StringIO()
+        with patch("sys.stdout", captured):
+            sync_current.run(input_file=input_file)
+
+        assert json.loads(captured.getvalue()) == {"continue": True}
+        assert seen_project_dirs == [project_dir]

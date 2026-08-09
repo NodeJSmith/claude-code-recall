@@ -20,6 +20,7 @@ from ccrecall.formatting import (
     parse_project_key,
 )
 from ccrecall.parsing import extract_session_metadata, parse_all_with_uuids
+from ccrecall.transcript_sources import discover_project_transcript_files
 
 
 def upsert_project(
@@ -83,7 +84,9 @@ def _probe_project_dir(project_dir: Path) -> str | None:
 
     Returns the cwd string if found, or None if no JSONL exists or has no cwd.
     """
-    for jsonl_file in sorted(project_dir.glob("*.jsonl"))[:1]:
+    projects_dir = project_dir.parent
+    project_discovery = discover_project_transcript_files(project_dir, projects_dir)
+    for jsonl_file in project_discovery.files[:1]:
         with contextlib.suppress(Exception):
             entries = list(parse_all_with_uuids(jsonl_file))
             meta = extract_session_metadata(entries)

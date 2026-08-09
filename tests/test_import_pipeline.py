@@ -1,17 +1,20 @@
 """Integration tests for the import pipeline with v3 schema guards."""
 
 import json
+import logging
 import shutil
 import sqlite3
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 import sqlite_vec
 from conftest import VEC_SKIP, make_vec_conn
 
 from ccrecall.embeddings import EMBEDDING_DIM
-from ccrecall.hooks.import_conversations import import_project, import_session
+from ccrecall.hooks.import_conversations import _run, import_project, import_session
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures"
 
@@ -623,6 +626,95 @@ class TestImportProject:
             sessions, messages, _skipped = import_project(memory_db, project_dir)
             assert sessions == 0
             assert messages == 0
+
+    def test_nested_subagent_jsonl_files_are_imported_via_shared_project_discovery(self, memory_db, tmp_path):
+        """Project import must include safe nested subagent transcript files."""
+        project_dir = tmp_path / "-Users-sam-project"
+        project_dir.mkdir()
+        parent = project_dir / "sess-nested.jsonl"
+        nested_agent = project_dir / "state" / "nested" / "deeper" / "subagents" / "agent-sess-nested.jsonl"
+        parent.write_text(
+            json.dumps(
+                {
+                    "uuid": "u1",
+                    "parentUuid": None,
+                    "type": "user",
+                    "timestamp": "2026-01-01T10:00:00Z",
+                    "message": {"role": "user", "content": "start"},
+                }
+            )
+            + "\n"
+        )
+        nested_agent.parent.mkdir(parents=True)
+        nested_agent.write_text(
+            json.dumps(
+                {
+                    "uuid": "a1",
+                    "parentUuid": "u1",
+                    "type": "assistant",
+                    "timestamp": "2026-01-01T10:00:01Z",
+                    "message": {"role": "assistant", "content": "nested follow-up"},
+                }
+            )
+            + "\n"
+        )
+
+        _sessions, _messages, skipped = import_project(memory_db, project_dir)
+
+        assert skipped == 0
+        cursor = memory_db.cursor()
+        assert cursor.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 1
+        assert cursor.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 2
+        assert cursor.execute("SELECT COUNT(*) FROM import_log").fetchone()[0] == 2
+        assert cursor.execute("SELECT leaf_uuid FROM branches WHERE is_active = 1").fetchone()[0] == "a1"
+
+    def test_symlinked_jsonl_is_skipped_before_import(self, memory_db, tmp_path):
+        """Symlinked transcript files must not be imported from a project directory."""
+        project_dir = tmp_path / "-Users-sam-project"
+        project_dir.mkdir()
+        outside = tmp_path / "outside.jsonl"
+        shutil.copy(FIXTURE_DIR / "linear_3_exchange.jsonl", outside)
+        (project_dir / "session1.jsonl").symlink_to(outside)
+
+        sessions, messages, skipped = import_project(memory_db, project_dir)
+
+        assert sessions == 0
+        assert messages == 0
+        assert skipped == 0
+        cursor = memory_db.cursor()
+        assert cursor.execute("SELECT COUNT(*) FROM import_log").fetchone()[0] == 0
+
+
+class TestImportRunPathSafety:
+    """Test --project path safety checks in the import hook."""
+
+    def test_run_rejects_symlink_project_dir(self, memory_db, tmp_path, monkeypatch, capsys):
+        """A --project target that resolves through a symlinked project dir must be rejected."""
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        real_project = tmp_path / "real-project"
+        real_project.mkdir()
+        (projects_dir / "linked-project").symlink_to(real_project, target_is_directory=True)
+        db_path = tmp_path / "memory.db"
+        db_path.write_text("", encoding="utf-8")
+
+        @contextmanager
+        def fake_connection(*_args, **_kwargs):
+            yield memory_db
+
+        import_project_mock = Mock()
+        monkeypatch.setattr("ccrecall.hooks.import_conversations.load_settings", lambda: {"exclude_projects": []})
+        monkeypatch.setattr(
+            "ccrecall.hooks.import_conversations.setup_logging", lambda *_args, **_kwargs: logging.getLogger("test")
+        )
+        monkeypatch.setattr("ccrecall.hooks.import_conversations.get_connection", fake_connection)
+        monkeypatch.setattr("ccrecall.hooks.import_conversations.get_db_path", lambda _settings: db_path)
+        monkeypatch.setattr("ccrecall.hooks.import_conversations.import_project", import_project_mock)
+
+        _run(db=db_path, projects_dir=projects_dir, project="linked-project", verbose=False)
+
+        assert capsys.readouterr().out == f"Unsafe project path: {projects_dir / 'linked-project'}\n"
+        import_project_mock.assert_not_called()
 
 
 class TestAppendOnlyReimport:

@@ -4,8 +4,8 @@ import argparse
 import json
 import logging
 import sqlite3
-import subprocess
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -22,11 +22,13 @@ from ccrecall.config import (
 from ccrecall.llm_summarizer import (
     InvocationResult,
     PacketBuildError,
+    branch_content_file_paths,
     branch_packet,
     build_prompt,
     capability_fingerprint,
-    discover_current_session_source_files,
+    get_claude_version,
     invoke_claude,
+    resolve_current_session_source_files,
     resolve_historical_source_files,
     verify_capability_sidecar,
     write_capability_sidecar,
@@ -64,6 +66,7 @@ BATCH_SIZE = 25
 DIAGNOSTIC_CAP = 240
 EXIT_OK = 0
 EXIT_ABORT = 1
+CAPABILITY_DIAGNOSTIC_PREFIX = "capability: "
 
 FORCE_ONLY_STATUSES = {STATUS_INVALID_OUTPUT, STATUS_BUDGET_EXCEEDED}
 CAPABILITY_BLOCKED_STATUSES = {
@@ -84,6 +87,43 @@ SOURCE_STATUSES = {
 }
 
 
+@dataclass(frozen=True)
+class BranchProcessResult:
+    selected: bool
+    enriched: bool
+
+
+def _normalize_process_result(result: object) -> BranchProcessResult:
+    if isinstance(result, BranchProcessResult):
+        return result
+    selected = getattr(result, "selected", None)
+    enriched = getattr(result, "enriched", None)
+    if isinstance(selected, bool) and isinstance(enriched, bool):
+        return BranchProcessResult(selected=selected, enriched=enriched)
+    if isinstance(result, bool):
+        return BranchProcessResult(selected=result, enriched=result)
+    raise TypeError(f"Unsupported branch process result: {type(result).__name__}")
+
+
+def _is_capability_gated_budget_failure(row: sqlite3.Row) -> bool:
+    # The branch status preserves the sidecar's provider failure, while this
+    # marker distinguishes a capability-check budget threshold from a real
+    # branch-enrichment budget failure during eligibility selection.
+    return (
+        row["summary_enrichment_status"] == STATUS_BUDGET_EXCEEDED
+        and isinstance(row["summary_enrichment_error"], str)
+        and row["summary_enrichment_error"].startswith(CAPABILITY_DIAGNOSTIC_PREFIX)
+    )
+
+
+def _print_manual_capability_guidance(status: str, diagnostic: str | None) -> None:
+    detail = diagnostic or status
+    print(
+        "ccrecall backfill llm-summaries: capability gate blocked"
+        f" ({detail}); run `ccrecall backfill llm-summaries --check-capability` first"
+    )
+
+
 def _cap(text: str | None) -> str | None:
     if text is None:
         return None
@@ -91,7 +131,7 @@ def _cap(text: str | None) -> str | None:
 
 
 def _diagnostic_summary(status: str, diagnostic: str | None, *, capability: bool = False) -> str | None:
-    prefix = "capability: " if capability else ""
+    prefix = CAPABILITY_DIAGNOSTIC_PREFIX if capability else ""
     if diagnostic:
         return _cap(prefix + diagnostic)
     return _cap(prefix + status)
@@ -173,7 +213,8 @@ def _load_branch_row(cursor: sqlite3.Cursor, branch_id: int) -> sqlite3.Row | No
                b.summary_enrichment_json, b.summary_enrichment_version,
                b.summary_enrichment_source_hash, b.summary_enrichment_status,
                b.summary_enrichment_error, b.summary_source_hash,
-               s.uuid AS session_uuid, s.git_branch, s.cwd, p.name AS project_name
+               s.uuid AS session_uuid, s.git_branch, s.cwd, p.name AS project_name,
+               p.path AS project_root
         FROM branches b
         JOIN sessions s ON s.id = b.session_id
         JOIN projects p ON p.id = s.project_id
@@ -220,16 +261,18 @@ def _resolve_source_files(
     current_session: bool = False,
 ) -> tuple[str, list[Path]]:
     historical_rows = _load_import_log_rows(cursor, session_uuid)
+    current_resolved = None
     if current_session:
-        current_files = discover_current_session_source_files(projects_dir, session_uuid)
-        if current_files:
-            return STATUS_OK, current_files
+        current_resolved = resolve_current_session_source_files(projects_dir, session_uuid)
+        if current_resolved.status == STATUS_UNSAFE_SOURCE_PATH:
+            return current_resolved.status, current_resolved.files
+        if current_resolved.status == STATUS_OK:
+            return current_resolved.status, current_resolved.files
     if historical_rows:
         resolved = resolve_historical_source_files(session_uuid, historical_rows)
         return resolved.status, resolved.files
-    current_files = discover_current_session_source_files(projects_dir, session_uuid)
-    if current_files:
-        return STATUS_OK, current_files
+    if current_resolved is not None:
+        return current_resolved.status, current_resolved.files
     return STATUS_MISSING_SOURCE, []
 
 
@@ -251,12 +294,14 @@ def _needs_enrichment(
             or not row["summary_enrichment_source_hash"]
             or row["summary_enrichment_source_hash"] != row["summary_source_hash"]
         )
+    if _is_capability_gated_budget_failure(row):
+        return capability_status != status
     if status in FORCE_ONLY_STATUSES:
         return False
     if status == STATUS_UNSAFE_SOURCE_PATH:
         return False
     if status in CAPABILITY_BLOCKED_STATUSES:
-        return capability_status == STATUS_OK
+        return capability_status != status
     if status in SOURCE_STATUSES:
         return source_status == STATUS_OK
     return True
@@ -333,17 +378,6 @@ def _write_success(
     return cursor.rowcount > 0
 
 
-def get_claude_version(run: Any = subprocess.run) -> tuple[str | None, str | None]:
-    try:
-        completed = run(["claude", "--version"], capture_output=True, text=True, timeout=30)
-    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-        return None, _cap(str(exc))
-    if completed.returncode != 0:
-        return None, _cap(completed.stderr.strip() or completed.stdout.strip() or "claude --version failed")
-    output = (completed.stdout or completed.stderr).strip()
-    return output.splitlines()[0] if output else "unknown", None
-
-
 def run_capability_check(
     *,
     verbose: bool = False,
@@ -391,13 +425,21 @@ def _process_branch(
     capability_diagnostic: str | None,
     projects_dir: Path,
     current_session: bool,
-) -> bool:
+) -> BranchProcessResult:
     with get_connection(settings) as conn:
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         row = _load_branch_row(cursor, branch_id)
         if row is None:
-            return False
+            return BranchProcessResult(selected=False, enriched=False)
+
+        status = row["summary_enrichment_status"]
+        if (
+            not force
+            and (status in CAPABILITY_BLOCKED_STATUSES or _is_capability_gated_budget_failure(row))
+            and status == capability_status
+        ):
+            return BranchProcessResult(selected=False, enriched=False)
 
         source_status, source_files = _resolve_source_files(
             cursor,
@@ -411,19 +453,19 @@ def _process_branch(
             capability_status=capability_status,
             source_status=source_status,
         ):
-            return False
+            return BranchProcessResult(selected=False, enriched=False)
 
         expected_hash = _persist_expected_source_hash(cursor, branch_id, row)
         if expected_hash is None:
-            return False
+            return BranchProcessResult(selected=False, enriched=False)
 
         summary_json = _parse_json_object(row["context_summary_json"])
         if summary_json is None:
-            return False
+            return BranchProcessResult(selected=False, enriched=False)
 
         active_branch_uuids = _load_active_branch_uuids(cursor, branch_id)
         if not active_branch_uuids:
-            return False
+            return BranchProcessResult(selected=False, enriched=False)
 
         if capability_status != STATUS_OK:
             _write_status(
@@ -433,7 +475,7 @@ def _process_branch(
                 status=capability_status,
                 diagnostic=_diagnostic_summary(capability_status, capability_diagnostic, capability=True),
             )
-            return False
+            return BranchProcessResult(selected=True, enriched=False)
 
         if source_status != STATUS_OK:
             _write_status(
@@ -443,7 +485,7 @@ def _process_branch(
                 status=source_status,
                 diagnostic=_diagnostic_summary(source_status, None),
             )
-            return False
+            return BranchProcessResult(selected=True, enriched=False)
 
         branch_metadata = {
             "session_uuid": row["session_uuid"],
@@ -460,7 +502,14 @@ def _process_branch(
             "commits": _parse_json_list(row["commits"]),
             "source_transcript_paths": [str(path) for path in source_files],
         }
-        valid_file_paths = _parse_json_string_list(row["files_modified"])
+        project_root = (
+            Path(row["project_root"]) if isinstance(row["project_root"], str) and row["project_root"] else None
+        )
+        valid_file_paths = _parse_json_string_list(row["files_modified"]) | branch_content_file_paths(
+            source_files,
+            active_branch_uuids,
+            project_root=project_root,
+        )
 
     try:
         with branch_packet(
@@ -496,7 +545,8 @@ def _process_branch(
             )
             if not _write_success(cursor, branch_id=branch_id, expected_hash=expected_hash, envelope=envelope):
                 logger.info("LLM summary stale for branch %s; discarding result", branch_id)
-            return True
+                return BranchProcessResult(selected=True, enriched=False)
+            return BranchProcessResult(selected=True, enriched=True)
 
         if not _write_status(
             cursor,
@@ -506,7 +556,7 @@ def _process_branch(
             diagnostic=result.diagnostic,
         ):
             logger.info("LLM summary stale for branch %s; discarding status %s", branch_id, result.status)
-        return False
+        return BranchProcessResult(selected=True, enriched=False)
 
 
 def _run(
@@ -541,16 +591,29 @@ def _run(
             fingerprint=capability_fingerprint(),
         )
 
-    processed = 0
+    if not current_session and capability_status != STATUS_OK:
+        _print_manual_capability_guidance(capability_status, capability_diagnostic)
+
+    selected_branches = 0
     total_success = 0
     last_branch_id: int | None = None
+
+    def complete() -> int:
+        logger.info("LLM summary worker complete: %s branches enriched", total_success)
+        if not current_session:
+            print(f"ccrecall backfill llm-summaries: complete: {total_success} branches enriched")
+        return EXIT_OK
+
+    if not current_session:
+        print("ccrecall backfill llm-summaries: processing eligible branches")
+
     try:
         while True:
             with get_connection(settings) as conn:
                 cursor = conn.cursor()
-                remaining = None if limit is None else limit - processed
+                remaining = None if limit is None else limit - selected_branches
                 if remaining is not None and remaining <= 0:
-                    return EXIT_OK
+                    return complete()
                 batch_limit = min(BATCH_SIZE, remaining) if remaining is not None else None
                 if current_session:
                     batch_limit = 1 if batch_limit is None else min(batch_limit, 1)
@@ -570,26 +633,31 @@ def _run(
             last_branch_id = batch_ids[-1]
 
             for branch_id in batch_ids:
-                if _process_branch(
-                    branch_id,
-                    settings=settings,
-                    logger=logger,
-                    force=force,
-                    capability_status=capability_status,
-                    capability_diagnostic=capability_diagnostic,
-                    projects_dir=projects_dir,
-                    current_session=current_session,
-                ):
+                result = _normalize_process_result(
+                    _process_branch(
+                        branch_id,
+                        settings=settings,
+                        logger=logger,
+                        force=force,
+                        capability_status=capability_status,
+                        capability_diagnostic=capability_diagnostic,
+                        projects_dir=projects_dir,
+                        current_session=current_session,
+                    )
+                )
+                if result.enriched:
                     total_success += 1
-                processed += 1
+                if result.selected:
+                    selected_branches += 1
+                if limit is not None and selected_branches >= limit:
+                    return complete()
             if current_session:
                 break
     except (sqlite3.Error, OSError):
         logger.exception("LLM summary worker aborted")
         return EXIT_ABORT
 
-    logger.info("LLM summary worker complete: %s branches enriched", total_success)
-    return EXIT_OK
+    return complete()
 
 
 def run(

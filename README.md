@@ -35,7 +35,7 @@ That registers the skills and wires the SessionStart / Stop / SessionEnd hooks (
 
 ## First-run setup
 
-No manual setup is needed. On the first session after installing, ccrecall silently creates `~/.ccrecall/config.json` with recommended defaults. You can edit that file directly at any time to change settings.
+No manual setup is needed. ccrecall uses built-in defaults unless you create `~/.ccrecall/config.json` with overrides.
 
 ## Semantic search
 
@@ -86,11 +86,11 @@ Expected outcome: progress/completion output only. ccrecall does not print trans
 
 ### Automatic current-session enrichment
 
-`llm_summaries_enabled` controls only the automatic post-sync worker. When it is `true`, `ccrecall sync-current` may spawn a detached enrichment worker after a successful Stop-hook sync **only if**:
+`llm_summaries_enabled` controls only the automatic post-sync worker. When it is `true`, `ccrecall sync-current` may spawn a detached enrichment worker after a successful Stop-hook sync when:
 
 - the current session produced new messages
-- the capability check is still valid for the installed Claude CLI
-- the branch meets the minimum-exchange threshold
+
+The worker checks the capability sidecar and branch eligibility itself. If the capability check is missing or invalid, it exits without calling Claude. If the branch does not meet the minimum-exchange threshold, it remains eligible for a later manual backfill.
 
 If any of those gates fail, or if Claude is unavailable, unauthenticated, rate-limited, over budget, times out, or returns invalid output, ccrecall keeps the deterministic summary and injected context exactly as before.
 
@@ -181,7 +181,7 @@ These are wired by the plugin's `hooks/hooks.json` and fire on their respective 
 | `ccrecall sync-current` | Syncs a single session file to the DB. Called by `ccrecall-sync` with the session ID from stdin |
 | `ccrecall import` | Full import of all JSONL files in `~/.claude/projects/`. Skips files that haven't changed since last import (file hash check). Run on first install and whenever new sessions need backfilling |
 | `ccrecall backfill summaries` | Generates context summaries for any DB branches that don't have one yet. Runs in the background after `ccrecall-setup` |
-| `ccrecall-llm-summaries` | Internal detached worker that builds branch packets and asks the installed Claude CLI for opt-in Branch Resume Briefs. Spawned after sync when `llm_summaries_enabled` is true and the capability gate is valid. |
+| `ccrecall-llm-summaries` | Internal detached worker that builds branch packets and asks the installed Claude CLI for opt-in Branch Resume Briefs. Spawned after sync when `llm_summaries_enabled` is true; it exits without calling Claude when the capability gate is not valid. |
 
 ### Skill CLIs (called from skill files — can also be used directly)
 
@@ -205,7 +205,7 @@ Session ends
              └─ writes to ~/.ccrecall/conversations.db
              └─ embeds the active leaf via jina if model available (drops silently on failure)
              └─ optionally spawns ccrecall-llm-summaries after sync
-                  (only when explicitly enabled and the capability gate passes)
+                  (only when explicitly enabled; worker checks the capability gate)
 
 /clear (SessionEnd)
   └─ ccrecall-clear-handoff
@@ -224,14 +224,14 @@ Session starts
 
 ## Config file
 
-`~/.ccrecall/config.json` — created automatically on first run with these defaults:
+`~/.ccrecall/config.json` is an optional user-created override file. ccrecall uses these defaults when a key is absent:
 
 | Key | Type | Default | Effect |
 |---|---|---|---|
 | `auto_inject_context` | bool | `true` | Inject a summary of your previous session at session start. |
 | `max_context_sessions` | int | `2` | How many recent sessions to include in that injected context. |
 | `exclude_projects` | list[str] | `[]` | Project names to skip when **storing** conversations — excluded projects are not imported or synced. Matched against the project's directory name. This is write-side only: it prevents new data from being indexed; it does not remove or hide conversations already stored before the project was excluded. |
-| `logging_enabled` | bool | `true` | Write hook diagnostics (including swallowed hook exceptions) to `~/.ccrecall/ccrecall.log`. Set to `false` to suppress the log. |
+| `logging_enabled` | bool | `true` | Write hook diagnostics (including swallowed hook exceptions) to per-process files such as `~/.ccrecall/ccrecall-sync.log`. Set to `false` to suppress logging. |
 | `log_level` | str | `"INFO"` | Logging verbosity when `logging_enabled` is true. Accepts standard Python level names: `DEBUG`, `INFO`, `WARNING`, `ERROR`. |
 | `alert_snooze_hours` | int | `24` | After surfacing an alert (unwritable DB, embedding failure), suppress the same alert for this many hours. |
 | `llm_summaries_enabled` | bool | `false` | Enable automatic post-sync LLM enrichment for eligible current sessions. Manual `ccrecall backfill llm-summaries` runs still work when this is `false`. |

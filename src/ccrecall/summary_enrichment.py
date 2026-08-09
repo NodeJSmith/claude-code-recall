@@ -5,6 +5,7 @@ import hashlib
 import json
 import sqlite3
 import uuid
+from pathlib import PurePosixPath
 from typing import Any
 
 from ccrecall.serialization import decode_json_field
@@ -51,6 +52,19 @@ SUPPLEMENTARY_RENDER_BUDGET = 800
 ALLOWED_CONFIDENCE_VALUES = {"high", "medium", "low"}
 ALLOWED_ATTEMPTED_PATH_OUTCOMES = {"failed", "abandoned", "inconclusive"}
 WORKER_OWNED_FIELDS = {"version", "model", "generated_at"}
+
+
+def normalize_project_file_reference(value: str) -> str | None:
+    normalized = value.strip()
+    if not normalized or "\\" in normalized or normalized.startswith(("/", "./", "../", "~/")):
+        return None
+    parts = PurePosixPath(normalized).parts
+    if not parts or any(part in ("", ".", "..") for part in parts):
+        return None
+    if parts[0].endswith(":"):
+        return None
+    return normalized
+
 
 _RESPONSE_FIELDS = {
     "title",
@@ -348,11 +362,14 @@ def _validate_files_and_reasons(
         obj = _coerce_mapping(item, label=label)
         _require_exact_keys(obj, required={"path", "reason", "source_uuids"}, label=label)
         path = _validate_string(obj["path"], label=f"{label} path", max_chars=FILE_PATH_MAX_CHARS)
-        if valid_file_paths is not None and path not in valid_file_paths:
+        normalized_path = normalize_project_file_reference(path)
+        if normalized_path is None:
+            raise SummaryEnrichmentValidationError(f"{label} has an invalid file reference")
+        if valid_file_paths is not None and normalized_path not in valid_file_paths:
             raise SummaryEnrichmentValidationError(f"{label} has an invalid file reference")
         validated.append(
             {
-                "path": path,
+                "path": normalized_path,
                 "reason": _validate_string(obj["reason"], label=f"{label} reason", max_chars=FILE_REASON_MAX_CHARS),
                 "source_uuids": _validate_source_uuids(
                     obj["source_uuids"],

@@ -3,20 +3,23 @@
 import contextlib
 import hashlib
 import json
+import logging
 import os
+import re
 import shutil
 import subprocess
 import tempfile
 from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from whenever import Instant
 
 from ccrecall.config import PID_FILE_MODE, atomic_write_json
 from ccrecall.content import build_tool_use_marker, extract_text_content
+from ccrecall.file_hashing import transcript_file_hash
 from ccrecall.parsing import extract_session_uuid, parse_all_with_uuids_and_numbers
 from ccrecall.summary_enrichment import (
     CLAUDE_RESPONSE_SCHEMA,
@@ -33,9 +36,12 @@ from ccrecall.summary_enrichment import (
     STATUS_SOURCE_INCOMPLETE,
     STATUS_SOURCE_UNVERIFIED,
     STATUS_TIMEOUT,
+    STATUS_UNSAFE_SOURCE_PATH,
     STATUS_UNSUPPORTED_CLI,
+    normalize_project_file_reference,
     validate_claude_response_body,
 )
+from ccrecall.transcript_sources import discover_importable_transcript_files, discover_session_transcript_files
 
 SUMMARIZER_SYSTEM_PROMPT = (
     "You are ccrecall-summary-enricher. Produce a factual continuation summary for one Claude Code conversation branch."
@@ -44,6 +50,12 @@ CAPABILITY_SIDECAR_VERSION = 1
 DIAGNOSTIC_CAP = 240
 PACKET_DIR_PREFIX = "packet-"
 MANIFEST_FILENAME = "manifest.json"
+COMMON_ROOT_PATH_REFERENCES = {"Dockerfile", "Makefile", "Justfile", "LICENSE", "NOTICE", ".gitignore"}
+PATH_REFERENCE_SEGMENT_RE = re.compile(r"[A-Za-z0-9_.-]+")
+PATH_REFERENCE_RE = re.compile(
+    r"(?<![A-Za-z0-9_./@-])(?:/?[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+|[A-Za-z0-9_.-]+\.[A-Za-z0-9_.-]+|Dockerfile|Makefile|Justfile|LICENSE|NOTICE|\.gitignore)(?![A-Za-z0-9_./@-])"
+)
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -79,16 +91,17 @@ def _cap(text: str | None) -> str | None:
     return text[:DIAGNOSTIC_CAP]
 
 
-def _is_under(path: Path, base: Path) -> bool:
-    try:
-        path.resolve().relative_to(base.resolve())
-        return True
-    except ValueError:
-        return False
-
-
 def _set_owner_only_dir(path: Path) -> None:
     path.chmod(0o700)
+
+
+def _cleanup_tree(path: Path) -> None:
+    try:
+        shutil.rmtree(path)
+    except FileNotFoundError:
+        return
+    except Exception as exc:
+        log.warning("cleanup failed for %s (%s)", path, exc.__class__.__name__)
 
 
 def _write_owner_only_text(path: Path, text: str) -> None:
@@ -108,34 +121,11 @@ def _canonical_json(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 
 
-def _file_sha256(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
 def capability_fingerprint(packet_dir: Path | None = None) -> str:
-    del packet_dir
-    security_shape = [
-        "-p",
-        "--safe-mode",
-        "--disable-slash-commands",
-        "--strict-mcp-config",
-        "--mcp-config",
-        '{"mcpServers":{}}',
-        "--tools",
-        "Read",
-        "--allowedTools",
-        "Read",
-        "--permission-mode",
-        "dontAsk",
-        "--add-dir",
-        "<packet-dir>",
-        "--output-format",
-        "json",
-        "--json-schema",
-        _canonical_json(CLAUDE_RESPONSE_SCHEMA),
-        "--no-session-persistence",
-    ]
-    return hashlib.sha256("\0".join(security_shape).encode("utf-8")).hexdigest()
+    packet_dir = packet_dir or Path("<packet-dir>")
+    security_shape = _build_capability_check_argv(packet_dir)[1:-1]
+    normalized_shape = ["<packet-dir>" if arg == str(packet_dir) else arg for arg in security_shape]
+    return hashlib.sha256("\0".join(normalized_shape).encode("utf-8")).hexdigest()
 
 
 def read_capability_sidecar(path: Path) -> dict[str, Any] | None:
@@ -287,6 +277,17 @@ def _classify_process_failure(stderr: str, stdout: str) -> tuple[str, str | None
     return STATUS_ERROR, _cap(stderr or stdout or "claude failed")
 
 
+def get_claude_version(run: Any = subprocess.run) -> tuple[str | None, str | None]:
+    try:
+        completed = run(["claude", "--version"], capture_output=True, text=True, timeout=30)
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        return None, _cap(str(exc))
+    if completed.returncode != 0:
+        return None, _cap(completed.stderr.strip() or completed.stdout.strip() or "claude --version failed")
+    output = (completed.stdout or completed.stderr).strip()
+    return output.splitlines()[0] if output else "unknown", None
+
+
 def _parse_claude_stdout(stdout: str) -> dict[str, Any]:
     data = json.loads(stdout)
     if not isinstance(data, dict):
@@ -337,7 +338,7 @@ def _snapshot_importable_transcripts(projects_dir: Path) -> dict[Path, tuple[int
     if not projects_dir.exists():
         return {}
     found: dict[Path, tuple[int, int]] = {}
-    for path in projects_dir.rglob("*.jsonl"):
+    for path in discover_importable_transcript_files(projects_dir).files:
         if path.is_file() and not path.is_symlink():
             with contextlib.suppress(Exception):
                 extract_session_uuid(path)
@@ -429,7 +430,7 @@ def run_capability_check(
 
         after = _snapshot_importable_transcripts(projects_dir)
         if after != before:
-            diagnostic = "no-session-persistence changed importable transcripts"
+            diagnostic = "no-session-persistence changed importable transcripts; remove them before retrying"
             write_capability_sidecar(
                 sidecar_path,
                 status=STATUS_CAPABILITY_UNVERIFIED,
@@ -447,32 +448,21 @@ def run_capability_check(
         )
         return CapabilityCheckResult(status=STATUS_OK)
     finally:
-        shutil.rmtree(packet_dir, ignore_errors=True)
-        shutil.rmtree(cwd_dir, ignore_errors=True)
+        _cleanup_tree(packet_dir)
+        _cleanup_tree(cwd_dir)
 
 
 def discover_current_session_source_files(projects_dir: Path, session_uuid: str) -> list[Path]:
-    found: list[Path] = []
-    if not projects_dir.exists():
-        return found
-    for project_dir in sorted(projects_dir.iterdir()):
-        if not project_dir.is_dir():
-            continue
-        direct = project_dir / f"{session_uuid}.jsonl"
-        if direct.exists() and direct.is_file() and not direct.is_symlink() and _is_under(direct, projects_dir):
-            found.append(direct)
-        for path in sorted(project_dir.rglob(f"*{session_uuid}*.jsonl")):
-            if "subagents" not in path.parts:
-                continue
-            if path.is_file() and not path.is_symlink() and _is_under(path, projects_dir):
-                found.append(path)
-    unique: list[Path] = []
-    seen: set[Path] = set()
-    for path in found:
-        if path not in seen:
-            seen.add(path)
-            unique.append(path)
-    return unique
+    return discover_session_transcript_files(projects_dir, session_uuid).files
+
+
+def resolve_current_session_source_files(projects_dir: Path, session_uuid: str) -> SourceResolution:
+    discovery = discover_session_transcript_files(projects_dir, session_uuid)
+    if discovery.had_matching_unsafe_path:
+        return SourceResolution(status=STATUS_UNSAFE_SOURCE_PATH, files=[])
+    if discovery.files:
+        return SourceResolution(status=STATUS_OK, files=discovery.files)
+    return SourceResolution(status=STATUS_MISSING_SOURCE, files=[])
 
 
 def _historical_source_row_value(row: Mapping[str, Any] | Sequence[Any], key: str, index: int) -> Any:
@@ -489,35 +479,48 @@ def resolve_historical_source_files(
     valid: list[Path] = []
     had_existing_mismatch = False
     had_only_unverified = False
+    had_unsafe_path = False
     for row in rows:
         file_path = _historical_source_row_value(row, "file_path", 0)
         if not isinstance(file_path, str):
             continue
         path = Path(file_path)
-        if extract_session_uuid(path) != session_uuid or not path.exists() or not path.is_file() or path.is_symlink():
+        if extract_session_uuid(path) != session_uuid or not path.exists():
+            continue
+        if not path.is_file() or path.is_symlink():
+            had_unsafe_path = True
             continue
         file_hash = _historical_source_row_value(row, "file_hash", 1)
         file_size = _historical_source_row_value(row, "file_size", 2)
         file_mtime = _historical_source_row_value(row, "file_mtime", 3)
+        current = path.stat()
+        checked_any_proof = False
+        matches = True
+
         if file_hash is not None:
-            current = path.stat()
-            if _file_sha256(path) == file_hash and current.st_size == file_size and current.st_mtime == file_mtime:
+            checked_any_proof = True
+            matches = matches and transcript_file_hash(path) == file_hash
+        if file_size is not None:
+            checked_any_proof = True
+            matches = matches and current.st_size == file_size
+        if file_mtime is not None:
+            checked_any_proof = True
+            matches = matches and current.st_mtime == file_mtime
+
+        if checked_any_proof:
+            if matches:
                 valid.append(path)
             else:
                 had_existing_mismatch = True
             continue
-        if file_size is not None and file_mtime is not None:
-            current = path.stat()
-            if current.st_size == file_size and current.st_mtime == file_mtime:
-                valid.append(path)
-            else:
-                had_existing_mismatch = True
-            continue
+
         had_only_unverified = True
     if valid:
         return SourceResolution(status=STATUS_OK, files=valid)
     if had_existing_mismatch:
         return SourceResolution(status=STATUS_SOURCE_CHANGED, files=[])
+    if had_unsafe_path:
+        return SourceResolution(status=STATUS_UNSAFE_SOURCE_PATH, files=[])
     if had_only_unverified:
         return SourceResolution(status=STATUS_SOURCE_UNVERIFIED, files=[])
     return SourceResolution(status=STATUS_MISSING_SOURCE, files=[])
@@ -577,6 +580,68 @@ def _tool_results(content: object) -> list[dict[str, Any]]:
             text = ""
         results.append({"is_error": bool(item.get("is_error", False)), "text": text.strip()})
     return results
+
+
+def _path_references(text: str, *, project_root: Path | None = None) -> list[str]:
+    paths: list[str] = []
+    for match in PATH_REFERENCE_RE.finditer(text):
+        candidate = match.group(0).strip("`'\"()[]{}<>,:;.!?")
+        normalized = _normalized_path_reference(candidate, project_root=project_root)
+        if normalized is not None and normalized not in paths:
+            paths.append(normalized)
+    return paths
+
+
+def _project_file_reference_exists(project_root: Path | None, normalized: str) -> bool:
+    if project_root is None:
+        return False
+    candidate = project_root.joinpath(*PurePosixPath(normalized).parts)
+    return candidate.is_file()
+
+
+def _normalized_path_reference(candidate: str, *, project_root: Path | None = None) -> str | None:
+    normalized = normalize_project_file_reference(candidate)
+    if normalized is None:
+        return None
+    if "/" not in normalized:
+        if normalized in COMMON_ROOT_PATH_REFERENCES:
+            return normalized
+        if not _project_file_reference_exists(project_root, normalized):
+            return None
+        return normalized
+    segments = normalized.split("/")
+    if not segments or any(not segment or not PATH_REFERENCE_SEGMENT_RE.fullmatch(segment) for segment in segments):
+        return None
+    final_segment = segments[-1]
+    if "." not in final_segment and final_segment not in COMMON_ROOT_PATH_REFERENCES:
+        return None
+    return normalized
+
+
+def branch_content_file_paths(
+    source_files: list[Path], active_branch_uuids: set[str], *, project_root: Path | None = None
+) -> set[str]:
+    """Collect file-path evidence from active-branch tool inputs, prose, and tool results."""
+    paths: set[str] = set()
+    for path in source_files:
+        for _line_number, entry in _parse_source_entries(path):
+            if entry.get("uuid") not in active_branch_uuids:
+                continue
+            normalized = _normalize_entry(entry)
+            for text in (normalized["request_text"], normalized["assistant_text"]):
+                if isinstance(text, str):
+                    paths.update(_path_references(text, project_root=project_root))
+            for result in normalized["tool_results"]:
+                text = result.get("text")
+                if isinstance(text, str):
+                    paths.update(_path_references(text, project_root=project_root))
+            for invocation in _tool_invocations(entry.get("message", {}).get("content")):
+                for signal in invocation.get("file_signals", []):
+                    if isinstance(signal, str):
+                        normalized_signal = _normalized_path_reference(signal, project_root=project_root)
+                        if normalized_signal is not None:
+                            paths.add(normalized_signal)
+    return paths
 
 
 def _normalize_entry(entry: dict[str, Any]) -> dict[str, Any]:
@@ -710,7 +775,7 @@ def branch_packet(
         )
         yield packet_dir
     finally:
-        shutil.rmtree(packet_dir, ignore_errors=True)
+        _cleanup_tree(packet_dir)
 
 
 def _pid_alive(pid: int) -> bool:
@@ -745,6 +810,6 @@ def reap_stale_packets(packet_parent: Path, *, min_age_seconds: int = 3600) -> l
             continue
         if _pid_alive(pid):
             continue
-        shutil.rmtree(path, ignore_errors=True)
+        _cleanup_tree(path)
         reaped.append(path)
     return reaped

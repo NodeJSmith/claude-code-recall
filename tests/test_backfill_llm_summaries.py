@@ -1,8 +1,7 @@
-import hashlib
-import importlib
 import json
 import logging
 import sqlite3
+import subprocess
 import sys
 import uuid
 from pathlib import Path
@@ -10,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from ccrecall.config import pid_file_path
+from ccrecall.file_hashing import transcript_file_hash
 from ccrecall.llm_summarizer import InvocationResult, write_capability_sidecar
 from ccrecall.llm_summary_db import get_connection
 from ccrecall.summarizer import SUMMARY_VERSION
@@ -20,6 +20,7 @@ from ccrecall.summary_enrichment import (
     STATUS_CLAUDE_UNAVAILABLE,
     STATUS_ERROR,
     STATUS_INVALID_OUTPUT,
+    STATUS_MISSING_SOURCE,
     STATUS_OK,
     STATUS_RATE_LIMITED,
     STATUS_SOURCE_CHANGED,
@@ -98,7 +99,7 @@ def _seed_branch(
             _entry(assistant_uuid, user_uuid, "2026-08-07T10:00:01Z", "assistant", "I found the failing path"),
         ],
     )
-    file_hash = hashlib.sha256(transcript_path.read_bytes()).hexdigest()
+    file_hash = transcript_file_hash(transcript_path)
     file_stat = transcript_path.stat()
 
     with get_connection(settings) as conn:
@@ -182,15 +183,24 @@ def _write_ok_sidecar(path: Path) -> None:
 
 
 class TestBackfillLlmSummaries:
+    class _FakeProcessResult:
+        def __init__(self, *, selected: bool, enriched: bool):
+            self.selected = selected
+            self.enriched = enriched
+
+        def __bool__(self) -> bool:
+            return self.enriched
+
     def test_worker_import_stays_on_llm_summary_db_boundary(self):
-        sys.modules.pop("ccrecall.db", None)
-        sys.modules.pop("ccrecall.llm_summary_db", None)
-        sys.modules.pop("ccrecall.hooks.backfill_llm_summaries", None)
+        probe = """
+import sys
+import ccrecall.hooks.backfill_llm_summaries as worker
+assert worker.get_connection.__module__ == "ccrecall.llm_summary_db"
+assert "ccrecall.db" not in sys.modules
+"""
+        completed = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True)
 
-        worker = importlib.import_module("ccrecall.hooks.backfill_llm_summaries")
-
-        assert worker.get_connection.__module__ == "ccrecall.llm_summary_db"
-        assert "ccrecall.db" not in sys.modules
+        assert completed.returncode == 0, completed.stderr
 
     def test_main_forwards_current_session_flag_to_run(self, monkeypatch):
         from ccrecall.hooks import backfill_llm_summaries as worker
@@ -259,7 +269,9 @@ class TestBackfillLlmSummaries:
         assert worker.run() == worker.EXIT_OK
         assert connection_kwargs == [{}]
 
-    def test_run_persists_worker_owned_enrichment_without_rewriting_deterministic_fields(self, tmp_path, monkeypatch):
+    def test_run_persists_worker_owned_enrichment_without_rewriting_deterministic_fields(
+        self, tmp_path, monkeypatch, capsys
+    ):
         from ccrecall.hooks import backfill_llm_summaries as worker
 
         db_path = tmp_path / "worker.db"
@@ -284,6 +296,10 @@ class TestBackfillLlmSummaries:
         monkeypatch.setattr(worker, "invoke_claude", fake_invoke)
 
         assert worker.run(capability_sidecar_path=sidecar, projects_dir=tmp_path / "projects") == worker.EXIT_OK
+
+        output = capsys.readouterr().out
+        assert "processing eligible branches" in output
+        assert "complete: 1 branches enriched" in output
 
         with sqlite3.connect(db_path) as conn:
             row = conn.execute(
@@ -562,13 +578,12 @@ class TestBackfillLlmSummaries:
             ),
         ]
         _write_jsonl(seeded["transcript_path"], restored_entries)
-        restored_bytes = seeded["transcript_path"].read_bytes()
         restored_stat = seeded["transcript_path"].stat()
         with sqlite3.connect(db_path) as conn:
             conn.execute(
                 "UPDATE import_log SET file_hash = ?, file_size = ?, file_mtime = ? WHERE file_path = ?",
                 (
-                    hashlib.sha256(restored_bytes).hexdigest(),
+                    transcript_file_hash(seeded["transcript_path"]),
                     restored_stat.st_size,
                     restored_stat.st_mtime,
                     str(seeded["transcript_path"]),
@@ -610,6 +625,244 @@ class TestBackfillLlmSummaries:
 
         assert worker.run(capability_sidecar_path=sidecar, projects_dir=tmp_path / "projects") == worker.EXIT_OK
         assert processed_ids == [first["branch_id"], second["branch_id"], third["branch_id"]]
+
+    def test_limit_skips_current_rows_before_counting_first_selected_eligible_branch(self, tmp_path, monkeypatch):
+        from ccrecall.hooks import backfill_llm_summaries as worker
+
+        db_path = tmp_path / "limit-current-skip.db"
+        first = _seed_branch(db_path, tmp_path / "limit-first.jsonl", session_uuid=_uuid("limit-first-session"))
+        second = _seed_branch(db_path, tmp_path / "limit-second.jsonl", session_uuid=_uuid("limit-second-session"))
+        sidecar = tmp_path / "capability.json"
+        _write_ok_sidecar(sidecar)
+
+        monkeypatch.setattr(worker, "BATCH_SIZE", 1)
+        monkeypatch.setattr(worker, "load_settings", lambda: first["settings"])
+        monkeypatch.setattr(worker, "setup_logging", lambda *_args, **_kwargs: logging.getLogger("test-worker"))
+        monkeypatch.setattr(worker, "get_claude_version", lambda run=None: ("1.2.3", None))
+        monkeypatch.setattr(worker, "capability_fingerprint", lambda: "fingerprint")
+
+        processed_ids: list[int] = []
+
+        def fake_process_branch(branch_id, **_kwargs):
+            processed_ids.append(branch_id)
+            if branch_id == first["branch_id"]:
+                return self._FakeProcessResult(selected=False, enriched=False)
+            return self._FakeProcessResult(selected=True, enriched=True)
+
+        monkeypatch.setattr(worker, "_process_branch", fake_process_branch)
+
+        assert (
+            worker.run(capability_sidecar_path=sidecar, projects_dir=tmp_path / "projects", limit=1) == worker.EXIT_OK
+        )
+        assert processed_ids == [first["branch_id"], second["branch_id"]]
+
+    def test_limit_counts_eligible_branch_failure_once_reached(self, tmp_path, monkeypatch):
+        from ccrecall.hooks import backfill_llm_summaries as worker
+
+        db_path = tmp_path / "limit-failure.db"
+        first = _seed_branch(db_path, tmp_path / "limit-failure-first.jsonl", session_uuid=_uuid("limit-failure-first"))
+        second = _seed_branch(
+            db_path,
+            tmp_path / "limit-failure-second.jsonl",
+            session_uuid=_uuid("limit-failure-second"),
+        )
+        _seed_branch(db_path, tmp_path / "limit-failure-third.jsonl", session_uuid=_uuid("limit-failure-third"))
+        sidecar = tmp_path / "capability.json"
+        _write_ok_sidecar(sidecar)
+
+        monkeypatch.setattr(worker, "BATCH_SIZE", 1)
+        monkeypatch.setattr(worker, "load_settings", lambda: first["settings"])
+        monkeypatch.setattr(worker, "setup_logging", lambda *_args, **_kwargs: logging.getLogger("test-worker"))
+        monkeypatch.setattr(worker, "get_claude_version", lambda run=None: ("1.2.3", None))
+        monkeypatch.setattr(worker, "capability_fingerprint", lambda: "fingerprint")
+
+        processed_ids: list[int] = []
+
+        def fake_process_branch(branch_id, **_kwargs):
+            processed_ids.append(branch_id)
+            if branch_id == first["branch_id"]:
+                return self._FakeProcessResult(selected=False, enriched=False)
+            if branch_id == second["branch_id"]:
+                return self._FakeProcessResult(selected=True, enriched=False)
+            return self._FakeProcessResult(selected=True, enriched=True)
+
+        monkeypatch.setattr(worker, "_process_branch", fake_process_branch)
+
+        assert (
+            worker.run(capability_sidecar_path=sidecar, projects_dir=tmp_path / "projects", limit=1) == worker.EXIT_OK
+        )
+        assert processed_ids == [first["branch_id"], second["branch_id"]]
+
+    def test_capability_check_budget_exceeded_preserves_recorded_status_and_retries_after_recheck(
+        self, tmp_path, monkeypatch
+    ):
+        from ccrecall.hooks import backfill_llm_summaries as worker
+
+        db_path = tmp_path / "capability-budget.db"
+        seeded = _seed_branch(db_path, tmp_path / "capability-budget.jsonl")
+        sidecar = tmp_path / "capability.json"
+        write_capability_sidecar(
+            sidecar,
+            status=STATUS_BUDGET_EXCEEDED,
+            claude_version="1.2.3",
+            fingerprint="fingerprint",
+            diagnostic="synthetic budget hit",
+        )
+
+        monkeypatch.setattr(worker, "load_settings", lambda: seeded["settings"])
+        monkeypatch.setattr(worker, "setup_logging", lambda *_args, **_kwargs: logging.getLogger("test-worker"))
+        monkeypatch.setattr(worker, "get_claude_version", lambda run=None: ("1.2.3", None))
+        monkeypatch.setattr(worker, "capability_fingerprint", lambda: "fingerprint")
+        invoke_calls = {"count": 0}
+
+        def fake_invoke(_packet_dir, _settings, _prompt, *, active_branch_uuids, valid_file_paths, run=None):
+            invoke_calls["count"] += 1
+            return InvocationResult(
+                status=STATUS_OK,
+                response_body=_response_body(active_branch_uuids, next(iter(valid_file_paths))),
+            )
+
+        monkeypatch.setattr(worker, "invoke_claude", fake_invoke)
+
+        worker.run(capability_sidecar_path=sidecar, projects_dir=tmp_path / "projects")
+
+        with sqlite3.connect(db_path) as conn:
+            row = conn.execute(
+                "SELECT summary_enrichment_status, summary_enrichment_error FROM branches WHERE id = ?",
+                (seeded["branch_id"],),
+            ).fetchone()
+
+        assert invoke_calls["count"] == 0
+        assert row == (STATUS_BUDGET_EXCEEDED, "capability: synthetic budget hit")
+
+        _write_ok_sidecar(sidecar)
+        worker.run(capability_sidecar_path=sidecar, projects_dir=tmp_path / "projects")
+
+        with sqlite3.connect(db_path) as conn:
+            status = conn.execute(
+                "SELECT summary_enrichment_status FROM branches WHERE id = ?",
+                (seeded["branch_id"],),
+            ).fetchone()[0]
+
+        assert invoke_calls["count"] == 1
+        assert status == STATUS_OK
+
+    def test_branch_level_budget_exceeded_stays_force_only_even_with_capability_recovery(self, tmp_path, monkeypatch):
+        from ccrecall.hooks import backfill_llm_summaries as worker
+
+        db_path = tmp_path / "branch-budget.db"
+        seeded = _seed_branch(
+            db_path,
+            tmp_path / "branch-budget.jsonl",
+            summary_enrichment_status=STATUS_BUDGET_EXCEEDED,
+            summary_enrichment_error="branch budget hit",
+        )
+        sidecar = tmp_path / "capability.json"
+        _write_ok_sidecar(sidecar)
+
+        monkeypatch.setattr(worker, "load_settings", lambda: seeded["settings"])
+        monkeypatch.setattr(worker, "setup_logging", lambda *_args, **_kwargs: logging.getLogger("test-worker"))
+        monkeypatch.setattr(worker, "get_claude_version", lambda run=None: ("1.2.3", None))
+        monkeypatch.setattr(worker, "capability_fingerprint", lambda: "fingerprint")
+        invoke_calls = {"count": 0}
+
+        def fake_invoke(_packet_dir, _settings, _prompt, *, active_branch_uuids, valid_file_paths, run=None):
+            invoke_calls["count"] += 1
+            return InvocationResult(
+                status=STATUS_OK,
+                response_body=_response_body(active_branch_uuids, next(iter(valid_file_paths))),
+            )
+
+        monkeypatch.setattr(worker, "invoke_claude", fake_invoke)
+
+        worker.run(capability_sidecar_path=sidecar, projects_dir=tmp_path / "projects")
+        worker.run(capability_sidecar_path=sidecar, projects_dir=tmp_path / "projects", force=True)
+
+        assert invoke_calls["count"] == 1
+
+    def test_manual_capability_gated_run_prints_check_capability_guidance(self, tmp_path, monkeypatch, capsys):
+        from ccrecall.hooks import backfill_llm_summaries as worker
+
+        db_path = tmp_path / "capability-guidance.db"
+        seeded = _seed_branch(db_path, tmp_path / "capability-guidance.jsonl")
+        sidecar = tmp_path / "missing-capability.json"
+
+        monkeypatch.setattr(worker, "load_settings", lambda: seeded["settings"])
+        monkeypatch.setattr(worker, "setup_logging", lambda *_args, **_kwargs: logging.getLogger("test-worker"))
+        monkeypatch.setattr(worker, "get_claude_version", lambda run=None: ("1.2.3", None))
+        monkeypatch.setattr(worker, "capability_fingerprint", lambda: "fingerprint")
+        invoke_calls = {"count": 0}
+        monkeypatch.setattr(
+            worker,
+            "invoke_claude",
+            lambda *_args, **_kwargs: invoke_calls.__setitem__("count", invoke_calls["count"] + 1),
+        )
+
+        assert worker.run(capability_sidecar_path=sidecar, projects_dir=tmp_path / "projects") == worker.EXIT_OK
+
+        output = capsys.readouterr().out
+        assert invoke_calls["count"] == 0
+        assert "--check-capability" in output
+        assert "capability gate blocked" in output
+
+    def test_capability_blocked_branch_refreshes_when_sidecar_status_changes(self, tmp_path, monkeypatch):
+        from ccrecall.hooks import backfill_llm_summaries as worker
+
+        db_path = tmp_path / "capability-status-refresh.db"
+        seeded = _seed_branch(
+            db_path,
+            tmp_path / "capability-status-refresh.jsonl",
+            summary_enrichment_status=STATUS_AUTH_REQUIRED,
+        )
+        sidecar = tmp_path / "capability.json"
+        write_capability_sidecar(
+            sidecar,
+            status=STATUS_RATE_LIMITED,
+            claude_version="1.2.3",
+            fingerprint="fingerprint",
+            diagnostic="retry later",
+        )
+
+        monkeypatch.setattr(worker, "load_settings", lambda: seeded["settings"])
+        monkeypatch.setattr(worker, "setup_logging", lambda *_args, **_kwargs: logging.getLogger("test-worker"))
+        monkeypatch.setattr(worker, "get_claude_version", lambda run=None: ("1.2.3", None))
+        monkeypatch.setattr(worker, "capability_fingerprint", lambda: "fingerprint")
+        monkeypatch.setattr(worker, "invoke_claude", pytest.fail)
+
+        assert worker.run(capability_sidecar_path=sidecar, projects_dir=tmp_path / "projects") == worker.EXIT_OK
+
+        with sqlite3.connect(db_path) as conn:
+            status = conn.execute(
+                "SELECT summary_enrichment_status FROM branches WHERE id = ?", (seeded["branch_id"],)
+            ).fetchone()[0]
+
+        assert status == STATUS_RATE_LIMITED
+
+    def test_matching_capability_status_skips_source_resolution(self, tmp_path, monkeypatch):
+        from ccrecall.hooks import backfill_llm_summaries as worker
+
+        db_path = tmp_path / "capability-status-skip.db"
+        seeded = _seed_branch(
+            db_path,
+            tmp_path / "capability-status-skip.jsonl",
+            summary_enrichment_status=STATUS_AUTH_REQUIRED,
+        )
+        sidecar = tmp_path / "capability.json"
+        write_capability_sidecar(
+            sidecar,
+            status=STATUS_AUTH_REQUIRED,
+            claude_version="1.2.3",
+            fingerprint="fingerprint",
+            diagnostic="sign in",
+        )
+
+        monkeypatch.setattr(worker, "load_settings", lambda: seeded["settings"])
+        monkeypatch.setattr(worker, "setup_logging", lambda *_args, **_kwargs: logging.getLogger("test-worker"))
+        monkeypatch.setattr(worker, "get_claude_version", lambda run=None: ("1.2.3", None))
+        monkeypatch.setattr(worker, "capability_fingerprint", lambda: "fingerprint")
+        monkeypatch.setattr(worker, "_resolve_source_files", pytest.fail)
+
+        assert worker.run(capability_sidecar_path=sidecar, projects_dir=tmp_path / "projects") == worker.EXIT_OK
 
     def test_import_log_fidelity_beats_live_projects_lookup_for_historical_runs(self, tmp_path, monkeypatch):
         from ccrecall.hooks import backfill_llm_summaries as worker
@@ -686,7 +939,7 @@ class TestBackfillLlmSummaries:
         assert rows == [
             (
                 str(seeded["transcript_path"]),
-                hashlib.sha256(seeded["transcript_path"].read_bytes()).hexdigest(),
+                transcript_file_hash(seeded["transcript_path"]),
                 seeded["transcript_path"].stat().st_size,
                 seeded["transcript_path"].stat().st_mtime,
             )
@@ -708,6 +961,7 @@ class TestBackfillLlmSummaries:
         projects_dir = tmp_path / "projects"
         live_transcript = projects_dir / "proj" / f"{seeded['session_uuid']}.jsonl"
         live_transcript.parent.mkdir(parents=True)
+        (tmp_path / "README.md").write_text("", encoding="utf-8")
         _write_jsonl(
             live_transcript,
             [
@@ -778,6 +1032,533 @@ class TestBackfillLlmSummaries:
 
         assert invoke_calls["count"] == 1
         assert row == (STATUS_OK, None)
+
+    def test_current_session_run_falls_back_to_historical_source_when_unrelated_symlinked_project_exists(
+        self, tmp_path, monkeypatch
+    ):
+        from ccrecall.hooks import backfill_llm_summaries as worker
+
+        db_path = tmp_path / "current-session-unrelated-symlink.db"
+        seeded = _seed_branch(db_path, tmp_path / "current-session-unrelated-symlink.jsonl")
+        sidecar = tmp_path / "capability.json"
+        _write_ok_sidecar(sidecar)
+        projects_dir = tmp_path / "projects"
+        real_project = tmp_path / "real-project"
+        real_project.mkdir(parents=True)
+        (real_project / f"{_uuid('other-session')}.jsonl").write_text("{}\n", encoding="utf-8")
+        projects_dir.mkdir(parents=True)
+        (projects_dir / "linked-project").symlink_to(real_project, target_is_directory=True)
+
+        monkeypatch.setattr(worker, "load_settings", lambda: seeded["settings"])
+        monkeypatch.setattr(worker, "setup_logging", lambda *_args, **_kwargs: logging.getLogger("test-worker"))
+        monkeypatch.setattr(worker, "get_claude_version", lambda run=None: ("1.2.3", None))
+        monkeypatch.setattr(worker, "capability_fingerprint", lambda: "fingerprint")
+        invoke_calls = {"count": 0}
+
+        def fake_invoke(_packet_dir, _settings, _prompt, *, active_branch_uuids, valid_file_paths, run=None):
+            invoke_calls["count"] += 1
+            assert valid_file_paths == {"src/main.py"}
+            return InvocationResult(
+                status=STATUS_OK,
+                response_body=_response_body(active_branch_uuids, next(iter(valid_file_paths))),
+            )
+
+        monkeypatch.setattr(worker, "invoke_claude", fake_invoke)
+
+        assert (
+            worker.run(
+                capability_sidecar_path=sidecar,
+                projects_dir=projects_dir,
+                session=seeded["session_uuid"],
+                current_session=True,
+            )
+            == worker.EXIT_OK
+        )
+
+        with sqlite3.connect(db_path) as conn:
+            row = conn.execute(
+                "SELECT summary_enrichment_status, summary_enrichment_error FROM branches WHERE id = ?",
+                (seeded["branch_id"],),
+            ).fetchone()
+
+        assert invoke_calls["count"] == 1
+        assert row == (STATUS_OK, None)
+
+    def test_current_session_run_rejects_matching_unsafe_live_candidate_instead_of_falling_back_to_historical(
+        self, tmp_path, monkeypatch
+    ):
+        from ccrecall.hooks import backfill_llm_summaries as worker
+
+        db_path = tmp_path / "current-session-matching-unsafe.db"
+        seeded = _seed_branch(db_path, tmp_path / "current-session-matching-unsafe.jsonl")
+        sidecar = tmp_path / "capability.json"
+        _write_ok_sidecar(sidecar)
+        projects_dir = tmp_path / "projects"
+        project_dir = projects_dir / "proj"
+        project_dir.mkdir(parents=True)
+        (project_dir / f"{seeded['session_uuid']}.jsonl").write_text("{}\n", encoding="utf-8")
+        subagents = project_dir / "state" / "subagents"
+        subagents.mkdir(parents=True)
+        (subagents / f"agent-{seeded['session_uuid']}.jsonl").mkdir()
+
+        monkeypatch.setattr(worker, "load_settings", lambda: seeded["settings"])
+        monkeypatch.setattr(worker, "setup_logging", lambda *_args, **_kwargs: logging.getLogger("test-worker"))
+        monkeypatch.setattr(worker, "get_claude_version", lambda run=None: ("1.2.3", None))
+        monkeypatch.setattr(worker, "capability_fingerprint", lambda: "fingerprint")
+        invoke_calls = {"count": 0}
+
+        def fake_invoke(*_args, **_kwargs):
+            invoke_calls["count"] += 1
+            return InvocationResult(status=STATUS_OK, response_body={})
+
+        monkeypatch.setattr(worker, "invoke_claude", fake_invoke)
+
+        assert (
+            worker.run(
+                capability_sidecar_path=sidecar,
+                projects_dir=projects_dir,
+                session=seeded["session_uuid"],
+                current_session=True,
+            )
+            == worker.EXIT_OK
+        )
+
+        with sqlite3.connect(db_path) as conn:
+            row = conn.execute(
+                "SELECT summary_enrichment_status FROM branches WHERE id = ?",
+                (seeded["branch_id"],),
+            ).fetchone()
+
+        assert invoke_calls["count"] == 0
+        assert row == ("unsafe_source_path",)
+
+    def test_historical_resolution_without_import_log_does_not_scan_live_projects_tree(self, tmp_path):
+        from ccrecall.hooks import backfill_llm_summaries as worker
+
+        db_path = tmp_path / "no-import-log.db"
+        seeded = _seed_branch(db_path, tmp_path / "no-import-log.jsonl")
+        projects_dir = tmp_path / "projects"
+        live_transcript = projects_dir / "proj" / f"{seeded['session_uuid']}.jsonl"
+        live_transcript.parent.mkdir(parents=True)
+        _write_jsonl(
+            live_transcript,
+            [
+                _entry(seeded["user_uuid"], None, "2026-08-07T10:00:00Z", "user", "Investigate the worker bug"),
+                _entry(
+                    seeded["assistant_uuid"],
+                    seeded["user_uuid"],
+                    "2026-08-07T10:00:01Z",
+                    "assistant",
+                    "I found the failing path",
+                ),
+            ],
+        )
+
+        with sqlite3.connect(db_path) as conn:
+            conn.execute("DELETE FROM import_log WHERE file_path = ?", (str(seeded["transcript_path"]),))
+            conn.commit()
+            status, files = worker._resolve_source_files(
+                conn.cursor(),
+                session_uuid=seeded["session_uuid"],
+                projects_dir=projects_dir,
+            )
+
+        assert status == STATUS_MISSING_SOURCE
+        assert files == []
+
+    def test_current_session_enrichment_accepts_branch_content_file_path_evidence(self, tmp_path, monkeypatch):
+        from ccrecall.hooks import backfill_llm_summaries as worker
+
+        db_path = tmp_path / "current-session-branch-file-evidence.db"
+        seeded = _seed_branch(db_path, tmp_path / "current-session-branch-file-evidence.jsonl")
+        sidecar = tmp_path / "capability.json"
+        _write_ok_sidecar(sidecar)
+        projects_dir = tmp_path / "projects"
+        live_transcript = projects_dir / "proj" / f"{seeded['session_uuid']}.jsonl"
+        live_transcript.parent.mkdir(parents=True)
+        (live_transcript.parent / "config").mkdir()
+        (live_transcript.parent / "docs").mkdir()
+        (live_transcript.parent / "Dockerfile").write_text("", encoding="utf-8")
+        (live_transcript.parent / "config" / ".gitignore").write_text("", encoding="utf-8")
+        (live_transcript.parent / "docs" / "Makefile").write_text("", encoding="utf-8")
+        _write_jsonl(
+            live_transcript,
+            [
+                _entry(
+                    seeded["user_uuid"],
+                    None,
+                    "2026-08-07T10:00:00Z",
+                    "user",
+                    "Investigate the worker bug",
+                ),
+                {
+                    "uuid": seeded["assistant_uuid"],
+                    "parentUuid": seeded["user_uuid"],
+                    "type": "assistant",
+                    "timestamp": "2026-08-07T10:00:01Z",
+                    "message": {
+                        "role": "assistant",
+                        "content": [
+                            {"type": "text", "text": "I inspected the read-only file."},
+                            {"type": "tool_use", "name": "Read", "input": {"file_path": "src/read_only.py"}},
+                        ],
+                    },
+                },
+            ],
+        )
+
+        monkeypatch.setattr(worker, "load_settings", lambda: seeded["settings"])
+        monkeypatch.setattr(worker, "setup_logging", lambda *_args, **_kwargs: logging.getLogger("test-worker"))
+        monkeypatch.setattr(worker, "get_claude_version", lambda run=None: ("1.2.3", None))
+        monkeypatch.setattr(worker, "capability_fingerprint", lambda: "fingerprint")
+
+        def fake_invoke(_packet_dir, _settings, _prompt, *, active_branch_uuids, valid_file_paths, run=None):
+            assert valid_file_paths == {"src/main.py", "src/read_only.py"}
+            return InvocationResult(
+                status=STATUS_OK,
+                response_body=_response_body(active_branch_uuids, "src/read_only.py"),
+            )
+
+        monkeypatch.setattr(worker, "invoke_claude", fake_invoke)
+
+        assert (
+            worker.run(
+                capability_sidecar_path=sidecar,
+                projects_dir=projects_dir,
+                session=seeded["session_uuid"],
+                current_session=True,
+            )
+            == worker.EXIT_OK
+        )
+
+        with sqlite3.connect(db_path) as conn:
+            row = conn.execute(
+                "SELECT summary_enrichment_status, summary_enrichment_json FROM branches WHERE id = ?",
+                (seeded["branch_id"],),
+            ).fetchone()
+
+        assert row[0] == STATUS_OK
+        assert json.loads(row[1])["files_and_reasons"][0]["path"] == "src/read_only.py"
+
+    def test_current_session_enrichment_accepts_prose_and_result_file_path_evidence(self, tmp_path, monkeypatch):
+        from ccrecall.hooks import backfill_llm_summaries as worker
+
+        db_path = tmp_path / "current-session-prose-result-file-evidence.db"
+        seeded = _seed_branch(db_path, tmp_path / "current-session-prose-result-file-evidence.jsonl")
+        sidecar = tmp_path / "capability.json"
+        _write_ok_sidecar(sidecar)
+        projects_dir = tmp_path / "projects"
+        live_transcript = projects_dir / "proj" / f"{seeded['session_uuid']}.jsonl"
+        live_transcript.parent.mkdir(parents=True)
+        (live_transcript.parent / "README.md").write_text("", encoding="utf-8")
+        _write_jsonl(
+            live_transcript,
+            [
+                {
+                    "uuid": seeded["user_uuid"],
+                    "parentUuid": None,
+                    "type": "user",
+                    "timestamp": "2026-08-07T10:00:00Z",
+                    "message": {
+                        "role": "user",
+                        "content": [{"type": "text", "text": "Please verify `src/prose_only.py`."}],
+                    },
+                },
+                {
+                    "uuid": seeded["assistant_uuid"],
+                    "parentUuid": seeded["user_uuid"],
+                    "type": "assistant",
+                    "timestamp": "2026-08-07T10:00:01Z",
+                    "message": {
+                        "role": "assistant",
+                        "content": [
+                            {"type": "text", "text": "The generated note is in docs/result-notes.md."},
+                            {
+                                "type": "tool_result",
+                                "content": [{"type": "text", "text": "Wrote logs/result.txt after the check."}],
+                            },
+                        ],
+                    },
+                },
+            ],
+        )
+
+        monkeypatch.setattr(worker, "load_settings", lambda: seeded["settings"])
+        monkeypatch.setattr(worker, "setup_logging", lambda *_args, **_kwargs: logging.getLogger("test-worker"))
+        monkeypatch.setattr(worker, "get_claude_version", lambda run=None: ("1.2.3", None))
+        monkeypatch.setattr(worker, "capability_fingerprint", lambda: "fingerprint")
+
+        def fake_invoke(_packet_dir, _settings, _prompt, *, active_branch_uuids, valid_file_paths, run=None):
+            assert valid_file_paths == {"src/main.py", "src/prose_only.py", "docs/result-notes.md", "logs/result.txt"}
+            return InvocationResult(
+                status=STATUS_OK,
+                response_body=_response_body(active_branch_uuids, "docs/result-notes.md"),
+            )
+
+        monkeypatch.setattr(worker, "invoke_claude", fake_invoke)
+
+        assert (
+            worker.run(
+                capability_sidecar_path=sidecar,
+                projects_dir=projects_dir,
+                session=seeded["session_uuid"],
+                current_session=True,
+            )
+            == worker.EXIT_OK
+        )
+
+        with sqlite3.connect(db_path) as conn:
+            row = conn.execute(
+                "SELECT summary_enrichment_status, summary_enrichment_json FROM branches WHERE id = ?",
+                (seeded["branch_id"],),
+            ).fetchone()
+
+        assert row[0] == STATUS_OK
+        assert json.loads(row[1])["files_and_reasons"][0]["path"] == "docs/result-notes.md"
+
+    def test_current_session_enrichment_accepts_root_level_readme_from_prose_and_result_evidence(
+        self, tmp_path, monkeypatch
+    ):
+        from ccrecall.hooks import backfill_llm_summaries as worker
+
+        db_path = tmp_path / "current-session-root-readme-file-evidence.db"
+        seeded = _seed_branch(db_path, tmp_path / "current-session-root-readme-file-evidence.jsonl")
+        sidecar = tmp_path / "capability.json"
+        _write_ok_sidecar(sidecar)
+        projects_dir = tmp_path / "projects"
+        live_transcript = projects_dir / "proj" / f"{seeded['session_uuid']}.jsonl"
+        live_transcript.parent.mkdir(parents=True)
+        (tmp_path / "README.md").write_text("", encoding="utf-8")
+        _write_jsonl(
+            live_transcript,
+            [
+                {
+                    "uuid": seeded["user_uuid"],
+                    "parentUuid": None,
+                    "type": "user",
+                    "timestamp": "2026-08-07T10:00:00Z",
+                    "message": {
+                        "role": "user",
+                        "content": [{"type": "text", "text": "Please confirm the `README.md` wording."}],
+                    },
+                },
+                {
+                    "uuid": seeded["assistant_uuid"],
+                    "parentUuid": seeded["user_uuid"],
+                    "type": "assistant",
+                    "timestamp": "2026-08-07T10:00:01Z",
+                    "message": {
+                        "role": "assistant",
+                        "content": [
+                            {"type": "text", "text": "I reviewed it."},
+                            {
+                                "type": "tool_result",
+                                "content": [{"type": "text", "text": "Updated README.md after the check."}],
+                            },
+                        ],
+                    },
+                },
+            ],
+        )
+
+        monkeypatch.setattr(worker, "load_settings", lambda: seeded["settings"])
+        monkeypatch.setattr(worker, "setup_logging", lambda *_args, **_kwargs: logging.getLogger("test-worker"))
+        monkeypatch.setattr(worker, "get_claude_version", lambda run=None: ("1.2.3", None))
+        monkeypatch.setattr(worker, "capability_fingerprint", lambda: "fingerprint")
+
+        def fake_invoke(_packet_dir, _settings, _prompt, *, active_branch_uuids, valid_file_paths, run=None):
+            assert valid_file_paths == {"README.md", "src/main.py"}
+            return InvocationResult(
+                status=STATUS_OK,
+                response_body=_response_body(active_branch_uuids, "README.md"),
+            )
+
+        monkeypatch.setattr(worker, "invoke_claude", fake_invoke)
+
+        assert (
+            worker.run(
+                capability_sidecar_path=sidecar,
+                projects_dir=projects_dir,
+                session=seeded["session_uuid"],
+                current_session=True,
+            )
+            == worker.EXIT_OK
+        )
+
+        with sqlite3.connect(db_path) as conn:
+            row = conn.execute(
+                "SELECT summary_enrichment_status, summary_enrichment_json FROM branches WHERE id = ?",
+                (seeded["branch_id"],),
+            ).fetchone()
+
+        assert row[0] == STATUS_OK
+        assert json.loads(row[1])["files_and_reasons"][0]["path"] == "README.md"
+
+    def test_current_session_enrichment_uses_project_root_for_root_level_file_evidence(self, tmp_path, monkeypatch):
+        from ccrecall.hooks import backfill_llm_summaries as worker
+
+        db_path = tmp_path / "current-session-project-root-file-evidence.db"
+        seeded = _seed_branch(db_path, tmp_path / "current-session-project-root-file-evidence.jsonl")
+        sidecar = tmp_path / "capability.json"
+        _write_ok_sidecar(sidecar)
+        projects_dir = tmp_path / "projects"
+        live_transcript = projects_dir / "proj" / f"{seeded['session_uuid']}.jsonl"
+        project_root = tmp_path / "repo"
+        nested_cwd = project_root / "packages" / "app"
+        live_transcript.parent.mkdir(parents=True)
+        nested_cwd.mkdir(parents=True)
+        (project_root / "README.md").write_text("", encoding="utf-8")
+        _write_jsonl(
+            live_transcript,
+            [
+                {
+                    "uuid": seeded["user_uuid"],
+                    "parentUuid": None,
+                    "type": "user",
+                    "timestamp": "2026-08-07T10:00:00Z",
+                    "message": {
+                        "role": "user",
+                        "content": [{"type": "text", "text": "Please confirm the `README.md` wording."}],
+                    },
+                },
+                {
+                    "uuid": seeded["assistant_uuid"],
+                    "parentUuid": seeded["user_uuid"],
+                    "type": "assistant",
+                    "timestamp": "2026-08-07T10:00:01Z",
+                    "message": {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": "I reviewed it."}],
+                    },
+                },
+            ],
+        )
+
+        with sqlite3.connect(db_path) as conn:
+            conn.execute("UPDATE projects SET path = ?", (str(project_root),))
+            conn.execute("UPDATE sessions SET cwd = ?", (str(nested_cwd),))
+            conn.commit()
+
+        monkeypatch.setattr(worker, "load_settings", lambda: seeded["settings"])
+        monkeypatch.setattr(worker, "setup_logging", lambda *_args, **_kwargs: logging.getLogger("test-worker"))
+        monkeypatch.setattr(worker, "get_claude_version", lambda run=None: ("1.2.3", None))
+        monkeypatch.setattr(worker, "capability_fingerprint", lambda: "fingerprint")
+
+        def fake_invoke(_packet_dir, _settings, _prompt, *, active_branch_uuids, valid_file_paths, run=None):
+            assert valid_file_paths == {"README.md", "src/main.py"}
+            return InvocationResult(
+                status=STATUS_OK,
+                response_body=_response_body(active_branch_uuids, "README.md"),
+            )
+
+        monkeypatch.setattr(worker, "invoke_claude", fake_invoke)
+
+        assert (
+            worker.run(
+                capability_sidecar_path=sidecar,
+                projects_dir=projects_dir,
+                session=seeded["session_uuid"],
+                current_session=True,
+            )
+            == worker.EXIT_OK
+        )
+
+        with sqlite3.connect(db_path) as conn:
+            row = conn.execute(
+                "SELECT summary_enrichment_status, summary_enrichment_json FROM branches WHERE id = ?",
+                (seeded["branch_id"],),
+            ).fetchone()
+
+        assert row[0] == STATUS_OK
+        assert json.loads(row[1])["files_and_reasons"][0]["path"] == "README.md"
+
+    def test_current_session_enrichment_rejects_directory_like_slash_paths_but_keeps_tool_inputs(
+        self, tmp_path, monkeypatch
+    ):
+        from ccrecall.hooks import backfill_llm_summaries as worker
+
+        db_path = tmp_path / "current-session-extensionless-file-evidence.db"
+        seeded = _seed_branch(db_path, tmp_path / "current-session-extensionless-file-evidence.jsonl")
+        sidecar = tmp_path / "capability.json"
+        _write_ok_sidecar(sidecar)
+        projects_dir = tmp_path / "projects"
+        live_transcript = projects_dir / "proj" / f"{seeded['session_uuid']}.jsonl"
+        live_transcript.parent.mkdir(parents=True)
+        _write_jsonl(
+            live_transcript,
+            [
+                {
+                    "uuid": seeded["user_uuid"],
+                    "parentUuid": None,
+                    "type": "user",
+                    "timestamp": "2026-08-07T10:00:00Z",
+                    "message": {
+                        "role": "user",
+                        "content": [{"type": "text", "text": "Please verify Dockerfile and config/.gitignore."}],
+                    },
+                },
+                {
+                    "uuid": seeded["assistant_uuid"],
+                    "parentUuid": seeded["user_uuid"],
+                    "type": "assistant",
+                    "timestamp": "2026-08-07T10:00:01Z",
+                    "message": {
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "I checked docs/Makefile, ignored and/or, and did not treat docs/v2 as a file.",
+                            },
+                            {"type": "tool_use", "name": "Glob", "input": {"path": "src"}},
+                            {"type": "tool_use", "name": "Read", "input": {"file_path": "ops/Justfile"}},
+                            {
+                                "type": "tool_result",
+                                "content": [{"type": "text", "text": "Updated Dockerfile after the check."}],
+                            },
+                        ],
+                    },
+                },
+            ],
+        )
+
+        monkeypatch.setattr(worker, "load_settings", lambda: seeded["settings"])
+        monkeypatch.setattr(worker, "setup_logging", lambda *_args, **_kwargs: logging.getLogger("test-worker"))
+        monkeypatch.setattr(worker, "get_claude_version", lambda run=None: ("1.2.3", None))
+        monkeypatch.setattr(worker, "capability_fingerprint", lambda: "fingerprint")
+
+        def fake_invoke(_packet_dir, _settings, _prompt, *, active_branch_uuids, valid_file_paths, run=None):
+            assert valid_file_paths == {
+                "Dockerfile",
+                "config/.gitignore",
+                "docs/Makefile",
+                "ops/Justfile",
+                "src/main.py",
+            }
+            return InvocationResult(
+                status=STATUS_OK,
+                response_body=_response_body(active_branch_uuids, "Dockerfile"),
+            )
+
+        monkeypatch.setattr(worker, "invoke_claude", fake_invoke)
+
+        assert (
+            worker.run(
+                capability_sidecar_path=sidecar,
+                projects_dir=projects_dir,
+                session=seeded["session_uuid"],
+                current_session=True,
+            )
+            == worker.EXIT_OK
+        )
+
+        with sqlite3.connect(db_path) as conn:
+            row = conn.execute(
+                "SELECT summary_enrichment_status, summary_enrichment_json FROM branches WHERE id = ?",
+                (seeded["branch_id"],),
+            ).fetchone()
+
+        assert row[0] == STATUS_OK
+        assert json.loads(row[1])["files_and_reasons"][0]["path"] == "Dockerfile"
 
     def test_current_session_run_stops_after_first_selection_page(self, tmp_path, monkeypatch):
         from ccrecall.hooks import backfill_llm_summaries as worker
@@ -860,7 +1641,9 @@ class TestBackfillLlmSummaries:
 
         assert row == (STATUS_ERROR, "boom")
 
-    def test_source_hash_change_during_claude_discards_success_and_failure_status_writes(self, tmp_path, monkeypatch):
+    def test_source_hash_change_during_claude_discards_success_and_failure_status_writes(
+        self, tmp_path, monkeypatch, capsys
+    ):
         from ccrecall.hooks import backfill_llm_summaries as worker
 
         sidecar = tmp_path / "capability.json"
@@ -903,6 +1686,8 @@ class TestBackfillLlmSummaries:
             monkeypatch.setattr(worker, "invoke_claude", fake_invoke)
 
             worker.run(capability_sidecar_path=sidecar, projects_dir=tmp_path / "projects")
+
+            assert "complete: 0 branches enriched" in capsys.readouterr().out
 
             with sqlite3.connect(db_path) as conn:
                 row = conn.execute(

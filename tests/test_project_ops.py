@@ -91,7 +91,7 @@ class TestUpsertProjectProbesJsonl:
             project_dir = Path(tmpdir) / "-home-user-node-banana"
             project_dir.mkdir()
 
-            # linear_3_exchange.jsonl has cwd="/Users/samarthgupta/repos/forks/node-banana"
+            # The fixture provides cwd metadata for project-path derivation.
             shutil.copy(FIXTURE_DIR / "linear_3_exchange.jsonl", project_dir / "sess.jsonl")
 
             cursor = memory_db.cursor()
@@ -112,6 +112,28 @@ class TestUpsertProjectProbesJsonl:
         )
         assert row[1] == "node-banana"
 
+    def test_upsert_project_probes_safe_nested_subagent_jsonl(self, memory_db):
+        """Subagent-only projects should probe the first safe discovered transcript."""
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project_dir = Path(tmpdir) / "-home-user-node-banana"
+            subagents_dir = project_dir / "subagents"
+            subagents_dir.mkdir(parents=True)
+
+            shutil.copy(FIXTURE_DIR / "linear_3_exchange.jsonl", subagents_dir / "sess.jsonl")
+
+            cursor = memory_db.cursor()
+            project_id = upsert_project(cursor, "-home-user-node-banana", project_dir=project_dir)
+            memory_db.commit()
+
+        assert project_id is not None
+
+        cursor.execute("SELECT path, name FROM projects WHERE id = ?", (project_id,))
+        row = cursor.fetchone()
+        assert row is not None
+        assert row[0] == "/Users/samarthgupta/repos/forks/node-banana"
+        assert row[1] == "node-banana"
+
     def test_upsert_project_falls_back_to_key_when_no_jsonl(self, memory_db):
         """When project_dir has no JSONL, fall back to lossy hyphen reconstruction."""
 
@@ -130,3 +152,22 @@ class TestUpsertProjectProbesJsonl:
         assert row is not None
         # Falls back to parse_project_key (lossy) when no JSONL available
         assert "myproject" in row[0], "Fallback path should contain project name from key reconstruction"
+
+    def test_upsert_project_does_not_probe_top_level_symlink_project_dir(self, memory_db):
+        """Symlink project dirs are rejected before JSONL probing."""
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            real_project_dir = Path(tmpdir) / "real-project"
+            real_project_dir.mkdir()
+            shutil.copy(FIXTURE_DIR / "linear_3_exchange.jsonl", real_project_dir / "sess.jsonl")
+            symlink_project_dir = Path(tmpdir) / "-home-user-node-banana"
+            symlink_project_dir.symlink_to(real_project_dir, target_is_directory=True)
+
+            cursor = memory_db.cursor()
+            project_id = upsert_project(cursor, "-home-user-node-banana", project_dir=symlink_project_dir)
+            memory_db.commit()
+
+        cursor.execute("SELECT path FROM projects WHERE id = ?", (project_id,))
+        row = cursor.fetchone()
+        assert row is not None
+        assert row[0] == "/home/user/node/banana"
