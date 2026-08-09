@@ -1826,8 +1826,14 @@ class TestCardFields:
                 "hash-current",
                 STATUS_OK,
             ),
+            (
+                json.dumps(_valid_search_enrichment()),
+                SUMMARY_ENRICHMENT_VERSION,
+                "hash-stale",
+                STATUS_OK,
+            ),
         ],
-        ids=["invalid-envelope", "failed-status", "version-stale"],
+        ids=["invalid-envelope", "failed-status", "version-stale", "source-hash-stale"],
     )
     def test_card_falls_back_when_enrichment_is_invalid_failed_or_version_stale(
         self,

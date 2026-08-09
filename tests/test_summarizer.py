@@ -7,6 +7,7 @@ import sqlite3
 
 import pytest
 
+import ccrecall.embed_ops as embed_ops
 from ccrecall.branch_ops import sync_branch
 from ccrecall.db import CONTENT_ERROR_VERSION
 from ccrecall.embed_ops import write_branch_summary
@@ -748,7 +749,12 @@ class TestBackfillErrorHandling:
 
 
 class TestSummarySourceHashMaintenance:
-    def _make_conn_with_branch(self) -> tuple[sqlite3.Connection, int]:
+    def _make_conn_with_branch(
+        self,
+        *,
+        summary_version: int = 0,
+        summary_source_hash: str | None = "stale-hash",
+    ) -> tuple[sqlite3.Connection, int]:
         conn = sqlite3.connect(":memory:")
         conn.executescript(SCHEMA)
         conn.commit()
@@ -789,8 +795,8 @@ class TestSummarySourceHashMaintenance:
                 json.dumps(["fix: bug"]),
                 json.dumps({"Read": 1}),
                 "hello\nworld",
-                0,
-                "stale-hash",
+                summary_version,
+                summary_source_hash,
             ),
         )
         branch_id = cursor.lastrowid
@@ -870,6 +876,23 @@ class TestSummarySourceHashMaintenance:
             (branch_id,),
         ).fetchone()
         assert row == (None, 0)
+
+    def test_write_branch_summary_hash_persistence_failure_keeps_branch_backfillable(self, monkeypatch):
+        conn, branch_id = self._make_conn_with_branch(summary_version=None, summary_source_hash=None)
+        cursor = conn.cursor()
+
+        def boom(_cursor, _branch_id):
+            raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr(embed_ops, "compute_branch_summary_source_hash", boom)
+
+        assert write_branch_summary(cursor, branch_id) is None
+
+        row = cursor.execute(
+            "SELECT summary_version, summary_source_hash, context_summary_json FROM branches WHERE id = ?",
+            (branch_id,),
+        ).fetchone()
+        assert row == (None, None, None)
 
     def test_backfill_summaries_writes_hash_and_clears_it_on_content_error(self, tmp_path, monkeypatch):
         db = tmp_path / "summary-source-hash.db"

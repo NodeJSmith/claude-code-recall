@@ -1,4 +1,3 @@
-import hashlib
 import json
 import logging
 import os
@@ -7,13 +6,14 @@ import stat
 import subprocess
 import uuid
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
+import ccrecall.llm_summarizer as llm_summarizer
 from ccrecall.file_hashing import transcript_file_hash
 from ccrecall.llm_summarizer import (
     PacketBuildError,
-    _build_capability_check_argv,
     _parse_source_entries,
     branch_content_file_paths,
     branch_packet,
@@ -167,6 +167,79 @@ class TestClaudeInvocation:
         assert calls["kwargs"]["text"] is True
         assert calls["kwargs"]["timeout"] == 30
 
+    def test_invoke_claude_validates_structured_output_from_success_envelope(self, tmp_path):
+
+        packet_dir = tmp_path / "packet"
+        packet_dir.mkdir()
+        source_uuid = _u("envelope-source")
+        settings = {
+            "llm_summary_model": "sonnet",
+            "llm_summary_effort": "medium",
+            "llm_summary_max_budget_usd": 1.0,
+            "llm_summary_timeout_seconds": 30,
+        }
+        payload = {
+            "type": "result",
+            "subtype": "success",
+            "structured_output": {
+                "title": {"text": "ok", "source_uuids": [source_uuid]},
+                "where_we_left_off": {"text": "done", "source_uuids": [source_uuid]},
+                "how_we_got_here": {"text": "path", "source_uuids": [source_uuid]},
+                "key_decisions": [],
+                "attempted_paths": [],
+                "open_questions": [],
+                "files_and_reasons": [],
+                "continuation_hints": [],
+                "confidence": "high",
+            },
+        }
+
+        def fake_run(argv, **_kwargs):
+            return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(payload), stderr="")
+
+        result = invoke_claude(
+            packet_dir,
+            settings,
+            "prompt",
+            active_branch_uuids={source_uuid},
+            valid_file_paths=set(),
+            run=fake_run,
+        )
+
+        assert result.status == STATUS_OK
+        assert result.response_body == payload["structured_output"]
+
+    def test_invoke_claude_rejects_malformed_success_envelope(self, tmp_path):
+
+        packet_dir = tmp_path / "packet"
+        packet_dir.mkdir()
+        settings = {
+            "llm_summary_model": "sonnet",
+            "llm_summary_effort": "medium",
+            "llm_summary_max_budget_usd": 1.0,
+            "llm_summary_timeout_seconds": 30,
+        }
+
+        def fake_run(argv, **_kwargs):
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout=json.dumps({"type": "result", "subtype": "success", "structured_output": []}),
+                stderr="",
+            )
+
+        result = invoke_claude(
+            packet_dir,
+            settings,
+            "prompt",
+            active_branch_uuids={_u("1")},
+            valid_file_paths=set(),
+            run=fake_run,
+        )
+
+        assert result.status == STATUS_INVALID_OUTPUT
+        assert result.response_body is None
+
     @pytest.mark.parametrize(
         ("outcome", "expected_status"),
         [
@@ -251,6 +324,61 @@ class TestClaudeInvocation:
         assert result.diagnostic is not None
         assert "threshold" in result.diagnostic.lower()
 
+    def test_invoke_claude_classifies_budget_before_auth_words(self, tmp_path):
+
+        packet_dir = tmp_path / "packet"
+        packet_dir.mkdir()
+        settings = {
+            "llm_summary_model": "sonnet",
+            "llm_summary_effort": "medium",
+            "llm_summary_max_budget_usd": 1.0,
+            "llm_summary_timeout_seconds": 30,
+        }
+
+        def fake_run(*_args, **_kwargs):
+            return subprocess.CompletedProcess(
+                ["claude"],
+                2,
+                stdout="",
+                stderr="Authentication skipped because the max budget was exceeded.",
+            )
+
+        result = invoke_claude(
+            packet_dir,
+            settings,
+            "prompt",
+            active_branch_uuids={_u("1")},
+            valid_file_paths=set(),
+            run=fake_run,
+        )
+
+        assert result.status == STATUS_BUDGET_EXCEEDED
+
+    def test_invoke_claude_uses_bounded_auth_word_matching(self, tmp_path):
+
+        packet_dir = tmp_path / "packet"
+        packet_dir.mkdir()
+        settings = {
+            "llm_summary_model": "sonnet",
+            "llm_summary_effort": "medium",
+            "llm_summary_max_budget_usd": 1.0,
+            "llm_summary_timeout_seconds": 30,
+        }
+
+        def fake_run(*_args, **_kwargs):
+            return subprocess.CompletedProcess(["claude"], 2, stdout="", stderr="author metadata mismatch")
+
+        result = invoke_claude(
+            packet_dir,
+            settings,
+            "prompt",
+            active_branch_uuids={_u("1")},
+            valid_file_paths=set(),
+            run=fake_run,
+        )
+
+        assert result.status == STATUS_ERROR
+
     def test_get_claude_version_reads_version_at_boundary(self):
 
         def fake_run(argv, **kwargs):
@@ -321,7 +449,7 @@ class TestCapabilitySidecar:
 
     def test_readiness_rejects_missing_stale_and_mismatched_sidecar(self, tmp_path):
         sidecar = tmp_path / "capability.json"
-        fingerprint = capability_fingerprint(packet_dir=tmp_path / "packet")
+        fingerprint = capability_fingerprint()
 
         status, _reason = verify_capability_sidecar(sidecar, claude_version="1.2.3", fingerprint=fingerprint)
         assert status == STATUS_CAPABILITY_UNVERIFIED
@@ -348,7 +476,7 @@ class TestCapabilitySidecar:
     def test_budget_exceeded_in_sidecar_remains_distinct_until_successful_rerun(self, tmp_path):
 
         sidecar = tmp_path / "capability.json"
-        fingerprint = capability_fingerprint(packet_dir=tmp_path / "packet")
+        fingerprint = capability_fingerprint()
 
         def fail_run(*_args, **_kwargs):
             return subprocess.CompletedProcess(["claude"], 2, stdout="", stderr="max budget threshold exceeded")
@@ -366,7 +494,7 @@ class TestCapabilitySidecar:
         status, _reason = verify_capability_sidecar(sidecar, claude_version="1.2.3", fingerprint=fingerprint)
         assert status == STATUS_BUDGET_EXCEEDED
 
-        unchanged_fingerprint = capability_fingerprint(packet_dir=tmp_path / "different-packet")
+        unchanged_fingerprint = capability_fingerprint()
         status, _reason = verify_capability_sidecar(
             sidecar,
             claude_version="1.2.3",
@@ -390,19 +518,16 @@ class TestCapabilitySidecar:
         status, _reason = verify_capability_sidecar(sidecar, claude_version="1.2.3", fingerprint=fingerprint)
         assert status == STATUS_OK
 
-    def test_capability_fingerprint_tracks_capability_check_argv_shape(self, tmp_path):
+    def test_capability_fingerprint_changes_when_security_flags_change(self, monkeypatch):
 
-        packet_dir = tmp_path / "packet"
-        argv = _build_capability_check_argv(packet_dir)
-        normalized = ["<packet-dir>" if arg == str(packet_dir) else arg for arg in argv[1:-1]]
+        original = capability_fingerprint()
+        monkeypatch.setattr(
+            llm_summarizer,
+            "CLAUDE_SECURITY_ARGV",
+            (*llm_summarizer.CLAUDE_SECURITY_ARGV[:-1], "ask"),
+        )
 
-        assert capability_fingerprint(packet_dir=packet_dir) == capability_fingerprint(
-            packet_dir=tmp_path / "other-packet"
-        )
-        assert (
-            capability_fingerprint(packet_dir=packet_dir)
-            == hashlib.sha256("\0".join(normalized).encode("utf-8")).hexdigest()
-        )
+        assert capability_fingerprint() != original
 
     def test_capability_check_fails_if_new_importable_transcript_appears(self, tmp_path):
 
@@ -624,6 +749,26 @@ class TestSourceResolution:
         unsafe_state.mkdir(parents=True)
         (unsafe_state / f"agent-{session_uuid}.jsonl").write_text("{}\n", encoding="utf-8")
         (project_dir / "state").symlink_to(unsafe_state.parent.parent, target_is_directory=True)
+
+        result = resolve_current_session_source_files(projects_dir, session_uuid)
+
+        assert result.status == STATUS_UNSAFE_SOURCE_PATH
+        assert result.files == []
+
+    def test_current_session_source_resolution_detects_nested_subagent_in_symlinked_project_state_tree(self, tmp_path):
+
+        session_uuid = _u("session-unsafe-project-state")
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        real_project = tmp_path / "real-project"
+        unsafe_subagents = real_project / "state" / "nested" / "subagents"
+        unsafe_subagents.mkdir(parents=True)
+        (unsafe_subagents / f"agent-{session_uuid}.jsonl").write_text("{}\n", encoding="utf-8")
+        (unsafe_subagents.parent.parent / "loop").symlink_to(
+            unsafe_subagents.parent.parent,
+            target_is_directory=True,
+        )
+        (projects_dir / "linked-project").symlink_to(real_project, target_is_directory=True)
 
         result = resolve_current_session_source_files(projects_dir, session_uuid)
 
@@ -1461,7 +1606,8 @@ class TestPacketBuilding:
             encoding="utf-8",
         )
 
-        reaped = reap_stale_packets(packet_parent, min_age_seconds=0)
+        with patch("ccrecall.llm_summarizer._pid_alive", side_effect=lambda pid: pid == os.getpid()):
+            reaped = reap_stale_packets(packet_parent, min_age_seconds=0)
 
         assert stale in reaped
         assert not stale.exists()

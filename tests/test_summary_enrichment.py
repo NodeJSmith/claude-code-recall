@@ -1,10 +1,12 @@
 import copy
+import sqlite3
 import subprocess
 import sys
 import uuid
 
 import pytest
 
+from ccrecall.schema import SCHEMA
 from ccrecall.summary_enrichment import (
     CLAUDE_RESPONSE_SCHEMA,
     PRIMARY_RENDER_BUDGET,
@@ -12,6 +14,7 @@ from ccrecall.summary_enrichment import (
     SUMMARY_ENRICHMENT_VERSION,
     SummaryEnrichmentValidationError,
     build_stored_enrichment_envelope,
+    compute_branch_summary_source_hash,
     compute_summary_source_hash,
     normalize_project_file_reference,
     render_enriched_context_summary,
@@ -257,6 +260,38 @@ class TestSummarySourceHash:
             {**summary_inputs, "git_branch": 123}
         )
 
+    def test_compute_branch_summary_source_hash_ignores_inactive_branch(self):
+        conn = sqlite3.connect(":memory:")
+        conn.executescript(SCHEMA)
+        cursor = conn.cursor()
+        cursor.execute("INSERT INTO projects (path, key, name) VALUES (?, ?, ?)", ("/test/proj", "proj", "proj"))
+        cursor.execute("INSERT INTO sessions (uuid, project_id, git_branch) VALUES (?, ?, ?)", ("sess-1", 1, "main"))
+        cursor.execute(
+            """
+            INSERT INTO branches (
+                session_id, leaf_uuid, is_active, summary_version, context_summary_json,
+                aggregated_content, exchange_count, started_at, ended_at, files_modified,
+                tool_counts, commits
+            ) VALUES (?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                1,
+                _uuid("leaf"),
+                6,
+                '{"version":6,"topic":"Resume"}',
+                "alpha beta gamma",
+                12,
+                "2026-08-07T10:00:00Z",
+                "2026-08-07T11:00:00Z",
+                '["src/main.py"]',
+                '{"Read":2}',
+                '["feat: add renderer"]',
+            ),
+        )
+
+        assert compute_branch_summary_source_hash(cursor, 1) is None
+        conn.close()
+
 
 class TestRendering:
     def test_valid_current_enrichment_requires_current_ok_status_and_hash_match(self):
@@ -312,6 +347,30 @@ class TestRendering:
         rendered = render_enriched_context_summary(
             base_markdown,
             {"title": {"text": "bad", "source_uuids": []}},
+            is_primary_session=True,
+            status=STATUS_OK,
+            stored_source_hash="abc",
+            current_source_hash="abc",
+            stored_enrichment_version=SUMMARY_ENRICHMENT_VERSION,
+        )
+
+        assert rendered == base_markdown
+
+    @pytest.mark.parametrize(
+        ("mutator"),
+        [
+            lambda envelope: envelope["title"].__setitem__("source_uuids", None),
+            lambda envelope: envelope.__setitem__("files_and_reasons", 5),
+        ],
+    )
+    def test_render_enriched_context_summary_malformed_stored_envelope_falls_back(self, mutator):
+        base_markdown = "### Session: deterministic\n\nBase summary"
+        envelope = _valid_envelope()
+        mutator(envelope)
+
+        rendered = render_enriched_context_summary(
+            base_markdown,
+            envelope,
             is_primary_session=True,
             status=STATUS_OK,
             stored_source_hash="abc",
@@ -421,7 +480,7 @@ class TestRendering:
         assert sorted(ACTIVE_UUIDS)[0] not in rendered
         llm_block, _, suffix = rendered.partition("\n\n" + base_markdown)
         assert suffix == ""
-        assert len(llm_block) <= 2400
+        assert len(llm_block) <= PRIMARY_RENDER_BUDGET
 
     def test_render_llm_block_primary_stops_after_over_budget_continuation_hints(self):
         envelope = _valid_envelope()

@@ -1131,6 +1131,7 @@ class TestSyncCurrentLlmSummarySpawn:
             "1",
             "--current-session",
         ]
+        assert kwargs["stdin"] is subprocess.DEVNULL
         assert kwargs["stdout"] is subprocess.DEVNULL
         assert kwargs["stderr"] is subprocess.DEVNULL
         if sys.platform == "win32":
@@ -1178,8 +1179,8 @@ class TestSyncCurrentTranscriptDiscovery:
     def test_get_session_file_uses_shared_current_session_discovery_semantics(self, tmp_path):
         session_uuid = VALID_SYNC_UUID
         projects_dir = tmp_path / "projects"
-        project_a = projects_dir / "a"
-        project_b = projects_dir / "b"
+        project_a = projects_dir / "z-direct-project"
+        project_b = projects_dir / "a-subagent-project"
         subagents = project_b / "state" / "subagents"
         project_a.mkdir(parents=True)
         subagents.mkdir(parents=True)
@@ -1194,6 +1195,32 @@ class TestSyncCurrentTranscriptDiscovery:
         found = sync_current.get_session_file(projects_dir, session_uuid)
 
         assert found == direct
+
+    def test_get_session_file_fails_closed_when_matching_source_path_is_unsafe(self, tmp_path):
+        session_uuid = VALID_SYNC_UUID
+        projects_dir = tmp_path / "projects"
+        project_dir = projects_dir / "a"
+        project_dir.mkdir(parents=True)
+        safe = project_dir / f"{session_uuid}.jsonl"
+        safe.write_text("{}\n", encoding="utf-8")
+        subagents = project_dir / "state" / "subagents"
+        subagents.mkdir(parents=True)
+        (subagents / f"agent-{session_uuid}.jsonl").mkdir()
+
+        assert sync_current.get_session_file(projects_dir, session_uuid) is None
+
+    def test_get_session_file_ignores_unrelated_unsafe_projects(self, tmp_path):
+        session_uuid = VALID_SYNC_UUID
+        projects_dir = tmp_path / "projects"
+        project_dir = projects_dir / "safe"
+        project_dir.mkdir(parents=True)
+        safe = project_dir / f"{session_uuid}.jsonl"
+        safe.write_text("{}\n", encoding="utf-8")
+        unsafe_target = tmp_path / "unsafe-project"
+        unsafe_target.mkdir()
+        (projects_dir / "unsafe").symlink_to(unsafe_target, target_is_directory=True)
+
+        assert sync_current.get_session_file(projects_dir, session_uuid) == safe
 
     def test_run_derives_top_level_project_dir_for_arbitrarily_nested_subagent_transcript(self, tmp_path, monkeypatch):
         projects_dir = tmp_path / "projects"

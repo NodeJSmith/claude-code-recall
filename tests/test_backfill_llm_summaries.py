@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from ccrecall.config import pid_file_path
+import ccrecall.config as config_module
 from ccrecall.file_hashing import transcript_file_hash
 from ccrecall.hooks import backfill_llm_summaries as worker
 from ccrecall.llm_summarizer import InvocationResult, write_capability_sidecar
@@ -199,7 +199,13 @@ import ccrecall.hooks.backfill_llm_summaries as worker
 assert worker.get_connection.__module__ == "ccrecall.llm_summary_db"
 assert "ccrecall.db" not in sys.modules
 """
-        completed = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True)
+        completed = subprocess.run(
+            [sys.executable, "-c", probe],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
 
         assert completed.returncode == 0, completed.stderr
 
@@ -230,6 +236,42 @@ assert "ccrecall.db" not in sys.modules
 
         with pytest.raises(ValueError, match="--current-session requires --session"):
             worker._run(current_session=True)
+
+    @pytest.mark.parametrize(
+        ("flag", "value", "message"),
+        [("--days", "0", "--days must be >= 1"), ("--limit", "0", "--limit must be >= 1")],
+    )
+    def test_main_rejects_non_positive_numeric_limits(self, capsys, flag, value, message):
+        with pytest.raises(SystemExit) as exc_info:
+            worker.main([flag, value])
+
+        assert exc_info.value.code == 2
+        assert message in capsys.readouterr().err
+
+    def test_run_logs_unexpected_top_level_worker_failures_and_returns_abort(self, monkeypatch):
+        class _FakeLogger:
+            def __init__(self):
+                self.message: str | None = None
+
+            def exception(self, message: str) -> None:
+                self.message = message
+
+        fake_logger = _FakeLogger()
+        removed: list[str] = []
+        original_get_logger = worker.logging.getLogger
+
+        monkeypatch.setattr(worker, "try_acquire_pid_file", lambda _key: True)
+        monkeypatch.setattr(worker, "remove_pid_file", lambda key: removed.append(key))
+        monkeypatch.setattr(worker, "_run", lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("boom")))
+        monkeypatch.setattr(
+            worker.logging,
+            "getLogger",
+            lambda _name=None: fake_logger if _name == worker.__name__ else original_get_logger(_name),
+        )
+
+        assert worker.run() == worker.EXIT_ABORT
+        assert fake_logger.message == "LLM summary worker crashed"
+        assert removed == [worker.PID_KEY]
 
     def test_worker_run_never_requests_load_vec_true(self, tmp_path, monkeypatch):
 
@@ -1445,6 +1487,81 @@ assert "ccrecall.db" not in sys.modules
         assert row[0] == STATUS_OK
         assert json.loads(row[1])["files_and_reasons"][0]["path"] == "README.md"
 
+    def test_current_session_enrichment_normalizes_absolute_files_modified_under_project_root(
+        self, tmp_path, monkeypatch
+    ):
+
+        db_path = tmp_path / "current-session-absolute-files-modified.db"
+        seeded = _seed_branch(db_path, tmp_path / "current-session-absolute-files-modified.jsonl")
+        sidecar = tmp_path / "capability.json"
+        _write_ok_sidecar(sidecar)
+        projects_dir = tmp_path / "projects"
+        live_transcript = projects_dir / "proj" / f"{seeded['session_uuid']}.jsonl"
+        project_root = tmp_path / "repo"
+        live_transcript.parent.mkdir(parents=True)
+        (project_root / "src").mkdir(parents=True)
+        (project_root / "src" / "main.py").write_text("", encoding="utf-8")
+        _write_jsonl(
+            live_transcript,
+            [
+                {
+                    "uuid": seeded["user_uuid"],
+                    "parentUuid": None,
+                    "type": "user",
+                    "timestamp": "2026-08-07T10:00:00Z",
+                    "message": {"role": "user", "content": [{"type": "text", "text": "Check src/main.py."}]},
+                },
+                {
+                    "uuid": seeded["assistant_uuid"],
+                    "parentUuid": seeded["user_uuid"],
+                    "type": "assistant",
+                    "timestamp": "2026-08-07T10:00:01Z",
+                    "message": {"role": "assistant", "content": [{"type": "text", "text": "Done."}]},
+                },
+            ],
+        )
+
+        with sqlite3.connect(db_path) as conn:
+            conn.execute("UPDATE projects SET path = ?", (str(project_root),))
+            conn.execute(
+                "UPDATE branches SET files_modified = ? WHERE id = ?",
+                (json.dumps([str(project_root / "src" / "main.py")]), seeded["branch_id"]),
+            )
+            conn.commit()
+
+        monkeypatch.setattr(worker, "load_settings", lambda: seeded["settings"])
+        monkeypatch.setattr(worker, "setup_logging", lambda *_args, **_kwargs: logging.getLogger("test-worker"))
+        monkeypatch.setattr(worker, "get_claude_version", lambda run=None: ("1.2.3", None))
+        monkeypatch.setattr(worker, "capability_fingerprint", lambda: "fingerprint")
+
+        def fake_invoke(_packet_dir, _settings, _prompt, *, active_branch_uuids, valid_file_paths, run=None):
+            assert valid_file_paths == {"src/main.py"}
+            return InvocationResult(
+                status=STATUS_OK,
+                response_body=_response_body(active_branch_uuids, "src/main.py"),
+            )
+
+        monkeypatch.setattr(worker, "invoke_claude", fake_invoke)
+
+        assert (
+            worker.run(
+                capability_sidecar_path=sidecar,
+                projects_dir=projects_dir,
+                session=seeded["session_uuid"],
+                current_session=True,
+            )
+            == worker.EXIT_OK
+        )
+
+        with sqlite3.connect(db_path) as conn:
+            row = conn.execute(
+                "SELECT summary_enrichment_status, summary_enrichment_json FROM branches WHERE id = ?",
+                (seeded["branch_id"],),
+            ).fetchone()
+
+        assert row[0] == STATUS_OK
+        assert json.loads(row[1])["files_and_reasons"][0]["path"] == "src/main.py"
+
     def test_current_session_enrichment_rejects_directory_like_slash_paths_but_keeps_tool_inputs(
         self, tmp_path, monkeypatch
     ):
@@ -1749,6 +1866,8 @@ assert "ccrecall.db" not in sys.modules
         self, tmp_path, monkeypatch
     ):
 
+        original_try_acquire = worker.try_acquire_pid_file
+        original_remove_pid_file = worker.remove_pid_file
         removed: list[str] = []
         monkeypatch.setattr(worker, "load_settings", lambda: {"db_path": str(tmp_path / "unused.db")})
         monkeypatch.setattr(worker, "setup_logging", lambda *_args, **_kwargs: logging.getLogger("test-worker"))
@@ -1758,13 +1877,15 @@ assert "ccrecall.db" not in sys.modules
         assert worker.run() == worker.EXIT_OK
         assert removed == []
 
-        stale_marker = pid_file_path(worker.PID_KEY)
+        monkeypatch.setattr("ccrecall.config.pid_file_path", lambda key: tmp_path / f".pid-{key}")
+        stale_marker = config_module.pid_file_path(worker.PID_KEY)
         stale_marker.parent.mkdir(parents=True, exist_ok=True)
-        stale_marker.write_text("999999", encoding="utf-8")
-        monkeypatch.undo()
+        stale_marker.write_text("99999999", encoding="utf-8")
 
         monkeypatch.setattr(worker, "load_settings", lambda: {"db_path": str(tmp_path / "unused.db")})
         monkeypatch.setattr(worker, "setup_logging", lambda *_args, **_kwargs: logging.getLogger("test-worker"))
+        monkeypatch.setattr(worker, "try_acquire_pid_file", original_try_acquire)
+        monkeypatch.setattr(worker, "remove_pid_file", original_remove_pid_file)
         monkeypatch.setattr(worker, "_run", lambda **_kwargs: worker.EXIT_OK)
 
         assert worker.run() == worker.EXIT_OK
@@ -1775,7 +1896,6 @@ assert "ccrecall.db" not in sys.modules
         monkeypatch.setattr(worker, "try_acquire_pid_file", lambda _key: True)
         monkeypatch.setattr(worker, "_run", lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("boom")))
 
-        with pytest.raises(RuntimeError, match="boom"):
-            worker.run()
+        assert worker.run() == worker.EXIT_ABORT
 
         assert cleanup_calls == [worker.PID_KEY]

@@ -33,6 +33,19 @@ from ccrecall.embeddings import EMBEDDING_DIM, EMBEDDING_MODEL, EMBEDDING_VERSIO
 from ccrecall.schema import SCHEMA, SCHEMA_CORE, SCHEMA_FTS5, detect_fts_support
 
 
+def _run_subprocess_probe(
+    code: str, *, timeout: int = 30, env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
+        env=env,
+    )
+
+
 class TestSchemaCreation:
     def test_all_tables_exist(self, memory_db):
         cursor = memory_db.cursor()
@@ -864,7 +877,73 @@ class TestSchemaVersioning:
         """A v6 DB gains the additive enrichment columns, and reopening does not disturb them."""
         db_path = tmp_path / "v6_to_v7.db"
         conn = sqlite3.connect(db_path)
-        conn.executescript(SCHEMA)
+        conn.executescript(
+            """
+            CREATE TABLE projects (
+              id INTEGER PRIMARY KEY,
+              path TEXT UNIQUE NOT NULL,
+              key TEXT UNIQUE NOT NULL,
+              name TEXT,
+              created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX idx_projects_key ON projects(key);
+
+            CREATE TABLE sessions (
+              id INTEGER PRIMARY KEY,
+              uuid TEXT UNIQUE NOT NULL,
+              project_id INTEGER REFERENCES projects(id),
+              parent_session_id INTEGER REFERENCES sessions(id),
+              git_branch TEXT,
+              cwd TEXT,
+              imported_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX idx_sessions_project ON sessions(project_id);
+
+            CREATE TABLE branches (
+              id INTEGER PRIMARY KEY,
+              session_id INTEGER NOT NULL REFERENCES sessions(id),
+              leaf_uuid TEXT NOT NULL,
+              is_active INTEGER DEFAULT 1,
+              started_at DATETIME,
+              ended_at DATETIME,
+              exchange_count INTEGER DEFAULT 0,
+              files_modified TEXT,
+              commits TEXT,
+              tool_counts TEXT,
+              aggregated_content TEXT,
+              context_summary TEXT,
+              context_summary_json TEXT,
+              summary_version INTEGER DEFAULT 0,
+              embedding_version INTEGER DEFAULT 0,
+              embedding_model TEXT,
+              summary_version_at_embed INTEGER,
+              UNIQUE(session_id)
+            );
+            CREATE INDEX idx_branches_session ON branches(session_id);
+            CREATE INDEX idx_branches_active ON branches(is_active);
+            CREATE INDEX idx_branches_summary_version ON branches(summary_version);
+            CREATE INDEX idx_branches_embedding_version ON branches(embedding_version);
+
+            CREATE VIRTUAL TABLE branches_fts USING fts5(
+              aggregated_content,
+              content=branches,
+              content_rowid=id,
+              tokenize='porter unicode61'
+            );
+            CREATE TRIGGER branches_ai AFTER INSERT ON branches BEGIN
+              INSERT INTO branches_fts(rowid, aggregated_content) VALUES (new.id, new.aggregated_content);
+            END;
+            CREATE TRIGGER branches_ad AFTER DELETE ON branches BEGIN
+              INSERT INTO branches_fts(branches_fts, rowid, aggregated_content)
+              VALUES('delete', old.id, old.aggregated_content);
+            END;
+            CREATE TRIGGER branches_au AFTER UPDATE ON branches BEGIN
+              INSERT INTO branches_fts(branches_fts, rowid, aggregated_content)
+              VALUES('delete', old.id, old.aggregated_content);
+              INSERT INTO branches_fts(rowid, aggregated_content) VALUES (new.id, new.aggregated_content);
+            END;
+            """
+        )
         conn.execute("INSERT INTO projects (path, key, name) VALUES ('/p-v6', '-p-v6', 'p-v6')")
         project_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
         conn.execute("INSERT INTO sessions (uuid, project_id) VALUES ('sess-v6', ?)", (project_id,))
@@ -907,6 +986,37 @@ class TestSchemaVersioning:
                     None,
                     None,
                 )
+                migrated.execute(
+                    "UPDATE branches SET aggregated_content = ? WHERE leaf_uuid = 'leaf-v6'",
+                    ("updated after reopen",),
+                )
+                assert migrated.execute(
+                    "SELECT aggregated_content FROM branches_fts WHERE rowid = (SELECT id FROM branches WHERE leaf_uuid = 'leaf-v6')"
+                ).fetchone() == ("updated after reopen",)
+
+    def test_v7_migration_skips_alters_when_branches_columns_are_already_present(self):
+        conn = sqlite3.connect(":memory:")
+        conn.executescript(SCHEMA)
+
+        statements: list[str] = []
+        conn.set_trace_callback(statements.append)
+        db_module.llm_summary_db._migrate_to_v7(conn)
+        conn.set_trace_callback(None)
+
+        assert not [statement for statement in statements if "ALTER TABLE branches ADD COLUMN" in statement]
+        conn.close()
+
+    def test_v7_migration_only_adds_missing_columns_for_partial_schema(self):
+        conn = sqlite3.connect(":memory:")
+        conn.execute(
+            "CREATE TABLE branches (id INTEGER PRIMARY KEY, summary_enrichment_json TEXT, summary_enrichment_version INTEGER DEFAULT 0)"
+        )
+
+        db_module.llm_summary_db._migrate_to_v7(conn)
+
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(branches)").fetchall()}
+        assert columns == {"id"} | set(db_module.llm_summary_db.V7_BRANCH_COLUMNS)
+        conn.close()
 
     def test_migration_from_v4_creates_ingestion_check_cache_table(self, tmp_path):
         """A v4 DB gains the ingestion check cache table and is stamped to v5 on open."""
@@ -1672,12 +1782,7 @@ class TestTransitiveImportIsolation:
             "found = heavy & set(sys.modules)\n"
             "assert not found, f'Heavy modules loaded: {found}'\n"
         )
-        result = subprocess.run(
-            [sys.executable, "-c", code],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
+        result = _run_subprocess_probe(code)
         assert result.returncode == 0, result.stderr
 
     def test_config_does_not_import_heavy_deps(self):
@@ -1694,23 +1799,13 @@ class TestTransitiveImportIsolation:
     def test_memory_context_does_not_import_heavy_deps(self):
         """memory_context.py must not import the LLM summarizer boundary."""
         code = "import ccrecall.hooks.memory_context\nimport sys\nassert 'ccrecall.llm_summarizer' not in sys.modules\n"
-        result = subprocess.run(
-            [sys.executable, "-c", code],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
+        result = _run_subprocess_probe(code)
         assert result.returncode == 0, result.stderr
 
     def test_memory_setup_does_not_import_heavy_deps(self):
         """memory_setup.py must not import the LLM summarizer boundary."""
         code = "import ccrecall.hooks.memory_setup\nimport sys\nassert 'ccrecall.llm_summarizer' not in sys.modules\n"
-        result = subprocess.run(
-            [sys.executable, "-c", code],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
+        result = _run_subprocess_probe(code)
         assert result.returncode == 0, result.stderr
 
     def test_clear_handoff_does_not_import_heavy_deps(self):
@@ -1746,12 +1841,7 @@ class TestTransitiveImportIsolation:
             "assert not found, f'Heavy modules loaded: {found}'\n"
             "assert 'ccrecall.db' not in loaded, 'ccrecall.db should not be imported'\n"
         )
-        result = subprocess.run(
-            [sys.executable, "-c", code],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
+        result = _run_subprocess_probe(code)
         assert result.returncode == 0, result.stderr
 
     def test_backfill_llm_summaries_entrypoint_imports_no_cli_graph_or_heavy_modules(self):
@@ -1766,12 +1856,7 @@ class TestTransitiveImportIsolation:
             "assert 'ccrecall.cli.commands' not in loaded\n"
             "assert 'ccrecall.db' not in loaded\n"
         )
-        result = subprocess.run(
-            [sys.executable, "-c", code],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
+        result = _run_subprocess_probe(code)
         assert result.returncode == 0, result.stderr
 
 
@@ -1785,12 +1870,9 @@ class TestClaudeConfigDir:
             f"assert DEFAULT_PROJECTS_DIR == Path({str(tmp_path)!r}) / 'projects', "
             f"f'got {{DEFAULT_PROJECTS_DIR}}'\n"
         )
-        result = subprocess.run(
-            [sys.executable, "-c", code],
-            capture_output=True,
-            text=True,
+        result = _run_subprocess_probe(
+            code,
             timeout=10,
-            check=False,
             env={**dict(os.environ), "CLAUDE_CONFIG_DIR": str(tmp_path)},
         )
         assert result.returncode == 0, result.stderr
@@ -1803,14 +1885,7 @@ class TestClaudeConfigDir:
             "f'got {DEFAULT_PROJECTS_DIR}'\n"
         )
         env = {k: v for k, v in os.environ.items() if k != "CLAUDE_CONFIG_DIR"}
-        result = subprocess.run(
-            [sys.executable, "-c", code],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
-            env=env,
-        )
+        result = _run_subprocess_probe(code, timeout=10, env=env)
         assert result.returncode == 0, result.stderr
 
     def test_empty_env_var_falls_back_to_dot_claude(self):
@@ -1820,12 +1895,9 @@ class TestClaudeConfigDir:
             "assert DEFAULT_PROJECTS_DIR == Path.home() / '.claude' / 'projects', "
             "f'got {DEFAULT_PROJECTS_DIR}'\n"
         )
-        result = subprocess.run(
-            [sys.executable, "-c", code],
-            capture_output=True,
-            text=True,
+        result = _run_subprocess_probe(
+            code,
             timeout=10,
-            check=False,
             env={**dict(os.environ), "CLAUDE_CONFIG_DIR": ""},
         )
         assert result.returncode == 0, result.stderr
@@ -1836,12 +1908,9 @@ class TestClaudeConfigDir:
             "from ccrecall.db import DEFAULT_PROJECTS_DIR as from_db\n"
             "assert from_config == from_db, f'{from_config} != {from_db}'\n"
         )
-        result = subprocess.run(
-            [sys.executable, "-c", code],
-            capture_output=True,
-            text=True,
+        result = _run_subprocess_probe(
+            code,
             timeout=10,
-            check=False,
             env={**dict(os.environ), "CLAUDE_CONFIG_DIR": str(tmp_path)},
         )
         assert result.returncode == 0, result.stderr
