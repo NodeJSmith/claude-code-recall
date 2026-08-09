@@ -57,6 +57,7 @@ def test_every_manifest_uuid_exists_in_its_fixture_and_fixtures_are_deidentified
         serialized_fixture = fixture_path.read_text(encoding="utf-8")
         assert "/home/" not in serialized_fixture
         assert "/Users/" not in serialized_fixture
+        assert "C:/Users/" not in serialized_fixture
         assert "C:\\Users\\" not in serialized_fixture
 
         for facts in scenario["facts"].values():

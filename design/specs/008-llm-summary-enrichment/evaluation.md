@@ -45,7 +45,7 @@ If your Claude CLI auth does not follow `HOME`, point `CLAUDE_CONFIG_DIR` at you
 
 ## Step 2: Materialize importable synthetic transcripts
 
-After this step, each scenario fixture exists under its own synthetic Claude project directory with a filename that contains its session UUID.
+After this step, each scenario fixture exists under its own synthetic Claude project directory with a filename that contains its session UUID. The synthetic directory name stays aligned with later DB lookup and review-bundle filenames, while the manifest scenario id remains the review label.
 
 ```bash
 uv run python - <<'PY'
@@ -54,17 +54,20 @@ from pathlib import Path
 
 repo = Path.cwd()
 fixtures = repo / "tests/fixtures/llm_summary_evaluation"
+manifest = json.loads((fixtures / "manifest.json").read_text(encoding="utf-8"))
 projects = Path.home().parent / "projects"
 projects.mkdir(parents=True, exist_ok=True)
 
-for fixture in sorted(fixtures.glob("*.jsonl")):
+for scenario in manifest["scenarios"]:
+    fixture = fixtures / scenario["fixture"]
     lines = [json.loads(line) for line in fixture.read_text(encoding="utf-8").splitlines() if line.strip()]
     session_id = next(row["sessionId"] for row in lines if "sessionId" in row)
-    project_dir = projects / fixture.stem
+    project_key = fixture.stem
+    project_dir = projects / project_key
     project_dir.mkdir(parents=True, exist_ok=True)
     target = project_dir / f"{session_id}.jsonl"
     target.write_text(fixture.read_text(encoding="utf-8"), encoding="utf-8")
-    print(f"prepared {fixture.stem}: {target.name}")
+    print(f"prepared {scenario['id']} -> {project_key}: {target.name}")
 PY
 ```
 
@@ -100,7 +103,7 @@ Expected outcome: progress/completion output only. No transcript text or raw Cla
 
 ## Step 5: Export a private review bundle
 
-After this step, you'll have local-only markdown and JSON files to inspect while filling in `evaluation-results.md`.
+After this step, you'll have local-only markdown and JSON files to inspect while filling in `evaluation-results.md`. The DB lookup uses the same synthetic project directory stem created in Step 2, while the output filenames stay keyed by manifest scenario id.
 
 ```bash
 uv run python - <<'PY'
@@ -119,23 +122,24 @@ db_path = Path.home() / ".ccrecall/conversations.db"
 with sqlite3.connect(db_path) as conn:
     conn.row_factory = sqlite3.Row
     for scenario in manifest["scenarios"]:
+        project_key = Path(scenario["fixture"]).stem
         row = conn.execute(
             """
-            SELECT b.context_summary,
-                   b.summary_enrichment_json,
-                   b.summary_enrichment_status,
+             SELECT b.context_summary,
+                    b.summary_enrichment_json,
+                    b.summary_enrichment_status,
                    b.summary_enrichment_source_hash,
                    b.summary_source_hash,
                    b.summary_enrichment_version
-            FROM branches b
-            JOIN sessions s ON s.id = b.session_id
-            JOIN projects p ON p.id = s.project_id
-            WHERE p.name = ? AND b.is_active = 1
-            """,
-            (scenario["id"],),
+             FROM branches b
+             JOIN sessions s ON s.id = b.session_id
+             JOIN projects p ON p.id = s.project_id
+             WHERE p.name = ? AND b.is_active = 1
+             """,
+            (project_key,),
         ).fetchone()
         if row is None:
-            raise SystemExit(f"missing imported branch for {scenario['id']}")
+            raise SystemExit(f"missing imported branch for {scenario['id']} ({project_key})")
 
         enrichment = json.loads(row["summary_enrichment_json"]) if row["summary_enrichment_json"] else None
         rendered = render_enriched_context_summary(
