@@ -5,7 +5,6 @@ import json
 import os
 import sqlite3
 import subprocess
-import sys
 import tempfile
 import time
 from pathlib import Path
@@ -21,6 +20,7 @@ from ccrecall.config import (
 )
 from ccrecall.db import CONTENT_ERROR_VERSION, get_connection
 from ccrecall.hooks import backfill_summaries, import_conversations
+from ccrecall.hooks.subprocess_utils import detached_popen_kwargs
 from ccrecall.hooks.warm_model import PID_KEY as WARM_MODEL_PID_KEY
 from ccrecall.summarizer import SUMMARY_VERSION
 
@@ -61,11 +61,7 @@ def _spawn_background(argv: list[str], pid_key: str) -> None:
             break
 
     # We hold the exclusive lock (fd is open for writing)
-    kwargs: dict = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
-    if sys.platform == "win32":
-        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
-    else:
-        kwargs["start_new_session"] = True
+    kwargs = detached_popen_kwargs()
     try:
         proc = subprocess.Popen(argv, **kwargs)  # noqa: S603 — spawns a trusted internal command, not untrusted input
         # Write child PID so the child process can clean up the file on exit

@@ -3,6 +3,7 @@
 import sqlite3
 
 from ccrecall.serialization import decode_json_column
+from ccrecall.summary_enrichment import valid_current_enrichment
 
 # Fallback topic truncation for a recall card when no precomputed topic exists.
 FALLBACK_TOPIC_MAX_CHARS = 200
@@ -67,7 +68,10 @@ def hydrate_cards(
         SELECT b.id as _branch_db_id, s.uuid as session_uuid,
                b.started_at, b.ended_at, b.exchange_count,
                b.files_modified, b.commits, s.git_branch,
-               p.name as project, b.context_summary_json{tool_counts_col}
+               p.name as project, b.context_summary_json,
+               b.summary_enrichment_json, b.summary_enrichment_version,
+               b.summary_enrichment_source_hash, b.summary_enrichment_status,
+               b.summary_source_hash{tool_counts_col}
         FROM branches b
         JOIN sessions s ON b.session_id = s.id
         JOIN projects p ON s.project_id = p.id
@@ -96,6 +100,11 @@ def hydrate_cards(
                 git_branch,
                 project,
                 summary_json,
+                summary_enrichment_json,
+                summary_enrichment_version,
+                summary_enrichment_source_hash,
+                summary_enrichment_status,
+                summary_source_hash,
                 tool_counts_json,
             ) = row
         else:
@@ -110,6 +119,11 @@ def hydrate_cards(
                 git_branch,
                 project,
                 summary_json,
+                summary_enrichment_json,
+                summary_enrichment_version,
+                summary_enrichment_source_hash,
+                summary_enrichment_status,
+                summary_source_hash,
             ) = row
             tool_counts_json = None
 
@@ -119,9 +133,22 @@ def hydrate_cards(
         tool_counts: dict = decode_json_column(tool_counts_json, {}) if has_tool_counts else {}
 
         topic: str | None = None
+        display_title: str | None = None
+        summary_preview: str | None = None
         summary = decode_json_column(summary_json, {})
         if summary:
             topic = summary.get("topic") or None
+
+        enrichment = decode_json_column(summary_enrichment_json, None)
+        if valid_current_enrichment(
+            enrichment,
+            status=summary_enrichment_status,
+            stored_source_hash=summary_enrichment_source_hash,
+            current_source_hash=summary_source_hash,
+            stored_enrichment_version=summary_enrichment_version,
+        ):
+            display_title = enrichment.get("title", {}).get("text") or None
+            summary_preview = enrichment.get("where_we_left_off", {}).get("text") or None
 
         # Graceful degrade: no context_summary_json → first user message as topic
         if not topic:
@@ -149,6 +176,8 @@ def hydrate_cards(
                 "started_at": started_at,
                 "ended_at": ended_at,
                 "topic": topic,
+                "display_title": display_title,
+                "summary_preview": summary_preview,
                 "exchange_count": exchange_count or 0,
                 "files_modified": files_modified,
                 "commits": commits,

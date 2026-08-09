@@ -1,0 +1,209 @@
+{
+  "version": 1,
+  "required_fact_categories": [
+    "latest_state",
+    "causal_history",
+    "decision_rationale",
+    "attempted_path",
+    "unresolved_work",
+    "handoff"
+  ],
+  "scenarios": [
+    {
+      "id": "bug-investigation",
+      "fixture": "bug-investigation.jsonl",
+      "theme": "bug investigation",
+      "facts": {
+        "latest_state": [
+          {
+            "id": "bug-latest-1",
+            "claim": "Checkpointing is in place, the duplicate-row repro stopped in the synthetic rerun, and crash-recovery coverage is still missing.",
+            "source_uuids": [
+              "10000000-0000-4000-8000-000000000012",
+              "10000000-0000-4000-8000-000000000014",
+              "10000000-0000-4000-8000-000000000016"
+            ]
+          }
+        ],
+        "causal_history": [
+          {
+            "id": "bug-history-1",
+            "claim": "Duplicate branch rows came from retrying a partially committed batch after acknowledgement lagged behind cursor advancement.",
+            "source_uuids": [
+              "10000000-0000-4000-8000-000000000002",
+              "10000000-0000-4000-8000-000000000004"
+            ]
+          }
+        ],
+        "decision_rationale": [
+          {
+            "id": "bug-decision-1",
+            "claim": "The branch chose acknowledged-batch checkpointing because it fixes retries explicitly, preserves ordering, and avoids the unique-index masking failure mode.",
+            "source_uuids": [
+              "10000000-0000-4000-8000-000000000006",
+              "10000000-0000-4000-8000-000000000008"
+            ]
+          }
+        ],
+        "attempted_path": [
+          {
+            "id": "bug-attempt-1",
+            "claim": "A savepoint-per-batch approach was tried and abandoned because a crash between commit and acknowledgement still replayed imported rows after restart.",
+            "source_uuids": [
+              "10000000-0000-4000-8000-000000000009",
+              "10000000-0000-4000-8000-000000000010"
+            ]
+          }
+        ],
+        "unresolved_work": [
+          {
+            "id": "bug-open-1",
+            "claim": "The remaining work is crash-recovery regression coverage plus stale PID cleanup verification for the retry worker.",
+            "source_uuids": [
+              "10000000-0000-4000-8000-000000000014"
+            ]
+          }
+        ],
+        "handoff": [
+          {
+            "id": "bug-handoff-1",
+            "claim": "The next person should add the crash-between-commit-and-ack regression, verify stale PID cleanup, and rerun the duplicate import fixture before merge.",
+            "source_uuids": [
+              "10000000-0000-4000-8000-000000000018"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "implementation-refactor",
+      "fixture": "implementation-refactor.jsonl",
+      "theme": "implementation refactor",
+      "facts": {
+        "latest_state": [
+          {
+            "id": "refactor-latest-1",
+            "claim": "Packet building is extracted and the worker is thinner, but startup import-guard coverage and one stale-packet reaper integration check are still missing.",
+            "source_uuids": [
+              "20000000-0000-4000-8000-000000000012",
+              "20000000-0000-4000-8000-000000000014"
+            ]
+          }
+        ],
+        "causal_history": [
+          {
+            "id": "refactor-history-1",
+            "claim": "The refactor started because the worker mixed selection, source validation, packet projection, and persistence in one hard-to-test path.",
+            "source_uuids": [
+              "20000000-0000-4000-8000-000000000002",
+              "20000000-0000-4000-8000-000000000004"
+            ]
+          }
+        ],
+        "decision_rationale": [
+          {
+            "id": "refactor-decision-1",
+            "claim": "The branch chose a shared source resolver so historical and current-session safety checks cannot drift apart.",
+            "source_uuids": [
+              "20000000-0000-4000-8000-000000000007",
+              "20000000-0000-4000-8000-000000000008"
+            ]
+          }
+        ],
+        "attempted_path": [
+          {
+            "id": "refactor-attempt-1",
+            "claim": "An in-place minimal patch was tried and abandoned because source validation and packet cleanup stayed interleaved and hard to reason about.",
+            "source_uuids": [
+              "20000000-0000-4000-8000-000000000005",
+              "20000000-0000-4000-8000-000000000006"
+            ]
+          }
+        ],
+        "unresolved_work": [
+          {
+            "id": "refactor-open-1",
+            "claim": "The remaining work is startup coverage proving the worker avoids embedding imports plus one post-move stale reaper integration check.",
+            "source_uuids": [
+              "20000000-0000-4000-8000-000000000012"
+            ]
+          }
+        ],
+        "handoff": [
+          {
+            "id": "refactor-handoff-1",
+            "claim": "The next maintainer should add the startup import-guard test first, then rerun the stale packet reaper integration case.",
+            "source_uuids": [
+              "20000000-0000-4000-8000-000000000016"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "planning-discovery",
+      "fixture": "planning-discovery.jsonl",
+      "theme": "planning and discovery",
+      "facts": {
+        "latest_state": [
+          {
+            "id": "planning-latest-1",
+            "claim": "The synthetic manual gate is defined, the live-provider CI idea is rejected, and the remaining work is keeping the local export procedure and results record current.",
+            "source_uuids": [
+              "30000000-0000-4000-8000-000000000012",
+              "30000000-0000-4000-8000-000000000014"
+            ]
+          }
+        ],
+        "causal_history": [
+          {
+            "id": "planning-history-1",
+            "claim": "The evaluation plan moved to synthetic local review because provider-backed CI would require credentials, be flaky, and risk recording live prompt traffic.",
+            "source_uuids": [
+              "30000000-0000-4000-8000-000000000002",
+              "30000000-0000-4000-8000-000000000004"
+            ]
+          }
+        ],
+        "decision_rationale": [
+          {
+            "id": "planning-decision-1",
+            "claim": "The branch decided to keep evaluation manual and local so the repo can store only synthetic fixtures and de-identified results while preserving privacy and repeatability.",
+            "source_uuids": [
+              "30000000-0000-4000-8000-000000000006",
+              "30000000-0000-4000-8000-000000000008"
+            ]
+          }
+        ],
+        "attempted_path": [
+          {
+            "id": "planning-attempt-1",
+            "claim": "A live-provider CI smoke test was explored and dropped because it would make the gate noisy and weaken the explicit local opt-in boundary.",
+            "source_uuids": [
+              "30000000-0000-4000-8000-000000000009",
+              "30000000-0000-4000-8000-000000000010"
+            ]
+          }
+        ],
+        "unresolved_work": [
+          {
+            "id": "planning-open-1",
+            "claim": "The remaining work is maintaining the private review-bundle export step and refreshing committed results whenever the prompt or schema changes.",
+            "source_uuids": [
+              "30000000-0000-4000-8000-000000000012"
+            ]
+          }
+        ],
+        "handoff": [
+          {
+            "id": "planning-handoff-1",
+            "claim": "The next maintainer should rerun all three synthetic fixtures after every prompt or schema change, refresh evaluation-results.md, and keep review bundles local-only.",
+            "source_uuids": [
+              "30000000-0000-4000-8000-000000000016"
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

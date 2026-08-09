@@ -52,6 +52,13 @@ CREATE TABLE IF NOT EXISTS branches (
   embedding_version INTEGER DEFAULT 0,
   embedding_model TEXT,
   summary_version_at_embed INTEGER,
+  summary_enrichment_json TEXT,
+  summary_enrichment_version INTEGER DEFAULT 0,
+  summary_enrichment_source_hash TEXT,
+  summary_enrichment_status TEXT,
+  summary_enrichment_error TEXT,
+  summary_enrichment_updated_at DATETIME,
+  summary_source_hash TEXT,
   UNIQUE(session_id, leaf_uuid)
 );
 CREATE INDEX IF NOT EXISTS idx_branches_session ON branches(session_id);

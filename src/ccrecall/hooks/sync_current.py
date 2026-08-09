@@ -10,6 +10,8 @@ import contextlib
 import json
 import logging
 import re
+import shutil
+import subprocess
 import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -30,8 +32,10 @@ from ccrecall.db import DEFAULT_PROJECTS_DIR, chunk_vec_queryable, get_connectio
 from ccrecall.embeddings import is_model_cached_on_disk
 from ccrecall.formatting import extract_project_name, normalize_cwd
 from ccrecall.health import REASON_VEC_UNAVAILABLE, clear_embedding_failure, record_embedding_failure
+from ccrecall.hooks.subprocess_utils import detached_popen_kwargs
 from ccrecall.models import HookInput
 from ccrecall.session_ops import sync_session
+from ccrecall.transcript_sources import discover_session_transcript_files
 
 _UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE)
 
@@ -87,39 +91,41 @@ def validate_session_id(session_id: str) -> bool:
     return bool(session_id and _UUID_RE.match(session_id))
 
 
-def _is_under(path: Path, base: Path) -> bool:
-    """Check whether path resolves to a location under base (symlink-escape guard)."""
-    try:
-        path.resolve().relative_to(base.resolve())
-        return True
-    except ValueError:
-        return False
-
-
 def get_session_file(projects_dir: Path, session_id: str) -> Path | None:
     """Find the JSONL file for a session ID. Validates path stays under projects_dir."""
-    for project_dir in projects_dir.iterdir():
-        if not project_dir.is_dir():
-            continue
-
-        # Check main session files
-        session_file = project_dir / f"{session_id}.jsonl"
-        if session_file.exists():
-            # Verify resolved path is still under projects_dir (symlink escape prevention)
-            if _is_under(session_file, projects_dir):
-                return session_file
-            continue
-
-        # Check subagent files
-        for subdir in project_dir.iterdir():
-            if subdir.is_dir():
-                subagents_dir = subdir / "subagents"
-                if subagents_dir.exists():
-                    for f in subagents_dir.glob(f"*{session_id}*.jsonl"):
-                        if _is_under(f, projects_dir):
-                            return f
-
+    discovery = discover_session_transcript_files(projects_dir, session_id)
+    if discovery.had_matching_unsafe_path:
+        return None
+    if discovery.files:
+        return discovery.files[0]
     return None
+
+
+def _project_root_for_session_file(session_file: Path, projects_dir: Path) -> Path:
+    """Resolve the top-level Claude project dir for a direct or nested subagent transcript."""
+    try:
+        relative = session_file.relative_to(projects_dir)
+    except ValueError:
+        return session_file.parent
+    if not relative.parts:
+        return session_file.parent
+    return projects_dir / relative.parts[0]
+
+
+def _spawn_llm_summary_worker(session_id: str, logger: logging.Logger) -> None:
+    """Best-effort detached spawn of the lightweight LLM summary worker."""
+    worker_path = shutil.which("ccrecall-llm-summaries")
+    if worker_path is None:
+        logger.warning("LLM summary worker spawn failed for session %s: executable not found", session_id[:8])
+        return
+
+    try:
+        subprocess.Popen(  # noqa: S603 — trusted internal console script
+            [worker_path, "--session", session_id, "--limit", "1", "--current-session"],
+            **detached_popen_kwargs(),
+        )
+    except OSError as exc:
+        logger.warning("LLM summary worker spawn failed for session %s: %s", session_id[:8], exc)
 
 
 def run(input_file: Path | None = None) -> None:
@@ -194,11 +200,7 @@ def run(input_file: Path | None = None) -> None:
 
         try:
             with get_connection(settings, load_vec=True) as conn:
-                project_dir = session_file.parent
-
-                # Handle subagent paths
-                if project_dir.name == "subagents":
-                    project_dir = project_dir.parent.parent
+                project_dir = _project_root_for_session_file(session_file, DEFAULT_PROJECTS_DIR)
 
                 # Embedding capability check: sqlite-vec availability determines whether
                 # embedding can run. Record a failure on unavailability; clear on success.
@@ -228,6 +230,9 @@ def run(input_file: Path | None = None) -> None:
             if vec_ok:
                 with contextlib.suppress(Exception):  # best-effort; must not affect hook behavior
                     clear_embedding_failure()
+
+            if new_messages > 0 and settings.get("llm_summaries_enabled", False):
+                _spawn_llm_summary_worker(session_id, logger)
 
             # Output for hook (continue = True means don't block)
             output = {"continue": True}

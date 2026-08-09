@@ -19,6 +19,7 @@ from ccrecall.summarizer import (
     build_context_summary_json,
     render_context_summary,
 )
+from ccrecall.summary_enrichment import render_enriched_context_summary
 
 # Uncached topic fallback truncates the first user message to this many chars.
 TOPIC_PREVIEW_MAX_CHARS = 120
@@ -142,6 +143,16 @@ def build_context(sessions: list[dict]) -> str:
     for i, session in enumerate(sessions):
         cached = session.get("context_summary")
         body = cached if cached else _build_fallback_context(session)
+        if cached:
+            body = render_enriched_context_summary(
+                body,
+                session.get("summary_enrichment"),
+                is_primary_session=i == 0,
+                status=session.get("summary_enrichment_status"),
+                stored_source_hash=session.get("summary_enrichment_source_hash"),
+                current_source_hash=session.get("summary_source_hash"),
+                stored_enrichment_version=session.get("summary_enrichment_version"),
+            )
         uuid = session.get("uuid", "")
         if uuid and i > 0:
             body = f"> Session ID: {uuid}\n\n{body}"
