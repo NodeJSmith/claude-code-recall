@@ -12,6 +12,11 @@
 
 * cache unchanged ingestion checks ([#105](https://github.com/NodeJSmith/claude-code-recall/issues/105)) ([64e8a39](https://github.com/NodeJSmith/claude-code-recall/commit/64e8a39fd9ad1742ae2170241630bf4c1bb36264))
 
+## 2026-08-08
+
+- add opt-in Claude-powered Branch Resume Brief enrichment (#106)
+- harden transcript discovery and capability-gated enrichment fallback (#106)
+
 ## 2026-08-04
 
 - cache confirmed-OK ingestion checks for faster repeated status audits (#105)
