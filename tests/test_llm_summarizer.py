@@ -555,9 +555,6 @@ class TestCapabilitySidecar:
         assert created_transcript.exists()
 
     def test_capability_check_ignores_existing_importable_transcript_changing_in_place(self, tmp_path):
-        """A concurrent, unrelated Claude Code session appending to its own transcript during the
-        check must not fail it — a real --no-session-persistence leak always creates a brand-new
-        session file, never mutates an already-existing one (see design.md's "new *.jsonl" gate)."""
 
         projects_dir = tmp_path / "projects"
         project = projects_dir / "proj"
