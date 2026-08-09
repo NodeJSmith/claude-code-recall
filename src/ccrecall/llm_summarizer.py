@@ -348,16 +348,15 @@ def invoke_claude(
     return InvocationResult(status=STATUS_OK, response_body=validated)
 
 
-def _snapshot_importable_transcripts(projects_dir: Path) -> dict[Path, tuple[int, int]]:
+def _snapshot_importable_transcripts(projects_dir: Path) -> set[Path]:
     if not projects_dir.exists():
-        return {}
-    found: dict[Path, tuple[int, int]] = {}
+        return set()
+    found: set[Path] = set()
     for path in discover_importable_transcript_files(projects_dir).files:
         if path.is_file() and not path.is_symlink():
             with contextlib.suppress(Exception):
                 extract_session_uuid(path)
-                path_stat = path.stat()
-                found[path.resolve()] = (path_stat.st_size, path_stat.st_mtime_ns)
+                found.add(path.resolve())
     return found
 
 
@@ -431,8 +430,13 @@ def run_capability_check(
             return CapabilityCheckResult(status=status, diagnostic=diagnostic)
 
         after = _snapshot_importable_transcripts(projects_dir)
-        if after != before:
-            diagnostic = "no-session-persistence changed importable transcripts; remove them before retrying"
+        # Only a *new* transcript path counts as a leak: a --no-session-persistence failure
+        # always writes a fresh session file (new UUID), never mutates an existing one. Ignoring
+        # in-place changes to pre-existing transcripts avoids false positives from unrelated,
+        # concurrent Claude Code sessions appending to their own transcripts during this check.
+        new_paths = after - before
+        if new_paths:
+            diagnostic = "no-session-persistence created a new importable transcript; remove it before retrying"
             write_capability_sidecar(
                 sidecar_path,
                 status=STATUS_CAPABILITY_UNVERIFIED,

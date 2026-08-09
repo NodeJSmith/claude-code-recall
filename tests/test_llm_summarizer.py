@@ -554,7 +554,7 @@ class TestCapabilitySidecar:
         assert result.status == STATUS_CAPABILITY_UNVERIFIED
         assert created_transcript.exists()
 
-    def test_capability_check_fails_if_existing_importable_transcript_changes_in_place(self, tmp_path):
+    def test_capability_check_ignores_existing_importable_transcript_changing_in_place(self, tmp_path):
 
         projects_dir = tmp_path / "projects"
         project = projects_dir / "proj"
@@ -577,7 +577,7 @@ class TestCapabilitySidecar:
             run=fake_run,
         )
 
-        assert result.status == STATUS_CAPABILITY_UNVERIFIED
+        assert result.status == STATUS_OK
 
     @pytest.mark.parametrize(
         "relative_path",
