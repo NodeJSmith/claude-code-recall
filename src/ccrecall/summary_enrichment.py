@@ -296,6 +296,21 @@ def _validate_list(value: object, *, label: str, max_items: int) -> list[Any]:
     return value
 
 
+def _stored_dict_list(value: object) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)]
+
+
+def _stored_source_uuid_strings(section: object) -> list[str]:
+    if not isinstance(section, dict):
+        return []
+    source_uuids = section.get("source_uuids")
+    if not isinstance(source_uuids, list):
+        return []
+    return [item for item in source_uuids if isinstance(item, str)]
+
+
 def _validate_key_decisions(value: object, *, active_branch_uuids: set[str] | None) -> list[dict[str, Any]]:
     validated: list[dict[str, Any]] = []
     for index, item in enumerate(_validate_list(value, label="key_decisions", max_items=MAX_KEY_DECISIONS), start=1):
@@ -500,9 +515,7 @@ def validate_claude_response_body_without_membership(value: object) -> dict[str,
     active_branch_uuids = {
         item
         for section in (body.get("title"), body.get("where_we_left_off"), body.get("how_we_got_here"))
-        if isinstance(section, dict)
-        for item in section.get("source_uuids", [])
-        if isinstance(item, str)
+        for item in _stored_source_uuid_strings(section)
     }
     active_branch_uuids |= {
         item
@@ -513,15 +526,12 @@ def validate_claude_response_body_without_membership(value: object) -> dict[str,
             "files_and_reasons",
             "continuation_hints",
         )
-        for section in body.get(list_name, [])
-        if isinstance(section, dict)
-        for item in section.get("source_uuids", [])
-        if isinstance(item, str)
+        for section in _stored_dict_list(body.get(list_name))
+        for item in _stored_source_uuid_strings(section)
     }
     valid_file_paths = {
         path
-        for section in body.get("files_and_reasons", [])
-        if isinstance(section, dict)
+        for section in _stored_dict_list(body.get("files_and_reasons"))
         for path in [section.get("path")]
         if isinstance(path, str)
     }
@@ -590,7 +600,7 @@ def compute_branch_summary_source_hash(cursor: sqlite3.Cursor, branch_db_id: int
                b.tool_counts, b.commits, s.git_branch
         FROM branches b
         JOIN sessions s ON b.session_id = s.id
-        WHERE b.id = ?
+        WHERE b.id = ? AND b.is_active = 1
         """,
         (branch_db_id,),
     )

@@ -94,6 +94,8 @@ def validate_session_id(session_id: str) -> bool:
 def get_session_file(projects_dir: Path, session_id: str) -> Path | None:
     """Find the JSONL file for a session ID. Validates path stays under projects_dir."""
     discovery = discover_session_transcript_files(projects_dir, session_id)
+    if discovery.had_matching_unsafe_path:
+        return None
     if discovery.files:
         return discovery.files[0]
     return None

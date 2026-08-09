@@ -58,6 +58,7 @@ from ccrecall.summary_enrichment import (
     SUMMARY_ENRICHMENT_VERSION,
     build_stored_enrichment_envelope,
     compute_branch_summary_source_hash,
+    normalize_project_file_reference,
 )
 
 PID_KEY = "ccrecall-backfill-llm-summaries"
@@ -83,7 +84,6 @@ SOURCE_STATUSES = {
     STATUS_SOURCE_CHANGED,
     STATUS_SOURCE_INCOMPLETE,
     STATUS_SOURCE_UNVERIFIED,
-    STATUS_UNSAFE_SOURCE_PATH,
 }
 
 
@@ -169,6 +169,25 @@ def _parse_json_list(value: object) -> list[str]:
     if not isinstance(data, list):
         return []
     return [item for item in data if isinstance(item, str) and item]
+
+
+def _normalize_files_modified(value: object, project_root: Path | None) -> set[str]:
+    normalized_paths: set[str] = set()
+    for item in _parse_json_string_list(value):
+        normalized = normalize_project_file_reference(item)
+        if normalized is None and project_root is not None:
+            candidate = Path(item)
+            if candidate.is_absolute():
+                with_relative_root = None
+                try:
+                    with_relative_root = candidate.relative_to(project_root)
+                except ValueError:
+                    with_relative_root = None
+                if with_relative_root is not None:
+                    normalized = normalize_project_file_reference(with_relative_root.as_posix())
+        if normalized is not None:
+            normalized_paths.add(normalized)
+    return normalized_paths
 
 
 def _select_branch_ids(
@@ -487,6 +506,11 @@ def _process_branch(
             )
             return BranchProcessResult(selected=True, enriched=False)
 
+        project_root = (
+            Path(row["project_root"]) if isinstance(row["project_root"], str) and row["project_root"] else None
+        )
+        normalized_files_modified = _normalize_files_modified(row["files_modified"], project_root)
+
         branch_metadata = {
             "session_uuid": row["session_uuid"],
             "branch_id": branch_id,
@@ -497,15 +521,12 @@ def _process_branch(
             "started_at": row["started_at"],
             "ended_at": row["ended_at"],
             "exchange_count": row["exchange_count"],
-            "files_modified": sorted(_parse_json_string_list(row["files_modified"])),
+            "files_modified": sorted(normalized_files_modified),
             "tool_counts": _parse_json_object(row["tool_counts"]) or {},
             "commits": _parse_json_list(row["commits"]),
             "source_transcript_paths": [str(path) for path in source_files],
         }
-        project_root = (
-            Path(row["project_root"]) if isinstance(row["project_root"], str) and row["project_root"] else None
-        )
-        valid_file_paths = _parse_json_string_list(row["files_modified"]) | branch_content_file_paths(
+        valid_file_paths = normalized_files_modified | branch_content_file_paths(
             source_files,
             active_branch_uuids,
             project_root=project_root,
@@ -684,6 +705,9 @@ def run(
             capability_sidecar_path=capability_sidecar_path,
             projects_dir=projects_dir,
         )
+    except Exception:
+        logging.getLogger(__name__).exception("LLM summary worker crashed")
+        return EXIT_ABORT
     finally:
         remove_pid_file(PID_KEY)
 
@@ -697,6 +721,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args(argv)
+    if args.days is not None and args.days < 1:
+        parser.error("--days must be >= 1")
+    if args.limit is not None and args.limit < 1:
+        parser.error("--limit must be >= 1")
     if args.current_session and args.session is None:
         parser.error("--current-session requires --session")
     return run(

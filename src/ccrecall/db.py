@@ -11,7 +11,7 @@ from pathlib import Path
 
 import sqlite_vec
 
-import ccrecall.llm_summary_db as llm_summary_db
+from ccrecall import llm_summary_db
 from ccrecall.config import DEFAULT_DB_PATH
 from ccrecall.config import DEFAULT_PROJECTS_DIR as DEFAULT_PROJECTS_DIR
 from ccrecall.embeddings import EMBEDDING_DIM, EMBEDDING_MODEL, EMBEDDING_VERSION

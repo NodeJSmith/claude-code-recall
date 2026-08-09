@@ -10,6 +10,22 @@ class SessionTranscriptDiscovery:
     had_matching_unsafe_path: bool = False
 
 
+def _dedupe_paths(paths: list[Path]) -> list[Path]:
+    unique: list[Path] = []
+    seen: set[Path] = set()
+    for path in paths:
+        if path not in seen:
+            seen.add(path)
+            unique.append(path)
+    return unique
+
+
+def _resolved_path(path: Path) -> Path | None:
+    with contextlib.suppress(OSError, RuntimeError):
+        return path.resolve()
+    return None
+
+
 def _symlinked_project_contains_session_candidate(project_dir: Path, session_uuid: str) -> bool:
     direct = project_dir / f"{session_uuid}.jsonl"
     if direct.exists() or direct.is_symlink():
@@ -29,16 +45,17 @@ def _symlinked_project_contains_session_candidate(project_dir: Path, session_uui
     visited: set[Path] = set()
     while pending:
         current = pending.pop()
-        if current in visited:
+        resolved = _resolved_path(current)
+        if resolved is None or resolved in visited:
             continue
-        visited.add(current)
+        visited.add(resolved)
         with contextlib.suppress(OSError):
             for child in sorted(current.iterdir()):
                 if child.name == "subagents":
                     with contextlib.suppress(OSError):
                         for _path in child.glob(f"*{session_uuid}*.jsonl"):
                             return True
-                elif child.is_dir():
+                elif child.is_dir() and not child.is_symlink():
                     pending.append(child)
     return False
 
@@ -142,13 +159,7 @@ def _discover_safe_project_transcript_files(project_dir: Path, projects_dir: Pat
             else:
                 had_unsafe_path = True
 
-    unique: list[Path] = []
-    seen: set[Path] = set()
-    for path in found:
-        if path not in seen:
-            seen.add(path)
-            unique.append(path)
-    return SessionTranscriptDiscovery(files=unique, had_unsafe_path=had_unsafe_path)
+    return SessionTranscriptDiscovery(files=_dedupe_paths(found), had_unsafe_path=had_unsafe_path)
 
 
 def discover_project_transcript_files(project_dir: Path, projects_dir: Path) -> SessionTranscriptDiscovery:
@@ -201,17 +212,12 @@ def _candidate_subagent_dirs(project_dir: Path, projects_dir: Path) -> tuple[lis
                     else:
                         pending.append(child)
 
-    unique: list[Path] = []
-    seen: set[Path] = set()
-    for candidate in candidates:
-        if candidate not in seen:
-            seen.add(candidate)
-            unique.append(candidate)
-    return unique, had_unsafe_path
+    return _dedupe_paths(candidates), had_unsafe_path
 
 
 def discover_session_transcript_files(projects_dir: Path, session_uuid: str) -> SessionTranscriptDiscovery:
-    found: list[Path] = []
+    direct_found: list[Path] = []
+    subagent_found: list[Path] = []
     had_unsafe_path = False
     had_matching_unsafe_path = False
     if not projects_dir.exists():
@@ -228,7 +234,7 @@ def discover_session_transcript_files(projects_dir: Path, session_uuid: str) -> 
         direct = project_dir / f"{session_uuid}.jsonl"
         if direct.exists() or direct.is_symlink():
             if _is_safe_transcript_file(direct, projects_dir):
-                found.append(direct)
+                direct_found.append(direct)
             else:
                 had_unsafe_path = True
                 had_matching_unsafe_path = True
@@ -245,18 +251,12 @@ def discover_session_transcript_files(projects_dir: Path, session_uuid: str) -> 
                 continue
             for path in sorted(subagents_dir.glob(f"*{session_uuid}*.jsonl")):
                 if _is_safe_transcript_file(path, projects_dir):
-                    found.append(path)
+                    subagent_found.append(path)
                 else:
                     had_unsafe_path = True
                     had_matching_unsafe_path = True
-    unique: list[Path] = []
-    seen: set[Path] = set()
-    for path in found:
-        if path not in seen:
-            seen.add(path)
-            unique.append(path)
     return SessionTranscriptDiscovery(
-        files=unique,
+        files=_dedupe_paths(direct_found + subagent_found),
         had_unsafe_path=had_unsafe_path,
         had_matching_unsafe_path=had_matching_unsafe_path,
     )
@@ -276,10 +276,4 @@ def discover_importable_transcript_files(projects_dir: Path) -> SessionTranscrip
         project_discovery = _discover_safe_project_transcript_files(project_dir, projects_dir)
         found.extend(project_discovery.files)
         had_unsafe_path = had_unsafe_path or project_discovery.had_unsafe_path
-    unique: list[Path] = []
-    seen: set[Path] = set()
-    for path in found:
-        if path not in seen:
-            seen.add(path)
-            unique.append(path)
-    return SessionTranscriptDiscovery(files=unique, had_unsafe_path=had_unsafe_path)
+    return SessionTranscriptDiscovery(files=_dedupe_paths(found), had_unsafe_path=had_unsafe_path)

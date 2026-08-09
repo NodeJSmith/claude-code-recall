@@ -17,6 +17,16 @@ from ccrecall.schema import SCHEMA_CORE, SCHEMA_FTS4, SCHEMA_FTS5, detect_fts_su
 # delta into _apply_migrations (see _migrate_to_v1 for the version-1 shape).
 SCHEMA_VERSION = 7
 
+V7_BRANCH_COLUMNS = {
+    "summary_enrichment_json": "TEXT",
+    "summary_enrichment_version": "INTEGER DEFAULT 0",
+    "summary_enrichment_source_hash": "TEXT",
+    "summary_enrichment_status": "TEXT",
+    "summary_enrichment_error": "TEXT",
+    "summary_enrichment_updated_at": "DATETIME",
+    "summary_source_hash": "TEXT",
+}
+
 
 def apply_base_pragmas(conn: sqlite3.Connection) -> None:
     """Set WAL mode, busy_timeout, and foreign-key enforcement for concurrent-safe access."""
@@ -231,18 +241,16 @@ def _migrate_to_v6(conn: sqlite3.Connection) -> None:
 
 def _migrate_to_v7(conn: sqlite3.Connection) -> None:
     """Version-7 migration: add LLM summary enrichment columns to branches."""
-    for column, decl in (
-        ("summary_enrichment_json", "TEXT"),
-        ("summary_enrichment_version", "INTEGER DEFAULT 0"),
-        ("summary_enrichment_source_hash", "TEXT"),
-        ("summary_enrichment_status", "TEXT"),
-        ("summary_enrichment_error", "TEXT"),
-        ("summary_enrichment_updated_at", "DATETIME"),
-        ("summary_source_hash", "TEXT"),
-    ):
+    existing_columns = {row[1] for row in conn.execute("PRAGMA table_info(branches)")}
+    if V7_BRANCH_COLUMNS.keys() <= existing_columns:
+        return
+
+    for column, decl in V7_BRANCH_COLUMNS.items():
+        if column in existing_columns:
+            continue
         try:
             conn.execute(f"ALTER TABLE branches ADD COLUMN {column} {decl}")
-        except sqlite3.OperationalError as e:  # noqa: PERF203
+        except sqlite3.OperationalError as e:
             if "duplicate column name" not in str(e):
                 raise
 

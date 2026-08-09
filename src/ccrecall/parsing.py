@@ -53,11 +53,11 @@ def parse_jsonl_file(filepath: Path) -> Generator[dict, None, None]:
     """Parse JSONL file, yielding user/assistant entries for import."""
     with open(filepath, encoding="utf-8", errors="replace") as f:
         for line in f:
-            line = line.strip()
-            if not line:
+            stripped_line = line.strip()
+            if not stripped_line:
                 continue
             try:
-                entry = json.loads(line)
+                entry = json.loads(stripped_line)
             except json.JSONDecodeError:
                 continue
             if not is_valid_entry(entry):
@@ -72,11 +72,11 @@ def parse_lines_with_uuids(lines: Iterable[str]) -> Generator[dict, None, None]:
     Shared by the full-file reader and session_tail's tail-bounded reader.
     """
     for line in lines:
-        line = line.strip()
-        if not line:
+        stripped_line = line.strip()
+        if not stripped_line:
             continue
         try:
-            entry = json.loads(line)
+            entry = json.loads(stripped_line)
         except json.JSONDecodeError:
             continue
         if not is_valid_entry(entry):
@@ -88,11 +88,11 @@ def parse_lines_with_uuids(lines: Iterable[str]) -> Generator[dict, None, None]:
 def parse_lines_with_uuids_and_numbers(lines: Iterable[str]) -> Generator[tuple[int, dict], None, None]:
     """Yield line-numbered parsed JSONL entries that carry a uuid."""
     for line_number, line in enumerate(lines, start=1):
-        line = line.strip()
-        if not line:
+        stripped_line = line.strip()
+        if not stripped_line:
             continue
         try:
-            entry = json.loads(line)
+            entry = json.loads(stripped_line)
         except json.JSONDecodeError:
             continue
         if not is_valid_entry(entry):

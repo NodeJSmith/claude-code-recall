@@ -55,6 +55,28 @@ PATH_REFERENCE_SEGMENT_RE = re.compile(r"[A-Za-z0-9_.-]+")
 PATH_REFERENCE_RE = re.compile(
     r"(?<![A-Za-z0-9_./@-])(?:/?[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+|[A-Za-z0-9_.-]+\.[A-Za-z0-9_.-]+|Dockerfile|Makefile|Justfile|LICENSE|NOTICE|\.gitignore)(?![A-Za-z0-9_./@-])"
 )
+AUTH_LOGIN_WORD_RE = re.compile(
+    r"\b(?:auth|authenticate|authentication|login|log[ -]?in|logged[ -]?in|"
+    r"sign[ -]?in|reauth(?:enticate|entication)?)\b"
+)
+CLAUDE_SECURITY_ARGV = (
+    "--safe-mode",
+    "--disable-slash-commands",
+    "--strict-mcp-config",
+    "--mcp-config",
+    '{"mcpServers":{}}',
+    "--tools",
+    "Read",
+    "--allowedTools",
+    "Read",
+    "--permission-mode",
+    "dontAsk",
+)
+CLAUDE_STATIC_OUTPUT_ARGV = (
+    "--output-format",
+    "json",
+    "--json-schema",
+)
 log = logging.getLogger(__name__)
 
 
@@ -121,11 +143,10 @@ def _canonical_json(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 
 
-def capability_fingerprint(packet_dir: Path | None = None) -> str:
-    packet_dir = packet_dir or Path("<packet-dir>")
-    security_shape = _build_capability_check_argv(packet_dir)[1:-1]
-    normalized_shape = ["<packet-dir>" if arg == str(packet_dir) else arg for arg in security_shape]
-    return hashlib.sha256("\0".join(normalized_shape).encode("utf-8")).hexdigest()
+def capability_fingerprint() -> str:
+    """Return a fingerprint of the flags that constrain Claude's capabilities."""
+    security_shape = _build_capability_check_argv(Path("<packet-dir>"))[1:-1]
+    return hashlib.sha256("\0".join(security_shape).encode("utf-8")).hexdigest()
 
 
 def read_capability_sidecar(path: Path) -> dict[str, Any] | None:
@@ -229,24 +250,12 @@ def build_claude_argv(packet_dir: Path, settings: dict[str, Any], prompt: str) -
     return [
         "claude",
         "-p",
-        "--safe-mode",
-        "--disable-slash-commands",
-        "--strict-mcp-config",
-        "--mcp-config",
-        '{"mcpServers":{}}',
+        *CLAUDE_SECURITY_ARGV,
         "--append-system-prompt",
         SUMMARIZER_SYSTEM_PROMPT,
-        "--tools",
-        "Read",
-        "--allowedTools",
-        "Read",
-        "--permission-mode",
-        "dontAsk",
         "--add-dir",
         str(packet_dir),
-        "--output-format",
-        "json",
-        "--json-schema",
+        *CLAUDE_STATIC_OUTPUT_ARGV,
         _canonical_json(CLAUDE_RESPONSE_SCHEMA),
         "--max-budget-usd",
         str(settings["llm_summary_max_budget_usd"]),
@@ -263,12 +272,12 @@ def _classify_process_failure(stderr: str, stdout: str) -> tuple[str, str | None
     text = "\n".join(bit for bit in (stderr, stdout) if bit).lower()
     if "unknown option" in text or "unrecognized option" in text or "usage:" in text:
         return STATUS_UNSUPPORTED_CLI, _cap(stderr or stdout)
-    if "login" in text or "auth" in text:
-        return STATUS_AUTH_REQUIRED, _cap(stderr or stdout)
     if "rate limit" in text:
         return STATUS_RATE_LIMITED, _cap(stderr or stdout)
     if "budget" in text:
         return STATUS_BUDGET_EXCEEDED, _cap(stderr or stdout)
+    if AUTH_LOGIN_WORD_RE.search(text):
+        return STATUS_AUTH_REQUIRED, _cap(stderr or stdout)
     if stdout:
         try:
             json.loads(stdout)
@@ -292,6 +301,11 @@ def _parse_claude_stdout(stdout: str) -> dict[str, Any]:
     data = json.loads(stdout)
     if not isinstance(data, dict):
         raise ValueError("stdout must be a json object")
+    if "structured_output" in data:
+        structured_output = data.get("structured_output")
+        if not isinstance(structured_output, dict):
+            raise ValueError("structured_output must be a json object")
+        return structured_output
     return data
 
 
@@ -352,22 +366,10 @@ def _build_capability_check_argv(packet_dir: Path) -> list[str]:
     return [
         "claude",
         "-p",
-        "--safe-mode",
-        "--disable-slash-commands",
-        "--strict-mcp-config",
-        "--mcp-config",
-        '{"mcpServers":{}}',
-        "--tools",
-        "Read",
-        "--allowedTools",
-        "Read",
-        "--permission-mode",
-        "dontAsk",
+        *CLAUDE_SECURITY_ARGV,
         "--add-dir",
         str(packet_dir),
-        "--output-format",
-        "json",
-        "--json-schema",
+        *CLAUDE_STATIC_OUTPUT_ARGV,
         _canonical_json({"type": "object", "additionalProperties": False, "properties": {}}),
         "--no-session-persistence",
         prompt,
