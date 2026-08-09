@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.22.1](https://github.com/NodeJSmith/claude-code-recall/compare/v0.22.0...v0.22.1) (2026-08-09)
+
+
+### Bug Fixes
+
+* scope capability check to new transcripts, not all changes ([#112](https://github.com/NodeJSmith/claude-code-recall/issues/112)) ([9a0cb50](https://github.com/NodeJSmith/claude-code-recall/commit/9a0cb507316447d94fedf7e094b08b7bc6c95483))
+
 ## [0.22.0](https://github.com/NodeJSmith/claude-code-recall/compare/v0.21.1...v0.22.0) (2026-08-09)
 
 
