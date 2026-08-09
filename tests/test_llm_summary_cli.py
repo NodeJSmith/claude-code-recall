@@ -3,6 +3,7 @@ from unittest.mock import patch
 
 import pytest
 
+from ccrecall.cli import main
 from ccrecall.cli.commands import cmd_backfill_llm_summaries
 from ccrecall.config import DEFAULT_SETTINGS
 from ccrecall.hooks.backfill_llm_summaries import EXIT_OK
@@ -47,7 +48,6 @@ class TestLlmSummaryCli:
         mock_check.assert_called_once_with(verbose=False)
 
     def test_help_discloses_opt_in_data_sharing_and_budget_threshold_behavior(self, capsys):
-        from ccrecall.cli import main
 
         argv = sys.argv
         try:
@@ -70,7 +70,6 @@ class TestLlmSummaryCli:
         assert "charge" in output
 
     def test_check_capability_is_mutually_exclusive_with_selectors(self, capsys):
-        from ccrecall.cli import main
 
         argv = sys.argv
         try:
@@ -100,7 +99,6 @@ class TestLlmSummaryCli:
         )
 
     def test_help_shows_canonical_flags(self, capsys):
-        from ccrecall.cli import main
 
         argv = sys.argv
         try:

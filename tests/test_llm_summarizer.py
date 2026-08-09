@@ -11,6 +11,26 @@ from pathlib import Path
 import pytest
 
 from ccrecall.file_hashing import transcript_file_hash
+from ccrecall.llm_summarizer import (
+    PacketBuildError,
+    _build_capability_check_argv,
+    _parse_source_entries,
+    branch_content_file_paths,
+    branch_packet,
+    build_claude_argv,
+    build_prompt,
+    capability_fingerprint,
+    discover_current_session_source_files,
+    get_claude_version,
+    invoke_claude,
+    read_capability_sidecar,
+    reap_stale_packets,
+    resolve_current_session_source_files,
+    resolve_historical_source_files,
+    run_capability_check,
+    verify_capability_sidecar,
+    write_capability_sidecar,
+)
 from ccrecall.summary_enrichment import (
     STATUS_AUTH_REQUIRED,
     STATUS_BUDGET_EXCEEDED,
@@ -49,7 +69,6 @@ def _write_jsonl(path: Path, entries: list[dict]) -> None:
 
 class TestClaudeInvocation:
     def test_build_claude_argv_uses_safe_read_only_boundary(self, tmp_path):
-        from ccrecall.llm_summarizer import build_claude_argv
 
         packet_dir = tmp_path / "packet"
         packet_dir.mkdir()
@@ -77,7 +96,6 @@ class TestClaudeInvocation:
         assert argv[-1] == "prompt text"
 
     def test_build_prompt_directs_latest_state_history_rationale_failures_and_evidenced_next_steps(self, tmp_path):
-        from ccrecall.llm_summarizer import build_prompt
 
         packet_dir = tmp_path / "packet"
         packet_dir.mkdir()
@@ -105,7 +123,6 @@ class TestClaudeInvocation:
         assert "Every factual section and list item must cite source_uuids from the allowlist." in prompt
 
     def test_invoke_claude_uses_argv_list_without_shell_and_isolated_cwd(self, tmp_path, monkeypatch):
-        from ccrecall.llm_summarizer import invoke_claude
 
         packet_dir = tmp_path / "packet"
         packet_dir.mkdir()
@@ -173,7 +190,6 @@ class TestClaudeInvocation:
         ],
     )
     def test_invoke_claude_classifies_expected_failures(self, tmp_path, outcome, expected_status):
-        from ccrecall.llm_summarizer import invoke_claude
 
         packet_dir = tmp_path / "packet"
         packet_dir.mkdir()
@@ -204,7 +220,6 @@ class TestClaudeInvocation:
             assert len(result.diagnostic) <= 240
 
     def test_invoke_claude_surfaces_budget_threshold_diagnostic_without_rewriting_it(self, tmp_path):
-        from ccrecall.llm_summarizer import invoke_claude
 
         packet_dir = tmp_path / "packet"
         packet_dir.mkdir()
@@ -237,7 +252,6 @@ class TestClaudeInvocation:
         assert "threshold" in result.diagnostic.lower()
 
     def test_get_claude_version_reads_version_at_boundary(self):
-        from ccrecall.llm_summarizer import get_claude_version
 
         def fake_run(argv, **kwargs):
             assert argv == ["claude", "--version"]
@@ -250,7 +264,6 @@ class TestClaudeInvocation:
         assert diagnostic is None
 
     def test_get_claude_version_reports_missing_binary(self):
-        from ccrecall.llm_summarizer import get_claude_version
 
         def fake_run(*_args, **_kwargs):
             raise FileNotFoundError("claude")
@@ -263,7 +276,6 @@ class TestClaudeInvocation:
 
 class TestCapabilitySidecar:
     def test_security_fingerprint_ignores_model_effort_and_budget(self, tmp_path):
-        from ccrecall.llm_summarizer import read_capability_sidecar, run_capability_check
 
         settings_variants = [
             {
@@ -308,13 +320,6 @@ class TestCapabilitySidecar:
         assert len(fingerprints) == 1
 
     def test_readiness_rejects_missing_stale_and_mismatched_sidecar(self, tmp_path):
-        from ccrecall.llm_summarizer import (
-            capability_fingerprint,
-            read_capability_sidecar,
-            verify_capability_sidecar,
-            write_capability_sidecar,
-        )
-
         sidecar = tmp_path / "capability.json"
         fingerprint = capability_fingerprint(packet_dir=tmp_path / "packet")
 
@@ -341,7 +346,6 @@ class TestCapabilitySidecar:
         assert status == STATUS_CAPABILITY_UNVERIFIED
 
     def test_budget_exceeded_in_sidecar_remains_distinct_until_successful_rerun(self, tmp_path):
-        from ccrecall.llm_summarizer import capability_fingerprint, run_capability_check, verify_capability_sidecar
 
         sidecar = tmp_path / "capability.json"
         fingerprint = capability_fingerprint(packet_dir=tmp_path / "packet")
@@ -387,7 +391,6 @@ class TestCapabilitySidecar:
         assert status == STATUS_OK
 
     def test_capability_fingerprint_tracks_capability_check_argv_shape(self, tmp_path):
-        from ccrecall.llm_summarizer import _build_capability_check_argv, capability_fingerprint
 
         packet_dir = tmp_path / "packet"
         argv = _build_capability_check_argv(packet_dir)
@@ -402,7 +405,6 @@ class TestCapabilitySidecar:
         )
 
     def test_capability_check_fails_if_new_importable_transcript_appears(self, tmp_path):
-        from ccrecall.llm_summarizer import run_capability_check
 
         projects_dir = tmp_path / "projects"
         project = projects_dir / "proj"
@@ -428,7 +430,6 @@ class TestCapabilitySidecar:
         assert created_transcript.exists()
 
     def test_capability_check_fails_if_existing_importable_transcript_changes_in_place(self, tmp_path):
-        from ccrecall.llm_summarizer import run_capability_check
 
         projects_dir = tmp_path / "projects"
         project = projects_dir / "proj"
@@ -463,7 +464,6 @@ class TestCapabilitySidecar:
     def test_capability_check_fails_if_new_subagent_or_parser_resolvable_transcript_appears(
         self, tmp_path, relative_path
     ):
-        from ccrecall.llm_summarizer import run_capability_check
 
         projects_dir = tmp_path / "projects"
         projects_dir.mkdir()
@@ -490,7 +490,6 @@ class TestCapabilitySidecar:
 
 class TestSourceResolution:
     def test_current_session_source_discovery_finds_direct_and_subagent_and_rejects_symlink(self, tmp_path):
-        from ccrecall.llm_summarizer import discover_current_session_source_files
 
         session_uuid = _u("session")
         projects_dir = tmp_path / "projects"
@@ -515,7 +514,6 @@ class TestSourceResolution:
     def test_current_session_source_discovery_skips_unrelated_project_tree_dirs_while_supporting_known_layouts(
         self, tmp_path, monkeypatch
     ):
-        from ccrecall.llm_summarizer import discover_current_session_source_files
 
         session_uuid = _u("session-no-rglob")
         projects_dir = tmp_path / "projects"
@@ -544,7 +542,6 @@ class TestSourceResolution:
         assert discover_current_session_source_files(projects_dir, session_uuid) == [direct, subagent]
 
     def test_current_session_source_discovery_finds_arbitrarily_nested_subagents_dirs(self, tmp_path):
-        from ccrecall.llm_summarizer import discover_current_session_source_files
 
         session_uuid = _u("session-nested-subagents")
         projects_dir = tmp_path / "projects"
@@ -559,7 +556,6 @@ class TestSourceResolution:
         assert discover_current_session_source_files(projects_dir, session_uuid) == [direct, nested_subagent]
 
     def test_current_session_source_discovery_rejects_top_level_symlink_project_dirs(self, tmp_path):
-        from ccrecall.llm_summarizer import resolve_current_session_source_files
 
         session_uuid = _u("session-project-symlink")
         projects_dir = tmp_path / "projects"
@@ -575,7 +571,6 @@ class TestSourceResolution:
         assert result.files == []
 
     def test_current_session_source_discovery_rejects_non_regular_candidates(self, tmp_path):
-        from ccrecall.llm_summarizer import discover_current_session_source_files
 
         session_uuid = _u("session-dir")
         projects_dir = tmp_path / "projects"
@@ -589,7 +584,6 @@ class TestSourceResolution:
         assert discover_current_session_source_files(projects_dir, session_uuid) == []
 
     def test_current_session_source_resolution_reports_unsafe_paths(self, tmp_path):
-        from ccrecall.llm_summarizer import resolve_current_session_source_files
 
         session_uuid = _u("session-unsafe")
         projects_dir = tmp_path / "projects"
@@ -605,7 +599,6 @@ class TestSourceResolution:
     def test_current_session_source_resolution_rejects_mixed_safe_and_unsafe_candidates_for_same_session(
         self, tmp_path
     ):
-        from ccrecall.llm_summarizer import resolve_current_session_source_files
 
         session_uuid = _u("session-mixed-safe-unsafe")
         projects_dir = tmp_path / "projects"
@@ -622,7 +615,6 @@ class TestSourceResolution:
         assert result.files == []
 
     def test_current_session_source_resolution_detects_nested_subagent_in_unsafe_state_tree(self, tmp_path):
-        from ccrecall.llm_summarizer import resolve_current_session_source_files
 
         session_uuid = _u("session-unsafe-state")
         projects_dir = tmp_path / "projects"
@@ -639,7 +631,6 @@ class TestSourceResolution:
         assert result.files == []
 
     def test_current_session_source_resolution_detects_nested_subagent_below_symlinked_state_descendant(self, tmp_path):
-        from ccrecall.llm_summarizer import resolve_current_session_source_files
 
         session_uuid = _u("session-unsafe-state-descendant")
         projects_dir = tmp_path / "projects"
@@ -656,7 +647,6 @@ class TestSourceResolution:
         assert result.files == []
 
     def test_branch_content_file_paths_collects_tool_input_prose_and_result_references(self, tmp_path):
-        from ccrecall.llm_summarizer import branch_content_file_paths
 
         (tmp_path / "src").mkdir()
         (tmp_path / "docs").mkdir()
@@ -719,7 +709,6 @@ class TestSourceResolution:
         }
 
     def test_branch_content_file_paths_accepts_root_level_readme_from_prose_and_tool_result(self, tmp_path):
-        from ccrecall.llm_summarizer import branch_content_file_paths
 
         (tmp_path / "README.md").write_text("", encoding="utf-8")
         session_file = tmp_path / "session-readme.jsonl"
@@ -766,7 +755,6 @@ class TestSourceResolution:
         ) == {"README.md"}
 
     def test_branch_content_file_paths_keeps_existing_root_level_repo_file(self, tmp_path):
-        from ccrecall.llm_summarizer import branch_content_file_paths
 
         (tmp_path / "example.com").write_text("", encoding="utf-8")
         session_file = tmp_path / "session-existing-root-file.jsonl"
@@ -787,7 +775,6 @@ class TestSourceResolution:
         assert branch_content_file_paths([session_file], {user_uuid}, project_root=tmp_path) == {"example.com"}
 
     def test_branch_content_file_paths_requires_file_like_final_segment_for_slash_paths(self, tmp_path):
-        from ccrecall.llm_summarizer import branch_content_file_paths
 
         (tmp_path / "config").mkdir()
         (tmp_path / "docs").mkdir()
@@ -856,7 +843,6 @@ class TestSourceResolution:
         }
 
     def test_branch_content_file_paths_drops_absolute_and_local_tool_input_paths(self, tmp_path):
-        from ccrecall.llm_summarizer import branch_content_file_paths
 
         (tmp_path / "src").mkdir()
         session_file = tmp_path / "session-unsafe-tool-paths.jsonl"
@@ -888,7 +874,6 @@ class TestSourceResolution:
         assert branch_content_file_paths([session_file], {assistant_uuid}, project_root=tmp_path) == {"src/kept.py"}
 
     def test_branch_content_file_paths_rejects_absolute_and_dotted_non_file_prose_tokens(self, tmp_path):
-        from ccrecall.llm_summarizer import branch_content_file_paths
 
         (tmp_path / "src").mkdir()
         (tmp_path / "src" / "real.py").write_text("", encoding="utf-8")
@@ -937,7 +922,6 @@ class TestSourceResolution:
         }
 
     def test_historical_sources_classify_changed_and_unverified(self, tmp_path):
-        from ccrecall.llm_summarizer import resolve_historical_source_files
 
         session_uuid = _u("history")
         changed = tmp_path / f"{session_uuid}.jsonl"
@@ -972,7 +956,6 @@ class TestSourceResolution:
         assert unresolved_result.status == STATUS_SOURCE_UNVERIFIED
 
     def test_historical_sources_reject_non_regular_and_symlink_candidates(self, tmp_path):
-        from ccrecall.llm_summarizer import resolve_historical_source_files
 
         session_uuid = _u("history-non-regular")
         directory_candidate = tmp_path / f"{session_uuid}.jsonl"
@@ -1004,7 +987,6 @@ class TestSourceResolution:
         assert result.files == []
 
     def test_historical_sources_exclude_unsafe_candidates_when_valid_sources_remain(self, tmp_path):
-        from ccrecall.llm_summarizer import resolve_historical_source_files
 
         session_uuid = _u("history-mixed-safe-unsafe")
         safe_source = tmp_path / f"{session_uuid}.jsonl"
@@ -1037,7 +1019,6 @@ class TestSourceResolution:
         assert result.files == [safe_source]
 
     def test_historical_sources_prioritize_unsafe_over_unverified(self, tmp_path):
-        from ccrecall.llm_summarizer import resolve_historical_source_files
 
         session_uuid = _u("history-unsafe-over-unverified")
         unverified = tmp_path / f"{session_uuid}.jsonl"
@@ -1069,7 +1050,6 @@ class TestSourceResolution:
         assert result.files == []
 
     def test_historical_sources_accept_tuple_rows_from_db_boundary(self, tmp_path):
-        from ccrecall.llm_summarizer import resolve_historical_source_files
 
         session_uuid = _u("history-tuple")
         source = tmp_path / f"{session_uuid}.jsonl"
@@ -1108,7 +1088,6 @@ class TestSourceResolution:
         ],
     )
     def test_historical_sources_accept_each_available_proof_field_independently(self, tmp_path, row):
-        from ccrecall.llm_summarizer import resolve_historical_source_files
 
         session_uuid = _u("history-partial-proof")
         source = tmp_path / f"{session_uuid}.jsonl"
@@ -1120,7 +1099,6 @@ class TestSourceResolution:
         assert result.files == [source]
 
     def test_historical_sources_reject_mismatched_partial_stat_proof(self, tmp_path):
-        from ccrecall.llm_summarizer import resolve_historical_source_files
 
         session_uuid = _u("history-partial-mismatch")
         source = tmp_path / f"{session_uuid}.jsonl"
@@ -1137,7 +1115,6 @@ class TestSourceResolution:
 
 class TestPacketBuilding:
     def test_packet_build_requires_complete_uuid_coverage_and_rejects_conflicting_duplicates(self, tmp_path):
-        from ccrecall.llm_summarizer import PacketBuildError, branch_packet
 
         session_uuid = _u("packet")
         u1 = _u("u1")
@@ -1202,7 +1179,6 @@ class TestPacketBuilding:
             pass
 
     def test_packet_build_deduplicates_identical_duplicate_entries_and_cleans_up_on_failure(self, tmp_path):
-        from ccrecall.llm_summarizer import PacketBuildError, branch_packet
 
         session_uuid = _u("packet-identical")
         u1 = _u("u1-identical")
@@ -1257,7 +1233,6 @@ class TestPacketBuilding:
         assert list(packet_parent.iterdir()) == []
 
     def test_packet_projection_outline_permissions_and_cleanup(self, tmp_path):
-        from ccrecall.llm_summarizer import branch_packet
 
         session_uuid = _u("projected")
         u1 = _u("u1")
@@ -1343,7 +1318,6 @@ class TestPacketBuilding:
         assert not packet_dir_holder["path"].exists()
 
     def test_branch_packet_cleanup_failure_logs_path_and_error_class_only(self, tmp_path, monkeypatch, caplog):
-        from ccrecall.llm_summarizer import branch_packet
 
         session_uuid = _u("cleanup-warning")
         u1 = _u("cleanup-warning-u1")
@@ -1386,7 +1360,6 @@ class TestPacketBuilding:
         assert "SENSITIVE-PACKET-PAYLOAD" not in caplog.text
 
     def test_capability_check_cleanup_failure_logs_path_and_error_class_only(self, tmp_path, monkeypatch, caplog):
-        from ccrecall.llm_summarizer import run_capability_check
 
         packet_dir = tmp_path / "capability-packet"
         cwd_dir = tmp_path / "capability-cwd"
@@ -1423,7 +1396,6 @@ class TestPacketBuilding:
         assert "SENSITIVE-CAPABILITY-PAYLOAD" not in caplog.text
 
     def test_packet_parser_keeps_source_line_numbers_through_shared_parsing_boundary(self, tmp_path):
-        from ccrecall.llm_summarizer import _parse_source_entries
 
         session_uuid = _u("line-numbered-parse")
         transcript = tmp_path / f"{session_uuid}.jsonl"
@@ -1447,7 +1419,6 @@ class TestPacketBuilding:
         assert [(line_number, entry["uuid"]) for line_number, entry in rows] == [(2, u1), (4, a1)]
 
     def test_packet_files_are_owner_only(self, tmp_path):
-        from ccrecall.llm_summarizer import branch_packet
 
         session_uuid = _u("packet-perms")
         u1 = _u("packet-perms-u1")
@@ -1475,7 +1446,6 @@ class TestPacketBuilding:
                 assert stat.S_IMODE((packet_dir / name).stat().st_mode) == 0o600
 
     def test_reap_stale_packet_directories_only_removes_dead_old_packets(self, tmp_path):
-        from ccrecall.llm_summarizer import reap_stale_packets
 
         packet_parent = tmp_path / "packets"
         stale = packet_parent / "stale"
