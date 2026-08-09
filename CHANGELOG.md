@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.22.0](https://github.com/NodeJSmith/claude-code-recall/compare/v0.21.1...v0.22.0) (2026-08-09)
+
+
+### Features
+
+* add opt-in LLM branch resume briefs ([#106](https://github.com/NodeJSmith/claude-code-recall/issues/106)) ([ab096e5](https://github.com/NodeJSmith/claude-code-recall/commit/ab096e5372c153c9fa6343cbac3d0616b7ad1f67))
+
 ## [0.21.1](https://github.com/NodeJSmith/claude-code-recall/compare/v0.21.0...v0.21.1) (2026-08-04)
 
 
