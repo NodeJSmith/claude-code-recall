@@ -1,7 +1,7 @@
 ---
 task_id: "T02"
 title: "Add atomic recap schema and branch order"
-status: "planned"
+status: "done"
 depends_on: []
 implements: ["FR#20", "FR#21", "AC#13", "AC#14"]
 ---

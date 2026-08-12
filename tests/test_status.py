@@ -288,7 +288,10 @@ class TestRunEmbeddingWatermarkCoverage:
             "INSERT INTO messages (session_id, uuid, role, content, timestamp) VALUES (?, ?, 'user', 'hi', ?)",
             (session_id, f"m-{i}", "2024-01-01T00:00:00Z"),
         )
-        cur.execute("INSERT INTO branch_messages (branch_id, message_id) VALUES (?, ?)", (branch_id, cur.lastrowid))
+        cur.execute(
+            "INSERT INTO branch_messages (branch_id, message_id, position) VALUES (?, ?, 0)",
+            (branch_id, cur.lastrowid),
+        )
         conn.commit()
 
     def test_reports_partial_coverage(self, tmp_path, capsys):

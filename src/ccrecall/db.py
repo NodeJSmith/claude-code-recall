@@ -157,7 +157,7 @@ def fetch_branch_messages(cursor: sqlite3.Cursor, branch_id: int, include_notifi
         JOIN messages m ON bm.message_id = m.id
         WHERE bm.branch_id = ?
           AND (? OR COALESCE(m.is_notification, 0) = 0)
-        ORDER BY m.timestamp ASC
+        ORDER BY m.timestamp ASC, m.id ASC
         """,
         (branch_id, include_notifications),
     )
@@ -243,6 +243,7 @@ _migrate_to_v4 = llm_summary_db._migrate_to_v4
 _migrate_to_v5 = llm_summary_db._migrate_to_v5
 _migrate_to_v6 = llm_summary_db._migrate_to_v6
 _migrate_to_v7 = llm_summary_db._migrate_to_v7
+_migrate_to_v8 = llm_summary_db._migrate_to_v8
 
 
 def _apply_migrations(conn: sqlite3.Connection) -> None:

@@ -18,6 +18,7 @@ from conftest import NoCloseConn
 from conftest import make_jsonl_entry as _entry
 from conftest import write_jsonl as _write_jsonl
 
+from ccrecall import llm_summary_db
 from ccrecall.hooks.backfill_query import BATCH_SIZE, EXIT_ABORT, EXIT_OK
 from ccrecall.hooks.backfill_tool_content import backfill_session, run, select_batch
 from ccrecall.schema import SCHEMA
@@ -29,6 +30,8 @@ def _make_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(SCHEMA)
+    conn.execute("BEGIN IMMEDIATE")
+    llm_summary_db._migrate_to_v8(conn)
     conn.commit()
     return conn
 
@@ -74,8 +77,11 @@ def _seed_session(
     )
     branch_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
-    for msg_id in msg_ids:
-        conn.execute("INSERT INTO branch_messages (branch_id, message_id) VALUES (?, ?)", (branch_id, msg_id))
+    for position, msg_id in enumerate(msg_ids):
+        conn.execute(
+            "INSERT INTO branch_messages (branch_id, message_id, position) VALUES (?, ?, ?)",
+            (branch_id, msg_id, position),
+        )
 
     conn.execute(
         "INSERT INTO import_log (file_path, file_hash, messages_imported) VALUES (?, ?, ?)",
@@ -98,6 +104,47 @@ def _run_backfill(conn: sqlite3.Connection, *, days=None, limit=None, status=Fal
 
 
 class TestBackfillCore:
+    def test_existing_messages_repair_migrated_branch_positions(self, tmp_path):
+        filepath = tmp_path / "ordered.jsonl"
+        _write_jsonl(
+            filepath,
+            [
+                _entry("u1", None, "2026-01-01T10:00:00Z", "user", "start"),
+                _entry("a1", "u1", "2026-01-01T10:00:20Z", "assistant", "middle"),
+                _entry("a2", "a1", "2026-01-01T10:00:30Z", "assistant", "end"),
+            ],
+        )
+        conn = _make_conn()
+        session_id, branch_id = _seed_session(
+            conn,
+            filepath=filepath,
+            existing_messages=[
+                ("u1", "user", "start", "2026-01-01T10:00:00Z"),
+                ("a1", "assistant", "middle", "2026-01-01T10:00:20Z"),
+                ("a2", "assistant", "end", "2026-01-01T10:00:30Z"),
+            ],
+        )
+        conn.execute(
+            "UPDATE branch_messages SET position = CASE "
+            "WHEN position = 1 THEN 12 WHEN position = 2 THEN 11 ELSE position END "
+            "WHERE branch_id = ?",
+            (branch_id,),
+        )
+        conn.execute("UPDATE branch_messages SET position = position - 10 WHERE branch_id = ?", (branch_id,))
+        assert conn.execute(
+            "SELECT m.uuid FROM branch_messages bm JOIN messages m ON m.id = bm.message_id "
+            "WHERE bm.branch_id = ? ORDER BY bm.position",
+            (branch_id,),
+        ).fetchall() == [("u1",), ("a2",), ("a1",)]
+
+        assert backfill_session(conn.cursor(), session_id, [filepath]) is True
+
+        assert conn.execute(
+            "SELECT m.uuid FROM branch_messages bm JOIN messages m ON m.id = bm.message_id "
+            "WHERE bm.branch_id = ? ORDER BY bm.position",
+            (branch_id,),
+        ).fetchall() == [("u1",), ("a1",), ("a2",)]
+
     def test_update_existing_row_and_insert_tool_only_row(self, tmp_path):
         """A session with one text+tool assistant row (pre-existing, tool_content
         NULL) and one tool-only assistant row (never inserted, forward-sync
@@ -661,8 +708,11 @@ class TestBackfillMultiFile:
             (session_id,),
         )
         branch_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-        for mid in conn.execute("SELECT id FROM messages WHERE session_id = ?", (session_id,)).fetchall():
-            conn.execute("INSERT INTO branch_messages (branch_id, message_id) VALUES (?, ?)", (branch_id, mid[0]))
+        for position, mid in enumerate(conn.execute("SELECT id FROM messages WHERE session_id = ?", (session_id,))):
+            conn.execute(
+                "INSERT INTO branch_messages (branch_id, message_id, position) VALUES (?, ?, ?)",
+                (branch_id, mid[0], position),
+            )
         conn.execute("INSERT INTO import_log (file_path, file_hash) VALUES (?, 'h1')", (str(parent),))
         conn.execute("INSERT INTO import_log (file_path, file_hash) VALUES (?, 'h2')", (str(agent),))
         conn.commit()

@@ -107,9 +107,12 @@ class TestSessionSelection:
     def _link_message_to_branch(self, memory_db: sqlite3.Connection, branch_id: int, message_id: int):
         """Helper to link a message to a branch."""
         cursor = memory_db.cursor()
+        position = cursor.execute("SELECT COUNT(*) FROM branch_messages WHERE branch_id = ?", (branch_id,)).fetchone()[
+            0
+        ]
         cursor.execute(
-            "INSERT INTO branch_messages (branch_id, message_id) VALUES (?, ?)",
-            (branch_id, message_id),
+            "INSERT INTO branch_messages (branch_id, message_id, position) VALUES (?, ?, ?)",
+            (branch_id, message_id, position),
         )
         memory_db.commit()
 

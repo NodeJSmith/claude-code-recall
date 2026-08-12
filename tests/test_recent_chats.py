@@ -63,7 +63,7 @@ def _seed_sessions(conn: sqlite3.Connection) -> list[str]:
             (sess_id, f"msg-rc-{i + 1}", "user", f"User message {i + 1}", ts_start),
         )
         msg_id = cursor.lastrowid
-        cursor.execute("INSERT INTO branch_messages VALUES (?, ?)", (branch_id, msg_id))
+        cursor.execute("INSERT INTO branch_messages VALUES (?, ?, ?)", (branch_id, msg_id, 0))
 
     conn.commit()
     return uuids

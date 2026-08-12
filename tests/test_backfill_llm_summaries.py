@@ -157,8 +157,8 @@ def _seed_branch(
         )
         message_ids = [row[0] for row in cursor.execute("SELECT id FROM messages ORDER BY id").fetchall()]
         cursor.executemany(
-            "INSERT INTO branch_messages (branch_id, message_id) VALUES (?, ?)",
-            [(branch_id, message_id) for message_id in message_ids],
+            "INSERT INTO branch_messages (branch_id, message_id, position) VALUES (?, ?, ?)",
+            [(branch_id, message_id, position) for position, message_id in enumerate(message_ids)],
         )
         cursor.execute(
             """

@@ -96,8 +96,8 @@ def _insert_branch_with_messages(
         )
         user_msg_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
         conn.execute(
-            "INSERT INTO branch_messages(branch_id, message_id) VALUES (?, ?)",
-            (branch_id, user_msg_id),
+            "INSERT INTO branch_messages(branch_id, message_id, position) VALUES (?, ?, ?)",
+            (branch_id, user_msg_id, i * 2),
         )
 
         conn.execute(
@@ -106,8 +106,8 @@ def _insert_branch_with_messages(
         )
         asst_msg_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
         conn.execute(
-            "INSERT INTO branch_messages(branch_id, message_id) VALUES (?, ?)",
-            (branch_id, asst_msg_id),
+            "INSERT INTO branch_messages(branch_id, message_id, position) VALUES (?, ?, ?)",
+            (branch_id, asst_msg_id, i * 2 + 1),
         )
 
     conn.commit()
@@ -140,7 +140,10 @@ def _insert_assistant_only_branch(conn: sqlite3.Connection, num_messages: int = 
             (session_id, f"a-{uid}-{i}", f"Assistant message {i}", f"2024-01-01T{ts_h:02d}:00:00Z"),
         )
         msg_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-        conn.execute("INSERT INTO branch_messages(branch_id, message_id) VALUES (?, ?)", (branch_id, msg_id))
+        conn.execute(
+            "INSERT INTO branch_messages(branch_id, message_id, position) VALUES (?, ?, ?)",
+            (branch_id, msg_id, i),
+        )
 
     conn.commit()
     return branch_id

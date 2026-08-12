@@ -222,16 +222,19 @@ def find_all_branches(all_entries: list[dict]) -> list[dict]:
     latest = select_active_leaf_entry(all_entries)
     if latest is None:
         return []
-    active_uuids: set[str] = set()
+    reverse_path: list[str] = []
     current: str | None = latest["uuid"]
     while current:
-        active_uuids.add(current)
+        reverse_path.append(current)
         current = uuid_to_parent.get(current)
+    ordered_uuids = list(reversed(reverse_path))
+    active_uuids = set(ordered_uuids)
 
     branches: list[dict] = [
         {
             "leaf_uuid": latest["uuid"],
             "uuids": active_uuids,
+            "ordered_uuids": ordered_uuids,
             "is_active": True,
         }
     ]

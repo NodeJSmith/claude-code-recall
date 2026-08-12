@@ -16,6 +16,7 @@ from conftest import VEC_SKIP, make_vec_conn
 
 import ccrecall.config as config_module
 import ccrecall.db as db_module
+import ccrecall.llm_summary_db as llm_summary_db
 from ccrecall.config import (
     DEFAULT_SETTINGS,
     atomic_write_json,
@@ -89,6 +90,203 @@ class TestSchemaCreation:
         memory_db.commit()
         cursor.execute("SELECT uuid FROM sessions")
         assert cursor.fetchone()[0] == "sess-1"
+
+
+class TestRecapSchemaMigration:
+    def test_capability_distinguishes_missing_partial_and_complete_schema(self, tmp_path):
+        db_path = tmp_path / "recap-capability.db"
+        conn = sqlite3.connect(db_path)
+        assert llm_summary_db.recap_schema_capability(conn) == "unavailable"
+        conn.execute("CREATE TABLE session_recap_jobs (session_id INTEGER PRIMARY KEY)")
+        assert llm_summary_db.recap_schema_capability(conn) == "partial"
+        conn.close()
+
+        with get_connection(settings={"db_path": str(tmp_path / "complete.db")}) as migrated:
+            assert llm_summary_db.recap_schema_capability(migrated) == "ready"
+            migrated.execute("PRAGMA user_version = 7")
+            assert llm_summary_db.recap_schema_capability(migrated) == "out_of_date"
+
+    def test_capability_read_only_does_not_repair_partial_schema(self, tmp_path):
+        db_path = tmp_path / "partial.db"
+        conn = sqlite3.connect(db_path)
+        conn.executescript(SCHEMA_CORE)
+        conn.execute("ALTER TABLE branches ADD COLUMN recap_input_hash TEXT")
+        conn.commit()
+        before = conn.execute("PRAGMA schema_version").fetchone()[0]
+        conn.close()
+
+        readonly = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        readonly.execute("PRAGMA query_only = ON")
+        assert llm_summary_db.recap_schema_capability(readonly) == "partial"
+        readonly.close()
+
+        conn = sqlite3.connect(db_path)
+        assert conn.execute("PRAGMA schema_version").fetchone()[0] == before
+        assert conn.execute("SELECT name FROM sqlite_master WHERE name = 'session_recap_jobs'").fetchone() is None
+        conn.close()
+
+    def test_capability_requires_active_attempt_update_trigger(self, tmp_path):
+        db_path = tmp_path / "missing-update-trigger.db"
+        with get_connection(settings={"db_path": str(db_path)}) as conn:
+            conn.execute("DROP TRIGGER session_recap_jobs_active_attempt_session_update")
+
+        readonly = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        readonly.execute("PRAGMA query_only = ON")
+        assert llm_summary_db.recap_schema_capability(readonly) == "partial"
+        readonly.close()
+
+    def test_capability_rejects_non_enforcing_ownership_trigger(self, tmp_path):
+        db_path = tmp_path / "no-op-ownership-trigger.db"
+        with get_connection(settings={"db_path": str(db_path)}) as conn:
+            conn.execute("DROP TRIGGER session_recap_jobs_active_attempt_session")
+            conn.execute(
+                "CREATE TRIGGER session_recap_jobs_active_attempt_session "
+                "BEFORE INSERT ON session_recap_jobs "
+                "BEGIN -- WHERE id = NEW.active_attempt_id AND session_id = NEW.session_id "
+                "AND job_session_id = NEW.session_id\nSELECT 1; END"
+            )
+
+        readonly = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        readonly.execute("PRAGMA query_only = ON")
+        assert llm_summary_db.recap_schema_capability(readonly) == "partial"
+        readonly.close()
+
+    def test_no_migrate_connection_leaves_legacy_schema_untouched(self, tmp_path):
+        db_path = tmp_path / "legacy.db"
+        conn = sqlite3.connect(db_path)
+        conn.execute("CREATE TABLE sentinel (id INTEGER PRIMARY KEY)")
+        conn.commit()
+        conn.close()
+
+        hook_conn = llm_summary_db.open_no_migrate_connection({"db_path": str(db_path)})
+        assert hook_conn.execute("SELECT name FROM sqlite_master WHERE name = 'branches'").fetchone() is None
+        hook_conn.close()
+
+    def test_migration_backfills_positions_and_claim_schema_atomically(self, tmp_path):
+        db_path = tmp_path / "recap-upgrade.db"
+        conn = sqlite3.connect(db_path)
+        conn.executescript(SCHEMA_CORE)
+        conn.execute("INSERT INTO projects(path, key) VALUES ('/p', 'p')")
+        conn.execute("INSERT INTO sessions(uuid, project_id) VALUES ('s', 1)")
+        conn.execute("INSERT INTO branches(session_id, leaf_uuid) VALUES (1, 'leaf')")
+        conn.execute(
+            "INSERT INTO messages(session_id, uuid, timestamp, role, content) VALUES (1, 'late', '2025-01-02', 'user', 'late')"
+        )
+        conn.execute("INSERT INTO branch_messages VALUES (1, 1)")
+        conn.execute(
+            "INSERT INTO messages(session_id, uuid, timestamp, role, content) VALUES (1, 'early', '2025-01-01', 'user', 'early')"
+        )
+        conn.execute("INSERT INTO branch_messages VALUES (1, 2)")
+        conn.execute("PRAGMA user_version = 7")
+        conn.commit()
+        conn.close()
+
+        with get_connection(settings={"db_path": str(db_path)}) as migrated:
+            assert migrated.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+            assert migrated.execute(
+                "SELECT message_id, position FROM branch_messages ORDER BY position"
+            ).fetchall() == [(2, 0), (1, 1)]
+            assert llm_summary_db.recap_schema_capability(migrated) == "ready"
+            with pytest.raises(sqlite3.IntegrityError):
+                migrated.execute("INSERT INTO branch_messages(branch_id, message_id, position) VALUES (1, 1, 0)")
+
+    def test_migration_backfills_positions_by_normalized_timestamp(self, tmp_path):
+        db_path = tmp_path / "offset-order.db"
+        conn = sqlite3.connect(db_path)
+        conn.executescript(SCHEMA_CORE)
+        conn.execute("INSERT INTO projects(path, key) VALUES ('/p', 'p')")
+        conn.execute("INSERT INTO sessions(uuid, project_id) VALUES ('s', 1)")
+        conn.execute("INSERT INTO branches(session_id, leaf_uuid) VALUES (1, 'leaf')")
+        conn.execute(
+            "INSERT INTO messages(session_id, uuid, timestamp, role, content) "
+            "VALUES (1, 'utc-midnight', '2025-01-01T00:00:00Z', 'user', 'midnight')"
+        )
+        conn.execute("INSERT INTO branch_messages VALUES (1, 1)")
+        conn.execute(
+            "INSERT INTO messages(session_id, uuid, timestamp, role, content) "
+            "VALUES (1, 'offset-earlier', '2025-01-01T00:30:00+01:00', 'user', 'earlier')"
+        )
+        conn.execute("INSERT INTO branch_messages VALUES (1, 2)")
+        conn.execute("PRAGMA user_version = 7")
+        conn.commit()
+        conn.close()
+
+        with get_connection(settings={"db_path": str(db_path)}) as migrated:
+            assert migrated.execute(
+                "SELECT message_id, position FROM branch_messages ORDER BY position"
+            ).fetchall() == [(2, 0), (1, 1)]
+
+    def test_migration_rollback_hides_partial_claim_schema(self, tmp_path):
+        db_path = tmp_path / "rollback.db"
+        conn = sqlite3.connect(db_path)
+        conn.executescript(SCHEMA_CORE)
+        conn.commit()
+        conn.execute("BEGIN IMMEDIATE")
+        llm_summary_db._migrate_to_v8(conn)
+        observer = sqlite3.connect(db_path)
+        assert llm_summary_db.recap_schema_capability(observer) == "unavailable"
+        observer.close()
+        conn.execute("ROLLBACK")
+        assert llm_summary_db.recap_schema_capability(conn) == "unavailable"
+        conn.close()
+
+    def test_fresh_and_upgraded_recap_schema_shapes_match(self, tmp_path):
+        fresh_path = tmp_path / "fresh.db"
+        upgraded_path = tmp_path / "upgraded.db"
+        conn = sqlite3.connect(upgraded_path)
+        conn.executescript(SCHEMA_CORE)
+        conn.execute("PRAGMA user_version = 7")
+        conn.commit()
+        conn.close()
+
+        def schema_shape(conn: sqlite3.Connection) -> list[tuple[str, str | None]]:
+            return conn.execute(
+                "SELECT name, sql FROM sqlite_master "
+                "WHERE name = 'branch_messages' "
+                "OR name LIKE 'session_recap_%' OR name LIKE 'idx_recap_%' "
+                "ORDER BY name"
+            ).fetchall()
+
+        with get_connection(settings={"db_path": str(fresh_path)}) as fresh:
+            fresh_shape = schema_shape(fresh)
+            assert llm_summary_db.recap_schema_capability(fresh) == "ready"
+        with get_connection(settings={"db_path": str(upgraded_path)}) as upgraded:
+            assert schema_shape(upgraded) == fresh_shape
+            assert llm_summary_db.recap_schema_capability(upgraded) == "ready"
+
+    def test_active_attempt_must_belong_to_its_job_session(self, tmp_path):
+        with get_connection(settings={"db_path": str(tmp_path / "owners.db")}) as conn:
+            conn.execute("INSERT INTO sessions(uuid) VALUES ('one'), ('two')")
+            conn.execute(
+                "INSERT INTO session_recap_jobs(session_id, trigger, state, requested_at, updated_at) "
+                "VALUES (1, 'test', 'pending', 'now', 'now'), (2, 'test', 'pending', 'now', 'now')"
+            )
+            conn.execute(
+                "INSERT INTO session_recap_attempts("
+                "session_id, job_session_id, input_hash, input_contract_version, policy_version, "
+                "recap_contract_version, claim_token, trigger, state, created_at"
+                ") VALUES (2, 2, 'hash', 1, 1, 2, 0, 'test', 'reserved', 'now')"
+            )
+            attempt_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+            with pytest.raises(sqlite3.IntegrityError, match="active attempt must belong"):
+                conn.execute("UPDATE session_recap_jobs SET active_attempt_id = ? WHERE session_id = 1", (attempt_id,))
+
+    def test_active_attempt_must_reference_the_same_job(self, tmp_path):
+        with get_connection(settings={"db_path": str(tmp_path / "crossed-owner.db")}) as conn:
+            conn.execute("INSERT INTO sessions(uuid) VALUES ('one'), ('two')")
+            conn.execute(
+                "INSERT INTO session_recap_jobs(session_id, trigger, state, requested_at, updated_at) "
+                "VALUES (1, 'test', 'pending', 'now', 'now'), (2, 'test', 'pending', 'now', 'now')"
+            )
+            conn.execute(
+                "INSERT INTO session_recap_attempts("
+                "session_id, job_session_id, input_hash, input_contract_version, policy_version, "
+                "recap_contract_version, claim_token, trigger, state, created_at"
+                ") VALUES (1, 2, 'hash', 1, 1, 2, 0, 'test', 'reserved', 'now')"
+            )
+            attempt_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+            with pytest.raises(sqlite3.IntegrityError, match="active attempt must belong"):
+                conn.execute("UPDATE session_recap_jobs SET active_attempt_id = ? WHERE session_id = 1", (attempt_id,))
 
 
 class TestLoadSettings:
@@ -623,6 +821,7 @@ def _seed_v0_db_with_dead_branches(db_path) -> None:
     )
     msg_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
+    # Deliberately retain the pre-v8 two-column link schema for migration coverage.
     conn.execute("INSERT INTO branch_messages (branch_id, message_id) VALUES (?, ?)", (active_branch_id, msg_id))
     conn.execute("INSERT INTO branch_messages (branch_id, message_id) VALUES (?, ?)", (inactive_branch_id, msg_id))
 
@@ -1242,6 +1441,7 @@ class TestSchemaEquivalencePin:
         "branch_messages": [
             (0, "branch_id", "INTEGER", 1, None, 1),
             (1, "message_id", "INTEGER", 1, None, 2),
+            (2, "position", "INTEGER", 1, None, 0),
         ],
         "branches": [
             (0, "id", "INTEGER", 0, None, 1),
@@ -1268,6 +1468,12 @@ class TestSchemaEquivalencePin:
             (21, "summary_enrichment_error", "TEXT", 0, None, 0),
             (22, "summary_enrichment_updated_at", "DATETIME", 0, None, 0),
             (23, "summary_source_hash", "TEXT", 0, None, 0),
+            (24, "recap_input_hash", "TEXT", 0, None, 0),
+            (25, "recap_input_contract_version", "INTEGER", 0, None, 0),
+            (26, "recap_eligibility_policy_version", "INTEGER", 0, None, 0),
+            (27, "summary_enrichment_input_hash", "TEXT", 0, None, 0),
+            (28, "summary_enrichment_input_contract_version", "INTEGER", 0, None, 0),
+            (29, "summary_enrichment_policy_version", "INTEGER", 0, None, 0),
         ],
         "branches_fts": [
             (0, "aggregated_content", "", 0, None, 0),
@@ -1346,6 +1552,13 @@ class TestSchemaEquivalencePin:
         "idx_messages_timestamp",
         "idx_messages_tool_content_null",
         "idx_projects_key",
+        "idx_recap_attempts_input",
+        "idx_recap_attempts_job_latest",
+        "idx_recap_attempts_live",
+        "idx_recap_attempts_status",
+        "idx_recap_jobs_lease",
+        "idx_recap_jobs_ready",
+        "idx_recap_runs_started",
         "idx_sessions_project",
     ]
 
@@ -1371,6 +1584,7 @@ class TestSchemaEquivalencePin:
                 WHERE type='table'
                 AND name NOT LIKE 'sqlite_%'
                 AND name != 'token_snapshots'
+                AND name NOT LIKE 'session_recap_%'
                 AND name NOT LIKE '%_fts_%'
                 ORDER BY name
             """)
@@ -1722,7 +1936,10 @@ class TestFetchBranchMessagesUuid:
             (sess_id, "msg-uuid-test", "user", "hello"),
         )
         msg_id = cursor.lastrowid
-        cursor.execute("INSERT INTO branch_messages (branch_id, message_id) VALUES (?, ?)", (branch_id, msg_id))
+        cursor.execute(
+            "INSERT INTO branch_messages (branch_id, message_id, position) VALUES (?, ?, 0)",
+            (branch_id, msg_id),
+        )
         memory_db.commit()
 
         messages = fetch_branch_messages(cursor, branch_id, include_notifications=False)
@@ -1730,6 +1947,29 @@ class TestFetchBranchMessagesUuid:
         assert len(messages) == 1
         assert "uuid" in messages[0], "fetch_branch_messages must include 'uuid' key in each message dict"
         assert messages[0]["uuid"] == "msg-uuid-test"
+
+    def test_orders_equal_timestamps_by_message_id(self, memory_db):
+        cursor = memory_db.cursor()
+        cursor.execute("INSERT INTO projects (path, key, name) VALUES (?, ?, ?)", ("/p-order", "-p-order", "p-order"))
+        project_id = cursor.lastrowid
+        cursor.execute("INSERT INTO sessions (uuid, project_id) VALUES (?, ?)", ("sess-order", project_id))
+        session_id = cursor.lastrowid
+        cursor.execute("INSERT INTO branches (session_id, leaf_uuid) VALUES (?, ?)", (session_id, "leaf-order"))
+        branch_id = cursor.lastrowid
+        for uuid in ("first", "second"):
+            cursor.execute(
+                "INSERT INTO messages (session_id, uuid, timestamp, role, content) VALUES (?, ?, ?, ?, ?)",
+                (session_id, uuid, "2025-01-01T00:00:00Z", "user", uuid),
+            )
+            cursor.execute(
+                "INSERT INTO branch_messages (branch_id, message_id, position) VALUES (?, ?, ?)",
+                (branch_id, cursor.lastrowid, 1 if uuid == "first" else 0),
+            )
+        memory_db.commit()
+
+        messages = fetch_branch_messages(cursor, branch_id, include_notifications=False)
+
+        assert [message["uuid"] for message in messages] == ["first", "second"]
 
 
 class TestFetchBranchMessagesToolContent:
@@ -1750,7 +1990,10 @@ class TestFetchBranchMessagesToolContent:
             (sess_id, "msg-tool-content-test", "assistant", "", "[Bash: ls -la]"),
         )
         msg_id = cursor.lastrowid
-        cursor.execute("INSERT INTO branch_messages (branch_id, message_id) VALUES (?, ?)", (branch_id, msg_id))
+        cursor.execute(
+            "INSERT INTO branch_messages (branch_id, message_id, position) VALUES (?, ?, 0)",
+            (branch_id, msg_id),
+        )
         memory_db.commit()
 
         messages = fetch_branch_messages(cursor, branch_id, include_notifications=False)

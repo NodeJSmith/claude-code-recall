@@ -12,6 +12,7 @@ from ccrecall.branch_ops import sync_branch
 from ccrecall.db import CONTENT_ERROR_VERSION
 from ccrecall.embed_ops import write_branch_summary
 from ccrecall.hooks import backfill_summaries, memory_setup
+from ccrecall.llm_summary_db import _migrate_to_v8
 from ccrecall.schema import SCHEMA
 from ccrecall.summarizer import (
     SUMMARY_VERSION,
@@ -465,6 +466,8 @@ class TestComputeContextSummary:
     def db_with_session(self):
         conn = sqlite3.connect(":memory:")
         conn.executescript(SCHEMA)
+        conn.execute("BEGIN IMMEDIATE")
+        _migrate_to_v8(conn)
         conn.commit()
 
         cursor = conn.cursor()
@@ -529,7 +532,7 @@ class TestComputeContextSummary:
                 "All tests pass. Next step is deploying to staging.",
             ),
         ]
-        for session_id, uuid, ts, role, content in msgs:
+        for position, (session_id, uuid, ts, role, content) in enumerate(msgs):
             cursor.execute(
                 """
                 INSERT INTO messages (session_id, uuid, timestamp, role, content, is_notification)
@@ -539,8 +542,8 @@ class TestComputeContextSummary:
             )
             msg_id = cursor.lastrowid
             cursor.execute(
-                "INSERT INTO branch_messages (branch_id, message_id) VALUES (?, ?)",
-                (branch_id, msg_id),
+                "INSERT INTO branch_messages (branch_id, message_id, position) VALUES (?, ?, ?)",
+                (branch_id, msg_id, position),
             )
 
         conn.commit()
@@ -757,6 +760,8 @@ class TestSummarySourceHashMaintenance:
     ) -> tuple[sqlite3.Connection, int]:
         conn = sqlite3.connect(":memory:")
         conn.executescript(SCHEMA)
+        conn.execute("BEGIN IMMEDIATE")
+        _migrate_to_v8(conn)
         conn.commit()
         cursor = conn.cursor()
         cursor.execute(
@@ -818,8 +823,8 @@ class TestSummarySourceHashMaintenance:
         )
         assistant_id = cursor.lastrowid
         cursor.executemany(
-            "INSERT INTO branch_messages (branch_id, message_id) VALUES (?, ?)",
-            [(branch_id, user_id), (branch_id, assistant_id)],
+            "INSERT INTO branch_messages (branch_id, message_id, position) VALUES (?, ?, ?)",
+            [(branch_id, user_id, 0), (branch_id, assistant_id, 1)],
         )
         conn.commit()
         return conn, branch_id
@@ -898,6 +903,9 @@ class TestSummarySourceHashMaintenance:
         db = tmp_path / "summary-source-hash.db"
         conn = sqlite3.connect(str(db))
         conn.executescript(SCHEMA)
+        conn.execute("BEGIN IMMEDIATE")
+        _migrate_to_v8(conn)
+        conn.execute("PRAGMA user_version = 8")
         conn.commit()
         cursor = conn.cursor()
         cursor.execute("INSERT INTO projects (path, key, name) VALUES (?, ?, ?)", ("/test/proj", "-test-proj", "proj"))
@@ -937,8 +945,8 @@ class TestSummarySourceHashMaintenance:
         )
         message_ids = [row[0] for row in cursor.execute("SELECT id FROM messages ORDER BY id").fetchall()]
         cursor.executemany(
-            "INSERT INTO branch_messages (branch_id, message_id) VALUES (?, ?)",
-            [(branch_id, message_id) for message_id in message_ids],
+            "INSERT INTO branch_messages (branch_id, message_id, position) VALUES (?, ?, ?)",
+            [(branch_id, message_id, position) for position, message_id in enumerate(message_ids)],
         )
         conn.commit()
         conn.close()
@@ -1067,6 +1075,8 @@ class TestSummarySourceHashMaintenance:
     ) -> tuple[sqlite3.Connection, int, int, dict[str, int], list[dict], dict[str, object]]:
         conn = sqlite3.connect(":memory:")
         conn.executescript(SCHEMA)
+        conn.execute("BEGIN IMMEDIATE")
+        _migrate_to_v8(conn)
         conn.commit()
         cursor = conn.cursor()
         cursor.execute(
@@ -1123,8 +1133,8 @@ class TestSummarySourceHashMaintenance:
         )
         uuid_to_msg_id = {uuid: msg_id for msg_id, uuid in cursor.execute("SELECT id, uuid FROM messages")}
         cursor.executemany(
-            "INSERT INTO branch_messages (branch_id, message_id) VALUES (?, ?)",
-            [(branch_id, msg_id) for msg_id in uuid_to_msg_id.values()],
+            "INSERT INTO branch_messages (branch_id, message_id, position) VALUES (?, ?, ?)",
+            [(branch_id, msg_id, position) for position, msg_id in enumerate(uuid_to_msg_id.values())],
         )
         conn.commit()
         messages = [

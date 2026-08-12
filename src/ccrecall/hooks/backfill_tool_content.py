@@ -58,6 +58,7 @@ import sys
 import time
 from pathlib import Path
 
+from ccrecall.branch_ops import diff_branch_messages
 from ccrecall.config import load_settings, setup_logging
 from ccrecall.content import extract_text_content
 from ccrecall.db import VEC_BUSY_TIMEOUT_MS, get_connection
@@ -450,29 +451,19 @@ def backfill_session(cursor: sqlite3.Cursor, session_id: int, filepaths: list[Pa
     # genuinely new rows — the row-construction logic isn't reimplemented here.
     messages = [e for e in all_entries if is_insertable_message(e)]
     valid_branch_uuids = branch["uuids"]
-    before_uuids = set(existing_uuids)
     insert_new_messages(cursor, session_id, messages, valid_branch_uuids, existing_uuids)
-    new_uuids = existing_uuids - before_uuids
 
-    if new_uuids:
-        new_uuids_list = list(new_uuids)
-        uuid_to_msg_id: dict[str, int] = {}
-        # -1 reserves one slot for the session_id bound parameter
-        for i in range(0, len(new_uuids_list), MAX_SQL_PARAMS - 1):
-            chunk = new_uuids_list[i : i + MAX_SQL_PARAMS - 1]
-            placeholders = ",".join("?" * len(chunk))
-            cursor.execute(
-                f"SELECT id, uuid FROM messages WHERE session_id = ? AND uuid IN ({placeholders})",
-                (session_id, *chunk),
-            )
-            uuid_to_msg_id.update({row[1]: row[0] for row in cursor.fetchall()})
-        for uuid in new_uuids:
-            msg_id = uuid_to_msg_id.get(uuid)
-            if msg_id:
-                cursor.execute(
-                    "INSERT OR IGNORE INTO branch_messages (branch_id, message_id) VALUES (?, ?)",
-                    (branch_db_id, msg_id),
-                )
+    ordered_uuids = branch.get("ordered_uuids", list(valid_branch_uuids))
+    uuid_to_msg_id: dict[str, int] = {}
+    for i in range(0, len(ordered_uuids), MAX_SQL_PARAMS - 1):
+        chunk = ordered_uuids[i : i + MAX_SQL_PARAMS - 1]
+        placeholders = ",".join("?" * len(chunk))
+        cursor.execute(
+            f"SELECT id, uuid FROM messages WHERE session_id = ? AND uuid IN ({placeholders})",
+            (session_id, *chunk),
+        )
+        uuid_to_msg_id.update({row[1]: row[0] for row in cursor.fetchall()})
+    diff_branch_messages(cursor, branch_db_id, ordered_uuids, uuid_to_msg_id)
 
     # Rebuild aggregated_content from the branch's existing files/commits
     # metadata (unchanged by this backfill) plus the newly-populated tool

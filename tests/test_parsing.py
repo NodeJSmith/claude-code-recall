@@ -3,6 +3,7 @@
 import sqlite3
 from pathlib import Path
 
+from ccrecall.llm_summary_db import _migrate_to_v8
 from ccrecall.parsing import (
     aggregate_branch_content,
     build_aggregated_content,
@@ -66,6 +67,15 @@ class TestFindAllBranchesBasics:
         assert len(branches) == 1
         assert branches[0]["is_active"] is True
         assert "abc" in branches[0]["uuids"]
+
+    def test_branch_retains_root_to_leaf_order(self):
+        entries = [
+            {"uuid": "root", "type": "user", "timestamp": "2025-01-01T00:00:00Z"},
+            {"uuid": "leaf", "parentUuid": "root", "type": "assistant", "timestamp": "2025-01-01T00:01:00Z"},
+        ]
+        branch = find_all_branches(entries)[0]
+        assert branch["uuids"] == {"root", "leaf"}
+        assert branch["ordered_uuids"] == ["root", "leaf"]
 
 
 # ── Fixture-driven tests ──
@@ -322,6 +332,8 @@ class TestAggregateBranchContent:
         """messages: list of (role, content, tool_content) tuples, in timestamp order."""
         conn = sqlite3.connect(":memory:")
         conn.executescript(SCHEMA)
+        conn.execute("BEGIN IMMEDIATE")
+        _migrate_to_v8(conn)
         conn.commit()
         cursor = conn.cursor()
         cursor.execute(
@@ -343,8 +355,8 @@ class TestAggregateBranchContent:
             )
             msg_id = cursor.lastrowid
             cursor.execute(
-                "INSERT INTO branch_messages (branch_id, message_id) VALUES (?, ?)",
-                (branch_id, msg_id),
+                "INSERT INTO branch_messages (branch_id, message_id, position) VALUES (?, ?, ?)",
+                (branch_id, msg_id, i),
             )
         conn.commit()
         return conn, branch_id

@@ -17,6 +17,7 @@ from ccrecall.db import (
 from ccrecall.embeddings import EMBEDDING_DIM, EMBEDDING_MODEL, EMBEDDING_VERSION
 from ccrecall.formatting import apply_scores, format_card_json, format_snippet_json, format_snippet_markdown
 from ccrecall.fusion import rrf_scored
+from ccrecall.llm_summary_db import _migrate_to_v8
 from ccrecall.recent_chats import get_recent_sessions
 from ccrecall.schema import SCHEMA, SCHEMA_CORE, detect_fts_support
 from ccrecall.search_cli import format_markdown, print_status, run, run_messages
@@ -36,6 +37,8 @@ def search_db():
     """In-memory DB with schema, seeded with searchable sessions."""
     conn = sqlite3.connect(":memory:")
     conn.executescript(SCHEMA)
+    conn.execute("BEGIN IMMEDIATE")
+    _migrate_to_v8(conn)
     conn.commit()
 
     cursor = conn.cursor()
@@ -86,8 +89,8 @@ def search_db():
         ),
     )
     m2_id = cursor.lastrowid
-    cursor.execute("INSERT INTO branch_messages VALUES (?, ?)", (b1_id, m1_id))
-    cursor.execute("INSERT INTO branch_messages VALUES (?, ?)", (b1_id, m2_id))
+    cursor.execute("INSERT INTO branch_messages VALUES (?, ?, ?)", (b1_id, m1_id, 0))
+    cursor.execute("INSERT INTO branch_messages VALUES (?, ?, ?)", (b1_id, m2_id, 1))
 
     # Session 2 in alpha: talks about "database migration" (worktree)
     cursor.execute(
@@ -123,8 +126,8 @@ def search_db():
         ),
     )
     m4_id = cursor.lastrowid
-    cursor.execute("INSERT INTO branch_messages VALUES (?, ?)", (b2_id, m3_id))
-    cursor.execute("INSERT INTO branch_messages VALUES (?, ?)", (b2_id, m4_id))
+    cursor.execute("INSERT INTO branch_messages VALUES (?, ?, ?)", (b2_id, m3_id, 0))
+    cursor.execute("INSERT INTO branch_messages VALUES (?, ?, ?)", (b2_id, m4_id, 1))
 
     # Session 3 in beta: talks about "pytest mocking" (base repo)
     cursor.execute(
@@ -160,8 +163,8 @@ def search_db():
         ),
     )
     m6_id = cursor.lastrowid
-    cursor.execute("INSERT INTO branch_messages VALUES (?, ?)", (b3_id, m5_id))
-    cursor.execute("INSERT INTO branch_messages VALUES (?, ?)", (b3_id, m6_id))
+    cursor.execute("INSERT INTO branch_messages VALUES (?, ?, ?)", (b3_id, m5_id, 0))
+    cursor.execute("INSERT INTO branch_messages VALUES (?, ?, ?)", (b3_id, m6_id, 1))
 
     conn.commit()
     yield conn
@@ -345,6 +348,8 @@ class TestFtsSearchFindsFilePath:
         """DB with a branch whose aggregated_content includes file paths via __files__ marker."""
         conn = sqlite3.connect(":memory:")
         conn.executescript(SCHEMA)
+        conn.execute("BEGIN IMMEDIATE")
+        _migrate_to_v8(conn)
         conn.commit()
 
         cursor = conn.cursor()
@@ -405,8 +410,8 @@ class TestFtsSearchFindsFilePath:
             ),
         )
         m2_id = cursor.lastrowid
-        cursor.execute("INSERT INTO branch_messages VALUES (?, ?)", (b1_id, m1_id))
-        cursor.execute("INSERT INTO branch_messages VALUES (?, ?)", (b1_id, m2_id))
+        cursor.execute("INSERT INTO branch_messages VALUES (?, ?, ?)", (b1_id, m1_id, 0))
+        cursor.execute("INSERT INTO branch_messages VALUES (?, ?, ?)", (b1_id, m2_id, 1))
 
         conn.commit()
         yield conn
@@ -521,6 +526,11 @@ def _seed_branch(
     started_at: str | None = None,
 ) -> tuple[int, int]:
     """Seed one searchable branch with the metadata knobs used by search filters."""
+    if not any(row[1] == "position" for row in conn.execute("PRAGMA table_info(branch_messages)")):
+        conn.execute("BEGIN IMMEDIATE")
+        _migrate_to_v8(conn)
+        conn.execute("PRAGMA user_version = 8")
+        conn.commit()
     cursor = conn.cursor()
     project_path = f"/home/user/{project}"
     project_key = f"-home-user-{project}"
@@ -560,7 +570,7 @@ def _seed_branch(
         (sess_id, f"m-{uuid}", "user", content, "2025-01-01T00:00:00Z"),
     )
     msg_id = cursor.lastrowid
-    cursor.execute("INSERT INTO branch_messages VALUES (?, ?)", (branch_id, msg_id))
+    cursor.execute("INSERT INTO branch_messages VALUES (?, ?, ?)", (branch_id, msg_id, 0))
     conn.commit()
     return sess_id, branch_id
 
@@ -1522,7 +1532,7 @@ class TestSessionDedup:
                 (sess_id, f"m-{leaf}", "user", content, "2025-01-01T00:00:00Z"),
             )
             mid = cursor.lastrowid
-            cursor.execute("INSERT INTO branch_messages VALUES (?, ?)", (bid, mid))
+            cursor.execute("INSERT INTO branch_messages VALUES (?, ?, ?)", (bid, mid, 0))
 
             # Seed chunk_vec for each branch
             cursor.execute(
@@ -1656,6 +1666,11 @@ class TestCardFields:
 
     def _seed_with_summary(self, conn):
         """Seed a branch with context_summary_json carrying topic."""
+        if not any(row[1] == "position" for row in conn.execute("PRAGMA table_info(branch_messages)")):
+            conn.execute("BEGIN IMMEDIATE")
+            _migrate_to_v8(conn)
+            conn.execute("PRAGMA user_version = 8")
+            conn.commit()
         cursor = conn.cursor()
         cursor.execute(
             "INSERT INTO projects (path, key, name) VALUES (?, ?, ?)",
@@ -1700,7 +1715,7 @@ class TestCardFields:
             (sess_id, "cf-msg", "user", "Debugging a pytest fixture", "2025-06-01T10:00:00Z"),
         )
         msg_id = cursor.lastrowid
-        cursor.execute("INSERT INTO branch_messages VALUES (?, ?)", (branch_id, msg_id))
+        cursor.execute("INSERT INTO branch_messages VALUES (?, ?, ?)", (branch_id, msg_id, 0))
         conn.commit()
         return branch_id
 
@@ -2489,6 +2504,8 @@ class TestRecallCaveat:
         """compute_caveat returns a string when branch coverage is below RECALL_CAVEAT_COVERAGE_THRESHOLD."""
         conn = sqlite3.connect(":memory:")
         conn.executescript(SCHEMA)
+        conn.execute("BEGIN IMMEDIATE")
+        _migrate_to_v8(conn)
         conn.commit()
         cursor = conn.cursor()
         cursor.execute("INSERT INTO projects (path, key, name) VALUES ('/p', '-p', 'p')")
@@ -2507,7 +2524,7 @@ class TestRecallCaveat:
             (s1,),
         )
         m1 = cursor.lastrowid
-        cursor.execute("INSERT INTO branch_messages VALUES (?, ?)", (b1, m1))
+        cursor.execute("INSERT INTO branch_messages VALUES (?, ?, ?)", (b1, m1, 0))
         # Un-embedded branch (NULL watermark)
         cursor.execute("INSERT INTO sessions (uuid, project_id) VALUES ('s2', ?)", (proj_id,))
         s2 = cursor.lastrowid
@@ -2521,7 +2538,7 @@ class TestRecallCaveat:
             (s2,),
         )
         m2 = cursor.lastrowid
-        cursor.execute("INSERT INTO branch_messages VALUES (?, ?)", (b2, m2))
+        cursor.execute("INSERT INTO branch_messages VALUES (?, ?, ?)", (b2, m2, 0))
         conn.commit()
 
         with patch("ccrecall.search_conversations.chunk_vec_queryable", return_value=True):
@@ -2535,6 +2552,8 @@ class TestRecallCaveat:
         """compute_caveat returns None when vec is available and all branches are embedded (100% >= 95%)."""
         conn = sqlite3.connect(":memory:")
         conn.executescript(SCHEMA)
+        conn.execute("BEGIN IMMEDIATE")
+        _migrate_to_v8(conn)
         conn.commit()
         cursor = conn.cursor()
         cursor.execute("INSERT INTO projects (path, key, name) VALUES ('/p', '-p', 'p')")
@@ -2552,7 +2571,7 @@ class TestRecallCaveat:
             (s1,),
         )
         m1 = cursor.lastrowid
-        cursor.execute("INSERT INTO branch_messages VALUES (?, ?)", (b1, m1))
+        cursor.execute("INSERT INTO branch_messages VALUES (?, ?, ?)", (b1, m1, 0))
         conn.commit()
 
         with patch("ccrecall.search_conversations.chunk_vec_queryable", return_value=True):
@@ -2565,6 +2584,8 @@ class TestRecallCaveat:
         """compute_caveat returns None (no crash) when there are no embeddable branches."""
         conn = sqlite3.connect(":memory:")
         conn.executescript(SCHEMA)
+        conn.execute("BEGIN IMMEDIATE")
+        _migrate_to_v8(conn)
         conn.commit()
         # Empty DB: no branches → total = 0
 

@@ -18,6 +18,7 @@ from conftest import patched_clear, patched_record
 from ccrecall.health import REASON_VEC_UNAVAILABLE
 from ccrecall.hooks import memory_setup, memory_sync, sync_current
 from ccrecall.hooks.sync_current import sync_session, validate_session_id
+from ccrecall.llm_summary_db import _migrate_to_v8
 from ccrecall.recent_chats import run as recent_chats_run
 from ccrecall.schema import SCHEMA
 from ccrecall.search_cli import run as search_conversations_run
@@ -555,6 +556,9 @@ class TestRecentChatsDbFlag:
         custom_db = tmp_path / "custom.db"
         conn = sqlite3.connect(str(custom_db))
         conn.executescript(SCHEMA)
+        conn.execute("BEGIN IMMEDIATE")
+        _migrate_to_v8(conn)
+        conn.execute("PRAGMA user_version = 8")
         conn.commit()
 
         # Insert a project and session with a branch so recent_chats can retrieve it
@@ -582,7 +586,7 @@ class TestRecentChatsDbFlag:
         )
         msg_id = cursor.lastrowid
         cursor.execute(
-            "INSERT INTO branch_messages (branch_id, message_id) VALUES (?, ?)",
+            "INSERT INTO branch_messages (branch_id, message_id, position) VALUES (?, ?, 0)",
             (branch_id, msg_id),
         )
         conn.commit()
@@ -607,6 +611,9 @@ class TestSearchConversationsDbFlag:
         custom_db = tmp_path / "search_custom.db"
         conn = sqlite3.connect(str(custom_db))
         conn.executescript(SCHEMA)
+        conn.execute("BEGIN IMMEDIATE")
+        _migrate_to_v8(conn)
+        conn.execute("PRAGMA user_version = 8")
         conn.commit()
 
         # Insert a project, session, branch, and message with unique searchable content
@@ -635,7 +642,7 @@ class TestSearchConversationsDbFlag:
         )
         msg_id = cursor.lastrowid
         cursor.execute(
-            "INSERT INTO branch_messages (branch_id, message_id) VALUES (?, ?)",
+            "INSERT INTO branch_messages (branch_id, message_id, position) VALUES (?, ?, 0)",
             (branch_id, msg_id),
         )
         conn.commit()

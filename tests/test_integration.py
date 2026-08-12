@@ -19,6 +19,7 @@ from ccrecall.content import (
 )
 from ccrecall.embeddings import EMBEDDING_DIM
 from ccrecall.hooks.backfill_tool_content import run as run_backfill_tool_content
+from ccrecall.llm_summary_db import _migrate_to_v8
 from ccrecall.parsing import (
     build_aggregated_content,
     compute_branch_metadata,
@@ -38,6 +39,8 @@ def _setup_db_and_import(filepath: Path) -> sqlite3.Connection:
     """Create in-memory DB and import a fixture file, flagging notifications."""
     conn = sqlite3.connect(":memory:")
     conn.executescript(SCHEMA)
+    conn.execute("BEGIN IMMEDIATE")
+    _migrate_to_v8(conn)
     conn.commit()
     cursor = conn.cursor()
 
@@ -115,12 +118,12 @@ def _setup_db_and_import(filepath: Path) -> sqlite3.Connection:
         )
         branch_db_id = cursor.lastrowid
 
-        for uuid in branch["uuids"]:
+        for position, uuid in enumerate(branch["ordered_uuids"]):
             msg_id = uuid_to_msg_id.get(uuid)
             if msg_id:
                 cursor.execute(
-                    "INSERT OR IGNORE INTO branch_messages VALUES (?, ?)",
-                    (branch_db_id, msg_id),
+                    "INSERT OR IGNORE INTO branch_messages VALUES (?, ?, ?)",
+                    (branch_db_id, msg_id, position),
                 )
 
         agg = build_aggregated_content(cursor, branch_db_id, files, commits)

@@ -15,7 +15,7 @@ from ccrecall.schema import SCHEMA_CORE, SCHEMA_FTS4, SCHEMA_FTS5, detect_fts_su
 
 # Current schema version. Bump when adding a migration and wire the new DDL
 # delta into _apply_migrations (see _migrate_to_v1 for the version-1 shape).
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 V7_BRANCH_COLUMNS = {
     "summary_enrichment_json": "TEXT",
@@ -255,6 +255,298 @@ def _migrate_to_v7(conn: sqlite3.Connection) -> None:
                 raise
 
 
+RECAP_TABLES = {
+    "session_recap_jobs",
+    "session_recap_attempts",
+    "session_recap_runtime",
+    "session_recap_provider_health",
+    "session_recap_runs",
+    "session_recap_run_candidates",
+    "session_recap_quarantine",
+}
+RECAP_INDEXES = {
+    "idx_recap_jobs_ready",
+    "idx_recap_jobs_lease",
+    "idx_recap_attempts_job_latest",
+    "idx_recap_attempts_input",
+    "idx_recap_attempts_status",
+    "idx_recap_attempts_live",
+    "idx_recap_runs_started",
+}
+RECAP_BRANCH_COLUMNS = {
+    "recap_input_hash",
+    "recap_input_contract_version",
+    "recap_eligibility_policy_version",
+    "summary_enrichment_input_hash",
+    "summary_enrichment_input_contract_version",
+    "summary_enrichment_policy_version",
+}
+RECAP_TABLE_COLUMNS = {
+    "session_recap_jobs": {
+        "session_id",
+        "requested_input_hash",
+        "trigger",
+        "state",
+        "reason",
+        "claim_token",
+        "lease_expires_at",
+        "active_attempt_id",
+        "next_eligible_at",
+        "requested_at",
+        "updated_at",
+    },
+    "session_recap_attempts": {
+        "id",
+        "session_id",
+        "job_session_id",
+        "input_hash",
+        "input_contract_version",
+        "policy_version",
+        "recap_contract_version",
+        "claim_token",
+        "trigger",
+        "model",
+        "max_budget_usd",
+        "timeout_seconds",
+        "state",
+        "reason",
+        "diagnostic",
+        "packet_path",
+        "packet_nonce",
+        "owner_pid",
+        "process_group_id",
+        "process_started_at",
+        "cleanup_state",
+        "started_at",
+        "finished_at",
+        "created_at",
+    },
+    "session_recap_runtime": {"singleton", "claim_token", "owner_pid", "lease_expires_at", "heartbeat_at"},
+    "session_recap_provider_health": {
+        "singleton",
+        "reason",
+        "consecutive_failures",
+        "diagnostic",
+        "last_failed_at",
+        "retry_after",
+    },
+    "session_recap_runs": {"id", "trigger", "selector_json", "started_at", "finished_at", "state", "attempt_limit"},
+    "session_recap_run_candidates": {
+        "run_id",
+        "session_id",
+        "input_hash",
+        "initial_disposition",
+        "final_disposition",
+        "started_attempt_id",
+    },
+    "session_recap_quarantine": {
+        "attempt_id",
+        "path",
+        "nonce",
+        "byte_size",
+        "process_group_id",
+        "process_started_at",
+        "cleanup_state",
+        "created_at",
+    },
+}
+
+
+def _has_foreign_key(conn: sqlite3.Connection, table: str, column: str, target: str, target_column: str) -> bool:
+    return any(
+        row[3] == column and row[2] == target and row[4] == target_column
+        for row in conn.execute(f"PRAGMA foreign_key_list({table})")
+    )
+
+
+def _has_index(conn: sqlite3.Connection, table: str, name: str, columns: tuple[str, ...], unique: bool = False) -> bool:
+    rows = [row for row in conn.execute(f"PRAGMA index_list({table})") if row[1] == name]
+    if not rows or bool(rows[0][2]) != unique:
+        return False
+    return tuple(row[2] for row in conn.execute(f"PRAGMA index_info({name})")) == columns
+
+
+def _normalize_sql(sql: str) -> str:
+    return " ".join(sql.lower().split())
+
+
+def _ownership_trigger_sql(name: str) -> str:
+    return (
+        f"CREATE TRIGGER {name} "
+        f"BEFORE {'INSERT' if name.endswith('session') else 'UPDATE OF active_attempt_id'} "
+        "ON session_recap_jobs "
+        "WHEN NEW.active_attempt_id IS NOT NULL AND NOT EXISTS ("
+        "SELECT 1 FROM session_recap_attempts "
+        "WHERE id = NEW.active_attempt_id AND session_id = NEW.session_id "
+        "AND job_session_id = NEW.session_id"
+        ") BEGIN SELECT RAISE(ABORT, 'active attempt must belong to job session'); END"
+    )
+
+
+def _recap_schema_complete(conn: sqlite3.Connection) -> bool:
+    objects = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type IN ('table', 'index')")}
+    if not (objects >= RECAP_TABLES and objects >= RECAP_INDEXES):
+        return False
+    if any(
+        not columns <= {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        for table, columns in RECAP_TABLE_COLUMNS.items()
+    ):
+        return False
+    branch_columns = {row[1] for row in conn.execute("PRAGMA table_info(branches)")}
+    link_columns = {row[1] for row in conn.execute("PRAGMA table_info(branch_messages)")}
+    if not (branch_columns >= RECAP_BRANCH_COLUMNS and "position" in link_columns):
+        return False
+    required_foreign_keys = (
+        ("session_recap_jobs", "session_id", "sessions", "id"),
+        ("session_recap_jobs", "active_attempt_id", "session_recap_attempts", "id"),
+        ("session_recap_attempts", "session_id", "sessions", "id"),
+        ("session_recap_attempts", "job_session_id", "session_recap_jobs", "session_id"),
+        ("session_recap_run_candidates", "run_id", "session_recap_runs", "id"),
+        ("session_recap_run_candidates", "started_attempt_id", "session_recap_attempts", "id"),
+        ("session_recap_quarantine", "attempt_id", "session_recap_attempts", "id"),
+    )
+    if not all(_has_foreign_key(conn, *foreign_key) for foreign_key in required_foreign_keys):
+        return False
+    indexes = (
+        ("session_recap_jobs", "idx_recap_jobs_ready", ("state", "next_eligible_at"), False),
+        ("session_recap_jobs", "idx_recap_jobs_lease", ("lease_expires_at",), False),
+        ("session_recap_attempts", "idx_recap_attempts_job_latest", ("job_session_id", "id"), False),
+        ("session_recap_attempts", "idx_recap_attempts_input", ("session_id", "input_hash"), False),
+        ("session_recap_attempts", "idx_recap_attempts_status", ("state", "finished_at"), False),
+        ("session_recap_attempts", "idx_recap_attempts_live", ("job_session_id",), True),
+        ("session_recap_runs", "idx_recap_runs_started", ("started_at",), False),
+    )
+    if not all(_has_index(conn, *index) for index in indexes):
+        return False
+    sql = {
+        row[0]: _normalize_sql(row[1] or "")
+        for row in conn.execute("SELECT name, sql FROM sqlite_master WHERE type IN ('table', 'index', 'trigger')")
+    }
+    ownership_triggers = (
+        "session_recap_jobs_active_attempt_session",
+        "session_recap_jobs_active_attempt_session_update",
+    )
+    return (
+        "unique (branch_id, position)" in sql.get("branch_messages", "")
+        and "check (state in ('pending', 'claimed', 'current', 'excluded', 'blocked'))"
+        in sql.get("session_recap_jobs", "")
+        and "check (singleton = 1)" in sql.get("session_recap_runtime", "")
+        and "check (singleton = 1)" in sql.get("session_recap_provider_health", "")
+        and "where state in ('reserved', 'running')" in sql.get("idx_recap_attempts_live", "")
+        and all(sql.get(name) == _normalize_sql(_ownership_trigger_sql(name)) for name in ownership_triggers)
+    )
+
+
+def recap_schema_capability(conn: sqlite3.Connection) -> str:
+    """Report recap-schema readiness without altering the database."""
+    objects = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type IN ('table', 'index')")}
+    branch_columns = {row[1] for row in conn.execute("PRAGMA table_info(branches)")}
+    link_columns = {row[1] for row in conn.execute("PRAGMA table_info(branch_messages)")}
+    if not (objects & RECAP_TABLES) and "position" not in link_columns and not (branch_columns & RECAP_BRANCH_COLUMNS):
+        return "unavailable"
+    if not _recap_schema_complete(conn):
+        return "partial"
+    version = conn.execute("PRAGMA user_version").fetchone()[0]
+    return "ready" if version >= SCHEMA_VERSION else "out_of_date"
+
+
+def _migrate_to_v8(conn: sqlite3.Connection) -> None:
+    """Create the complete claim-capable recap schema in one transaction."""
+    ddl = """
+        ALTER TABLE branches ADD COLUMN recap_input_hash TEXT;
+        ALTER TABLE branches ADD COLUMN recap_input_contract_version INTEGER;
+        ALTER TABLE branches ADD COLUMN recap_eligibility_policy_version INTEGER;
+        ALTER TABLE branches ADD COLUMN summary_enrichment_input_hash TEXT;
+        ALTER TABLE branches ADD COLUMN summary_enrichment_input_contract_version INTEGER;
+        ALTER TABLE branches ADD COLUMN summary_enrichment_policy_version INTEGER;
+
+        CREATE TABLE branch_messages_new (
+          branch_id INTEGER NOT NULL REFERENCES branches(id),
+          message_id INTEGER NOT NULL REFERENCES messages(id),
+          position INTEGER NOT NULL,
+          PRIMARY KEY (branch_id, message_id),
+          UNIQUE (branch_id, position)
+        );
+        INSERT INTO branch_messages_new (branch_id, message_id, position)
+        SELECT bm.branch_id, bm.message_id,
+               ROW_NUMBER() OVER (PARTITION BY bm.branch_id ORDER BY julianday(m.timestamp), m.id) - 1
+        FROM branch_messages bm JOIN messages m ON m.id = bm.message_id;
+        DROP TABLE branch_messages;
+        ALTER TABLE branch_messages_new RENAME TO branch_messages;
+        CREATE INDEX idx_branch_messages_message ON branch_messages(message_id);
+
+        CREATE TABLE session_recap_jobs (
+          session_id INTEGER PRIMARY KEY REFERENCES sessions(id), requested_input_hash TEXT,
+          trigger TEXT NOT NULL,
+          state TEXT NOT NULL CHECK (state IN ('pending', 'claimed', 'current', 'excluded', 'blocked')),
+          reason TEXT, claim_token INTEGER NOT NULL DEFAULT 0 CHECK (claim_token >= 0),
+          lease_expires_at TEXT, active_attempt_id INTEGER REFERENCES session_recap_attempts(id), next_eligible_at TEXT,
+          requested_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        );
+        CREATE TABLE session_recap_attempts (
+          id INTEGER PRIMARY KEY, session_id INTEGER NOT NULL REFERENCES sessions(id),
+          job_session_id INTEGER NOT NULL REFERENCES session_recap_jobs(session_id), input_hash TEXT NOT NULL,
+          input_contract_version INTEGER NOT NULL, policy_version INTEGER NOT NULL,
+          recap_contract_version INTEGER NOT NULL,
+          claim_token INTEGER NOT NULL, trigger TEXT NOT NULL, model TEXT, max_budget_usd REAL, timeout_seconds INTEGER,
+          state TEXT NOT NULL CHECK (state IN (
+            'reserved', 'running', 'succeeded', 'stale_discarded', 'timeout',
+            'budget_exceeded', 'unusable_output', 'global_abort', 'cleanup_failed',
+            'abandoned', 'cancelled_before_launch'
+          )),
+          reason TEXT, diagnostic TEXT, packet_path TEXT, packet_nonce TEXT,
+          owner_pid INTEGER, process_group_id INTEGER, process_started_at TEXT, cleanup_state TEXT,
+          started_at TEXT, finished_at TEXT, created_at TEXT NOT NULL
+        );
+        CREATE TABLE session_recap_runtime (
+          singleton INTEGER PRIMARY KEY CHECK (singleton = 1), claim_token INTEGER NOT NULL DEFAULT 0,
+          owner_pid INTEGER, lease_expires_at TEXT, heartbeat_at TEXT
+        );
+        CREATE TABLE session_recap_provider_health (
+          singleton INTEGER PRIMARY KEY CHECK (singleton = 1), reason TEXT,
+          consecutive_failures INTEGER NOT NULL DEFAULT 0,
+          diagnostic TEXT, last_failed_at TEXT, retry_after TEXT
+        );
+        CREATE TABLE session_recap_runs (
+          id INTEGER PRIMARY KEY, trigger TEXT NOT NULL, selector_json TEXT, started_at TEXT NOT NULL,
+          finished_at TEXT, state TEXT NOT NULL, attempt_limit INTEGER
+        );
+        CREATE TABLE session_recap_run_candidates (
+          run_id INTEGER NOT NULL REFERENCES session_recap_runs(id),
+          session_id INTEGER NOT NULL REFERENCES sessions(id),
+          input_hash TEXT, initial_disposition TEXT NOT NULL, final_disposition TEXT,
+          started_attempt_id INTEGER REFERENCES session_recap_attempts(id), PRIMARY KEY (run_id, session_id)
+        );
+        CREATE TABLE session_recap_quarantine (
+          attempt_id INTEGER PRIMARY KEY REFERENCES session_recap_attempts(id), path TEXT NOT NULL,
+          nonce TEXT NOT NULL, byte_size INTEGER, process_group_id INTEGER,
+          process_started_at TEXT, cleanup_state TEXT NOT NULL,
+          created_at TEXT NOT NULL, CHECK (byte_size IS NULL OR byte_size >= 0)
+        );
+        CREATE INDEX idx_recap_jobs_ready ON session_recap_jobs(state, next_eligible_at);
+        CREATE INDEX idx_recap_jobs_lease ON session_recap_jobs(lease_expires_at);
+        CREATE INDEX idx_recap_attempts_job_latest ON session_recap_attempts(job_session_id, id DESC);
+        CREATE INDEX idx_recap_attempts_input ON session_recap_attempts(session_id, input_hash);
+        CREATE INDEX idx_recap_attempts_status ON session_recap_attempts(state, finished_at);
+        CREATE UNIQUE INDEX idx_recap_attempts_live
+          ON session_recap_attempts(job_session_id)
+          WHERE state IN ('reserved', 'running');
+        CREATE INDEX idx_recap_runs_started ON session_recap_runs(started_at DESC);
+    """
+    # executescript commits any active transaction before running its SQL. Keep
+    # every claim object inside the caller's BEGIN IMMEDIATE instead.
+    for statement in ddl.split(";"):
+        if statement.strip():
+            conn.execute(statement)
+    for trigger in (
+        "session_recap_jobs_active_attempt_session",
+        "session_recap_jobs_active_attempt_session_update",
+    ):
+        conn.execute(_ownership_trigger_sql(trigger))
+    if not _recap_schema_complete(conn):
+        raise sqlite3.OperationalError("recap migration postconditions failed")
+
+
 def _apply_migrations(
     conn: sqlite3.Connection,
     *,
@@ -286,6 +578,8 @@ def _apply_migrations(
                     migrate_to_v1(conn)
                 if current < 2:
                     migrate_to_v2(conn)
+                if current < 8:
+                    _migrate_to_v8(conn)
                 conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             conn.execute("COMMIT")
         except Exception:
@@ -315,6 +609,15 @@ def _open_connection(
     conn.commit()
 
     (apply_migrations_callback or _apply_migrations)(conn)
+    return conn
+
+
+def open_no_migrate_connection(settings: dict | None = None, *, busy_timeout_ms: int = 100) -> sqlite3.Connection:
+    """Open an existing writable DB for a bounded hook operation without migration."""
+    db_path = get_db_path(settings)
+    conn = sqlite3.connect(f"file:{db_path}?mode=rw", uri=True)
+    conn.execute(f"PRAGMA busy_timeout = {busy_timeout_ms}")
+    conn.execute("PRAGMA foreign_keys = ON")
     return conn
 
 

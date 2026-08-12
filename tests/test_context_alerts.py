@@ -14,6 +14,7 @@ from ccrecall.hooks.context_alerts import (
     has_backfillable_tool_content,
     proactive_alert_block,
 )
+from ccrecall.llm_summary_db import _migrate_to_v8
 from ccrecall.schema import SCHEMA
 
 pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
@@ -23,6 +24,8 @@ def _make_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(SCHEMA)
+    conn.execute("BEGIN IMMEDIATE")
+    _migrate_to_v8(conn)
     conn.commit()
     return conn
 
@@ -52,7 +55,7 @@ def _seed_session(
     branch_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
     conn.execute(
-        "INSERT INTO branch_messages (branch_id, message_id) VALUES (?, ?)",
+        "INSERT INTO branch_messages (branch_id, message_id, position) VALUES (?, ?, 0)",
         (branch_id, msg_id),
     )
 

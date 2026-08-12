@@ -158,18 +158,19 @@ def diff_branch_messages(
     branch_uuids: list[str],
     uuid_to_msg_id: dict[str, int],
 ) -> None:
-    """Diff branch_messages links: add missing, remove stale (not messages themselves)."""
+    """Diff branch_messages links and retain deterministic root-to-leaf positions."""
     cursor.execute(
         "SELECT message_id FROM branch_messages WHERE branch_id = ?",
         (branch_db_id,),
     )
     existing_bm_ids = {row[0] for row in cursor.fetchall()}
 
-    desired_bm_ids: set[int] = set()
-    for uuid in branch_uuids:
+    desired_positions: dict[int, int] = {}
+    for position, uuid in enumerate(branch_uuids):
         msg_id = uuid_to_msg_id.get(uuid)
         if msg_id:
-            desired_bm_ids.add(msg_id)
+            desired_positions[msg_id] = position
+    desired_bm_ids = set(desired_positions)
 
     to_add = desired_bm_ids - existing_bm_ids
     to_remove = existing_bm_ids - desired_bm_ids
@@ -180,11 +181,29 @@ def diff_branch_messages(
             f"DELETE FROM branch_messages WHERE branch_id = ? AND message_id IN ({placeholders})",
             (branch_db_id, *to_remove),
         )
-    if to_add:
+    has_position = any(row[1] == "position" for row in cursor.execute("PRAGMA table_info(branch_messages)"))
+    if has_position:
+        # Move retained links out of the constrained range before assigning their
+        # new positions, so a path reorder cannot collide with a live position.
         cursor.executemany(
-            "INSERT OR IGNORE INTO branch_messages (branch_id, message_id) VALUES (?, ?)",
-            [(branch_db_id, mid) for mid in to_add],
+            "UPDATE branch_messages SET position = ? WHERE branch_id = ? AND message_id = ?",
+            [(-position - 1, branch_db_id, message_id) for message_id, position in desired_positions.items()],
         )
+        cursor.executemany(
+            "UPDATE branch_messages SET position = ? WHERE branch_id = ? AND message_id = ?",
+            [(position, branch_db_id, message_id) for message_id, position in desired_positions.items()],
+        )
+    if to_add:
+        if has_position:
+            cursor.executemany(
+                "INSERT INTO branch_messages (branch_id, message_id, position) VALUES (?, ?, ?)",
+                [(branch_db_id, message_id, desired_positions[message_id]) for message_id in to_add],
+            )
+        else:
+            cursor.executemany(
+                "INSERT OR IGNORE INTO branch_messages (branch_id, message_id) VALUES (?, ?)",
+                [(branch_db_id, mid) for mid in to_add],
+            )
 
 
 def sync_branch(
@@ -197,6 +216,7 @@ def sync_branch(
 ) -> None:
     """Process one branch: upsert metadata, diff links, compute summary, embed."""
     branch_uuids = branch["uuids"]
+    ordered_branch_uuids = branch.get("ordered_uuids", list(branch_uuids))
     is_active = branch["is_active"]
 
     branch_msgs = [m for m in messages if m.get("uuid") in branch_uuids]
@@ -220,7 +240,7 @@ def sync_branch(
         session_id,
     )
 
-    diff_branch_messages(cursor, branch_db_id, branch_uuids, uuid_to_msg_id)
+    diff_branch_messages(cursor, branch_db_id, ordered_branch_uuids, uuid_to_msg_id)
 
     # Aggregate branch content for FTS — SET (recompute from scratch, not append)
     # Includes: message text + deduplicated full file paths + commit text

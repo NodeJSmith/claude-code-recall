@@ -9,6 +9,7 @@ import sqlite_vec
 
 from ccrecall.db import _ensure_vec_schema
 from ccrecall.health import clear_embedding_failure, record_embedding_failure
+from ccrecall.llm_summary_db import _migrate_to_v8
 from ccrecall.schema import SCHEMA
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures"
@@ -54,6 +55,8 @@ def make_vec_conn(db_path: str = ":memory:") -> sqlite3.Connection:
     """
     conn = sqlite3.connect(db_path)
     conn.executescript(SCHEMA)
+    conn.execute("BEGIN IMMEDIATE")
+    _migrate_to_v8(conn)
     conn.commit()
     conn.enable_load_extension(True)
     sqlite_vec.load(conn)
@@ -72,6 +75,8 @@ def memory_db():
     # IntegrityError at runtime where FK enforcement is on.
     conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(SCHEMA)
+    conn.execute("BEGIN IMMEDIATE")
+    _migrate_to_v8(conn)
     conn.commit()
     yield conn
     conn.close()
