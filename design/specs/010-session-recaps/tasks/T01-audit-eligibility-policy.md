@@ -1,7 +1,7 @@
 ---
 task_id: "T01"
 title: "Audit meaningful-session eligibility"
-status: "planned"
+status: "done"
 depends_on: []
 implements: ["FR#14", "AC#8"]
 ---
