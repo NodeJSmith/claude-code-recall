@@ -28,9 +28,10 @@ from ccrecall.config import (
 )
 from ccrecall.db import DEFAULT_PROJECTS_DIR, chunk_vec_queryable, get_connection
 from ccrecall.embeddings import is_model_cached_on_disk
-from ccrecall.formatting import extract_project_name, normalize_cwd
+from ccrecall.formatting import extract_project_name, normalize_cwd, normalize_project_key
 from ccrecall.health import REASON_VEC_UNAVAILABLE, clear_embedding_failure, record_embedding_failure
 from ccrecall.models import HookInput
+from ccrecall.project_ops import upsert_project
 from ccrecall.session_ops import sync_session
 from ccrecall.transcript_sources import discover_session_transcript_files
 
@@ -120,8 +121,20 @@ def sync_session_for_finalization(settings: dict, session_id: str) -> int:
     session_file = get_session_file(DEFAULT_PROJECTS_DIR, session_id)
     if session_file is None:
         return 0
+    project_root = _project_root_for_session_file(session_file, DEFAULT_PROJECTS_DIR)
     with get_connection(settings, load_vec=True) as conn:
-        return sync_session(conn, session_file, _project_root_for_session_file(session_file, DEFAULT_PROJECTS_DIR))
+        # Recap callers have no hook cwd to test, so resolve the real project
+        # name the way the batch import does before importing anything. Skipping
+        # this would let a recap request carry a project the user excluded.
+        exclude_projects = settings.get("exclude_projects") or []
+        if exclude_projects:
+            cursor = conn.cursor()
+            project_id = upsert_project(cursor, normalize_project_key(project_root.name), project_dir=project_root)
+            row = cursor.execute("SELECT name FROM projects WHERE id = ?", (project_id,)).fetchone()
+            name = row[0] if row else extract_project_name(str(project_root))
+            if name in exclude_projects:
+                return 0
+        return sync_session(conn, session_file, project_root)
 
 
 def run(input_file: Path | None = None) -> None:

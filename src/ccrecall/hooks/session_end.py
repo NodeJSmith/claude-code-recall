@@ -12,6 +12,7 @@ from pydantic import ValidationError
 from whenever import Instant
 
 from ccrecall.config import PID_FILE_MODE, get_db_path, load_settings, log_hook_exception
+from ccrecall.formatting import extract_project_name, normalize_cwd
 from ccrecall.hooks.durability import fsync_directory, journal_lock
 from ccrecall.hooks.handoff import write_clear_handoff
 from ccrecall.hooks.subprocess_utils import detached_popen_kwargs
@@ -88,6 +89,14 @@ def main() -> None:
             or not _valid_session_id(session_uuid)
         ):
             return
+        # Recording intent for an excluded project is what later authorizes
+        # importing it and sending it to a provider. Fail open when cwd is
+        # absent, matching the Stop hook; sync_session_for_finalization is the
+        # backstop that refuses the import itself.
+        exclude_projects = settings.get("exclude_projects") or []
+        if exclude_projects and hook_input.cwd:
+            if extract_project_name(normalize_cwd(hook_input.cwd)) in exclude_projects:
+                return
         now = Instant.now().format_iso()
         platform_supported = posix_process_groups_supported()
         intent = record_intent(settings, session_uuid, now, platform_supported=platform_supported)
