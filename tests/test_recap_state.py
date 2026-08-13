@@ -441,6 +441,8 @@ def test_proven_cleanup_releases_fenced_running_attempt_provider_admission(tmp_p
         _attempt(conn, 1, first, provider_token=probe)
         upsert_job(conn, 1, "input-b", "end", "2026-08-12T10:00:01Z")
 
+        # The fenced claim keeps its lease, so the replacement that releases the
+        # stale admission waits for expiry rather than stealing a live claim.
         second = claim_job(conn, 1, EXPIRED, 60, cleanup_proven=True)
 
         assert admit_provider(conn, 1, second, EXPIRED) == probe + 1

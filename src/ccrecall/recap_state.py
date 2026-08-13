@@ -63,10 +63,10 @@ def upsert_job(
         AND NOT (session_recap_jobs.state = 'blocked'
                  AND session_recap_jobs.reason = 'cleanup_failed'
                  AND session_recap_jobs.active_attempt_id IS NOT NULL)"""
-    # State and lease are the only handles recovery has on a live attempt, so a
-    # changed input may fence that attempt but must never reset them beneath it.
-    resettable = """excluded.requested_input_hash IS NOT session_recap_jobs.requested_input_hash
-        AND session_recap_jobs.active_attempt_id IS NULL"""
+    # Strictly narrower than fenced: state and lease are the only handles recovery
+    # has on a live attempt, so a changed input may fence that attempt but must
+    # never reset them beneath it.
+    resettable = f"({fenced}) AND session_recap_jobs.active_attempt_id IS NULL"
     conn.execute(
         f"""
         INSERT INTO session_recap_jobs (
@@ -685,15 +685,15 @@ def reset_health(conn: sqlite3.Connection) -> None:
     # the attempt until lease recovery and reopens the global gate beside it.
     # An admission with nothing behind it leaked, and this stays the manual
     # release for it.
-    held = """EXISTS (SELECT 1 FROM session_recap_attempts a
+    admission_held = """EXISTS (SELECT 1 FROM session_recap_attempts a
         WHERE a.provider_token = session_recap_provider_health.probe_token
           AND a.state IN ('reserved', 'running'))"""
     conn.execute(
         f"UPDATE session_recap_provider_health SET reason = NULL, consecutive_failures = 0, "
         f"diagnostic = NULL, last_failed_at = NULL, retry_after = NULL, "
-        f"probe_active = CASE WHEN {held} THEN probe_active ELSE 0 END, "
-        f"probe_session_id = CASE WHEN {held} THEN probe_session_id ELSE NULL END, "
-        f"probe_claim_token = CASE WHEN {held} THEN probe_claim_token ELSE NULL END "
+        f"probe_active = CASE WHEN {admission_held} THEN probe_active ELSE 0 END, "
+        f"probe_session_id = CASE WHEN {admission_held} THEN probe_session_id ELSE NULL END, "
+        f"probe_claim_token = CASE WHEN {admission_held} THEN probe_claim_token ELSE NULL END "
         "WHERE singleton = 1"
     )
 

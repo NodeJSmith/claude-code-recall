@@ -359,6 +359,11 @@ def _process_job(
     if row is not None:
         sync_session_for_finalization(settings, row[0])
     with get_connection(settings) as conn:
+        # The capture snapshot reads the branch identity and writes it back, so it
+        # takes the write lock up front the way record_intent does. Without that,
+        # an import committing between the read and the write would have its newer
+        # hash overwritten by this stale one.
+        conn.execute("BEGIN IMMEDIATE")
         branch = conn.execute(
             "SELECT id, recap_input_hash, summary_enrichment_json, summary_enrichment_version, "
             "summary_enrichment_status, summary_enrichment_input_hash, "
@@ -374,16 +379,18 @@ def _process_job(
             mark_excluded(conn, session_id, token, None, lineage, "missing_active_branch", now)
             return True
         branch_id, input_hash = branch[0], branch[1]
-        recap = load_recap_input(conn.cursor(), branch_id)
+        # Persist as well as read: a DB upgraded from v7 has recap_input_hash as
+        # NULL with no backfill, so a branch the import fast-skips would keep
+        # recomputing the mismatch below and never reach a provider.
+        recap = refresh_recap_input(conn.cursor(), branch_id)
         if recap.input_hash != input_hash:
             # The capture snapshot is authoritative even if a concurrent import
-            # updated the branch immediately before this claim. Persist it too:
-            # a DB upgraded from v7 has no stored hash and no backfill for one,
-            # so leaving the branch untouched recomputes this same mismatch on
-            # every later claim and the session never reaches a provider.
-            refresh_recap_input(conn.cursor(), branch_id)
+            # updated the branch immediately before this claim.
             upsert_job(conn, session_id, recap.input_hash, "session_end", now)
             return True
+        # Release the write lock before eligibility, admission, and reservation
+        # work; each of those fences itself on the claim token it already holds.
+        conn.commit()
         if valid_current_enrichment(
             json.loads(branch[2]) if branch[2] else None,
             status=branch[4],
