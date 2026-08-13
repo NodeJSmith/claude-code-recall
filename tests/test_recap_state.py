@@ -343,6 +343,19 @@ def test_changed_input_fences_a_claimed_job_without_releasing_its_attempt(tmp_pa
         assert not complete_attempt(conn, attempt, first, "succeeded", NOW)
 
 
+def test_changed_input_requeues_a_claimed_job_before_attempt_reservation(tmp_path):
+    with get_connection(_connection(tmp_path)) as conn:
+        upsert_job(conn, 1, "input-a", "end", NOW)
+        first = claim_job(conn, 1, NOW, 60)
+
+        assert recap_state_changed_input(conn, 1, "input-b", "2026-08-12T10:00:01Z")
+        assert conn.execute(
+            "SELECT requested_input_hash, state, reason, lease_expires_at, next_eligible_at, "
+            "active_attempt_id, retry_lineage, claim_token FROM session_recap_jobs"
+        ).fetchone() == ("input-b", "pending", None, None, None, None, 1, first + 1)
+        assert claim_job(conn, 1, "2026-08-12T10:00:01Z", 60) == first + 2
+
+
 def test_proven_cleanup_releases_fenced_running_attempt_provider_admission(tmp_path):
     with get_connection(_connection(tmp_path)) as conn:
         upsert_job(conn, 1, "input-a", "end", NOW)

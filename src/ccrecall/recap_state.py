@@ -112,10 +112,11 @@ def recap_state_changed_input(
     input_hash: str,
     now: str | None,
 ) -> bool:
-    """Fence changed input and reset only content-dependent terminal state."""
+    """Fence changed input and reset eligible terminal or pre-attempt claim state."""
     resettable = """state IN ('current', 'excluded')
         OR (state = 'pending' AND reason = 'timeout_retry')
-        OR (state = 'blocked' AND reason IN ('budget_exceeded', 'unusable_output', 'timeout_exhausted'))"""
+        OR (state = 'blocked' AND reason IN ('budget_exceeded', 'unusable_output', 'timeout_exhausted'))
+        OR (state = 'claimed' AND active_attempt_id IS NULL)"""
     return bool(
         conn.execute(
             f"""UPDATE session_recap_jobs SET requested_input_hash = ?, updated_at = COALESCE(?, CURRENT_TIMESTAMP),
