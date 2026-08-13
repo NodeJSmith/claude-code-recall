@@ -1,5 +1,7 @@
 # Design: Session Recaps
 
+**Status:** archived
+
 **Date:** 2026-08-12
 **Status:** archived
 **Scope-mode:** hold
