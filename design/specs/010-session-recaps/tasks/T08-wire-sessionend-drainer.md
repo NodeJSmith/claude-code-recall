@@ -1,7 +1,7 @@
 ---
 task_id: "T08"
 title: "Wire SessionEnd and serialized drainer"
-status: "planned"
+status: "done"
 depends_on: ["T03", "T04", "T05", "T06", "T07"]
 implements: ["FR#5", "FR#7", "FR#8", "FR#9", "FR#10", "FR#11", "FR#13", "AC#2", "AC#4", "AC#5", "AC#7", "AC#18", "AC#19"]
 ---

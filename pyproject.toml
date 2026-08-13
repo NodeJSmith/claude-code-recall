@@ -70,6 +70,8 @@ ccrecall-setup           = "ccrecall.hooks.memory_setup:main"
 ccrecall-sync            = "ccrecall.hooks.memory_sync:main"
 ccrecall-context         = "ccrecall.hooks.memory_context:main"
 ccrecall-clear-handoff   = "ccrecall.hooks.clear_handoff:main"
+ccrecall-session-end     = "ccrecall.hooks.session_end:main"
+ccrecall-drain-session-recaps = "ccrecall.hooks.drain_session_recaps:main"
 ccrecall-warm-model      = "ccrecall.hooks.warm_model:main"
 ccrecall-llm-summaries   = "ccrecall.hooks.backfill_llm_summaries:main"
 

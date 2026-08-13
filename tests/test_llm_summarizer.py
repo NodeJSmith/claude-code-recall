@@ -7,7 +7,9 @@ from pathlib import Path
 import pytest
 
 from ccrecall.llm_summarizer import (
+    STATUS_CLAUDE_UNAVAILABLE,
     STATUS_CLEANUP_FAILED,
+    STATUS_ERROR,
     STATUS_OK,
     STATUS_PLATFORM_UNSUPPORTED,
     STATUS_TIMEOUT,
@@ -337,6 +339,46 @@ def test_admission_blocks_packet_write_and_provider_spawn(tmp_path):
     assert result.status == STATUS_CLEANUP_FAILED
     assert not packet.exists()
     assert not calls
+
+
+def test_initial_packet_admission_denial_uses_content_free_cleanup_seam(tmp_path):
+    packet = tmp_path / "owner" / "input.json"
+    cleanup = []
+
+    assert not write_packet(
+        packet,
+        b"sensitive",
+        admit_launch=lambda: False,
+        persist_write_failure=lambda state, metadata: cleanup.append((state, metadata)),
+        packet_nonce="nonce",
+    )
+
+    assert cleanup == [("verified_removed", {"packet_path": str(packet), "packet_nonce": "nonce", "byte_size": None})]
+    assert not packet.exists()
+
+
+@pytest.mark.parametrize(
+    ("error", "status"),
+    [(FileNotFoundError(), STATUS_CLAUDE_UNAVAILABLE), (OSError(), STATUS_ERROR)],
+)
+def test_spawn_failure_removes_packet_and_reports_cleanup(tmp_path, error, status):
+    packet = tmp_path / "owner" / "input.json"
+    write_packet(packet, b"sensitive")
+    cleanup = []
+
+    result = invoke_claude(
+        packet,
+        SETTINGS,
+        persist_launch=lambda *_args: True,
+        persist_cleanup=lambda state, metadata: cleanup.append((state, metadata)),
+        popen=lambda *_args, **_kwargs: (_ for _ in ()).throw(error),
+        platform_supported=True,
+        packet_nonce="nonce",
+    )
+
+    assert result.status == status
+    assert cleanup == [("verified_removed", {"packet_path": str(packet), "packet_nonce": "nonce", "byte_size": None})]
+    assert not packet.exists()
 
 
 def test_quarantine_capacity_blocks_count_and_bytes(memory_db):

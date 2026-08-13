@@ -21,7 +21,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash -c 'command -v ccrecall-clear-handoff >/dev/null 2>&1 && ccrecall-clear-handoff || true'",
+            "command": "bash -c 'command -v ccrecall-session-end >/dev/null 2>&1 && ccrecall-session-end || true'",
             "timeout": 10000
           }
         ]

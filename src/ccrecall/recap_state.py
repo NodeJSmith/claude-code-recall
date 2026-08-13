@@ -633,7 +633,7 @@ def open_cooldown(
     admitted = conn.execute(
         """UPDATE session_recap_attempts SET state = 'global_abort', diagnostic = ?, finished_at = ?
            WHERE id = ? AND claim_token = ? AND provider_token = ?
-             AND state = 'running' AND EXISTS (
+              AND (state = 'running' OR (state = 'reserved' AND cleanup_state = 'verified_removed')) AND EXISTS (
                SELECT 1 FROM session_recap_jobs j WHERE j.session_id = job_session_id
                  AND j.state = 'claimed' AND j.claim_token = ?
                  AND j.active_attempt_id = session_recap_attempts.id
@@ -746,6 +746,53 @@ def requeue_changed_input_after_cleanup(conn: sqlite3.Connection, session_id: in
             (now, session_id),
         ).rowcount
     )
+
+
+def recover_expired_attempt(conn: sqlite3.Connection, attempt_id: int, now: str, *, cleanup_proven: bool) -> bool:
+    """Fence an expired owner after recovery has resolved its cleanup obligation."""
+    attempt = conn.execute(
+        "SELECT job_session_id, claim_token, provider_token FROM session_recap_attempts "
+        "WHERE id = ? AND state IN ('reserved', 'running')",
+        (attempt_id,),
+    ).fetchone()
+    if attempt is None:
+        return False
+    session_id, token, provider_token = attempt
+    if cleanup_proven:
+        closed = conn.execute(
+            """UPDATE session_recap_jobs SET state = 'pending', reason = NULL,
+                   active_attempt_id = NULL, lease_expires_at = NULL, next_eligible_at = NULL,
+                   retry_lineage = retry_lineage + 1, claim_token = claim_token + 1, updated_at = ?
+               WHERE session_id = ? AND state = 'claimed' AND claim_token = ?
+                 AND active_attempt_id = ?""",
+            (now, session_id, token, attempt_id),
+        ).rowcount
+        outcome = "abandoned"
+    else:
+        closed = conn.execute(
+            """UPDATE session_recap_jobs SET state = 'blocked', reason = 'cleanup_failed',
+                   lease_expires_at = NULL, next_eligible_at = NULL, claim_token = claim_token + 1,
+                   updated_at = ? WHERE session_id = ? AND state = 'claimed'
+                     AND claim_token = ? AND active_attempt_id = ?""",
+            (now, session_id, token, attempt_id),
+        ).rowcount
+        outcome = "cleanup_failed"
+    if not closed:
+        return False
+    conn.execute(
+        "UPDATE session_recap_attempts SET state = ?, finished_at = ? "
+        "WHERE id = ? AND claim_token = ? AND state IN ('reserved', 'running')",
+        (outcome, now, attempt_id, token),
+    )
+    if provider_token is not None:
+        conn.execute(
+            "UPDATE session_recap_provider_health SET probe_active = 0, "
+            "probe_session_id = NULL, probe_claim_token = NULL "
+            "WHERE singleton = 1 AND probe_token = ? AND probe_session_id = ? "
+            "AND probe_claim_token = ?",
+            (provider_token, session_id, token),
+        )
+    return True
 
 
 def verify_cleanup_removed(conn: sqlite3.Connection, attempt_id: int, token: int, now: str) -> bool:

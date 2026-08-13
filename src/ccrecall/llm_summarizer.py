@@ -4,7 +4,6 @@ import json
 import os
 import signal
 import subprocess
-import sys
 import tempfile
 import time
 from contextlib import suppress
@@ -13,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from ccrecall.config import PID_FILE_MODE
+from ccrecall.process_cleanup import posix_process_groups_supported, process_group_absent, process_start_identity
 from ccrecall.summary_enrichment import CLAUDE_RESPONSE_SCHEMA, validate_claude_response_body
 
 STATUS_OK = "ok"
@@ -56,15 +56,6 @@ class InvocationResult:
 
 def _cap(text: str | None) -> str | None:
     return text[:DIAGNOSTIC_CAP] if text else None
-
-
-def posix_process_groups_supported() -> bool:
-    return (
-        sys.platform == "linux"
-        and Path("/proc/self/stat").is_file()
-        and hasattr(os, "killpg")
-        and hasattr(os, "getpgid")
-    )
 
 
 def build_prompt(packet_path: Path) -> str:
@@ -142,6 +133,14 @@ def write_packet(
     whose removal cannot be proved; no provider can be launched from this path.
     """
     if admit_launch is not None and not admit_launch():
+        # No path was created, but the caller may already hold a fenced provider
+        # reservation. Release it through the same content-free cancellation seam.
+        if persist_write_failure is not None:
+            _persist_cleanup(
+                persist_write_failure,
+                "verified_removed",
+                _packet_cleanup_metadata(packet_path, packet_nonce),
+            )
         return False
     temporary = None
     fd = None
@@ -184,15 +183,6 @@ def remove_packet(packet_path: Path) -> bool:
     return True
 
 
-def _process_start_identity(pid: int) -> str | None:
-    """Linux start ticks distinguish a reused PID; unknown is intentionally unsafe."""
-    try:
-        fields = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").rsplit(") ", 1)[1].split()
-        return fields[19]
-    except (FileNotFoundError, IndexError, OSError):
-        return None
-
-
 def _classify_process_failure(stderr: str, stdout: str) -> tuple[str, str | None]:
     text = "\n".join(bit for bit in (stderr, stdout) if bit).lower()
     if "unknown option" in text or "unrecognized option" in text or "usage:" in text:
@@ -214,22 +204,10 @@ def _parse_stdout(stdout: str) -> dict[str, Any]:
     return validate_claude_response_body(body)
 
 
-def _group_is_absent(group_id: int) -> bool:
-    """Prove a Linux process group has no members, including orphaned descendants."""
-    try:
-        for stat_path in Path("/proc").glob("[0-9]*/stat"):
-            fields = stat_path.read_text(encoding="utf-8").rsplit(") ", 1)[1].split()
-            if fields[0] != "Z" and int(fields[2]) == group_id:
-                return False
-    except (IndexError, OSError, ValueError):
-        return False
-    return True
-
-
 def _wait_for_group_absence(group_id: int, timeout: float) -> bool:
     deadline = time.monotonic() + timeout
     while True:
-        if _group_is_absent(group_id):
+        if process_group_absent(group_id):
             return True
         if time.monotonic() >= deadline:
             return False
@@ -310,6 +288,12 @@ def invoke_claude(
     except Exception:
         admitted = False
     if not admitted:
+        deleted = remove_packet(packet_path)
+        _persist_cleanup(
+            persist_cleanup,
+            "verified_removed" if deleted else "uncertain",
+            _packet_cleanup_metadata(packet_path, packet_nonce),
+        )
         return InvocationResult(STATUS_CLEANUP_FAILED, diagnostic=STATUS_CLEANUP_FAILED)
     try:
         process = popen(
@@ -321,12 +305,18 @@ def invoke_claude(
             cwd=packet_path.parent,
             start_new_session=True,
         )
-    except FileNotFoundError:
-        return InvocationResult(STATUS_CLAUDE_UNAVAILABLE, diagnostic=STATUS_CLAUDE_UNAVAILABLE)
-    except OSError:
+    except (FileNotFoundError, OSError) as exc:
+        deleted = remove_packet(packet_path)
+        _persist_cleanup(
+            persist_cleanup,
+            "verified_removed" if deleted else "uncertain",
+            _packet_cleanup_metadata(packet_path, packet_nonce),
+        )
+        if isinstance(exc, FileNotFoundError):
+            return InvocationResult(STATUS_CLAUDE_UNAVAILABLE, diagnostic=STATUS_CLAUDE_UNAVAILABLE)
         return InvocationResult(STATUS_ERROR, diagnostic="provider_error")
 
-    started_at = _process_start_identity(process.pid)
+    started_at = process_start_identity(process.pid)
     try:
         group_id = os.getpgid(process.pid)
         persisted = (
@@ -364,7 +354,7 @@ def invoke_claude(
             process_started_at=started_at,
         )
 
-    if not _group_is_absent(group_id) and not _terminate_group(process, group_id, grace_seconds):
+    if not process_group_absent(group_id) and not _terminate_group(process, group_id, grace_seconds):
         _persist_cleanup(
             persist_cleanup,
             "uncertain",

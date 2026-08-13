@@ -1,0 +1,501 @@
+"""Detached, serialized Session Recap finalizer.
+
+This module is deliberately the only hook-side module that imports the provider
+boundary.  It operates exclusively on imported SQLite state after startup.
+"""
+
+import contextlib
+import json
+import os
+import re
+import signal
+import time
+import uuid
+from pathlib import Path
+
+from whenever import Instant
+
+from ccrecall.config import get_db_path, load_settings, remove_pid_file, setup_logging, try_acquire_pid_file
+from ccrecall.hooks.durability import fsync_directory, journal_lock
+from ccrecall.hooks.session_end import JOURNAL_PREFIX, JOURNAL_VERSION, journal_path
+from ccrecall.hooks.sync_current import sync_session_for_finalization
+from ccrecall.llm_summarizer import (
+    STATUS_AUTH_REQUIRED,
+    STATUS_BUDGET_EXCEEDED,
+    STATUS_CLAUDE_UNAVAILABLE,
+    STATUS_CLEANUP_FAILED,
+    STATUS_ERROR,
+    STATUS_INVALID_OUTPUT,
+    STATUS_PLATFORM_UNSUPPORTED,
+    STATUS_RATE_LIMITED,
+    STATUS_TIMEOUT,
+    STATUS_UNSUPPORTED_CLI,
+    invoke_claude,
+    posix_process_groups_supported,
+    remove_packet,
+    write_packet,
+)
+from ccrecall.llm_summary_db import get_connection, recap_schema_capability
+from ccrecall.process_cleanup import process_group_absent, process_start_identity
+from ccrecall.recap_contract import ELIGIBILITY_POLICY_VERSION, RECAP_INPUT_CONTRACT_VERSION
+from ccrecall.recap_eligibility import evaluate_branch
+from ccrecall.recap_input import load_recap_input
+from ccrecall.recap_state import (
+    acknowledge_cleanup,
+    admit_provider,
+    bind_attempt_packet,
+    cancel_attempt_before_launch,
+    claim_job,
+    claim_runtime,
+    complete_attempt,
+    defer_for_cooldown,
+    heartbeat_job,
+    heartbeat_runtime,
+    mark_current,
+    mark_excluded,
+    open_cooldown,
+    quarantine_admission,
+    quarantine_attempt,
+    record_attempt_launch,
+    recover_expired_attempt,
+    release_runtime,
+    reserve_attempt,
+    upsert_job,
+)
+from ccrecall.summary_enrichment import build_stored_enrichment_envelope, valid_current_enrichment
+
+PID_KEY = "ccrecall-drain-session-recaps"
+JOURNAL_BATCH_SIZE = 32
+_UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+
+
+def _now() -> str:
+    return Instant.now().format_iso()
+
+
+def _quarantine(path: Path) -> None:
+    with contextlib.suppress(OSError):
+        path.replace(path.with_suffix(path.suffix + ".bad"))
+
+
+def _valid_journal(value: object, marker: Path, settings: dict) -> dict:
+    if not isinstance(value, dict):
+        raise ValueError("journal is not an object")
+    session_uuid = value.get("session_uuid")
+    requested_at = value.get("requested_at")
+    if (
+        value.get("version") != JOURNAL_VERSION
+        or not isinstance(session_uuid, str)
+        or _UUID_RE.fullmatch(session_uuid) is None
+        or not isinstance(requested_at, str)
+        or not requested_at
+        or value.get("trigger") != "session_end"
+        or marker != journal_path(get_db_path(settings), session_uuid)
+    ):
+        raise ValueError("malformed recap journal")
+    return value
+
+
+def replay_journal(settings: dict, *, limit: int = JOURNAL_BATCH_SIZE) -> int:
+    """Replay committed intent before deleting its owner-only journal marker."""
+    root = get_db_path(settings).parent
+    replayed = 0
+    for marker in sorted(root.glob(f"{JOURNAL_PREFIX}*.json"))[:limit]:
+        try:
+            with journal_lock(marker):
+                try:
+                    value = json.loads(marker.read_text(encoding="utf-8"))
+                    value = _valid_journal(value, marker, settings)
+                except (ValueError, json.JSONDecodeError):
+                    # The shared lock prevents a concurrent SessionEnd writer
+                    # from replacing this malformed marker before its quarantine.
+                    _quarantine(marker)
+                    continue
+                # A valid SessionEnd UUID is durable intent even when Stop has not
+                # imported it yet. Final sync is silent and precedes this lookup.
+                sync_session_for_finalization(settings, value["session_uuid"])
+                with get_connection(settings) as conn:
+                    if recap_schema_capability(conn) != "ready":
+                        return replayed
+                    row = conn.execute(
+                        "SELECT s.id, b.recap_input_hash FROM sessions s JOIN branches b ON b.session_id = s.id "
+                        "WHERE s.uuid = ? AND b.is_active = 1",
+                        (value["session_uuid"],),
+                    ).fetchone()
+                    if row is None:
+                        continue
+                    upsert_job(conn, row[0], row[1], "session_end", value["requested_at"])
+                marker.unlink()
+                fsync_directory(root)
+                replayed += 1
+        except OSError:
+            continue
+    return replayed
+
+
+def _terminate_exact_group(pid: int, group_id: int, started_at: str) -> bool:
+    """Terminate only the persisted process-group leader, never a reused PID."""
+    if process_start_identity(pid) != started_at:
+        return False
+    for signum in (signal.SIGTERM, signal.SIGKILL):
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(group_id, signum)
+        deadline = time.monotonic() + 1
+        while time.monotonic() < deadline:
+            if process_group_absent(group_id):
+                return True
+            time.sleep(0.01)
+    return process_group_absent(group_id)
+
+
+def _recover_expired_claims(settings: dict, now: str) -> tuple[bool, set[int]]:
+    """Durably prove stale packet/process cleanup before any replacement claim."""
+    recovered: set[int] = set()
+    all_proven = True
+    with get_connection(settings) as conn:
+        rows = conn.execute(
+            "SELECT a.id, a.job_session_id, a.packet_path, a.owner_pid, a.process_group_id, "
+            "a.process_started_at FROM session_recap_attempts a JOIN session_recap_jobs j "
+            "ON j.session_id = a.job_session_id WHERE a.state IN ('reserved', 'running') "
+            "AND j.state = 'claimed' AND j.lease_expires_at <= ?",
+            (now,),
+        ).fetchall()
+        for attempt_id, session_id, packet, pid, group, started in rows:
+            proven = False
+            if pid is None and group is None and started is None:
+                proven = packet is None or remove_packet(Path(packet))
+            elif isinstance(pid, int) and isinstance(group, int) and isinstance(started, str):
+                proven = True if process_group_absent(group) else _terminate_exact_group(pid, group, started)
+                if proven and packet is not None:
+                    proven = remove_packet(Path(packet))
+            if proven:
+                conn.execute(
+                    "UPDATE session_recap_attempts SET cleanup_state = 'verified_removed', "
+                    "finished_at = ? WHERE id = ?",
+                    (now, attempt_id),
+                )
+                if recover_expired_attempt(conn, attempt_id, now, cleanup_proven=True):
+                    recovered.add(session_id)
+            else:
+                all_proven = False
+                conn.execute(
+                    "UPDATE session_recap_attempts SET cleanup_state = 'uncertain', finished_at = ? WHERE id = ?",
+                    (now, attempt_id),
+                )
+                quarantine_attempt(
+                    conn,
+                    attempt_id,
+                    conn.execute(
+                        "SELECT claim_token FROM session_recap_attempts WHERE id = ?", (attempt_id,)
+                    ).fetchone()[0],
+                    None,
+                    "uncertain",
+                    now,
+                )
+                recover_expired_attempt(conn, attempt_id, now, cleanup_proven=False)
+    return all_proven, recovered
+
+
+def _next_pending(conn, now: str) -> int | None:
+    row = conn.execute(
+        "SELECT session_id FROM session_recap_jobs WHERE state = 'pending' "
+        "AND (next_eligible_at IS NULL OR next_eligible_at <= ?) ORDER BY requested_at LIMIT 1",
+        (now,),
+    ).fetchone()
+    return row[0] if row else None
+
+
+def _packet_path(settings: dict, session_id: int, attempt_id: int, nonce: str) -> Path:
+    return get_db_path(settings).parent / "recap-packets" / str(session_id) / f"{attempt_id}-{nonce}.json"
+
+
+def _materialize(
+    settings: dict,
+    branch_id: int,
+    session_id: int,
+    token: int,
+    attempt_id: int,
+    input_hash: str,
+    response: dict,
+    model: str,
+) -> bool:
+    """Write only if the captured branch and claim generation remain current."""
+    now = _now()
+    envelope = build_stored_enrichment_envelope(
+        response, model=model, generated_at=now, attempt_id=attempt_id, recap_input_hash=input_hash
+    )
+    with get_connection(settings) as conn:
+        try:
+            current = load_recap_input(conn.cursor(), branch_id)
+        except ValueError:
+            return False
+        if current.input_hash != input_hash:
+            return False
+        changed = conn.execute(
+            """UPDATE branches SET summary_enrichment_json = ?, summary_enrichment_version = 2,
+                   summary_enrichment_status = 'ok', summary_enrichment_error = NULL,
+                   summary_enrichment_updated_at = ?, summary_enrichment_input_hash = ?,
+                   summary_enrichment_input_contract_version = ?, summary_enrichment_policy_version = ?
+                WHERE id = ? AND is_active = 1 AND recap_input_hash IS ? AND EXISTS (
+                  SELECT 1 FROM session_recap_jobs j WHERE j.session_id = ? AND j.state = 'claimed'
+                    AND j.claim_token = ? AND j.active_attempt_id = ? AND j.requested_input_hash IS ?
+                )""",
+            (
+                json.dumps(envelope, ensure_ascii=False, separators=(",", ":")),
+                now,
+                input_hash,
+                RECAP_INPUT_CONTRACT_VERSION,
+                ELIGIBILITY_POLICY_VERSION,
+                branch_id,
+                input_hash,
+                session_id,
+                token,
+                attempt_id,
+                input_hash,
+            ),
+        ).rowcount
+        return bool(changed)
+
+
+def _process_job(settings: dict, session_id: int, runtime_token: int, *, cleanup_proven: bool = False) -> bool:
+    """Capture, invoke, and materialize one fenced job. Returns false after global abort."""
+    now = _now()
+    with get_connection(settings) as conn:
+        token = claim_job(conn, session_id, now, settings["recap_job_lease_seconds"], cleanup_proven=cleanup_proven)
+        if token is None:
+            return True
+        heartbeat_runtime(conn, runtime_token, now, settings["recap_runtime_lease_seconds"])
+        row = conn.execute("SELECT uuid FROM sessions WHERE id = ?", (session_id,)).fetchone()
+    # This intentionally happens after the fenced job claim and before every
+    # recap input/eligibility read. It has no hook stdout and closes DB first.
+    if row is not None:
+        sync_session_for_finalization(settings, row[0])
+    with get_connection(settings) as conn:
+        branch = conn.execute(
+            "SELECT id, recap_input_hash, summary_enrichment_json, summary_enrichment_version, "
+            "summary_enrichment_status, summary_enrichment_input_hash, "
+            "summary_enrichment_input_contract_version, summary_enrichment_policy_version "
+            "FROM branches WHERE session_id = ? AND is_active = 1",
+            (session_id,),
+        ).fetchone()
+        lineage_row = conn.execute(
+            "SELECT retry_lineage FROM session_recap_jobs WHERE session_id = ?", (session_id,)
+        ).fetchone()
+        lineage = lineage_row[0] if lineage_row else 0
+        if branch is None:
+            mark_excluded(conn, session_id, token, None, lineage, "missing_active_branch", now)
+            return True
+        branch_id, input_hash = branch[0], branch[1]
+        recap = load_recap_input(conn.cursor(), branch_id)
+        if recap.input_hash != input_hash:
+            # The capture snapshot is authoritative even if a concurrent import
+            # updated the branch immediately before this claim.
+            upsert_job(conn, session_id, recap.input_hash, "session_end", now)
+            return True
+        if valid_current_enrichment(
+            json.loads(branch[2]) if branch[2] else None,
+            status=branch[4],
+            current_input_hash=input_hash,
+            materialized_input_hash=branch[5],
+            materialized_input_contract_version=branch[6],
+            materialized_policy_version=branch[7],
+            stored_enrichment_version=branch[3],
+        ):
+            mark_current(conn, session_id, token, input_hash, lineage, now)
+            return True
+        decision = evaluate_branch(conn.cursor(), branch_id)
+        if not decision.eligible:
+            mark_excluded(conn, session_id, token, input_hash, lineage, decision.reason, now)
+            return True
+        if not posix_process_groups_supported():
+            conn.execute(
+                "UPDATE session_recap_jobs SET state = 'blocked', reason = 'platform_unsupported', "
+                "lease_expires_at = NULL "
+                "WHERE session_id = ? AND claim_token = ? AND state = 'claimed'",
+                (session_id, token),
+            )
+            return True
+        provider_token = admit_provider(conn, session_id, token, now)
+        if provider_token is None:
+            defer_for_cooldown(conn, session_id, token, now)
+            return True
+        nonce = uuid.uuid4().hex
+        try:
+            attempt_id = reserve_attempt(
+                conn,
+                session_id,
+                token,
+                input_hash,
+                "session_end",
+                now,
+                provider_token=provider_token,
+                model=settings["llm_summary_model"],
+                max_budget_usd=settings["llm_summary_max_budget_usd"],
+                timeout_seconds=settings["llm_summary_timeout_seconds"],
+            )
+        except RuntimeError:
+            return True
+        packet_path = _packet_path(settings, session_id, attempt_id, nonce)
+        if not bind_attempt_packet(conn, attempt_id, token, str(packet_path), nonce):
+            return True
+
+    # The packet is a copied DB snapshot and every provider callback opens its
+    # own brief transaction. No SQLite connection spans filesystem/provider work.
+    def persist_cleanup(state: str, metadata: dict) -> None:
+        with get_connection(settings) as callback_conn:
+            acknowledge_cleanup(callback_conn, attempt_id, token, state, _now())
+            if state == "verified_removed":
+                cancel_attempt_before_launch(callback_conn, attempt_id, token, input_hash, lineage, _now())
+            else:
+                quarantine_attempt(callback_conn, attempt_id, token, metadata.get("byte_size"), state, _now())
+
+    def persist_launch(pid: int, group: int, started: str) -> bool:
+        with get_connection(settings) as callback_conn:
+            return record_attempt_launch(callback_conn, attempt_id, token, pid, group, started, _now())
+
+    def persist_prelaunch_cleanup(state: str, metadata: dict) -> None:
+        """Keep a cleaned reservation fenced until its provider cooldown opens."""
+        with get_connection(settings) as callback_conn:
+            acknowledged = acknowledge_cleanup(callback_conn, attempt_id, token, state, _now())
+            if state != "verified_removed":
+                if acknowledged:
+                    quarantine_attempt(callback_conn, attempt_id, token, metadata.get("byte_size"), state, _now())
+                complete_attempt(
+                    callback_conn, attempt_id, token, "cleanup_failed", _now(), diagnostic="provider_error"
+                )
+
+    def admit_launch() -> bool:
+        with get_connection(settings) as callback_conn:
+            allowed, _count, _bytes, _oldest = quarantine_admission(
+                callback_conn,
+                max_count=settings["recap_quarantine_max_count"],
+                max_bytes=settings["recap_quarantine_max_bytes"],
+            )
+            return allowed and heartbeat_job(
+                callback_conn, session_id, token, _now(), settings["recap_job_lease_seconds"]
+            )
+
+    if not write_packet(
+        packet_path,
+        recap.packet,
+        admit_launch=admit_launch,
+        persist_write_failure=persist_cleanup,
+        packet_nonce=nonce,
+    ):
+        return True
+    result = invoke_claude(
+        packet_path,
+        settings,
+        persist_launch=persist_launch,
+        persist_cleanup=persist_prelaunch_cleanup,
+        admit_launch=admit_launch,
+        packet_nonce=nonce,
+    )
+    if result.status == "ok" and result.response_body is not None:
+        outcome = (
+            "succeeded"
+            if _materialize(
+                settings,
+                branch_id,
+                session_id,
+                token,
+                attempt_id,
+                input_hash,
+                result.response_body,
+                settings["llm_summary_model"],
+            )
+            else "stale_discarded"
+        )
+        with get_connection(settings) as conn:
+            heartbeat_runtime(conn, runtime_token, _now(), settings["recap_runtime_lease_seconds"])
+            complete_attempt(conn, attempt_id, token, outcome, _now())
+    elif result.status in {
+        STATUS_RATE_LIMITED,
+        STATUS_AUTH_REQUIRED,
+        STATUS_CLAUDE_UNAVAILABLE,
+        STATUS_UNSUPPORTED_CLI,
+        STATUS_ERROR,
+    }:
+        with get_connection(settings) as conn:
+            heartbeat_runtime(conn, runtime_token, _now(), settings["recap_runtime_lease_seconds"])
+            open_cooldown(
+                conn,
+                attempt_id,
+                token,
+                provider_token,
+                result.status,
+                _now(),
+                30,
+                settings["recap_cooldown_max_seconds"],
+                diagnostic="provider_error",
+            )
+        return False
+    else:
+        outcomes = {
+            STATUS_BUDGET_EXCEEDED: "budget_exceeded",
+            STATUS_TIMEOUT: "timeout",
+            STATUS_INVALID_OUTPUT: "unusable_output",
+            STATUS_CLEANUP_FAILED: "cleanup_failed",
+            STATUS_PLATFORM_UNSUPPORTED: "cleanup_failed",
+        }
+        with get_connection(settings) as conn:
+            heartbeat_runtime(conn, runtime_token, _now(), settings["recap_runtime_lease_seconds"])
+            complete_attempt(
+                conn,
+                attempt_id,
+                token,
+                outcomes.get(result.status, "cleanup_failed"),
+                _now(),
+                diagnostic=result.diagnostic,
+            )
+    return True
+
+
+def run() -> int:
+    settings = load_settings()
+    logger = setup_logging(settings, process_name="drain-session-recaps")
+    replay_journal(settings)
+    if not try_acquire_pid_file(PID_KEY):
+        return 0
+    try:
+        with get_connection(settings) as conn:
+            if recap_schema_capability(conn) != "ready":
+                return 0
+        cleanup_proven, recovered = _recover_expired_claims(settings, _now())
+        if not cleanup_proven:
+            return 0
+        with get_connection(settings) as conn:
+            runtime_token = claim_runtime(
+                conn,
+                os.getpid(),
+                _now(),
+                settings["recap_runtime_lease_seconds"],
+                cleanup_proven=cleanup_proven,
+            )
+        if runtime_token is None:
+            return 0
+        try:
+            while True:
+                with get_connection(settings) as conn:
+                    session_id = _next_pending(conn, _now())
+                if session_id is None or not _process_job(
+                    settings, session_id, runtime_token, cleanup_proven=session_id in recovered
+                ):
+                    break
+        finally:
+            with get_connection(settings) as conn:
+                release_runtime(conn, runtime_token)
+        return 0
+    except Exception:
+        logger.exception("Session recap drainer failed")
+        return 1
+    finally:
+        remove_pid_file(PID_KEY)
+
+
+def main() -> None:
+    raise SystemExit(run())
+
+
+if __name__ == "__main__":
+    main()

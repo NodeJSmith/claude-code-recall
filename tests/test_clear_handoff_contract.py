@@ -23,6 +23,8 @@ from unittest.mock import patch
 import pytest
 
 import ccrecall.hooks.clear_handoff as _clear_handoff
+import ccrecall.hooks.handoff as _handoff
+import ccrecall.hooks.session_end as _session_end
 import ccrecall.hooks.session_selection as _session_selection
 from ccrecall.hooks.session_selection import HANDOFF_STALE_SECONDS
 
@@ -48,8 +50,9 @@ def _run_handoff_main(tmp_path: Path, payload: dict | str) -> tuple[Path, str]:
     with (
         patch.object(sys, "stdin", io.StringIO(stdin_data)),
         patch.object(sys, "stdout", stdout_capture),
-        patch.object(_clear_handoff, "load_settings", return_value=fake_settings),
-        patch.object(_clear_handoff, "get_db_path", return_value=fake_db),
+        patch.object(_handoff, "load_settings", return_value=fake_settings),
+        patch.object(_handoff, "get_db_path", return_value=fake_db),
+        patch.object(_session_end, "posix_process_groups_supported", return_value=False),
     ):
         _clear_handoff.main()
 
