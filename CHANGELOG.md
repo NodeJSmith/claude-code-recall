@@ -4,7 +4,7 @@
 
 ### Features
 
-* add opt-in DB-backed Session Recaps with SessionEnd intent, serialized draining, recovery, and maintenance controls
+* add opt-in DB-backed Session Recaps with SessionEnd intent, serialized draining, recovery, and maintenance controls (#118)
 
 ## [0.22.1](https://github.com/NodeJSmith/claude-code-recall/compare/v0.22.0...v0.22.1) (2026-08-09)
 
