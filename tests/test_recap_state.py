@@ -19,6 +19,7 @@ from ccrecall.recap_state import (
     open_cooldown,
     prune_retention,
     recap_state_changed_input,
+    recover_expired_attempt,
     requeue_changed_input_after_cleanup,
     reserve_attempt,
     reserve_attempt_for_run,
@@ -341,6 +342,23 @@ def test_changed_input_fences_a_claimed_job_without_releasing_its_attempt(tmp_pa
         ).fetchone() == ("input-b", "claimed", attempt, 1, first + 1)
         assert not heartbeat_job(conn, 1, first, NOW, 60)
         assert not complete_attempt(conn, attempt, first, "succeeded", NOW)
+
+
+def test_recover_expired_attempt_reclaims_a_claim_fenced_by_changed_input(tmp_path):
+    with get_connection(_connection(tmp_path)) as conn:
+        upsert_job(conn, 1, "input-a", "end", NOW)
+        first = claim_job(conn, 1, NOW, 60)
+        attempt = _attempt(conn, 1, first)
+
+        assert recap_state_changed_input(conn, 1, "input-b", "2026-08-12T10:00:01Z")
+
+        assert recover_expired_attempt(conn, attempt, "2026-08-12T10:01:00Z", cleanup_proven=True)
+        assert conn.execute(
+            "SELECT requested_input_hash, state, active_attempt_id FROM session_recap_jobs"
+        ).fetchone() == ("input-b", "pending", None)
+        assert conn.execute("SELECT state FROM session_recap_attempts WHERE id = ?", (attempt,)).fetchone() == (
+            "abandoned",
+        )
 
 
 def test_changed_input_requeues_a_claimed_job_before_attempt_reservation(tmp_path):

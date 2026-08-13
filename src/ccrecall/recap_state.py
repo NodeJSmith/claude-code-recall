@@ -761,9 +761,9 @@ def recover_expired_attempt(conn: sqlite3.Connection, attempt_id: int, now: str,
             """UPDATE session_recap_jobs SET state = 'pending', reason = NULL,
                    active_attempt_id = NULL, lease_expires_at = NULL, next_eligible_at = NULL,
                    retry_lineage = retry_lineage + 1, claim_token = claim_token + 1, updated_at = ?
-               WHERE session_id = ? AND state = 'claimed' AND claim_token = ?
+               WHERE session_id = ? AND state = 'claimed'
                  AND active_attempt_id = ?""",
-            (now, session_id, token, attempt_id),
+            (now, session_id, attempt_id),
         ).rowcount
         outcome = "abandoned"
     else:
@@ -771,8 +771,8 @@ def recover_expired_attempt(conn: sqlite3.Connection, attempt_id: int, now: str,
             """UPDATE session_recap_jobs SET state = 'blocked', reason = 'cleanup_failed',
                    lease_expires_at = NULL, next_eligible_at = NULL, claim_token = claim_token + 1,
                    updated_at = ? WHERE session_id = ? AND state = 'claimed'
-                     AND claim_token = ? AND active_attempt_id = ?""",
-            (now, session_id, token, attempt_id),
+                     AND active_attempt_id = ?""",
+            (now, session_id, attempt_id),
         ).rowcount
         outcome = "cleanup_failed"
     if not closed:
