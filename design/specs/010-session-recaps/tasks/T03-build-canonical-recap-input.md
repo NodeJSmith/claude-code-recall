@@ -1,7 +1,7 @@
 ---
 task_id: "T03"
 title: "Build canonical DB recap input"
-status: "planned"
+status: "done"
 depends_on: ["T01", "T02"]
 implements: ["FR#3", "FR#4", "FR#23", "AC#2", "AC#3", "AC#16"]
 ---

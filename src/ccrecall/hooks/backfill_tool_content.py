@@ -81,6 +81,7 @@ from ccrecall.parsing import (
     is_insertable_message,
     parse_all_with_uuids,
 )
+from ccrecall.recap_input import refresh_recap_input
 from ccrecall.tool_content_status import count_eligible, count_pending_missing_jsonl, count_total_sessions
 
 _PRINT_PREFIX = "ccrecall backfill tool-content"
@@ -485,7 +486,6 @@ def backfill_session(cursor: sqlite3.Cursor, session_id: int, filepaths: list[Pa
         """,
         (agg_content, branch_db_id),
     )
-
     # Guarantee (#81 Fix 1): a session must leave the eligible set once this
     # function returns True, or it gets re-selected and re-parsed forever and
     # keeps re-firing the SessionStart alert. Any messages row still NULL here
@@ -508,6 +508,9 @@ def backfill_session(cursor: sqlite3.Cursor, session_id: int, filepaths: list[Pa
             session_id,
             cursor.rowcount,
         )
+    # Capture identity only after every recap-relevant tool_content value has
+    # reached its final normalized value in this transaction.
+    refresh_recap_input(cursor, branch_db_id)
     return True
 
 

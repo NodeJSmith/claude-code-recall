@@ -29,7 +29,12 @@ from ccrecall.branch_ops import sync_branch
 from ccrecall.db import chunk_vec_queryable
 from ccrecall.formatting import normalize_project_key
 from ccrecall.import_log_ops import import_log_skip_check, upsert_import_log
-from ccrecall.message_ops import insert_new_messages, update_missing_tool_content, upsert_session
+from ccrecall.message_ops import (
+    insert_new_messages,
+    repair_existing_messages,
+    update_missing_tool_content,
+    upsert_session,
+)
 from ccrecall.models import LOGGER_NAME
 from ccrecall.parsing import extract_session_metadata, extract_session_uuid, find_all_branches, parse_all_with_uuids
 from ccrecall.project_ops import upsert_project
@@ -122,6 +127,8 @@ def sync_session(
     existing_uuids = {row[0] for row in cursor.fetchall()}
 
     repaired_tool_content = update_missing_tool_content(cursor, session_id, messages, existing_uuids)
+    if force:
+        repair_existing_messages(cursor, session_id, messages)
     new_count = insert_new_messages(cursor, session_id, messages, valid_branch_uuids, existing_uuids)
 
     # Build uuid -> message_id mapping

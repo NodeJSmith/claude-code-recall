@@ -15,7 +15,9 @@ from ccrecall.embed_ops import MAX_WRITE_PATH_EMBEDS_PER_SYNC, embed_branch_chun
 from ccrecall.embeddings import EMBEDDING_DIM, EMBEDDING_MODEL, EMBEDDING_VERSION
 from ccrecall.hooks.import_conversations import get_file_hash
 from ccrecall.import_log_ops import has_pending_tool_content
+from ccrecall.llm_summary_db import _migrate_to_v8
 from ccrecall.parsing import extract_session_uuid
+from ccrecall.recap_input import refresh_recap_input
 from ccrecall.schema import SCHEMA
 from ccrecall.session_ops import sync_session
 from ccrecall.summarizer import SUMMARY_VERSION
@@ -1020,6 +1022,77 @@ class TestEmbedOnWriteSuccess:
                 assert vec_count == 0, f"inactive branch {branch_id}: should have no vectors, got {vec_count}"
 
         assert active_embedded, "expected at least one embedded active leaf"
+        conn.close()
+
+    @pytest.mark.skipif(not _VEC_OK, reason="sqlite-vec not available")
+    def test_forced_reimport_preserves_payload_and_vectors_while_requeuing_recap(self, tmp_path):
+        """Forced parser repair refreshes recaps without replacing unchanged embeddings or payload."""
+        fixture_path = FIXTURE_DIR / "single_rewind.jsonl"
+        conn = _make_vec_conn(tmp_path)
+        assert conn is not None
+        conn.execute("BEGIN IMMEDIATE")
+        _migrate_to_v8(conn)
+        conn.commit()
+        fake_vec = [0.1] * EMBEDDING_DIM
+
+        with patch("ccrecall.embed_ops.embed_batch", side_effect=lambda texts: [fake_vec] * len(texts)):
+            sync_session(conn, fixture_path, tmp_path)
+            conn.commit()
+
+            cursor = conn.cursor()
+            branch_id, session_id, original_hash = cursor.execute(
+                "SELECT id, session_id, recap_input_hash FROM branches WHERE is_active = 1"
+            ).fetchone()
+            cursor.execute(
+                "UPDATE branches SET summary_enrichment_json = ? WHERE id = ?",
+                ('{"summary":"retained payload"}', branch_id),
+            )
+            chunks_before = cursor.execute(
+                "SELECT id, exchange_index, embedding_version FROM chunks WHERE branch_id = ? ORDER BY id", (branch_id,)
+            ).fetchall()
+            vectors_before = cursor.execute(
+                "SELECT cv.chunk_id FROM chunk_vec cv JOIN chunks c ON c.id = cv.chunk_id "
+                "WHERE c.branch_id = ? ORDER BY cv.chunk_id",
+                (branch_id,),
+            ).fetchall()
+            assert chunks_before
+            assert vectors_before
+
+            message_id = cursor.execute(
+                "SELECT id FROM messages WHERE session_id = ? ORDER BY id LIMIT 1", (session_id,)
+            ).fetchone()[0]
+            cursor.execute("UPDATE messages SET content = 'incorrect parser value' WHERE id = ?", (message_id,))
+            changed_hash = refresh_recap_input(cursor, branch_id).input_hash
+            cursor.execute(
+                "INSERT INTO session_recap_jobs "
+                "(session_id, requested_input_hash, trigger, state, requested_at, updated_at) "
+                "VALUES (?, ?, 'test', 'current', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+                (session_id, changed_hash),
+            )
+            conn.commit()
+
+            sync_session(conn, fixture_path, tmp_path, force=True)
+            conn.commit()
+
+        branch = conn.execute(
+            "SELECT recap_input_hash, summary_enrichment_json FROM branches WHERE id = ?", (branch_id,)
+        ).fetchone()
+        job = conn.execute(
+            "SELECT requested_input_hash, state FROM session_recap_jobs WHERE session_id = ?", (session_id,)
+        ).fetchone()
+        chunks_after = conn.execute(
+            "SELECT id, exchange_index, embedding_version FROM chunks WHERE branch_id = ? ORDER BY id", (branch_id,)
+        ).fetchall()
+        vectors_after = conn.execute(
+            "SELECT cv.chunk_id FROM chunk_vec cv JOIN chunks c ON c.id = cv.chunk_id "
+            "WHERE c.branch_id = ? ORDER BY cv.chunk_id",
+            (branch_id,),
+        ).fetchall()
+
+        assert branch == (original_hash, '{"summary":"retained payload"}')
+        assert job == (original_hash, "pending")
+        assert chunks_after == chunks_before
+        assert vectors_after == vectors_before
         conn.close()
 
 

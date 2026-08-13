@@ -21,6 +21,7 @@ from conftest import write_jsonl as _write_jsonl
 from ccrecall import llm_summary_db
 from ccrecall.hooks.backfill_query import BATCH_SIZE, EXIT_ABORT, EXIT_OK
 from ccrecall.hooks.backfill_tool_content import backfill_session, run, select_batch
+from ccrecall.recap_input import load_recap_input, refresh_recap_input
 from ccrecall.schema import SCHEMA
 
 pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
@@ -1005,7 +1006,7 @@ class TestOrphanedUuidQuiescence:
         )
 
         conn = _make_conn()
-        session_id, _ = _seed_session(
+        session_id, branch_id = _seed_session(
             conn,
             filepath=filepath,
             existing_messages=[
@@ -1017,7 +1018,19 @@ class TestOrphanedUuidQuiescence:
             leaf_uuid="u1",
         )
 
-        with caplog.at_level(logging.WARNING, logger="ccrecall"):
+        def refresh_after_normalization(cursor, refreshed_branch_id):
+            assert (
+                cursor.execute(
+                    "SELECT COUNT(*) FROM messages WHERE session_id = ? AND tool_content IS NULL", (session_id,)
+                ).fetchone()[0]
+                == 0
+            )
+            return refresh_recap_input(cursor, refreshed_branch_id)
+
+        with (
+            caplog.at_level(logging.WARNING, logger="ccrecall"),
+            patch("ccrecall.hooks.backfill_tool_content.refresh_recap_input", side_effect=refresh_after_normalization),
+        ):
             code = _run_backfill(conn)
         assert code == EXIT_OK
 
@@ -1030,6 +1043,8 @@ class TestOrphanedUuidQuiescence:
             "SELECT tool_content FROM messages WHERE session_id = ? AND uuid = ?", (session_id, "orphan1")
         ).fetchone()
         assert orphan_row[0] == "", "uuid absent from the surviving JSONL must be stamped '' , not left NULL"
+        stored_hash = conn.execute("SELECT recap_input_hash FROM branches WHERE id = ?", (branch_id,)).fetchone()[0]
+        assert stored_hash == load_recap_input(conn.cursor(), branch_id).input_hash
 
         assert "marked tool_content=''" in caplog.text, "an unrecoverable orphaned uuid must log a WARNING"
 

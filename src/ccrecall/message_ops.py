@@ -147,3 +147,44 @@ def update_missing_tool_content(
         )
         updated += cursor.rowcount
     return updated
+
+
+def repair_existing_messages(
+    cursor: sqlite3.Cursor,
+    session_id: int,
+    messages: list[dict],
+) -> int:
+    """Apply parser corrections during an explicitly forced full reimport."""
+    updated = 0
+    for entry in messages:
+        parts = message_content_parts(entry)
+        uuid = entry.get("uuid")
+        if parts is None or not uuid:
+            continue
+        text, has_thinking, tool_content = parts
+        content = entry.get("message", {}).get("content", "")
+        is_notification = entry.get("type") == "user" and (
+            is_task_notification(content) or is_teammate_message(content)
+        )
+        cursor.execute(
+            """
+            UPDATE messages
+            SET parent_uuid = ?, timestamp = ?, role = ?, content = ?, has_thinking = ?,
+                is_notification = ?, origin = ?, tool_content = ?
+            WHERE session_id = ? AND uuid = ?
+            """,
+            (
+                entry.get("parentUuid"),
+                entry.get("timestamp"),
+                entry.get("type"),
+                text,
+                has_thinking,
+                int(is_notification),
+                parse_origin(entry),
+                tool_content,
+                session_id,
+                uuid,
+            ),
+        )
+        updated += cursor.rowcount
+    return updated
