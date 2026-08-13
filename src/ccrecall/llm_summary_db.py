@@ -405,6 +405,60 @@ def _ownership_trigger_sql(name: str) -> str:
     )
 
 
+OWNERSHIP_TRIGGERS = (
+    "session_recap_jobs_active_attempt_session",
+    "session_recap_jobs_active_attempt_session_update",
+)
+# Idempotent so the same statements serve first creation and later repair. Only
+# idx_recap_attempts_live's SQL text is inspected by _recap_schema_complete, and
+# its WHERE clause survives the IF NOT EXISTS.
+V8_RECAP_INDEX_DDL = (
+    "CREATE INDEX IF NOT EXISTS idx_recap_jobs_ready ON session_recap_jobs(state, next_eligible_at)",
+    "CREATE INDEX IF NOT EXISTS idx_recap_jobs_lease ON session_recap_jobs(lease_expires_at)",
+    "CREATE INDEX IF NOT EXISTS idx_recap_attempts_job_latest ON session_recap_attempts(job_session_id, id DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_recap_attempts_input ON session_recap_attempts(session_id, input_hash)",
+    "CREATE INDEX IF NOT EXISTS idx_recap_attempts_status ON session_recap_attempts(state, finished_at)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_recap_attempts_live ON session_recap_attempts(job_session_id) "
+    "WHERE state IN ('reserved', 'running')",
+    "CREATE INDEX IF NOT EXISTS idx_recap_runs_started ON session_recap_runs(started_at DESC)",
+)
+V9_RECAP_INDEX_DDL = (
+    "CREATE INDEX IF NOT EXISTS idx_recap_attempts_lineage "
+    "ON session_recap_attempts(job_session_id, retry_lineage, id)",
+)
+
+
+def _recreate_recap_indexes_and_triggers(conn: sqlite3.Connection) -> None:
+    """Restore missing recap indexes and triggers without touching a single row."""
+    for statement in (*V8_RECAP_INDEX_DDL, *V9_RECAP_INDEX_DDL):
+        conn.execute(statement)
+    for trigger in OWNERSHIP_TRIGGERS:
+        # Recreate unconditionally: _recap_schema_complete compares trigger SQL
+        # exactly, so a trigger that merely drifted must be replaced, not kept.
+        conn.execute(f"DROP TRIGGER IF EXISTS {trigger}")
+        conn.execute(_ownership_trigger_sql(trigger))
+
+
+def _repair_recap_objects_in_place(conn: sqlite3.Connection) -> bool:
+    """Try to restore completeness by recreating objects; report whether it worked.
+
+    Leaves the schema exactly as found when it cannot, so the caller can fall
+    back to the destructive rebuild without inheriting a half-applied repair.
+    """
+    conn.execute("SAVEPOINT recap_repair_in_place")
+    try:
+        _recreate_recap_indexes_and_triggers(conn)
+        repaired = _recap_schema_complete(conn)
+    except sqlite3.DatabaseError:
+        # A missing column the index needs, for instance: the shape is wrong in
+        # a way only the rebuild can fix.
+        repaired = False
+    if not repaired:
+        conn.execute("ROLLBACK TO SAVEPOINT recap_repair_in_place")
+    conn.execute("RELEASE SAVEPOINT recap_repair_in_place")
+    return repaired
+
+
 def _recap_schema_complete(conn: sqlite3.Connection, *, v8: bool = False) -> bool:
     required_indexes = V8_RECAP_INDEXES if v8 else RECAP_INDEXES
     required_columns = V8_RECAP_TABLE_COLUMNS if v8 else RECAP_TABLE_COLUMNS
@@ -545,15 +599,6 @@ def _migrate_to_v8(conn: sqlite3.Connection) -> None:
           process_started_at TEXT, cleanup_state TEXT NOT NULL,
           created_at TEXT NOT NULL, CHECK (byte_size IS NULL OR byte_size >= 0)
         );
-        CREATE INDEX idx_recap_jobs_ready ON session_recap_jobs(state, next_eligible_at);
-        CREATE INDEX idx_recap_jobs_lease ON session_recap_jobs(lease_expires_at);
-        CREATE INDEX idx_recap_attempts_job_latest ON session_recap_attempts(job_session_id, id DESC);
-        CREATE INDEX idx_recap_attempts_input ON session_recap_attempts(session_id, input_hash);
-        CREATE INDEX idx_recap_attempts_status ON session_recap_attempts(state, finished_at);
-        CREATE UNIQUE INDEX idx_recap_attempts_live
-          ON session_recap_attempts(job_session_id)
-          WHERE state IN ('reserved', 'running');
-        CREATE INDEX idx_recap_runs_started ON session_recap_runs(started_at DESC);
     """
     branch_columns = {row[1] for row in conn.execute("PRAGMA table_info(branches)")}
     for column, declaration in RECAP_BRANCH_COLUMN_DECLARATIONS.items():
@@ -564,10 +609,9 @@ def _migrate_to_v8(conn: sqlite3.Connection) -> None:
     for statement in ddl.split(";"):
         if statement.strip():
             conn.execute(statement)
-    for trigger in (
-        "session_recap_jobs_active_attempt_session",
-        "session_recap_jobs_active_attempt_session_update",
-    ):
+    for statement in V8_RECAP_INDEX_DDL:
+        conn.execute(statement)
+    for trigger in OWNERSHIP_TRIGGERS:
         conn.execute(_ownership_trigger_sql(trigger))
     if not _recap_schema_complete(conn, v8=True):
         raise sqlite3.OperationalError("recap migration postconditions failed")
@@ -659,11 +703,14 @@ def _apply_migrations(
             elif not _recap_schema_complete(conn):
                 if current == 8 and _recap_schema_complete(conn, v8=True):
                     _migrate_to_v9(conn)
-                    conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
-                else:
+                elif not _repair_recap_objects_in_place(conn):
+                    # Only a genuinely wrong table or column shape earns the
+                    # rebuild: it drops every recap table, and the quarantine
+                    # rows it takes with them are the only record of packets
+                    # still awaiting cleanup.
                     _repair_v8_schema(conn)
                     _migrate_to_v9(conn)
-                    conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+                conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             conn.execute("COMMIT")
         except Exception:
             conn.execute("ROLLBACK")

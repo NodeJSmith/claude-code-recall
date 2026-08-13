@@ -190,6 +190,30 @@ class TestRecapSchemaMigration:
             with pytest.raises(sqlite3.IntegrityError):
                 migrated.execute("INSERT INTO branch_messages(branch_id, message_id, position) VALUES (1, 1, 0)")
 
+    def test_a_current_db_missing_one_recap_object_keeps_its_recap_state(self, tmp_path):
+        """The rebuild drops quarantine rows, the only record of uncleaned packets."""
+        db_path = tmp_path / "damaged-index.db"
+        settings = {"db_path": str(db_path)}
+        with get_connection(settings=settings) as conn:
+            conn.execute("INSERT INTO projects(path, key, name) VALUES ('/p', 'p', 'p')")
+            conn.execute("INSERT INTO sessions(uuid, project_id) VALUES ('s', 1)")
+            conn.execute(
+                "INSERT INTO session_recap_jobs(session_id, requested_input_hash, trigger, state, "
+                "requested_at, updated_at) VALUES (1, 'h', 'session_end', 'pending', 'now', 'now')"
+            )
+
+        for dropped in ("DROP INDEX idx_recap_jobs_lease", "DROP TRIGGER session_recap_jobs_active_attempt_session"):
+            conn = sqlite3.connect(db_path)
+            conn.execute(dropped)
+            conn.commit()
+            conn.close()
+
+            with get_connection(settings=settings) as repaired:
+                assert llm_summary_db.recap_schema_capability(repaired) == "ready"
+                assert repaired.execute("SELECT COUNT(*) FROM session_recap_jobs").fetchone() == (1,), (
+                    f"recap state was rebuilt away after {dropped}"
+                )
+
     def test_migration_backfills_positions_by_normalized_timestamp(self, tmp_path):
         db_path = tmp_path / "offset-order.db"
         conn = sqlite3.connect(db_path)
