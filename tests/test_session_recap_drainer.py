@@ -20,7 +20,7 @@ from ccrecall.llm_summarizer import (
 )
 from ccrecall.llm_summary_db import get_connection
 from ccrecall.recap_input import load_recap_input
-from ccrecall.recap_state import create_run, upsert_job
+from ccrecall.recap_state import admit_provider, claim_job, create_run, upsert_job
 
 UUID = "12345678-1234-1234-1234-123456789abc"
 
@@ -644,6 +644,32 @@ def test_recovery_reclaims_expired_unlaunched_changed_input_attempt(tmp_path):
             "verified_removed",
         )
         assert conn.execute("SELECT state, active_attempt_id FROM session_recap_jobs").fetchone() == ("pending", None)
+
+
+def test_recovery_requeues_expired_claim_without_reserved_attempt(tmp_path):
+    settings = _settings(tmp_path)
+    with get_connection(settings) as conn:
+        conn.execute("INSERT INTO projects(path, key) VALUES ('/p', 'p')")
+        conn.execute("INSERT INTO sessions(uuid, project_id) VALUES (?, 1)", (UUID,))
+        conn.execute("INSERT INTO branches(session_id, leaf_uuid, is_active) VALUES (1, 'leaf', 1)")
+        upsert_job(conn, 1, "input", "session_end", "2026-08-12T10:00:00Z")
+        token = claim_job(conn, 1, "2026-08-12T10:00:00Z", 60)
+        assert token == 1
+        assert admit_provider(conn, 1, token, "2026-08-12T10:00:00Z") == 1
+        conn.execute("UPDATE session_recap_jobs SET lease_expires_at = '2000-01-01T00:00:00Z'")
+
+    proven, recovered = drain_session_recaps._recover_expired_claims(settings, "2026-08-12T10:01:00Z")
+
+    assert proven
+    assert recovered == {1}
+    with get_connection(settings) as conn:
+        assert conn.execute(
+            "SELECT state, claim_token, lease_expires_at, active_attempt_id FROM session_recap_jobs"
+        ).fetchone() == ("pending", 2, None, None)
+        assert conn.execute(
+            "SELECT probe_active, probe_session_id, probe_claim_token FROM session_recap_provider_health"
+        ).fetchone() == (0, None, None)
+        assert claim_job(conn, 1, "2026-08-12T10:01:00Z", 60) == 3
 
 
 def test_recovery_run_drains_requeued_same_generation_attempt(tmp_path, monkeypatch):

@@ -160,6 +160,24 @@ def _recover_expired_claims(settings: dict, now: str) -> tuple[bool, set[int]]:
     recovered: set[int] = set()
     all_proven = True
     with get_connection(settings) as conn:
+        unreserved = conn.execute(
+            "UPDATE session_recap_jobs SET state = 'pending', claim_token = claim_token + 1, "
+            "lease_expires_at = NULL, updated_at = ?, reason = NULL "
+            "WHERE state = 'claimed' AND active_attempt_id IS NULL AND lease_expires_at <= ? "
+            "RETURNING session_id, claim_token",
+            (now, now),
+        ).fetchall()
+        for session_id, token in unreserved:
+            # A crash can occur after provider admission but before the attempt
+            # reservation; release only the admission fenced by this old claim.
+            conn.execute(
+                "UPDATE session_recap_provider_health SET probe_active = 0, "
+                "probe_session_id = NULL, probe_claim_token = NULL "
+                "WHERE singleton = 1 AND probe_active = 1 AND probe_session_id = ? "
+                "AND probe_claim_token < ?",
+                (session_id, token),
+            )
+            recovered.add(session_id)
         rows = conn.execute(
             "SELECT a.id, a.job_session_id, a.packet_path, a.owner_pid, a.process_group_id, "
             "a.process_started_at FROM session_recap_attempts a JOIN session_recap_jobs j "
