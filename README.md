@@ -176,7 +176,7 @@ These are the `ccrecall` subcommands the `/ccr-*` skills invoke. You can run the
 | `ccrecall tail` | Reads the tail of a prior session's transcript to recover the last instruction and any unanswered question. Used by `/ccr-resume` |
 | `ccrecall backfill embeddings` | Opt-in seeding of embeddings for historical active-leaf branches (jina-v2-small-en via fastembed). Not auto-spawned. Supports `--days N` / `--limit N` / `--threads N`; throttled via `nice` + a single inference thread by default. Resumable |
 | `ccrecall backfill llm-summaries` | Compatibility-named, opt-in Session Recap backfill through the installed Claude CLI. Supports session/day/attempt selectors, targeted `--retry-failures`, and one-run model/budget/timeout overrides. |
-| `ccrecall recap recover` / `reset-health` / `maintain` | Recover overdue queued work, clear provider cooldown without bypassing safety blocks, or preview/prune eligible lifecycle history. |
+| `ccrecall recap recover` / `reset-health` / `maintain` | Recover overdue queued work, clear provider cooldown without bypassing safety blocks, or preview/prune eligible lifecycle history. `reset-health` preserves an admission that a reserved or running attempt still holds, so a provider call already in flight keeps fencing the next one until it finishes or `recover` closes it. |
 | `ccrecall backfill tool-content` | Opt-in re-parse of already-synced sessions' JSONL files to populate `messages.tool_content` for rows synced before tool-content extraction existed. Not auto-spawned. Supports `--days N` / `--limit N` / `--status`; resets `embedding_version` on touched branches so `backfill embeddings` re-embeds them. Resumable |
 
 ## Data flow

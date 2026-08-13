@@ -278,7 +278,7 @@ def cmd_recap_recover() -> None:
 
 @recap_app.command(name="reset-health")
 def cmd_recap_reset_health() -> None:
-    """Clear the provider cooldown; this never overrides job safety blocks."""
+    """Clear the provider cooldown; never overrides job safety blocks or a live attempt's admission."""
     with get_recap_connection(load_settings()) as conn:
         reset_health(conn)
 
