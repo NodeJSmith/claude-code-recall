@@ -12,6 +12,7 @@ from ccrecall.config import load_settings, remove_pid_file, try_acquire_pid_file
 from ccrecall.llm_summary_db import get_connection, recap_schema_capability
 from ccrecall.process_cleanup import posix_process_groups_supported
 from ccrecall.recap_eligibility import evaluate_branch
+from ccrecall.recap_input import refresh_recap_input
 from ccrecall.recap_state import create_run, finalize_run, run_accounting, targeted_retry, upsert_job
 
 PID_KEY = "ccrecall-backfill-llm-summaries"
@@ -120,7 +121,12 @@ def run(
                 params.append(f"-{days}")
             sql += " ORDER BY b.ended_at, s.id"
             candidates: list[tuple[int, str | None, str]] = []
-            for session_id, _uuid, branch_id, input_hash in conn.execute(sql, params):
+            for session_id, _uuid, branch_id, _stored_hash in conn.execute(sql, params):
+                # Snapshot the identity the drainer will compute, not a column an
+                # upgraded-from-v7 DB never backfilled. A NULL snapshot goes stale
+                # on the first claim, dropping the job out of this run and past
+                # both --limit and the run's model, budget, and timeout overrides.
+                input_hash = refresh_recap_input(conn.cursor(), branch_id).input_hash
                 decision = evaluate_branch(conn.cursor(), branch_id)
                 if not decision.eligible:
                     candidates.append((session_id, input_hash, "excluded"))
