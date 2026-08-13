@@ -368,6 +368,77 @@ def start_attempt(conn: sqlite3.Connection, attempt_id: int, token: int, now: st
     )
 
 
+def bind_attempt_packet(
+    conn: sqlite3.Connection,
+    attempt_id: int,
+    token: int,
+    packet_path: str,
+    packet_nonce: str,
+) -> bool:
+    """Bind a deterministic packet owner before the filesystem is touched."""
+    return bool(
+        conn.execute(
+            "UPDATE session_recap_attempts SET packet_path = ?, packet_nonce = ?, cleanup_state = 'reserved' "
+            "WHERE id = ? AND claim_token = ? AND state = 'reserved' AND packet_path IS NULL",
+            (packet_path, packet_nonce, attempt_id, token),
+        ).rowcount
+    )
+
+
+def record_attempt_launch(
+    conn: sqlite3.Connection,
+    attempt_id: int,
+    token: int,
+    owner_pid: int,
+    process_group_id: int,
+    process_started_at: str,
+    now: str,
+) -> bool:
+    """Persist exact launch identity before the provider boundary treats it as running."""
+    return bool(
+        conn.execute(
+            "UPDATE session_recap_attempts SET owner_pid = ?, process_group_id = ?, process_started_at = ?, "
+            "cleanup_state = 'launched', state = 'running', started_at = ? "
+            "WHERE id = ? AND claim_token = ? AND state = 'reserved' AND packet_path IS NOT NULL "
+            "AND EXISTS (SELECT 1 FROM session_recap_jobs j WHERE j.session_id = job_session_id "
+            "AND j.state = 'claimed' AND j.claim_token = ? AND j.active_attempt_id = session_recap_attempts.id)",
+            (owner_pid, process_group_id, process_started_at, now, attempt_id, token, token),
+        ).rowcount
+    )
+
+
+def quarantine_attempt(
+    conn: sqlite3.Connection,
+    attempt_id: int,
+    token: int,
+    byte_size: int | None,
+    cleanup_state: str,
+    now: str,
+) -> bool:
+    """Retain only owner/process metadata when packet cleanup is uncertain."""
+    return bool(
+        conn.execute(
+            "INSERT INTO session_recap_quarantine "
+            "(attempt_id, path, nonce, byte_size, process_group_id, process_started_at, cleanup_state, created_at) "
+            "SELECT id, packet_path, packet_nonce, ?, process_group_id, process_started_at, ?, ? "
+            "FROM session_recap_attempts WHERE id = ? AND claim_token = ? AND packet_path IS NOT NULL "
+            "AND packet_nonce IS NOT NULL ON CONFLICT(attempt_id) DO UPDATE SET byte_size = excluded.byte_size, "
+            "cleanup_state = excluded.cleanup_state",
+            (byte_size, cleanup_state, now, attempt_id, token),
+        ).rowcount
+    )
+
+
+def quarantine_admission(
+    conn: sqlite3.Connection, *, max_count: int, max_bytes: int
+) -> tuple[bool, int, int, str | None]:
+    """Return provider admission and content-free quarantine capacity metadata."""
+    count, byte_size, oldest = conn.execute(
+        "SELECT COUNT(*), COALESCE(SUM(byte_size), 0), MIN(created_at) FROM session_recap_quarantine"
+    ).fetchone()
+    return count < max_count and byte_size < max_bytes, count, byte_size, oldest
+
+
 def cancel_attempt_before_launch(
     conn: sqlite3.Connection,
     attempt_id: int,

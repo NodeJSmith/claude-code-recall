@@ -1,7 +1,7 @@
 ---
 task_id: "T06"
 title: "Harden recap provider execution"
-status: "planned"
+status: "done"
 depends_on: ["T03", "T04", "T05"]
 implements: ["FR#16", "FR#17", "FR#18", "FR#24", "FR#26", "AC#10", "AC#11", "AC#19", "AC#21"]
 ---

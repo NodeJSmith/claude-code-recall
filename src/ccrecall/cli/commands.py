@@ -19,7 +19,7 @@ from ccrecall import session_tail as session_tail_mod
 from ccrecall import status as status_mod
 from ccrecall.cli import app, backfill_app
 from ccrecall.cli.context import DEFAULT_CLI_CONTEXT, CLIContextParam
-from ccrecall.config import DEFAULT_DB_PATH, DEFAULT_SETTINGS, try_acquire_pid_file
+from ccrecall.config import DEFAULT_DB_PATH, try_acquire_pid_file
 from ccrecall.db import DEFAULT_PROJECTS_DIR
 from ccrecall.embeddings import DEFAULT_EMBED_THREADS
 from ccrecall.hooks import backfill_embeddings as backfill_embeddings_mod
@@ -54,26 +54,10 @@ def _exactly_one_query_or_status(arguments: ArgumentCollection) -> None:
 _SEARCH_MODE = Group("Search mode", validator=_exactly_one_query_or_status)
 
 
-_LLM_SUMMARY_SELECTOR_FLAGS = ("--days", "--limit", "--session", "--force")
-_DEFAULT_LLM_SUMMARY_BUDGET_USD = DEFAULT_SETTINGS["llm_summary_max_budget_usd"]
+_LLM_SUMMARY_MODE = Group("Selection")
+_LLM_SUMMARY_DOC = """Compatibility command for queued Session Recaps.
 
-
-def _check_capability_conflict_message(*, check_capability: bool, selector_supplied: bool) -> str | None:
-    """Return the shared exclusivity error when capability-check stands alone."""
-    if not check_capability or not selector_supplied:
-        return None
-    selectors = ", ".join(_LLM_SUMMARY_SELECTOR_FLAGS[:-1])
-    return f"--check-capability is mutually exclusive with {selectors}, and {_LLM_SUMMARY_SELECTOR_FLAGS[-1]}"
-
-
-_LLM_SUMMARY_MODE = Group("Capability / Selection")
-_LLM_SUMMARY_DOC = f"""Backfill opt-in Branch Resume Briefs via Claude Code auth.
-
-Sends selected local transcript content, branch/session metadata, and
-source-path provenance through Claude Code auth only after explicit opt-in.
-Uses the configured model plus the configurable ${_DEFAULT_LLM_SUMMARY_BUDGET_USD:.2f} default budget stop
-threshold; that threshold is upstream behavior, not a guaranteed maximum
-charge.
+The durable recap drainer will process these selectors in a later release.
 """
 
 # Output format is global: the meta launcher's --json fills ctx.json_mode, which
@@ -241,14 +225,6 @@ def cmd_backfill_tool_content(
 @backfill_app.command(name="llm-summaries")
 def cmd_backfill_llm_summaries(
     *,
-    check_capability: Annotated[
-        bool,
-        _FLAG,
-        _LLM_SUMMARY_MODE,
-        Parameter(
-            help="Verify the Claude no-session-persistence safety gate and update the capability sidecar.",
-        ),
-    ] = False,
     days: Annotated[
         int | None,
         _LLM_SUMMARY_MODE,
@@ -264,31 +240,13 @@ def cmd_backfill_llm_summaries(
         _LLM_SUMMARY_MODE,
         Parameter(help="Only enrich this session UUID."),
     ] = None,
-    force: Annotated[
-        bool,
-        _FLAG,
-        _LLM_SUMMARY_MODE,
-        Parameter(help="Retry force-only branch statuses such as invalid output or budget-exceeded runs."),
-    ] = False,
     ctx: CLIContextParam = DEFAULT_CLI_CONTEXT,
 ) -> None:
-    error = _check_capability_conflict_message(
-        check_capability=check_capability,
-        selector_supplied=days is not None or limit is not None or session is not None or force,
-    )
-    if error is not None:
-        print(error, file=sys.stderr)
-        raise SystemExit(2)
-
-    if check_capability:
-        raise SystemExit(backfill_llm_summaries_mod.run_capability_check(verbose=ctx.debug))
-
     raise SystemExit(
         backfill_llm_summaries_mod.run(
             days=days,
             limit=limit,
             session=session,
-            force=force,
             verbose=ctx.debug,
             current_session=False,
         )

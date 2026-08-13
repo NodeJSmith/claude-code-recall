@@ -49,12 +49,14 @@ DEFAULT_SETTINGS = {
     "llm_summaries_enabled": False,
     "llm_summary_model": "sonnet",
     "llm_summary_effort": "medium",
-    "llm_summary_timeout_seconds": 180,
+    "llm_summary_timeout_seconds": 120,
     "llm_summary_max_budget_usd": 1.00,
     "llm_summary_min_exchanges": 9,
     "recap_job_lease_seconds": 180,
     "recap_runtime_lease_seconds": 180,
     "recap_cooldown_max_seconds": 3600,
+    "recap_quarantine_max_count": 10,
+    "recap_quarantine_max_bytes": 10_000_000,
 }
 
 # Rotating memory-log handler sizing.

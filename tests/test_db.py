@@ -476,7 +476,7 @@ class TestLoadSettings:
         assert DEFAULT_SETTINGS["llm_summaries_enabled"] is False
         assert DEFAULT_SETTINGS["llm_summary_model"] == "sonnet"
         assert DEFAULT_SETTINGS["llm_summary_effort"] == "medium"
-        assert DEFAULT_SETTINGS["llm_summary_timeout_seconds"] == 180
+        assert DEFAULT_SETTINGS["llm_summary_timeout_seconds"] == 120
         assert DEFAULT_SETTINGS["llm_summary_max_budget_usd"] == 1.00
         assert DEFAULT_SETTINGS["llm_summary_min_exchanges"] == 9
 
