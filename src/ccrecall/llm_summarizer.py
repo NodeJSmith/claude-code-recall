@@ -267,6 +267,7 @@ def invoke_claude(
     *,
     persist_launch: Any,
     persist_cleanup: Any,
+    persist_spawn_intent: Any | None = None,
     admit_launch: Any | None = None,
     packet_nonce: str | None = None,
     popen: Any = subprocess.Popen,
@@ -295,6 +296,11 @@ def invoke_claude(
             _packet_cleanup_metadata(packet_path, packet_nonce),
         )
         return InvocationResult(STATUS_CLEANUP_FAILED, diagnostic=STATUS_CLEANUP_FAILED)
+    # Durable before the spawn, because the spawn itself cannot be undone and
+    # the identity that would let recovery find the process is only persisted
+    # after it. Dying in between otherwise looks exactly like never spawning.
+    if persist_spawn_intent is not None:
+        persist_spawn_intent()
     try:
         process = popen(
             build_claude_argv(packet_path, settings),

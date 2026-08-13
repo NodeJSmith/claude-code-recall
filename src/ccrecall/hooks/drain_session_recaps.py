@@ -53,6 +53,7 @@ from ccrecall.recap_state import (
     finalize_run,
     heartbeat_job,
     heartbeat_runtime,
+    mark_attempt_spawning,
     mark_current,
     mark_excluded,
     open_cooldown,
@@ -196,15 +197,21 @@ def _recover_expired_claims(settings: dict, now: str) -> tuple[bool, set[int]]:
             recovered.add(session_id)
         rows = conn.execute(
             "SELECT a.id, a.job_session_id, a.packet_path, a.owner_pid, a.process_group_id, "
-            "a.process_started_at FROM session_recap_attempts a JOIN session_recap_jobs j "
+            "a.process_started_at, a.cleanup_state FROM session_recap_attempts a JOIN session_recap_jobs j "
             "ON j.session_id = a.job_session_id WHERE a.state IN ('reserved', 'running') "
             "AND j.state = 'claimed' AND j.lease_expires_at <= ?",
             (now,),
         ).fetchall()
-        for attempt_id, session_id, packet, pid, group, started in rows:
+        for attempt_id, session_id, packet, pid, group, started, cleanup_state in rows:
             proven = False
             if pid is None and group is None and started is None:
-                proven = packet is None or remove_packet(Path(packet))
+                # No owner identity. That means the attempt never reached the
+                # spawn, or died in the window between spawning and recording
+                # who it spawned. Only the first is provably clean: deleting a
+                # packet says nothing about a process in its own session, and
+                # requeuing on that would launch a second provider call
+                # alongside one still running.
+                proven = cleanup_state != "spawning" and (packet is None or remove_packet(Path(packet)))
             elif isinstance(pid, int) and isinstance(group, int) and isinstance(started, str):
                 proven = True if process_group_absent(group) else _terminate_exact_group(pid, group, started)
                 if proven and packet is not None:
@@ -505,6 +512,10 @@ def _process_job(
         with get_connection(settings) as callback_conn:
             return record_attempt_launch(callback_conn, attempt_id, token, pid, group, started, _now())
 
+    def persist_spawn_intent() -> bool:
+        with get_connection(settings) as callback_conn:
+            return mark_attempt_spawning(callback_conn, attempt_id, token)
+
     def persist_prelaunch_cleanup(state: str, metadata: dict) -> None:
         """Keep a cleaned reservation fenced until its provider cooldown opens."""
         with get_connection(settings) as callback_conn:
@@ -534,12 +545,24 @@ def _process_job(
         persist_write_failure=persist_cleanup,
         packet_nonce=nonce,
     ):
-        return True
+        # Cancelling before launch returns the job to immediately eligible
+        # pending. If quarantine is what refused the launch, that condition is
+        # global and unchanged, so continuing would reselect this same job at
+        # once and spin, writing a cancelled_before_launch row every pass. Stop
+        # the drain instead and let recovery reduce quarantine first.
+        with get_connection(settings) as conn:
+            admitted, _count, _bytes, _oldest = quarantine_admission(
+                conn,
+                max_count=settings["recap_quarantine_max_count"],
+                max_bytes=settings["recap_quarantine_max_bytes"],
+            )
+        return admitted
     result = invoke_claude(
         packet_path,
         effective_settings,
         persist_launch=persist_launch,
         persist_cleanup=persist_prelaunch_cleanup,
+        persist_spawn_intent=persist_spawn_intent,
         admit_launch=admit_launch,
         packet_nonce=nonce,
     )
@@ -601,6 +624,7 @@ def _process_job(
                 # Provider diagnostics may contain transcript or provider text;
                 # persist only the lifecycle's content-free outcome code.
                 diagnostic=outcomes.get(result.status, "cleanup_failed"),
+                retry_delay_seconds=settings["recap_timeout_retry_seconds"],
             )
     return True
 

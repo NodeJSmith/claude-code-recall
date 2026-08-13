@@ -381,6 +381,22 @@ def bind_attempt_packet(
     )
 
 
+def mark_attempt_spawning(conn: sqlite3.Connection, attempt_id: int, token: int) -> bool:
+    """Record that a provider spawn is imminent, before it can be observed.
+
+    Between the spawn and ``record_attempt_launch`` there is no owner identity
+    to find the process by, so recovery cannot tell a live orphan from an
+    attempt that never launched. This marker is what separates them.
+    """
+    return bool(
+        conn.execute(
+            "UPDATE session_recap_attempts SET cleanup_state = 'spawning' "
+            "WHERE id = ? AND claim_token = ? AND state = 'reserved' AND packet_path IS NOT NULL",
+            (attempt_id, token),
+        ).rowcount
+    )
+
+
 def record_attempt_launch(
     conn: sqlite3.Connection,
     attempt_id: int,

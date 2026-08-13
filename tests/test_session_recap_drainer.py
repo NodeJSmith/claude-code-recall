@@ -37,6 +37,7 @@ def _settings(tmp_path):
         "recap_job_lease_seconds": 60,
         "recap_runtime_lease_seconds": 60,
         "recap_cooldown_max_seconds": 3600,
+        "recap_timeout_retry_seconds": 300,
         "recap_quarantine_max_count": 10,
         "recap_quarantine_max_bytes": 100000,
         "logging_enabled": False,
@@ -897,6 +898,99 @@ def test_backfill_snapshots_a_hash_the_branch_never_stored(tmp_path, monkeypatch
         assert conn.execute("SELECT requested_input_hash FROM session_recap_jobs").fetchone() == (expected,)
 
 
+def test_drainer_backs_the_first_timeout_retry_off(tmp_path, monkeypatch):
+    """An immediately eligible retry re-runs the same hanging provider at once."""
+    settings = _settings(tmp_path)
+    _queue_eligible_job(settings)
+    monkeypatch.setattr(drain_session_recaps, "sync_session_for_finalization", lambda *_args: 0)
+    monkeypatch.setattr(
+        drain_session_recaps, "evaluate_branch", lambda *_args: type("Decision", (), {"eligible": True})()
+    )
+    monkeypatch.setattr(drain_session_recaps, "posix_process_groups_supported", lambda: True)
+    monkeypatch.setattr(
+        drain_session_recaps,
+        "invoke_claude",
+        lambda *_a, **_k: InvocationResult(STATUS_TIMEOUT, diagnostic="private provider response"),
+    )
+
+    assert drain_session_recaps._process_job(settings, 1, 1)
+
+    with get_connection(settings) as conn:
+        state, reason, eligible_at = conn.execute(
+            "SELECT state, reason, next_eligible_at FROM session_recap_jobs"
+        ).fetchone()
+    assert (state, reason) == ("pending", "timeout_retry")
+    assert eligible_at is not None
+    assert eligible_at > drain_session_recaps._now()
+
+
+def test_recovery_will_not_claim_cleanup_for_an_attempt_that_may_have_spawned(tmp_path, monkeypatch):
+    """Dying between the spawn and recording its owner leaves a live orphan."""
+    settings = _settings(tmp_path)
+    packet = tmp_path / "packet.json"
+    packet.write_text("payload")
+    with get_connection(settings) as conn:
+        conn.execute("INSERT INTO projects(path, key) VALUES ('/p', 'p')")
+        conn.execute("INSERT INTO sessions(uuid, project_id) VALUES (?, 1)", (UUID,))
+        conn.execute("INSERT INTO branches(session_id, leaf_uuid, is_active) VALUES (1, 'leaf', 1)")
+        upsert_job(conn, 1, "input", "session_end", "2026-08-12T10:00:00Z")
+        conn.execute(
+            "UPDATE session_recap_jobs SET state = 'claimed', claim_token = 1, "
+            "lease_expires_at = '2000-01-01T00:00:00Z'"
+        )
+        # The window: packet bound and the spawn recorded as imminent, but no
+        # owner identity yet, so nothing can find the process.
+        attempt = conn.execute(
+            "INSERT INTO session_recap_attempts (session_id, job_session_id, input_hash, input_contract_version, "
+            "policy_version, recap_contract_version, claim_token, trigger, state, created_at, packet_path, "
+            "cleanup_state) VALUES (1, 1, 'input', 1, 1, 2, 1, 'session_end', 'reserved', '2026-08-12T10:00:00Z', "
+            "?, 'spawning') RETURNING id",
+            (str(packet),),
+        ).fetchone()[0]
+        conn.execute("UPDATE session_recap_jobs SET active_attempt_id = ?", (attempt,))
+
+    proven, recovered = drain_session_recaps._recover_expired_claims(settings, "2026-08-12T11:00:00Z")
+
+    # Deleting the packet proves nothing about a process in its own session, so
+    # requeuing here would launch a second provider call beside a live one.
+    assert not proven
+    assert recovered == set()
+    with get_connection(settings) as conn:
+        assert conn.execute("SELECT state, cleanup_state FROM session_recap_attempts").fetchone() == (
+            "cleanup_failed",
+            "uncertain",
+        )
+
+
+def test_recovery_still_clears_an_attempt_that_never_reached_the_spawn(tmp_path):
+    settings = _settings(tmp_path)
+    packet = tmp_path / "packet.json"
+    packet.write_text("payload")
+    with get_connection(settings) as conn:
+        conn.execute("INSERT INTO projects(path, key) VALUES ('/p', 'p')")
+        conn.execute("INSERT INTO sessions(uuid, project_id) VALUES (?, 1)", (UUID,))
+        conn.execute("INSERT INTO branches(session_id, leaf_uuid, is_active) VALUES (1, 'leaf', 1)")
+        upsert_job(conn, 1, "input", "session_end", "2026-08-12T10:00:00Z")
+        conn.execute(
+            "UPDATE session_recap_jobs SET state = 'claimed', claim_token = 1, "
+            "lease_expires_at = '2000-01-01T00:00:00Z'"
+        )
+        attempt = conn.execute(
+            "INSERT INTO session_recap_attempts (session_id, job_session_id, input_hash, input_contract_version, "
+            "policy_version, recap_contract_version, claim_token, trigger, state, created_at, packet_path, "
+            "cleanup_state) VALUES (1, 1, 'input', 1, 1, 2, 1, 'session_end', 'reserved', '2026-08-12T10:00:00Z', "
+            "?, 'reserved') RETURNING id",
+            (str(packet),),
+        ).fetchone()[0]
+        conn.execute("UPDATE session_recap_jobs SET active_attempt_id = ?", (attempt,))
+
+    proven, recovered = drain_session_recaps._recover_expired_claims(settings, "2026-08-12T11:00:00Z")
+
+    assert proven
+    assert recovered == {1}
+    assert not packet.exists()
+
+
 def test_drainer_persists_a_recomputed_hash_a_branch_never_stored(tmp_path, monkeypatch):
     """A DB upgraded from v7 has recap_input_hash as NULL with no backfill."""
     settings = _settings(tmp_path)
@@ -935,7 +1029,10 @@ def test_drainer_initial_admission_denial_cancels_attempt_and_releases_provider(
         drain_session_recaps, "evaluate_branch", lambda *_args: type("Decision", (), {"eligible": True})()
     )
     monkeypatch.setattr(drain_session_recaps, "posix_process_groups_supported", lambda: True)
-    assert drain_session_recaps._process_job(settings, 1, 1)
+    # The cancellation returns the job to immediately eligible pending, and the
+    # quarantine that refused it is global. Continuing would reselect this same
+    # job at once and spin, so the drain has to stop until recovery drains it.
+    assert not drain_session_recaps._process_job(settings, 1, 1)
     with get_connection(settings) as conn:
         assert conn.execute("SELECT state, active_attempt_id FROM session_recap_jobs").fetchone() == ("pending", None)
         assert conn.execute("SELECT state FROM session_recap_attempts").fetchone() == ("cancelled_before_launch",)

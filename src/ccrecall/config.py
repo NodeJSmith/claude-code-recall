@@ -54,6 +54,10 @@ DEFAULT_SETTINGS = {
     "recap_job_lease_seconds": 180,
     "recap_runtime_lease_seconds": 180,
     "recap_cooldown_max_seconds": 3600,
+    # A timeout retry that is immediately eligible re-runs the same hanging
+    # provider inside the same drain, burning the second attempt and blocking
+    # every queued recap behind it for another full timeout.
+    "recap_timeout_retry_seconds": 300,
     "recap_quarantine_max_count": 10,
     "recap_quarantine_max_bytes": 10_000_000,
 }
