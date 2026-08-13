@@ -8,7 +8,7 @@ from unittest.mock import patch
 import pytest
 
 import ccrecall.recap_input as recap_input
-from ccrecall.hooks import backfill_llm_summaries, drain_session_recaps, session_end
+from ccrecall.hooks import backfill_llm_summaries, drain_session_recaps, session_end, sync_current
 from ccrecall.hooks.durability import journal_lock
 from ccrecall.llm_summarizer import (
     STATUS_BUDGET_EXCEEDED,
@@ -279,6 +279,76 @@ def test_session_end_records_committed_intent_when_db_is_ready(tmp_path, monkeyp
         )
     assert not session_end.journal_path(tmp_path / "recaps.db", UUID).exists()
     assert spawned == [True]
+
+
+def test_session_end_records_no_intent_for_an_excluded_project(tmp_path, monkeypatch):
+    settings = _settings(tmp_path)
+    settings["exclude_projects"] = ["secret-client"]
+    monkeypatch.setattr(session_end, "load_settings", lambda: settings)
+    monkeypatch.setattr(session_end, "posix_process_groups_supported", lambda: True)
+    spawned = []
+    monkeypatch.setattr(session_end, "_spawn_drainer", lambda: spawned.append(True))
+
+    # No session row exists, so intent falls back to a journal marker — which the
+    # drainer would later resolve by importing the very project the user excluded.
+    _run_session_end({"session_id": UUID, "cwd": "/home/u/src/secret-client"}, settings)
+
+    assert not session_end.journal_path(tmp_path / "recaps.db", UUID).exists()
+    assert spawned == []
+
+
+def test_finalization_sync_refuses_to_import_an_excluded_project(tmp_path, monkeypatch):
+    """The choke point every recap path syncs through, reached without a hook cwd."""
+    settings = _settings(tmp_path)
+    settings["exclude_projects"] = ["secret-client"]
+    projects = tmp_path / "projects"
+    transcript = projects / "-home-u-src-secret-client" / f"{UUID}.jsonl"
+    transcript.parent.mkdir(parents=True)
+    transcript.write_text(
+        json.dumps({"type": "user", "uuid": "u1", "cwd": "/home/u/src/secret-client"}) + "\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(sync_current, "DEFAULT_PROJECTS_DIR", projects)
+    monkeypatch.setattr(sync_current, "get_session_file", lambda *_a: transcript)
+    imported = []
+    monkeypatch.setattr(sync_current, "sync_session", lambda *args: imported.append(args) or 1)
+
+    assert sync_current.sync_session_for_finalization(settings, UUID) == 0
+    assert imported == []
+
+
+def test_finalization_sync_imports_a_project_that_is_not_excluded(tmp_path, monkeypatch):
+    settings = _settings(tmp_path)
+    settings["exclude_projects"] = ["other-client"]
+    projects = tmp_path / "projects"
+    transcript = projects / "-home-u-src-secret-client" / f"{UUID}.jsonl"
+    transcript.parent.mkdir(parents=True)
+    transcript.write_text(
+        json.dumps({"type": "user", "uuid": "u1", "cwd": "/home/u/src/secret-client"}) + "\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(sync_current, "DEFAULT_PROJECTS_DIR", projects)
+    monkeypatch.setattr(sync_current, "get_session_file", lambda *_a: transcript)
+    imported = []
+    monkeypatch.setattr(sync_current, "sync_session", lambda *args: imported.append(args) or 1)
+
+    assert sync_current.sync_session_for_finalization(settings, UUID) == 1
+    assert len(imported) == 1
+
+
+def test_journal_replay_scans_past_markers_it_cannot_resolve(tmp_path):
+    settings = _settings(tmp_path)
+    resolvable = "ffffffff-ffff-ffff-ffff-ffffffffffff"
+    with get_connection(settings) as conn:
+        conn.execute("INSERT INTO projects(path, key) VALUES ('/p', 'p')")
+        conn.execute("INSERT INTO sessions(uuid, project_id) VALUES (?, 1)", (resolvable,))
+        conn.execute("INSERT INTO branches(session_id, leaf_uuid, is_active) VALUES (1, 'leaf', 1)")
+    # Sort ahead of the resolvable marker and fill the whole batch window.
+    for index in range(drain_session_recaps.JOURNAL_BATCH_SIZE):
+        stuck = f"00000000-0000-0000-0000-{index:012d}"
+        session_end.write_fallback_journal(tmp_path / "recaps.db", stuck, "2026-08-12T10:00:00Z")
+    session_end.write_fallback_journal(tmp_path / "recaps.db", resolvable, "2026-08-12T10:00:00Z")
+
+    assert drain_session_recaps.replay_journal(settings) == 1
+    assert not session_end.journal_path(tmp_path / "recaps.db", resolvable).exists()
 
 
 def test_session_end_journals_when_db_is_busy(tmp_path, monkeypatch):
@@ -767,6 +837,34 @@ def test_concurrent_drainers_admit_one_provider_invocation(tmp_path, monkeypatch
     first.join(2)
     assert not first.is_alive()
     assert calls == [True]
+
+
+def test_backfill_snapshots_a_hash_the_branch_never_stored(tmp_path, monkeypatch):
+    """A DB upgraded from v7 must not snapshot NULL into an immutable candidate."""
+    settings = _settings(tmp_path)
+    with get_connection(settings) as conn:
+        conn.execute("INSERT INTO projects(path, key) VALUES ('/p', 'p')")
+        conn.execute("INSERT INTO sessions(uuid, project_id) VALUES (?, 1)", (UUID,))
+        conn.execute("INSERT INTO branches(session_id, leaf_uuid, is_active) VALUES (1, 'leaf', 1)")
+        expected = load_recap_input(conn.cursor(), 1).input_hash
+    monkeypatch.setattr(backfill_llm_summaries, "load_settings", lambda: settings)
+    monkeypatch.setattr(backfill_llm_summaries, "try_acquire_pid_file", lambda _key: True)
+    monkeypatch.setattr(backfill_llm_summaries, "remove_pid_file", lambda _key: None)
+    monkeypatch.setattr(backfill_llm_summaries, "posix_process_groups_supported", lambda: True)
+    monkeypatch.setattr(
+        backfill_llm_summaries, "evaluate_branch", lambda *_a: type("Decision", (), {"eligible": True})()
+    )
+    monkeypatch.setattr(
+        backfill_llm_summaries.subprocess, "run", lambda *_a, **_k: type("Completed", (), {"returncode": 0})()
+    )
+
+    assert backfill_llm_summaries.run(limit=1) == 0
+
+    # A NULL snapshot goes stale the moment the drainer refreshes the branch,
+    # dropping the job out of its run and past --limit and the run's overrides.
+    with get_connection(settings) as conn:
+        assert conn.execute("SELECT input_hash FROM session_recap_run_candidates").fetchone() == (expected,)
+        assert conn.execute("SELECT requested_input_hash FROM session_recap_jobs").fetchone() == (expected,)
 
 
 def test_drainer_persists_a_recomputed_hash_a_branch_never_stored(tmp_path, monkeypatch):
