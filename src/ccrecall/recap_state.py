@@ -679,10 +679,21 @@ def open_cooldown(
 
 
 def reset_health(conn: sqlite3.Connection) -> None:
+    """Clear the cooldown, releasing an admission only when no attempt owns it."""
+    # An admission still held by a live attempt fences that attempt's own
+    # open_cooldown and keeps a second provider call out. Clearing it strands
+    # the attempt until lease recovery and reopens the global gate beside it.
+    # An admission with nothing behind it leaked, and this stays the manual
+    # release for it.
+    held = """EXISTS (SELECT 1 FROM session_recap_attempts a
+        WHERE a.provider_token = session_recap_provider_health.probe_token
+          AND a.state IN ('reserved', 'running'))"""
     conn.execute(
-        "UPDATE session_recap_provider_health SET reason = NULL, consecutive_failures = 0, "
-        "diagnostic = NULL, last_failed_at = NULL, retry_after = NULL, probe_active = 0, "
-        "probe_session_id = NULL, probe_claim_token = NULL "
+        f"UPDATE session_recap_provider_health SET reason = NULL, consecutive_failures = 0, "
+        f"diagnostic = NULL, last_failed_at = NULL, retry_after = NULL, "
+        f"probe_active = CASE WHEN {held} THEN probe_active ELSE 0 END, "
+        f"probe_session_id = CASE WHEN {held} THEN probe_session_id ELSE NULL END, "
+        f"probe_claim_token = CASE WHEN {held} THEN probe_claim_token ELSE NULL END "
         "WHERE singleton = 1"
     )
 
