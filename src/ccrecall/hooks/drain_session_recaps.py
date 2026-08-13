@@ -40,7 +40,7 @@ from ccrecall.llm_summary_db import get_connection, recap_schema_capability
 from ccrecall.process_cleanup import process_group_absent, process_start_identity
 from ccrecall.recap_contract import ELIGIBILITY_POLICY_VERSION, RECAP_INPUT_CONTRACT_VERSION
 from ccrecall.recap_eligibility import evaluate_branch
-from ccrecall.recap_input import load_recap_input
+from ccrecall.recap_input import load_recap_input, refresh_recap_input
 from ccrecall.recap_state import (
     acknowledge_cleanup,
     admit_provider,
@@ -377,7 +377,11 @@ def _process_job(
         recap = load_recap_input(conn.cursor(), branch_id)
         if recap.input_hash != input_hash:
             # The capture snapshot is authoritative even if a concurrent import
-            # updated the branch immediately before this claim.
+            # updated the branch immediately before this claim. Persist it too:
+            # a DB upgraded from v7 has no stored hash and no backfill for one,
+            # so leaving the branch untouched recomputes this same mismatch on
+            # every later claim and the session never reaches a provider.
+            refresh_recap_input(conn.cursor(), branch_id)
             upsert_job(conn, session_id, recap.input_hash, "session_end", now)
             return True
         if valid_current_enrichment(
