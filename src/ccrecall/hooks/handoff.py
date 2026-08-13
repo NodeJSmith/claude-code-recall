@@ -13,9 +13,17 @@ def write_clear_handoff(hook_input: HookInput, settings: dict | None = None) -> 
     if hook_input.end_reason != "clear" or not hook_input.session_id or not hook_input.cwd:
         return
     db_path = get_db_path(settings or load_settings())
-    (db_path.parent / CLEAR_HANDOFF_FILENAME).write_text(
+    target = db_path.parent / CLEAR_HANDOFF_FILENAME
+    # write_text truncates first, so a SessionStart reading concurrently can see
+    # half a document. Stage and rename instead, the way the journal marker does.
+    # The mkdir matters on a first run: without it this raises, and SessionEnd's
+    # broad except would swallow the handoff with no visible failure.
+    target.parent.mkdir(parents=True, exist_ok=True)
+    staged = target.with_name(f".{target.name}.tmp")
+    staged.write_text(
         json.dumps(
             {"session_id": hook_input.session_id, "cwd": hook_input.cwd, "timestamp": Instant.now().format_iso()},
         ),
         encoding="utf-8",
     )
+    staged.replace(target)

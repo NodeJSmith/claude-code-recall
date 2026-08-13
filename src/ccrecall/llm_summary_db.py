@@ -8,6 +8,7 @@ conversation DB without pulling in embedding dependencies.
 import contextlib
 import sqlite3
 from collections.abc import Callable
+from urllib.parse import quote
 
 from ccrecall.config import ensure_parent_dir, get_db_path
 from ccrecall.models import BUSY_TIMEOUT_MS
@@ -745,7 +746,9 @@ def _open_connection(
 def open_no_migrate_connection(settings: dict | None = None, *, busy_timeout_ms: int = 100) -> sqlite3.Connection:
     """Open an existing writable DB for a bounded hook operation without migration."""
     db_path = get_db_path(settings)
-    conn = sqlite3.connect(f"file:{db_path}?mode=rw", uri=True)
+    # '?' and '#' are reserved in a URI, so a path containing either would be
+    # read as the start of the query or fragment and open the wrong database.
+    conn = sqlite3.connect(f"file:{quote(str(db_path))}?mode=rw", uri=True)
     conn.execute(f"PRAGMA busy_timeout = {busy_timeout_ms}")
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
