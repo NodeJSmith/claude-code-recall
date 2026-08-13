@@ -519,7 +519,7 @@ def mark_excluded(
     conn: sqlite3.Connection,
     session_id: int,
     token: int,
-    input_hash: str,
+    input_hash: str | None,
     lineage: int,
     reason: str,
     now: str,
@@ -825,6 +825,8 @@ def create_run(
         "VALUES (?, ?, ?, 'running', ?)",
         (trigger, selector_json, now, attempt_limit),
     ).lastrowid
+    if run_id is None:
+        raise RuntimeError("failed to create recap run")
     conn.executemany(
         "INSERT INTO session_recap_run_candidates "
         "(run_id, session_id, input_hash, initial_disposition, final_disposition) "

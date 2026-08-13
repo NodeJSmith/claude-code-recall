@@ -275,9 +275,9 @@ def invoke_claude(
 ) -> InvocationResult:
     """Invoke one owned packet and prove its group is reaped before normal completion.
 
-    ``admit_launch`` is the T08-wired quarantine-capacity callback and must approve
+    ``admit_launch`` is the quarantine-capacity callback and must approve
     before spawn. ``persist_cleanup`` receives content-free packet and process
-    metadata for every uncertain cleanup; T08 persists it to quarantine.
+    metadata for every uncertain cleanup; the drainer persists it to quarantine.
     """
     if platform_supported is None:
         platform_supported = posix_process_groups_supported()

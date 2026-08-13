@@ -81,13 +81,18 @@ def main() -> None:
             return
         settings = load_settings()
         write_clear_handoff(hook_input, settings)
-        if not settings.get("llm_summaries_enabled", False) or not _valid_session_id(hook_input.session_id):
+        session_uuid = hook_input.session_id
+        if (
+            not settings.get("llm_summaries_enabled", False)
+            or session_uuid is None
+            or not _valid_session_id(session_uuid)
+        ):
             return
         now = Instant.now().format_iso()
         platform_supported = posix_process_groups_supported()
-        intent = record_intent(settings, hook_input.session_id, now, platform_supported=platform_supported)
+        intent = record_intent(settings, session_uuid, now, platform_supported=platform_supported)
         if intent in {"unknown", "unavailable"}:
-            write_fallback_journal(get_db_path(settings), hook_input.session_id, now)
+            write_fallback_journal(get_db_path(settings), session_uuid, now)
         if platform_supported:
             with contextlib.suppress(OSError):
                 _spawn_drainer()

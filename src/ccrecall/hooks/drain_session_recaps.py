@@ -399,19 +399,33 @@ def _process_job(
                 "llm_summary_timeout_seconds": controls.get("timeout_seconds")
                 or settings["llm_summary_timeout_seconds"],
             }
-            reserve = reserve_attempt_for_run if run_id is not None else reserve_attempt
-            args = (
-                (conn, run_id, session_id, token, input_hash, "manual", now)
-                if run_id is not None
-                else (conn, session_id, token, input_hash, "session_end", now)
-            )
-            attempt_id = reserve(
-                *args,
-                provider_token=provider_token,
-                model=effective_settings["llm_summary_model"],
-                max_budget_usd=effective_settings["llm_summary_max_budget_usd"],
-                timeout_seconds=effective_settings["llm_summary_timeout_seconds"],
-            )
+            if run_id is not None:
+                attempt_id = reserve_attempt_for_run(
+                    conn,
+                    run_id,
+                    session_id,
+                    token,
+                    input_hash,
+                    "manual",
+                    now,
+                    provider_token=provider_token,
+                    model=effective_settings["llm_summary_model"],
+                    max_budget_usd=effective_settings["llm_summary_max_budget_usd"],
+                    timeout_seconds=effective_settings["llm_summary_timeout_seconds"],
+                )
+            else:
+                attempt_id = reserve_attempt(
+                    conn,
+                    session_id,
+                    token,
+                    input_hash,
+                    "session_end",
+                    now,
+                    provider_token=provider_token,
+                    model=effective_settings["llm_summary_model"],
+                    max_budget_usd=effective_settings["llm_summary_max_budget_usd"],
+                    timeout_seconds=effective_settings["llm_summary_timeout_seconds"],
+                )
             if attempt_id is None:
                 return True
         except RuntimeError:

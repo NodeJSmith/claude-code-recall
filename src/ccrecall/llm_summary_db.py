@@ -596,7 +596,7 @@ def _repair_v8_schema(conn: sqlite3.Connection) -> None:
 
 
 def _migrate_to_v9(conn: sqlite3.Connection) -> None:
-    """Add T05 recap lifecycle fencing without replacing committed v8 tables."""
+    """Add recap lifecycle fencing without replacing committed v8 tables."""
     additions = (
         ("session_recap_jobs", "retry_lineage", "INTEGER NOT NULL DEFAULT 0"),
         ("session_recap_attempts", "retry_lineage", "INTEGER NOT NULL DEFAULT 0"),

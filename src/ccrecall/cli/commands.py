@@ -296,9 +296,11 @@ def cmd_recap_maintain(
         attempts = retention_candidates(conn, cutoff, limit=limit)
         runs = run_retention_candidates(conn, cutoff, limit=limit)
         if prune:
-            attempts, runs = prune_retention(conn, cutoff, limit=limit)
+            attempt_count, run_count = prune_retention(conn, cutoff, limit=limit)
+        else:
+            attempt_count, run_count = len(attempts), len(runs)
     action = "pruned" if prune else "would prune"
-    result = {"attempts": len(attempts), "runs": len(runs), "pruned": prune}
+    result = {"attempts": attempt_count, "runs": run_count, "pruned": prune}
     if ctx.json_mode:
         print(json.dumps({"session_recap_maintenance": result}, sort_keys=True))
     else:
