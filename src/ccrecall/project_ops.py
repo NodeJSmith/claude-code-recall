@@ -79,6 +79,20 @@ def upsert_project(
     return project_id
 
 
+def resolve_project(cursor: sqlite3.Cursor, project_dir: Path) -> tuple[int, str]:
+    """Upsert a Claude project directory and return its ``projects.id`` and real name.
+
+    The name is only trustworthy after the upsert has probed the directory for cwd
+    metadata, because the key alone reconstructs hyphens lossily. Every
+    ``exclude_projects`` check that starts from a directory rather than a live hook
+    cwd must resolve through here, so the two never disagree about what a project
+    is called.
+    """
+    project_id = upsert_project(cursor, normalize_project_key(project_dir.name), project_dir=project_dir)
+    row = cursor.execute("SELECT name FROM projects WHERE id = ?", (project_id,)).fetchone()
+    return project_id, row[0] if row else extract_project_name(str(project_dir))
+
+
 def _probe_project_dir(project_dir: Path) -> str | None:
     """Probe the first JSONL file in project_dir for cwd metadata.
 
