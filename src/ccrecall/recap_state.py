@@ -714,6 +714,24 @@ def reset_health(conn: sqlite3.Connection) -> None:
     )
 
 
+def block_job_internal_error(conn: sqlite3.Connection, session_id: int, now: str) -> bool:
+    """Fence a job whose processing raised, so one bad row cannot stall the queue.
+
+    Only a job holding no live attempt. Blocking one that still has an attempt
+    would put it beyond recovery, which finds work by ``state = 'claimed'`` — the
+    attempt is better left for lease expiry, which already proves its cleanup.
+    ``targeted_retry`` is the way back out once the cause is fixed.
+    """
+    return bool(
+        conn.execute(
+            "UPDATE session_recap_jobs SET state = 'blocked', reason = 'internal_error', "
+            "lease_expires_at = NULL, next_eligible_at = NULL, claim_token = claim_token + 1, "
+            "updated_at = ? WHERE session_id = ? AND active_attempt_id IS NULL",
+            (now, session_id),
+        ).rowcount
+    )
+
+
 def targeted_retry(
     conn: sqlite3.Connection,
     session_id: int,

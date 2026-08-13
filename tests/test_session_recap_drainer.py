@@ -898,6 +898,44 @@ def test_backfill_snapshots_a_hash_the_branch_never_stored(tmp_path, monkeypatch
         assert conn.execute("SELECT requested_input_hash FROM session_recap_jobs").fetchone() == (expected,)
 
 
+def test_one_job_that_raises_does_not_stall_every_other_session(tmp_path, monkeypatch):
+    """_next_pending is oldest-first with no rotation, so a poison job repeats."""
+    settings = _settings(tmp_path)
+    _insert_recap_session(settings)
+    with get_connection(settings) as conn:
+        conn.execute("INSERT INTO sessions(uuid, project_id) VALUES ('22222222-3333-4444-5555-666666666666', 1)")
+        conn.execute("INSERT INTO branches(session_id, leaf_uuid, is_active) VALUES (2, 'leaf-2', 1)")
+        # The poison job is older, so it is always selected first.
+        upsert_job(conn, 1, "input", "session_end", "2026-08-12T10:00:00Z")
+        upsert_job(conn, 2, "input-2", "session_end", "2026-08-12T10:00:05Z")
+    monkeypatch.setattr(drain_session_recaps, "load_settings", lambda: settings)
+    monkeypatch.setattr(drain_session_recaps, "try_acquire_pid_file", lambda _key: True)
+    monkeypatch.setattr(drain_session_recaps, "remove_pid_file", lambda _key: None)
+    monkeypatch.setattr(drain_session_recaps, "sync_session_for_finalization", lambda *_a: 0)
+    seen = []
+
+    def explode_on_session_one(_settings, session_id, *_a, **_k):
+        seen.append(session_id)
+        if session_id == 1:
+            raise RuntimeError("malformed row")
+        # Stand in for a real terminal transition, so the loop can end.
+        with get_connection(settings) as conn:
+            conn.execute("UPDATE session_recap_jobs SET state = 'current' WHERE session_id = ?", (session_id,))
+        return True
+
+    monkeypatch.setattr(drain_session_recaps, "_process_job", explode_on_session_one)
+
+    assert drain_session_recaps.run() == 0
+
+    # The drain survived and still reached the second session.
+    assert seen == [1, 2]
+    with get_connection(settings) as conn:
+        assert conn.execute("SELECT state, reason FROM session_recap_jobs WHERE session_id = 1").fetchone() == (
+            "blocked",
+            "internal_error",
+        )
+
+
 def test_drainer_backs_the_first_timeout_retry_off(tmp_path, monkeypatch):
     """An immediately eligible retry re-runs the same hanging provider at once."""
     settings = _settings(tmp_path)

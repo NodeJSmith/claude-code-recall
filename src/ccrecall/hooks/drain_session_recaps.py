@@ -45,6 +45,7 @@ from ccrecall.recap_state import (
     acknowledge_cleanup,
     admit_provider,
     bind_attempt_packet,
+    block_job_internal_error,
     cancel_attempt_before_launch,
     claim_job,
     claim_runtime,
@@ -672,14 +673,25 @@ def run(*, recover_only: bool = False) -> int:
                 session_id, run_id, controls = next_job
                 if run_id is not None:
                     observed_run_ids.add(run_id)
-                if not _process_job(
-                    settings,
-                    session_id,
-                    runtime_token,
-                    cleanup_proven=session_id in recovered,
-                    run_id=run_id,
-                    controls=controls,
-                ):
+                try:
+                    keep_draining = _process_job(
+                        settings,
+                        session_id,
+                        runtime_token,
+                        cleanup_proven=session_id in recovered,
+                        run_id=run_id,
+                        controls=controls,
+                    )
+                except Exception:
+                    # One job's failure is not the queue's. Without this the
+                    # exception escapes to the handler below, and _next_pending's
+                    # oldest-first ordering hands the same job back on the next
+                    # run, so a single bad row stalls recaps for every session.
+                    logger.exception("Recap job for session %s failed; blocking it and continuing", session_id)
+                    with get_connection(settings) as conn:
+                        block_job_internal_error(conn, session_id, _now())
+                    continue
+                if not keep_draining:
                     aborted_run_id = run_id
                     break
         finally:
