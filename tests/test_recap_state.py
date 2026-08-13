@@ -17,6 +17,7 @@ from ccrecall.recap_state import (
     mark_current,
     mark_excluded,
     open_cooldown,
+    preview_retention,
     prune_retention,
     recap_state_changed_input,
     recover_expired_attempt,
@@ -613,6 +614,28 @@ def test_run_reservation_rejects_limit_without_a_live_unowned_attempt(tmp_path):
         empty = create_run(conn, "backfill", "{}", [(1, "input-a", "already_current")], NOW, attempt_limit=0)
         assert finalize_run(conn, empty, NOW)
         assert run_partitions(conn, empty) == (1, 1)
+
+
+def test_retention_preview_reports_what_the_prune_actually_removes(tmp_path):
+    """An attempt a prunable run candidate owns is only unprotected mid-prune."""
+    settings = _connection(tmp_path)
+    old = "2025-01-01T00:00:00Z"
+    horizon = "2026-01-01T00:00:00Z"
+    with get_connection(settings) as conn:
+        upsert_job(conn, 1, "input-a", "end", old)
+        run = create_run(conn, "manual", "{}", [(1, "input-a", "pending")], old, attempt_limit=None)
+        token = claim_job(conn, 1, old, 60)
+        attempt = reserve_attempt_for_run(conn, run, 1, token, "input-a", "manual", old)
+        assert attempt is not None
+        assert complete_attempt(conn, attempt, token, "timeout", old)
+        assert finalize_run(conn, run, old)
+
+        previewed = preview_retention(conn, horizon, limit=10)
+        # The preview must not have removed anything itself.
+        assert conn.execute("SELECT COUNT(*) FROM session_recap_runs").fetchone() == (1,)
+
+    with get_connection(settings) as conn:
+        assert prune_retention(conn, horizon, limit=10) == previewed
 
 
 def test_retention_preserves_whole_retained_lineages_and_closed_runs(tmp_path):

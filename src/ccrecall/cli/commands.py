@@ -33,7 +33,7 @@ from ccrecall.hooks import drain_session_recaps as drain_session_recaps_mod
 from ccrecall.hooks import import_conversations as import_mod
 from ccrecall.hooks import sync_current as sync_current_mod
 from ccrecall.llm_summary_db import get_connection as get_recap_connection
-from ccrecall.recap_state import prune_retention, reset_health, retention_candidates, run_retention_candidates
+from ccrecall.recap_state import preview_retention, prune_retention, reset_health
 
 # store_true flags carry no --no-<flag> negation, matching the former argparse.
 _FLAG = Parameter(negative=[])
@@ -293,12 +293,8 @@ def cmd_recap_maintain(
     """Preview bounded recap retention work; use --prune to apply it."""
     cutoff = (Instant.now() - TimeDelta(days=90)).format_iso()
     with get_recap_connection(load_settings()) as conn:
-        attempts = retention_candidates(conn, cutoff, limit=limit)
-        runs = run_retention_candidates(conn, cutoff, limit=limit)
-        if prune:
-            attempt_count, run_count = prune_retention(conn, cutoff, limit=limit)
-        else:
-            attempt_count, run_count = len(attempts), len(runs)
+        run = prune_retention if prune else preview_retention
+        attempt_count, run_count = run(conn, cutoff, limit=limit)
     action = "pruned" if prune else "would prune"
     result = {"attempts": attempt_count, "runs": run_count, "pruned": prune}
     if ctx.json_mode:

@@ -80,6 +80,12 @@ def _now() -> str:
     return Instant.now().format_iso()
 
 
+def _override(controls: dict, key: str, default: object) -> object:
+    """Take a run's one-off control when it set one, including a zero."""
+    value = controls.get(key)
+    return default if value is None else value
+
+
 def _quarantine(path: Path) -> None:
     with contextlib.suppress(OSError):
         path.replace(path.with_suffix(path.suffix + ".bad"))
@@ -401,8 +407,15 @@ def _process_job(
         # Release the write lock before eligibility, admission, and reservation
         # work; each of those fences itself on the claim token it already holds.
         conn.commit()
+        try:
+            stored_enrichment = json.loads(branch[2]) if branch[2] else None
+        except json.JSONDecodeError:
+            # A corrupt blob cannot describe current content, so treat it as
+            # absent and regenerate. Raising here would abort the whole drain
+            # and take every job queued behind this one with it, on every run.
+            stored_enrichment = None
         if valid_current_enrichment(
-            json.loads(branch[2]) if branch[2] else None,
+            stored_enrichment,
             status=branch[4],
             current_input_hash=input_hash,
             materialized_input_hash=branch[5],
@@ -433,10 +446,15 @@ def _process_job(
             controls = controls or {}
             effective_settings = {
                 **settings,
-                "llm_summary_model": controls.get("model") or settings["llm_summary_model"],
-                "llm_summary_max_budget_usd": controls.get("max_budget_usd") or settings["llm_summary_max_budget_usd"],
-                "llm_summary_timeout_seconds": controls.get("timeout_seconds")
-                or settings["llm_summary_timeout_seconds"],
+                # Explicit None, not falsiness: a run that asked for a zero budget
+                # or timeout means it, and `or` would silently restore the default.
+                "llm_summary_model": _override(controls, "model", settings["llm_summary_model"]),
+                "llm_summary_max_budget_usd": _override(
+                    controls, "max_budget_usd", settings["llm_summary_max_budget_usd"]
+                ),
+                "llm_summary_timeout_seconds": _override(
+                    controls, "timeout_seconds", settings["llm_summary_timeout_seconds"]
+                ),
             }
             if run_id is not None:
                 attempt_id = reserve_attempt_for_run(

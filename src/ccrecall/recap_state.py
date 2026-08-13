@@ -1043,6 +1043,21 @@ def prune_retention(conn: sqlite3.Connection, cutoff: str, *, limit: int) -> tup
     return len(attempts), len(runs)
 
 
+def preview_retention(conn: sqlite3.Connection, cutoff: str, *, limit: int) -> tuple[int, int]:
+    """Count what prune_retention would remove, by doing it and rolling back.
+
+    Counting the two candidate queries independently under-reports: the prune
+    deletes eligible run candidates first, which unprotects the attempts they
+    owned. Only the real ordering answers what a destructive run would delete.
+    """
+    conn.execute("SAVEPOINT recap_retention_preview")
+    try:
+        return prune_retention(conn, cutoff, limit=limit)
+    finally:
+        conn.execute("ROLLBACK TO SAVEPOINT recap_retention_preview")
+        conn.execute("RELEASE SAVEPOINT recap_retention_preview")
+
+
 def run_accounting(conn: sqlite3.Connection, run_id: int) -> dict[str, object]:
     """Return durable immutable membership and started-attempt partitions."""
     population, finalized = run_partitions(conn, run_id)

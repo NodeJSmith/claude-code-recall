@@ -75,10 +75,9 @@ class TestLlmSummaryCli:
     def test_recap_maintain_uses_global_json_context(self, capsys):
         with patch("ccrecall.cli.commands.get_recap_connection") as connection:
             connection.return_value.__enter__.return_value = object()
-            with (
-                patch("ccrecall.cli.commands.retention_candidates", return_value=[1, 2]),
-                patch("ccrecall.cli.commands.run_retention_candidates", return_value=[3]),
-            ):
+            # The preview counts through the real prune ordering now, so it is
+            # one call rather than two independent candidate queries.
+            with patch("ccrecall.cli.commands.preview_retention", return_value=(2, 1)):
                 cmd_recap_maintain(ctx=CLIContext(json_mode=True))
         assert json.loads(capsys.readouterr().out) == {
             "session_recap_maintenance": {"attempts": 2, "pruned": False, "runs": 1}
@@ -87,9 +86,6 @@ class TestLlmSummaryCli:
     def test_recap_maintain_retains_human_output(self, capsys):
         with patch("ccrecall.cli.commands.get_recap_connection") as connection:
             connection.return_value.__enter__.return_value = object()
-            with (
-                patch("ccrecall.cli.commands.retention_candidates", return_value=[1]),
-                patch("ccrecall.cli.commands.run_retention_candidates", return_value=[]),
-            ):
+            with patch("ccrecall.cli.commands.preview_retention", return_value=(1, 0)):
                 cmd_recap_maintain()
         assert capsys.readouterr().out == "Session Recap maintenance: 1 attempts, 0 runs would prune\n"

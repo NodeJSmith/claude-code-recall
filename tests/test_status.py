@@ -373,13 +373,15 @@ def test_recap_status_lists_safe_recovery_commands_for_blocked_work_and_quaranti
         }
     ]
     assert status["recap"]["guidance"]["cleanup"] == [{"session": "cleanup", "command": "ccrecall recap recover"}]
-    assert status["recap"]["guidance"]["quarantine"] == "ccrecall recap maintain"
+    # maintain cannot reduce this quarantine — it skips cleanup-failed attempts
+    # whose removal is unproven, which is exactly what holds it open.
+    assert status["recap"]["guidance"]["quarantine"] == "ccrecall recap recover"
     print_status_report(status)
     output = capsys.readouterr().out
     assert f"--session {retryable_uuid} --retry-failures" in output
     assert "--session cleanup --retry-failures" not in output
     assert "cleanup recovery (cleanup): ccrecall recap recover" in output
-    assert "quarantine recovery: ccrecall recap maintain" in output
+    assert "quarantine recovery: ccrecall recap recover" in output
     assert "force" not in output
     assert db_path.stat().st_mtime_ns == before
 

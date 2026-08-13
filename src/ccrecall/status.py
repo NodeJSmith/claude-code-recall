@@ -206,7 +206,10 @@ def _recap_status(conn: sqlite3.Connection, settings: dict) -> dict:
                 "retry": retryable,
                 "cleanup": cleanup,
                 "maintain": "ccrecall recap maintain",
-                "quarantine": "ccrecall recap maintain" if not admitted else None,
+                # maintain only prunes retention-eligible history, and it skips
+                # cleanup-failed attempts whose removal is unproven — exactly the
+                # rows holding this quarantine open. recover reconciles them.
+                "quarantine": "ccrecall recap recover" if not admitted else None,
             },
         }
     )
