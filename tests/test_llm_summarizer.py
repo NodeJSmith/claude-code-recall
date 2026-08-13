@@ -95,7 +95,7 @@ class TestClaudeInvocation:
         assert argv[argv.index("--add-dir") + 1] == str(packet_dir)
         assert argv[-1] == "prompt text"
 
-    def test_build_prompt_directs_latest_state_history_rationale_failures_and_evidenced_next_steps(self, tmp_path):
+    def test_build_prompt_requests_only_an_evidenced_work_arc_and_outcome(self, tmp_path):
 
         packet_dir = tmp_path / "packet"
         packet_dir.mkdir()
@@ -104,23 +104,11 @@ class TestClaudeInvocation:
 
         assert f"Branch outline path: {packet_dir / 'branch-outline.json'}" in prompt
         assert "Read branch-outline.json and deterministic-summary.json first." in prompt
-        assert (
-            "Use the outline to locate relevant detailed transcript entries, especially the last exchanges and any middle-branch decision or failure points."
-            in prompt
-        )
-        assert (
-            "where_we_left_off must describe the latest evidenced state, including blockers or verification status when known."
-            in prompt
-        )
-        assert "how_we_got_here must explain the causal path to that state, not repeat the latest-state text." in prompt
-        assert "Include a key decision only when its rationale is evidenced." in prompt
-        assert "Include an attempted path only when it was evidenced as failed, abandoned, or inconclusive." in prompt
-        assert (
-            "When the branch ends with an evidenced unresolved action, blocker, or handoff, include at least one specific continuation hint. Do not add a generic next step when no such evidence exists."
-            in prompt
-        )
-        assert "Do not invent decisions, rationale, failures, unresolved tasks, or generic next steps." in prompt
-        assert "Every factual section and list item must cite source_uuids from the allowlist." in prompt
+        assert "recognizable work arc and its evidenced outcome" in prompt
+        assert "summary is required" in prompt
+        assert "Do not give handoff instructions, advice, continuation plans, next steps" in prompt
+        assert "Do not provide an exhaustive chronology" in prompt
+        assert "unsupported claims about the project as a whole" in prompt
 
     def test_invoke_claude_uses_argv_list_without_shell_and_isolated_cwd(self, tmp_path, monkeypatch):
 
@@ -138,15 +126,9 @@ class TestClaudeInvocation:
             calls["argv"] = argv
             calls["kwargs"] = kwargs
             payload = {
-                "title": {"text": "ok", "source_uuids": [_u("1")]},
-                "where_we_left_off": {"text": "done", "source_uuids": [_u("1")]},
-                "how_we_got_here": {"text": "path", "source_uuids": [_u("1")]},
-                "key_decisions": [],
-                "attempted_paths": [],
-                "open_questions": [],
-                "files_and_reasons": [],
-                "continuation_hints": [],
-                "confidence": "high",
+                "title": "Worker test",
+                "summary": "Investigated the invocation boundary.",
+                "outcome": "completed",
             }
             return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(payload), stderr="")
 
@@ -181,17 +163,7 @@ class TestClaudeInvocation:
         payload = {
             "type": "result",
             "subtype": "success",
-            "structured_output": {
-                "title": {"text": "ok", "source_uuids": [source_uuid]},
-                "where_we_left_off": {"text": "done", "source_uuids": [source_uuid]},
-                "how_we_got_here": {"text": "path", "source_uuids": [source_uuid]},
-                "key_decisions": [],
-                "attempted_paths": [],
-                "open_questions": [],
-                "files_and_reasons": [],
-                "continuation_hints": [],
-                "confidence": "high",
-            },
+            "structured_output": {"title": "Worker test", "summary": "Investigated the invocation boundary."},
         }
 
         def fake_run(argv, **_kwargs):

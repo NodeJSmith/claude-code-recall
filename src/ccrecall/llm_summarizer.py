@@ -44,7 +44,7 @@ from ccrecall.summary_enrichment import (
 from ccrecall.transcript_sources import discover_importable_transcript_files, discover_session_transcript_files
 
 SUMMARIZER_SYSTEM_PROMPT = (
-    "You are ccrecall-summary-enricher. Produce a factual continuation summary for one Claude Code conversation branch."
+    "You are ccrecall-summary-enricher. Produce a factual recap of one Claude Code conversation branch."
 )
 CAPABILITY_SIDECAR_VERSION = 1
 DIAGNOSTIC_CAP = 240
@@ -200,10 +200,7 @@ def verify_capability_sidecar(path: Path, *, claude_version: str, fingerprint: s
 def build_prompt(packet_dir: Path) -> str:
     return "\n".join(
         [
-            (
-                "You are ccrecall-summary-enricher. Produce a factual continuation "
-                "summary for one Claude Code conversation branch."
-            ),
+            ("You are ccrecall-summary-enricher. Produce a factual recap for one Claude Code conversation branch."),
             "",
             f"Branch packet directory: {packet_dir}",
             f"Branch outline path: {packet_dir / 'branch-outline.json'}",
@@ -212,34 +209,23 @@ def build_prompt(packet_dir: Path) -> str:
             f"Branch message UUID allowlist path: {packet_dir / 'allowed-uuids.txt'}",
             f"Deterministic summary path: {packet_dir / 'deterministic-summary.json'}",
             "",
-            "This is a Branch Resume Brief for one active branch, not a whole-session or project-history summary.",
-            "Read branch-outline.json and deterministic-summary.json first.",
             (
-                "Use the outline to locate relevant detailed transcript entries, especially the last exchanges "
-                "and any middle-branch decision or failure points."
+                "This is a concise recap of one conversation branch, not a project-wide or exhaustive "
+                "chronological summary."
             ),
+            "Read branch-outline.json and deterministic-summary.json first.",
+            ("Use the outline to locate the evidence needed for a recognizable work arc and its evidenced outcome."),
             (
                 "Read the branch transcript packet files as needed to establish evidence; do not infer facts "
                 "only from filenames, tool names, or metadata."
             ),
             "Summarize only messages whose uuid appears in the allowlist.",
-            "title must be a short, evidence-backed label for this branch, not a generic or speculative topic.",
-            (
-                "where_we_left_off must describe the latest evidenced state, including blockers or verification "
-                "status when known."
-            ),
-            "how_we_got_here must explain the causal path to that state, not repeat the latest-state text.",
-            "Include a key decision only when its rationale is evidenced.",
-            "Include an attempted path only when it was evidenced as failed, abandoned, or inconclusive.",
-            (
-                "When the branch ends with an evidenced unresolved action, blocker, or handoff, include at least one "
-                "specific continuation hint. Do not add a generic next step when no such evidence exists."
-            ),
-            (
-                "Prefer facts that help a future Claude Code session resume work. Do not invent decisions, "
-                "rationale, failures, unresolved tasks, or generic next steps."
-            ),
-            "Every factual section and list item must cite source_uuids from the allowlist.",
+            "summary is required: state the recognizable work arc and only its evidenced outcome.",
+            "title is optional: use a short, evidence-backed label only when useful.",
+            "outcome is optional and must be one of completed, partial, blocked, or unknown when supplied.",
+            "Do not give handoff instructions, advice, continuation plans, next steps, or generic recommendations.",
+            "Do not invent facts, decisions, outcomes, or unsupported claims about the project as a whole.",
+            "Do not provide an exhaustive chronology or sections beyond the response schema.",
             "Do not emit version, model, or generated_at; the worker adds them after validation.",
             "Return only the factual brief body matching the response schema.",
         ]

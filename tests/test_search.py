@@ -576,26 +576,16 @@ def _seed_branch(
 
 
 def _valid_search_enrichment() -> dict:
-    source_uuids = ["11111111-1111-4111-8111-111111111111"]
     return build_stored_enrichment_envelope(
         {
-            "title": {"text": "Resume fixture debugging", "source_uuids": source_uuids},
-            "where_we_left_off": {
-                "text": "We narrowed the regression to search-card hydration and still need to wire the display fields.",
-                "source_uuids": source_uuids,
-            },
-            "how_we_got_here": {"text": "We started with deterministic topic cards.", "source_uuids": source_uuids},
-            "key_decisions": [],
-            "attempted_paths": [],
-            "open_questions": [],
-            "files_and_reasons": [],
-            "continuation_hints": [],
-            "confidence": "high",
+            "title": "Resume fixture debugging",
+            "summary": "We narrowed the regression to search-card hydration and wired the display fields.",
+            "outcome": "partial",
         },
         model="sonnet",
         generated_at="2026-08-07T12:34:56Z",
-        active_branch_uuids=set(source_uuids),
-        valid_file_paths=set(),
+        attempt_id=1,
+        recap_input_hash="hash-1",
     )
 
 
@@ -1775,7 +1765,8 @@ class TestCardFields:
         conn.execute(
             """
             UPDATE branches
-            SET summary_source_hash = ?,
+            SET recap_input_hash = ?, summary_enrichment_input_hash = ?,
+                summary_enrichment_input_contract_version = ?, summary_enrichment_policy_version = ?,
                 summary_enrichment_json = ?,
                 summary_enrichment_version = ?,
                 summary_enrichment_source_hash = ?,
@@ -1784,6 +1775,9 @@ class TestCardFields:
             """,
             (
                 "hash-1",
+                "hash-1",
+                1,
+                1,
                 json.dumps(_valid_search_enrichment()),
                 SUMMARY_ENRICHMENT_VERSION,
                 "hash-1",
@@ -1800,7 +1794,7 @@ class TestCardFields:
         assert card["topic"] == "Debugging a pytest fixture"
         assert card["display_title"] == "Resume fixture debugging"
         assert card["summary_preview"] == (
-            "We narrowed the regression to search-card hydration and still need to wire the display fields."
+            "We narrowed the regression to search-card hydration and wired the display fields."
         )
 
         md = format_markdown(cards, "pytest", ranked=True)
@@ -1811,7 +1805,7 @@ class TestCardFields:
         assert payload["topic"] == "Debugging a pytest fixture"
         assert payload["display_title"] == "Resume fixture debugging"
         assert payload["summary_preview"] == (
-            "We narrowed the regression to search-card hydration and still need to wire the display fields."
+            "We narrowed the regression to search-card hydration and wired the display fields."
         )
         conn.close()
 
@@ -1819,7 +1813,7 @@ class TestCardFields:
         (
             "summary_enrichment_json",
             "summary_enrichment_version",
-            "summary_enrichment_source_hash",
+            "summary_enrichment_input_hash",
             "summary_enrichment_status",
         ),
         [
@@ -1848,13 +1842,13 @@ class TestCardFields:
                 STATUS_OK,
             ),
         ],
-        ids=["invalid-envelope", "failed-status", "version-stale", "source-hash-stale"],
+        ids=["invalid-envelope", "failed-status", "version-stale", "input-hash-stale"],
     )
     def test_card_falls_back_when_enrichment_is_invalid_failed_or_version_stale(
         self,
         summary_enrichment_json,
         summary_enrichment_version,
-        summary_enrichment_source_hash,
+        summary_enrichment_input_hash,
         summary_enrichment_status,
     ):
         conn = sqlite3.connect(":memory:")
@@ -1864,7 +1858,8 @@ class TestCardFields:
         conn.execute(
             """
             UPDATE branches
-            SET summary_source_hash = ?,
+            SET recap_input_hash = ?, summary_enrichment_input_hash = ?,
+                summary_enrichment_input_contract_version = 1, summary_enrichment_policy_version = 1,
                 summary_enrichment_json = ?,
                 summary_enrichment_version = ?,
                 summary_enrichment_source_hash = ?,
@@ -1873,9 +1868,10 @@ class TestCardFields:
             """,
             (
                 "hash-current",
+                summary_enrichment_input_hash,
                 summary_enrichment_json,
                 summary_enrichment_version,
-                summary_enrichment_source_hash,
+                "unused-v1-source-hash",
                 summary_enrichment_status,
                 branch_id,
             ),

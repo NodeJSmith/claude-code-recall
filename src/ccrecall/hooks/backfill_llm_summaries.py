@@ -38,6 +38,7 @@ from ccrecall.llm_summarizer import (
 )
 from ccrecall.llm_summary_db import get_connection
 from ccrecall.parsing import extract_session_uuid
+from ccrecall.recap_input import ELIGIBILITY_POLICY_VERSION, RECAP_INPUT_CONTRACT_VERSION, refresh_recap_input
 from ccrecall.summarizer import SUMMARY_VERSION
 from ccrecall.summary_enrichment import (
     STATUS_AUTH_REQUIRED,
@@ -57,7 +58,6 @@ from ccrecall.summary_enrichment import (
     STATUS_UNSUPPORTED_CLI,
     SUMMARY_ENRICHMENT_VERSION,
     build_stored_enrichment_envelope,
-    compute_branch_summary_source_hash,
     normalize_project_file_reference,
 )
 
@@ -231,7 +231,10 @@ def _load_branch_row(cursor: sqlite3.Cursor, branch_id: int) -> sqlite3.Row | No
                b.context_summary, b.context_summary_json, b.summary_version,
                b.summary_enrichment_json, b.summary_enrichment_version,
                b.summary_enrichment_source_hash, b.summary_enrichment_status,
-               b.summary_enrichment_error, b.summary_source_hash,
+                b.summary_enrichment_error, b.summary_source_hash, b.recap_input_hash,
+                b.recap_input_contract_version, b.recap_eligibility_policy_version,
+                b.summary_enrichment_input_hash, b.summary_enrichment_input_contract_version,
+                b.summary_enrichment_policy_version,
                s.uuid AS session_uuid, s.git_branch, s.cwd, p.name AS project_name,
                p.path AS project_root
         FROM branches b
@@ -310,8 +313,10 @@ def _needs_enrichment(
     if status == STATUS_OK:
         return (
             row["summary_enrichment_version"] != SUMMARY_ENRICHMENT_VERSION
-            or not row["summary_enrichment_source_hash"]
-            or row["summary_enrichment_source_hash"] != row["summary_source_hash"]
+            or not row["recap_input_hash"]
+            or row["recap_input_hash"] != row["summary_enrichment_input_hash"]
+            or row["summary_enrichment_input_contract_version"] != RECAP_INPUT_CONTRACT_VERSION
+            or row["summary_enrichment_policy_version"] != ELIGIBILITY_POLICY_VERSION
         )
     if _is_capability_gated_budget_failure(row):
         return capability_status != status
@@ -326,31 +331,11 @@ def _needs_enrichment(
     return True
 
 
-def _persist_expected_source_hash(cursor: sqlite3.Cursor, branch_id: int, row: sqlite3.Row) -> str | None:
-    expected_hash = row["summary_source_hash"]
-    if expected_hash is not None:
-        return expected_hash
-    if _parse_json_object(row["context_summary_json"]) is None:
-        return None
-    computed = compute_branch_summary_source_hash(cursor, branch_id)
-    if computed is None:
-        return None
-    cursor.execute(
-        "UPDATE branches SET summary_source_hash = ? WHERE id = ? AND summary_source_hash IS NULL",
-        (computed, branch_id),
-    )
-    cursor.execute("SELECT summary_source_hash FROM branches WHERE id = ?", (branch_id,))
-    refreshed = cursor.fetchone()
-    if refreshed is None or not isinstance(refreshed[0], str):
-        return None
-    return refreshed[0]
-
-
 def _write_status(
     cursor: sqlite3.Cursor,
     *,
     branch_id: int,
-    expected_hash: str,
+    expected_input_hash: str,
     status: str,
     diagnostic: str | None,
 ) -> bool:
@@ -360,9 +345,9 @@ def _write_status(
         SET summary_enrichment_status = ?,
             summary_enrichment_error = ?,
             summary_enrichment_updated_at = CURRENT_TIMESTAMP
-        WHERE id = ? AND summary_source_hash = ?
+        WHERE id = ? AND recap_input_hash = ?
         """,
-        (status, _cap(diagnostic), branch_id, expected_hash),
+        (status, _cap(diagnostic), branch_id, expected_input_hash),
     )
     return cursor.rowcount > 0
 
@@ -371,27 +356,31 @@ def _write_success(
     cursor: sqlite3.Cursor,
     *,
     branch_id: int,
-    expected_hash: str,
+    expected_input_hash: str,
     envelope: dict[str, Any],
 ) -> bool:
     cursor.execute(
         """
         UPDATE branches
         SET summary_enrichment_json = ?,
-            summary_enrichment_version = ?,
-            summary_enrichment_source_hash = ?,
+             summary_enrichment_version = ?,
+             summary_enrichment_input_hash = ?,
+             summary_enrichment_input_contract_version = ?,
+             summary_enrichment_policy_version = ?,
             summary_enrichment_status = ?,
             summary_enrichment_error = NULL,
             summary_enrichment_updated_at = CURRENT_TIMESTAMP
-        WHERE id = ? AND summary_source_hash = ?
+        WHERE id = ? AND recap_input_hash = ?
         """,
         (
             json.dumps(envelope, ensure_ascii=False),
             SUMMARY_ENRICHMENT_VERSION,
-            expected_hash,
+            expected_input_hash,
+            RECAP_INPUT_CONTRACT_VERSION,
+            ELIGIBILITY_POLICY_VERSION,
             STATUS_OK,
             branch_id,
-            expected_hash,
+            expected_input_hash,
         ),
     )
     return cursor.rowcount > 0
@@ -474,8 +463,8 @@ def _process_branch(
         ):
             return BranchProcessResult(selected=False, enriched=False)
 
-        expected_hash = _persist_expected_source_hash(cursor, branch_id, row)
-        if expected_hash is None:
+        recap_input = refresh_recap_input(cursor, branch_id)
+        if not recap_input.input_hash:
             return BranchProcessResult(selected=False, enriched=False)
 
         summary_json = _parse_json_object(row["context_summary_json"])
@@ -490,7 +479,7 @@ def _process_branch(
             _write_status(
                 cursor,
                 branch_id=branch_id,
-                expected_hash=expected_hash,
+                expected_input_hash=recap_input.input_hash,
                 status=capability_status,
                 diagnostic=_diagnostic_summary(capability_status, capability_diagnostic, capability=True),
             )
@@ -500,7 +489,7 @@ def _process_branch(
             _write_status(
                 cursor,
                 branch_id=branch_id,
-                expected_hash=expected_hash,
+                expected_input_hash=recap_input.input_hash,
                 status=source_status,
                 diagnostic=_diagnostic_summary(source_status, None),
             )
@@ -561,10 +550,12 @@ def _process_branch(
                 result.response_body,
                 model=settings["llm_summary_model"],
                 generated_at=Instant.now().format_iso(),
-                active_branch_uuids=active_branch_uuids,
-                valid_file_paths=valid_file_paths,
+                attempt_id=0,
+                recap_input_hash=recap_input.input_hash,
             )
-            if not _write_success(cursor, branch_id=branch_id, expected_hash=expected_hash, envelope=envelope):
+            if not _write_success(
+                cursor, branch_id=branch_id, expected_input_hash=recap_input.input_hash, envelope=envelope
+            ):
                 logger.info("LLM summary stale for branch %s; discarding result", branch_id)
                 return BranchProcessResult(selected=True, enriched=False)
             return BranchProcessResult(selected=True, enriched=True)
@@ -572,7 +563,7 @@ def _process_branch(
         if not _write_status(
             cursor,
             branch_id=branch_id,
-            expected_hash=expected_hash,
+            expected_input_hash=recap_input.input_hash,
             status=result.status,
             diagnostic=result.diagnostic,
         ):

@@ -1,7 +1,7 @@
 ---
 task_id: "T04"
 title: "Replace the recap contract and renderer"
-status: "planned"
+status: "done"
 depends_on: ["T02", "T03"]
 implements: ["FR#1", "FR#2", "FR#6", "AC#1"]
 ---

@@ -149,8 +149,10 @@ def build_context(sessions: list[dict]) -> str:
                 session.get("summary_enrichment"),
                 is_primary_session=i == 0,
                 status=session.get("summary_enrichment_status"),
-                stored_source_hash=session.get("summary_enrichment_source_hash"),
-                current_source_hash=session.get("summary_source_hash"),
+                current_input_hash=session.get("recap_input_hash"),
+                materialized_input_hash=session.get("summary_enrichment_input_hash"),
+                materialized_input_contract_version=session.get("summary_enrichment_input_contract_version"),
+                materialized_policy_version=session.get("summary_enrichment_policy_version"),
                 stored_enrichment_version=session.get("summary_enrichment_version"),
             )
         uuid = session.get("uuid", "")

@@ -28,7 +28,6 @@ from ccrecall.summary_enrichment import (
     STATUS_SOURCE_UNVERIFIED,
     STATUS_TIMEOUT,
     STATUS_UNSUPPORTED_CLI,
-    compute_summary_source_hash,
 )
 
 
@@ -47,17 +46,11 @@ def _entry(message_uuid: str, parent_uuid: str | None, timestamp: str, role: str
 
 
 def _response_body(active_branch_uuids: set[str], file_path: str = "src/main.py") -> dict:
-    uuids = sorted(active_branch_uuids)
+    del active_branch_uuids, file_path
     return {
-        "title": {"text": "Resume branch", "source_uuids": [uuids[0]]},
-        "where_we_left_off": {"text": "Latest state", "source_uuids": [uuids[0]]},
-        "how_we_got_here": {"text": "Causal path", "source_uuids": [uuids[1]]},
-        "key_decisions": [],
-        "attempted_paths": [],
-        "open_questions": [],
-        "files_and_reasons": [{"path": file_path, "reason": "Changed here", "source_uuids": [uuids[0]]}],
-        "continuation_hints": [{"text": "Next step", "source_uuids": [uuids[1]]}],
-        "confidence": "high",
+        "title": "Worker bug investigation",
+        "summary": "Investigated the worker bug and identified its failing path.",
+        "outcome": "partial",
     }
 
 
@@ -356,11 +349,12 @@ assert "ccrecall.db" not in sys.modules
         assert row[1] == '{"version": 2, "topic": "LLM summaries"}'
         assert row[2] == SUMMARY_VERSION
         stored = json.loads(row[3])
-        assert stored["version"] == 1
+        assert stored["version"] == 2
         assert stored["model"] == "sonnet"
-        assert row[4] == 1
+        assert stored["recap_input_hash"]
+        assert row[4] == 2
         assert row[5] == STATUS_OK
-        assert row[6] == row[7]
+        assert row[6] is None
 
     def test_run_closes_read_connection_before_claude_and_reopens_for_write(self, tmp_path, monkeypatch):
 
@@ -1256,7 +1250,7 @@ assert "ccrecall.db" not in sys.modules
             ).fetchone()
 
         assert row[0] == STATUS_OK
-        assert json.loads(row[1])["files_and_reasons"][0]["path"] == "src/read_only.py"
+        assert json.loads(row[1])["summary"] == "Investigated the worker bug and identified its failing path."
 
     def test_current_session_enrichment_accepts_prose_and_result_file_path_evidence(self, tmp_path, monkeypatch):
 
@@ -1331,7 +1325,7 @@ assert "ccrecall.db" not in sys.modules
             ).fetchone()
 
         assert row[0] == STATUS_OK
-        assert json.loads(row[1])["files_and_reasons"][0]["path"] == "docs/result-notes.md"
+        assert json.loads(row[1])["summary"] == "Investigated the worker bug and identified its failing path."
 
     def test_current_session_enrichment_accepts_root_level_readme_from_prose_and_result_evidence(
         self, tmp_path, monkeypatch
@@ -1408,7 +1402,7 @@ assert "ccrecall.db" not in sys.modules
             ).fetchone()
 
         assert row[0] == STATUS_OK
-        assert json.loads(row[1])["files_and_reasons"][0]["path"] == "README.md"
+        assert json.loads(row[1])["summary"] == "Investigated the worker bug and identified its failing path."
 
     def test_current_session_enrichment_uses_project_root_for_root_level_file_evidence(self, tmp_path, monkeypatch):
 
@@ -1485,7 +1479,7 @@ assert "ccrecall.db" not in sys.modules
             ).fetchone()
 
         assert row[0] == STATUS_OK
-        assert json.loads(row[1])["files_and_reasons"][0]["path"] == "README.md"
+        assert json.loads(row[1])["summary"] == "Investigated the worker bug and identified its failing path."
 
     def test_current_session_enrichment_normalizes_absolute_files_modified_under_project_root(
         self, tmp_path, monkeypatch
@@ -1560,7 +1554,7 @@ assert "ccrecall.db" not in sys.modules
             ).fetchone()
 
         assert row[0] == STATUS_OK
-        assert json.loads(row[1])["files_and_reasons"][0]["path"] == "src/main.py"
+        assert json.loads(row[1])["summary"] == "Investigated the worker bug and identified its failing path."
 
     def test_current_session_enrichment_rejects_directory_like_slash_paths_but_keeps_tool_inputs(
         self, tmp_path, monkeypatch
@@ -1647,7 +1641,7 @@ assert "ccrecall.db" not in sys.modules
             ).fetchone()
 
         assert row[0] == STATUS_OK
-        assert json.loads(row[1])["files_and_reasons"][0]["path"] == "Dockerfile"
+        assert json.loads(row[1])["summary"] == "Investigated the worker bug and identified its failing path."
 
     def test_current_session_run_stops_after_first_selection_page(self, tmp_path, monkeypatch):
 
@@ -1758,7 +1752,7 @@ assert "ccrecall.db" not in sys.modules
             ):
                 with sqlite3.connect(db_path) as conn:
                     conn.execute(
-                        "UPDATE branches SET summary_source_hash = ?, summary_enrichment_status = ? WHERE id = ?",
+                        "UPDATE branches SET recap_input_hash = ?, summary_enrichment_status = ? WHERE id = ?",
                         ("newer-hash", STATUS_OK, seeded["branch_id"]),
                     )
                     conn.commit()
@@ -1777,7 +1771,7 @@ assert "ccrecall.db" not in sys.modules
 
             with sqlite3.connect(db_path) as conn:
                 row = conn.execute(
-                    "SELECT summary_source_hash, summary_enrichment_status, summary_enrichment_json FROM branches WHERE id = ?",
+                    "SELECT recap_input_hash, summary_enrichment_status, summary_enrichment_json FROM branches WHERE id = ?",
                     (seeded["branch_id"],),
                 ).fetchone()
 
@@ -1812,34 +1806,13 @@ assert "ccrecall.db" not in sys.modules
 
         with sqlite3.connect(db_path) as conn:
             row = conn.execute(
-                """
-                SELECT b.leaf_uuid, b.summary_version, b.context_summary_json, b.aggregated_content,
-                       b.exchange_count, b.started_at, b.ended_at, b.files_modified,
-                       b.tool_counts, b.commits, s.git_branch, b.summary_source_hash
-                FROM branches b
-                JOIN sessions s ON s.id = b.session_id
-                WHERE b.id = ?
-                """,
+                "SELECT recap_input_hash, summary_enrichment_input_hash FROM branches WHERE id = ?",
                 (seeded["branch_id"],),
             ).fetchone()
 
         assert row is not None
         assert invoke_calls["count"] == 1
-        assert row[11] == compute_summary_source_hash(
-            {
-                "leaf_uuid": row[0],
-                "summary_version": row[1],
-                "context_summary_json": row[2],
-                "aggregated_content": row[3],
-                "exchange_count": row[4],
-                "started_at": row[5],
-                "ended_at": row[6],
-                "files_modified": row[7],
-                "tool_counts": row[8],
-                "commits": row[9],
-                "git_branch": row[10],
-            }
-        )
+        assert row[0] == row[1]
 
         invalid_db = tmp_path / "invalid.db"
         invalid_seeded = _seed_branch(
@@ -1855,12 +1828,13 @@ assert "ccrecall.db" not in sys.modules
 
         with sqlite3.connect(invalid_db) as conn:
             row = conn.execute(
-                "SELECT summary_source_hash, summary_enrichment_status FROM branches WHERE id = ?",
+                "SELECT recap_input_hash, summary_enrichment_status FROM branches WHERE id = ?",
                 (invalid_seeded["branch_id"],),
             ).fetchone()
 
         assert invoke_calls["count"] == 0
-        assert row == (None, None)
+        assert row[0]
+        assert row[1] is None
 
     def test_pid_guard_skips_live_worker_reaps_stale_marker_and_cleans_up_on_success_and_failure(
         self, tmp_path, monkeypatch

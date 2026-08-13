@@ -452,48 +452,16 @@ class TestBuildContext:
     """Test build_context() — uses cached summaries or fallback."""
 
     def _enrichment_envelope(self) -> dict:
-        uuids = [str(uuid4()) for _ in range(4)]
         return build_stored_enrichment_envelope(
             {
-                "title": {"text": "Resume the renderer wiring", "source_uuids": [uuids[0]]},
-                "where_we_left_off": {
-                    "text": "L" * 600,
-                    "source_uuids": [uuids[0], uuids[1]],
-                },
-                "how_we_got_here": {
-                    "text": "H" * 600,
-                    "source_uuids": [uuids[1]],
-                },
-                "key_decisions": [
-                    {
-                        "decision": "D" * 180,
-                        "rationale": "R" * 240,
-                        "source_uuids": [uuids[1], uuids[2]],
-                    }
-                ],
-                "attempted_paths": [
-                    {
-                        "text": "P" * 180,
-                        "outcome": "abandoned",
-                        "why_stopped": "W" * 180,
-                        "source_uuids": [uuids[2]],
-                    }
-                ],
-                "open_questions": [{"text": "Q" * 180, "source_uuids": [uuids[2]]}],
-                "files_and_reasons": [
-                    {
-                        "path": "src/main.py",
-                        "reason": "F" * 180,
-                        "source_uuids": [uuids[3]],
-                    }
-                ],
-                "continuation_hints": [{"text": "C" * 180, "source_uuids": [uuids[0], uuids[3]]}],
-                "confidence": "high",
+                "title": "Renderer wiring",
+                "summary": "The recap renderer is wired to validate the current cached recap.",
+                "outcome": "partial",
             },
             model="sonnet",
             generated_at="2026-08-07T12:34:56Z",
-            active_branch_uuids=set(uuids),
-            valid_file_paths={"src/main.py"},
+            attempt_id=1,
+            recap_input_hash="recap-hash",
         )
 
     def test_empty_sessions_returns_empty(self):
@@ -613,8 +581,10 @@ class TestBuildContext:
                 "summary_enrichment": self._enrichment_envelope(),
                 "summary_enrichment_status": STATUS_OK,
                 "summary_enrichment_version": SUMMARY_ENRICHMENT_VERSION,
-                "summary_enrichment_source_hash": "hash-1",
-                "summary_source_hash": "hash-1",
+                "recap_input_hash": "recap-hash",
+                "summary_enrichment_input_hash": "recap-hash",
+                "summary_enrichment_input_contract_version": 1,
+                "summary_enrichment_policy_version": 1,
             },
             {
                 "uuid": "supplementary-uuid",
@@ -622,25 +592,25 @@ class TestBuildContext:
                 "summary_enrichment": self._enrichment_envelope(),
                 "summary_enrichment_status": STATUS_OK,
                 "summary_enrichment_version": SUMMARY_ENRICHMENT_VERSION,
-                "summary_enrichment_source_hash": "hash-2",
-                "summary_source_hash": "hash-2",
+                "recap_input_hash": "recap-hash",
+                "summary_enrichment_input_hash": "recap-hash",
+                "summary_enrichment_input_contract_version": 1,
+                "summary_enrichment_policy_version": 1,
             },
         ]
 
         result = build_context(sessions)
         primary_block, supplementary_block = result.split("\n\n---\n\n", 1)
 
-        assert primary_block.startswith("### Branch Resume Brief")
+        assert primary_block.startswith("### Session Recap")
         assert "### Session: Primary" in primary_block
-        assert primary_block.index("### Branch Resume Brief") < primary_block.index("### Session: Primary")
-        assert "**How we got here:**" in primary_block
+        assert primary_block.index("### Session Recap") < primary_block.index("### Session: Primary")
+        assert "current cached recap" in primary_block
 
-        assert supplementary_block.startswith("> Session ID: supplementary-uuid\n\n### Branch Resume Brief")
+        assert supplementary_block.startswith("> Session ID: supplementary-uuid\n\n### Session Recap")
         assert "### Session: Supplementary" in supplementary_block
-        assert supplementary_block.index("### Branch Resume Brief") < supplementary_block.index(
-            "### Session: Supplementary"
-        )
-        assert "**How we got here:**" not in supplementary_block
+        assert supplementary_block.index("### Session Recap") < supplementary_block.index("### Session: Supplementary")
+        assert "current cached recap" in supplementary_block
 
     def test_uncached_session_preserves_existing_fallback_without_requiring_summary_json(self):
         session = {
@@ -652,8 +622,10 @@ class TestBuildContext:
             "summary_enrichment": self._enrichment_envelope(),
             "summary_enrichment_status": STATUS_OK,
             "summary_enrichment_version": SUMMARY_ENRICHMENT_VERSION,
-            "summary_enrichment_source_hash": "hash-1",
-            "summary_source_hash": "hash-1",
+            "recap_input_hash": "recap-hash",
+            "summary_enrichment_input_hash": "recap-hash",
+            "summary_enrichment_input_contract_version": 1,
+            "summary_enrichment_policy_version": 1,
             "messages": [
                 {
                     "role": "user",
@@ -670,7 +642,7 @@ class TestBuildContext:
 
         result = build_context([session])
 
-        assert "### Branch Resume Brief" not in result
+        assert "### Session Recap" not in result
         assert result == _build_fallback_context(session)
 
     @pytest.mark.parametrize(
@@ -694,14 +666,16 @@ class TestBuildContext:
             "summary_enrichment": summary_enrichment,
             "summary_enrichment_status": summary_enrichment_status,
             "summary_enrichment_version": summary_enrichment_version,
-            "summary_enrichment_source_hash": "hash-1",
-            "summary_source_hash": "hash-1",
+            "recap_input_hash": "recap-hash",
+            "summary_enrichment_input_hash": "recap-hash",
+            "summary_enrichment_input_contract_version": 1,
+            "summary_enrichment_policy_version": 1,
         }
 
         result = build_context([session])
 
         assert result == session["context_summary"]
-        assert "### Branch Resume Brief" not in result
+        assert "### Session Recap" not in result
 
     def test_no_uuid_omits_session_id_line(self):
         """Sessions without a uuid should not get a Session ID line."""

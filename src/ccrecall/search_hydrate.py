@@ -70,8 +70,9 @@ def hydrate_cards(
                b.files_modified, b.commits, s.git_branch,
                p.name as project, b.context_summary_json,
                b.summary_enrichment_json, b.summary_enrichment_version,
-               b.summary_enrichment_source_hash, b.summary_enrichment_status,
-               b.summary_source_hash{tool_counts_col}
+                b.summary_enrichment_source_hash, b.summary_enrichment_status,
+                b.summary_source_hash, b.recap_input_hash, b.summary_enrichment_input_hash,
+                b.summary_enrichment_input_contract_version, b.summary_enrichment_policy_version{tool_counts_col}
         FROM branches b
         JOIN sessions s ON b.session_id = s.id
         JOIN projects p ON s.project_id = p.id
@@ -102,9 +103,13 @@ def hydrate_cards(
                 summary_json,
                 summary_enrichment_json,
                 summary_enrichment_version,
-                summary_enrichment_source_hash,
+                _summary_enrichment_source_hash,
                 summary_enrichment_status,
-                summary_source_hash,
+                _summary_source_hash,
+                recap_input_hash,
+                summary_enrichment_input_hash,
+                summary_enrichment_input_contract_version,
+                summary_enrichment_policy_version,
                 tool_counts_json,
             ) = row
         else:
@@ -121,9 +126,13 @@ def hydrate_cards(
                 summary_json,
                 summary_enrichment_json,
                 summary_enrichment_version,
-                summary_enrichment_source_hash,
+                _summary_enrichment_source_hash,
                 summary_enrichment_status,
-                summary_source_hash,
+                _summary_source_hash,
+                recap_input_hash,
+                summary_enrichment_input_hash,
+                summary_enrichment_input_contract_version,
+                summary_enrichment_policy_version,
             ) = row
             tool_counts_json = None
 
@@ -143,12 +152,14 @@ def hydrate_cards(
         if valid_current_enrichment(
             enrichment,
             status=summary_enrichment_status,
-            stored_source_hash=summary_enrichment_source_hash,
-            current_source_hash=summary_source_hash,
+            current_input_hash=recap_input_hash,
+            materialized_input_hash=summary_enrichment_input_hash,
+            materialized_input_contract_version=summary_enrichment_input_contract_version,
+            materialized_policy_version=summary_enrichment_policy_version,
             stored_enrichment_version=summary_enrichment_version,
         ):
-            display_title = enrichment.get("title", {}).get("text") or None
-            summary_preview = enrichment.get("where_we_left_off", {}).get("text") or None
+            display_title = enrichment.get("title") or None
+            summary_preview = enrichment.get("summary") or None
 
         # Graceful degrade: no context_summary_json → first user message as topic
         if not topic:
