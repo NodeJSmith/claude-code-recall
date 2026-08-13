@@ -31,7 +31,7 @@ from ccrecall.embeddings import is_model_cached_on_disk
 from ccrecall.formatting import extract_project_name, normalize_cwd
 from ccrecall.health import REASON_VEC_UNAVAILABLE, clear_embedding_failure, record_embedding_failure
 from ccrecall.models import HookInput
-from ccrecall.project_ops import resolve_project
+from ccrecall.project_ops import project_name_for_dir
 from ccrecall.session_ops import sync_session
 from ccrecall.transcript_sources import discover_session_transcript_files
 
@@ -40,6 +40,10 @@ _UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f
 # PID-file concurrency guard: at most one sync-current at a time.
 # Skip (not queue) if another is running — recovered on the next Stop.
 PID_KEY = "ccrecall-sync-current"
+
+# Distinct from 0 ("nothing imported yet") and -1 (sync_session's unchanged-file
+# skip): the project is excluded, so no later run will ever import this session.
+EXCLUDED_PROJECT = -2
 
 # Dedicated logger for the cold-model warning, kept separate from the main
 # ccrecall logger (LOGGER_NAME) so it fires regardless of logging_enabled (see
@@ -114,21 +118,23 @@ def sync_session_for_finalization(settings: dict, session_id: str) -> int:
     """Perform a provider-free final import without emitting hook output.
 
     Recap orchestration calls this only after claiming its job; it owns transcript
-    discovery/import, while all recap selection continues to use SQLite.
+    discovery/import, while all recap selection continues to use SQLite. Returns
+    ``EXCLUDED_PROJECT`` when the project is one the user keeps out, which is a
+    permanent answer rather than the "not imported yet" that ``0`` can mean.
     """
     if not validate_session_id(session_id):
         return 0
     session_file = get_session_file(DEFAULT_PROJECTS_DIR, session_id)
     if session_file is None:
         return 0
+    # Recap callers have no hook cwd to test, so resolve the real project name
+    # from the transcript's own directory. Do it before opening the DB: this
+    # decides whether the project may be recorded at all.
+    exclude_projects = settings.get("exclude_projects") or []
     project_root = _project_root_for_session_file(session_file, DEFAULT_PROJECTS_DIR)
+    if exclude_projects and project_name_for_dir(project_root) in exclude_projects:
+        return EXCLUDED_PROJECT
     with get_connection(settings, load_vec=True) as conn:
-        # Recap callers have no hook cwd to test, so resolve the real project
-        # name the way the batch import does before importing anything. Skipping
-        # this would let a recap request carry a project the user excluded.
-        exclude_projects = settings.get("exclude_projects") or []
-        if exclude_projects and resolve_project(conn.cursor(), project_root)[1] in exclude_projects:
-            return 0
         return sync_session(conn, session_file, project_root)
 
 

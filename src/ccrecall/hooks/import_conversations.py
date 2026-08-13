@@ -28,7 +28,7 @@ from ccrecall.file_hashing import transcript_file_hash
 from ccrecall.import_log_ops import has_pending_tool_content
 from ccrecall.models import LOGGER_NAME
 from ccrecall.parsing import extract_session_uuid, sort_session_files
-from ccrecall.project_ops import resolve_project
+from ccrecall.project_ops import project_name_for_dir, upsert_project
 from ccrecall.session_ops import sync_session
 from ccrecall.transcript_sources import discover_project_transcript_files, is_safe_project_dir
 
@@ -216,12 +216,13 @@ def import_project(
     """
     cursor = conn.cursor()
 
-    # Upsert via the JSONL-probe strategy, then check exclusion against the real
-    # project name it derived.
-    project_id, project_name = resolve_project(cursor, project_dir)
-
+    # Resolve the real name by probing, and decide exclusion, before the upsert
+    # records anything about a project the user asked to keep out.
+    project_name = project_name_for_dir(project_dir)
     if exclude_projects and project_name in exclude_projects:
         return 0, 0, 0
+
+    project_id = upsert_project(cursor, project_dir.name, project_dir=project_dir)
 
     sessions_imported = 0
     messages_imported = 0

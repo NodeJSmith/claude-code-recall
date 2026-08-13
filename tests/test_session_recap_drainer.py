@@ -312,8 +312,11 @@ def test_finalization_sync_refuses_to_import_an_excluded_project(tmp_path, monke
     imported = []
     monkeypatch.setattr(sync_current, "sync_session", lambda *args: imported.append(args) or 1)
 
-    assert sync_current.sync_session_for_finalization(settings, UUID) == 0
+    assert sync_current.sync_session_for_finalization(settings, UUID) == sync_current.EXCLUDED_PROJECT
     assert imported == []
+    # The exclusion decision itself must not record the project it refuses.
+    with get_connection(settings) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM projects").fetchone() == (0,)
 
 
 def test_finalization_sync_imports_a_project_that_is_not_excluded(tmp_path, monkeypatch):
@@ -332,6 +335,22 @@ def test_finalization_sync_imports_a_project_that_is_not_excluded(tmp_path, monk
 
     assert sync_current.sync_session_for_finalization(settings, UUID) == 1
     assert len(imported) == 1
+
+
+def test_journal_replay_drops_a_marker_for_an_excluded_project(tmp_path, monkeypatch):
+    settings = _settings(tmp_path)
+    session_end.write_fallback_journal(tmp_path / "recaps.db", UUID, "2026-08-12T10:00:00Z")
+    monkeypatch.setattr(
+        drain_session_recaps, "sync_session_for_finalization", lambda *_a: drain_session_recaps.EXCLUDED_PROJECT
+    )
+
+    assert drain_session_recaps.replay_journal(settings) == 0
+
+    # An excluded project is never imported, so this marker can never resolve.
+    # Retaining it would re-sync it on every drain run, forever.
+    assert not session_end.journal_path(tmp_path / "recaps.db", UUID).exists()
+    with get_connection(settings) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM session_recap_jobs").fetchone() == (0,)
 
 
 def test_journal_replay_scans_past_markers_it_cannot_resolve(tmp_path):

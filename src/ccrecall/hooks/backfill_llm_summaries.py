@@ -121,15 +121,22 @@ def run(
                 params.append(f"-{days}")
             sql += " ORDER BY b.ended_at, s.id"
             candidates: list[tuple[int, str | None, str]] = []
-            for session_id, _uuid, branch_id, _stored_hash in conn.execute(sql, params):
-                # Snapshot the identity the drainer will compute, not a column an
-                # upgraded-from-v7 DB never backfilled. A NULL snapshot goes stale
-                # on the first claim, dropping the job out of this run and past
-                # both --limit and the run's model, budget, and timeout overrides.
-                input_hash = refresh_recap_input(conn.cursor(), branch_id).input_hash
+            for session_id, _uuid, branch_id, stored_hash in conn.execute(sql, params):
                 decision = evaluate_branch(conn.cursor(), branch_id)
                 if not decision.eligible:
-                    candidates.append((session_id, input_hash, "excluded"))
+                    # Never drained, so its hash is accounting only — not worth
+                    # rebuilding the whole projection for.
+                    candidates.append((session_id, stored_hash, "excluded"))
+                    continue
+                try:
+                    # Snapshot the identity the drainer will compute, not a column an
+                    # upgraded-from-v7 DB never backfilled. A NULL snapshot goes stale
+                    # on the first claim, dropping the job out of this run and past
+                    # both --limit and the run's model, budget, and timeout overrides.
+                    input_hash = refresh_recap_input(conn.cursor(), branch_id).input_hash
+                except ValueError:
+                    # A concurrent reimport replaced this branch between the scan
+                    # and here. Skip the one stale candidate, not the whole run.
                     continue
                 existing = conn.execute(
                     "SELECT state, reason FROM session_recap_jobs WHERE session_id = ?", (session_id,)

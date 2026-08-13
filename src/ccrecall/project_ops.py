@@ -79,18 +79,17 @@ def upsert_project(
     return project_id
 
 
-def resolve_project(cursor: sqlite3.Cursor, project_dir: Path) -> tuple[int, str]:
-    """Upsert a Claude project directory and return its ``projects.id`` and real name.
+def project_name_for_dir(project_dir: Path) -> str:
+    """Derive a Claude project directory's real name without writing anything.
 
-    The name is only trustworthy after the upsert has probed the directory for cwd
-    metadata, because the key alone reconstructs hyphens lossily. Every
-    ``exclude_projects`` check that starts from a directory rather than a live hook
-    cwd must resolve through here, so the two never disagree about what a project
-    is called.
+    An ``exclude_projects`` check decides whether a project may enter the DB at
+    all, so it must not itself create the ``projects`` row that importing would.
+    This mirrors ``upsert_project``'s own name derivation, minus the write, so the
+    two can never disagree about what a project is called. The probe matters: the
+    directory key alone reconstructs hyphens lossily.
     """
-    project_id = upsert_project(cursor, normalize_project_key(project_dir.name), project_dir=project_dir)
-    row = cursor.execute("SELECT name FROM projects WHERE id = ?", (project_id,)).fetchone()
-    return project_id, row[0] if row else extract_project_name(str(project_dir))
+    raw_path = _probe_project_dir(project_dir) or parse_project_key(normalize_project_key(project_dir.name))
+    return extract_project_name(normalize_cwd(raw_path))
 
 
 def _probe_project_dir(project_dir: Path) -> str | None:

@@ -19,7 +19,7 @@ from whenever import Instant
 from ccrecall.config import get_db_path, load_settings, remove_pid_file, setup_logging, try_acquire_pid_file
 from ccrecall.hooks.durability import fsync_directory, journal_lock
 from ccrecall.hooks.session_end import JOURNAL_PREFIX, JOURNAL_VERSION, journal_path
-from ccrecall.hooks.sync_current import sync_session_for_finalization
+from ccrecall.hooks.sync_current import EXCLUDED_PROJECT, sync_session_for_finalization
 from ccrecall.llm_summarizer import (
     STATUS_AUTH_REQUIRED,
     STATUS_BUDGET_EXCEEDED,
@@ -125,7 +125,12 @@ def replay_journal(settings: dict, *, limit: int = JOURNAL_BATCH_SIZE) -> int:
                     continue
                 # A valid SessionEnd UUID is durable intent even when Stop has not
                 # imported it yet. Final sync is silent and precedes this lookup.
-                sync_session_for_finalization(settings, value["session_uuid"])
+                if sync_session_for_finalization(settings, value["session_uuid"]) == EXCLUDED_PROJECT:
+                    # Void intent, not pending intent. Retaining it would leave a
+                    # marker no run can ever resolve, re-synced on every drain.
+                    marker.unlink()
+                    fsync_directory(root)
+                    continue
                 with get_connection(settings) as conn:
                     if recap_schema_capability(conn) != "ready":
                         return replayed
