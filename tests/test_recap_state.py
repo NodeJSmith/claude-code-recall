@@ -34,6 +34,8 @@ from ccrecall.recap_state import (
 )
 
 NOW = "2026-08-12T10:00:00Z"
+# Past any lease taken at NOW, so a claim can be recovered rather than stolen.
+EXPIRED = "2026-08-12T11:00:00Z"
 
 
 def _connection(tmp_path):
@@ -376,7 +378,10 @@ def test_new_input_fences_old_attempt_without_claiming_cleanup(tmp_path):
         assert not complete_attempt(conn, attempt, token, "succeeded", NOW)
         assert not start_attempt(conn, attempt, token, NOW)
         assert claim_job(conn, 1, NOW, 60) is None
-        assert claim_job(conn, 1, NOW, 60, cleanup_proven=True) == token + 2
+        # The fenced claim keeps its lease, so a replacement waits for expiry
+        # even holding cleanup proof — the same gate recovery goes through.
+        assert claim_job(conn, 1, NOW, 60, cleanup_proven=True) is None
+        assert claim_job(conn, 1, EXPIRED, 60, cleanup_proven=True) == token + 2
         row = conn.execute("SELECT requested_input_hash, state, active_attempt_id FROM session_recap_jobs").fetchone()
         assert row == ("input-b", "claimed", None)
         assert conn.execute("SELECT state FROM session_recap_attempts WHERE id = ?", (attempt,)).fetchone() == (
@@ -436,9 +441,9 @@ def test_proven_cleanup_releases_fenced_running_attempt_provider_admission(tmp_p
         _attempt(conn, 1, first, provider_token=probe)
         upsert_job(conn, 1, "input-b", "end", "2026-08-12T10:00:01Z")
 
-        second = claim_job(conn, 1, NOW, 60, cleanup_proven=True)
+        second = claim_job(conn, 1, EXPIRED, 60, cleanup_proven=True)
 
-        assert admit_provider(conn, 1, second, NOW) == probe + 1
+        assert admit_provider(conn, 1, second, EXPIRED) == probe + 1
 
 
 def test_changed_input_cleanup_failure_requires_proof_before_requeue(tmp_path):

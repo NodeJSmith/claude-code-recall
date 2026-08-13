@@ -57,8 +57,18 @@ def upsert_job(
     A changed input cannot clear ``active_attempt_id``: that would assert cleanup
     for a process we have not proved is gone. Recovery must supply that proof.
     """
+    # A cleanup obligation owns its lineage until proven: bumping it here would
+    # erase the changed-input signal requeue_changed_input_after_cleanup reads.
+    fenced = """excluded.requested_input_hash IS NOT session_recap_jobs.requested_input_hash
+        AND NOT (session_recap_jobs.state = 'blocked'
+                 AND session_recap_jobs.reason = 'cleanup_failed'
+                 AND session_recap_jobs.active_attempt_id IS NOT NULL)"""
+    # State and lease are the only handles recovery has on a live attempt, so a
+    # changed input may fence that attempt but must never reset them beneath it.
+    resettable = """excluded.requested_input_hash IS NOT session_recap_jobs.requested_input_hash
+        AND session_recap_jobs.active_attempt_id IS NULL"""
     conn.execute(
-        """
+        f"""
         INSERT INTO session_recap_jobs (
           session_id, requested_input_hash, trigger, state, requested_at, updated_at
         ) VALUES (?, ?, ?, 'pending', ?, ?)
@@ -67,40 +77,14 @@ def upsert_job(
           trigger = excluded.trigger,
           requested_at = excluded.requested_at,
           updated_at = excluded.updated_at,
-           retry_lineage = session_recap_jobs.retry_lineage +
-             (excluded.requested_input_hash IS NOT session_recap_jobs.requested_input_hash
-              AND NOT (session_recap_jobs.state = 'blocked'
-                       AND session_recap_jobs.reason = 'cleanup_failed'
-                       AND session_recap_jobs.active_attempt_id IS NOT NULL)),
-           claim_token = session_recap_jobs.claim_token +
-             (excluded.requested_input_hash IS NOT session_recap_jobs.requested_input_hash
-              AND NOT (session_recap_jobs.state = 'blocked'
-                       AND session_recap_jobs.reason = 'cleanup_failed'
-                       AND session_recap_jobs.active_attempt_id IS NOT NULL)),
-           state = CASE
-             WHEN excluded.requested_input_hash IS NOT session_recap_jobs.requested_input_hash
-              AND NOT (session_recap_jobs.state = 'blocked'
-                       AND session_recap_jobs.reason = 'cleanup_failed'
-                       AND session_recap_jobs.active_attempt_id IS NOT NULL)
-             THEN 'pending' ELSE session_recap_jobs.state END,
-           reason = CASE
-             WHEN excluded.requested_input_hash IS NOT session_recap_jobs.requested_input_hash
-              AND NOT (session_recap_jobs.state = 'blocked'
-                       AND session_recap_jobs.reason = 'cleanup_failed'
-                       AND session_recap_jobs.active_attempt_id IS NOT NULL)
-             THEN NULL ELSE session_recap_jobs.reason END,
+           retry_lineage = session_recap_jobs.retry_lineage + ({fenced}),
+           claim_token = session_recap_jobs.claim_token + ({fenced}),
+           state = CASE WHEN {resettable} THEN 'pending' ELSE session_recap_jobs.state END,
+           reason = CASE WHEN {resettable} THEN NULL ELSE session_recap_jobs.reason END,
            next_eligible_at = CASE
-             WHEN excluded.requested_input_hash IS NOT session_recap_jobs.requested_input_hash
-              AND NOT (session_recap_jobs.state = 'blocked'
-                       AND session_recap_jobs.reason = 'cleanup_failed'
-                       AND session_recap_jobs.active_attempt_id IS NOT NULL)
-             THEN NULL ELSE session_recap_jobs.next_eligible_at END,
+             WHEN {resettable} THEN NULL ELSE session_recap_jobs.next_eligible_at END,
            lease_expires_at = CASE
-             WHEN excluded.requested_input_hash IS NOT session_recap_jobs.requested_input_hash
-              AND NOT (session_recap_jobs.state = 'blocked'
-                       AND session_recap_jobs.reason = 'cleanup_failed'
-                       AND session_recap_jobs.active_attempt_id IS NOT NULL)
-             THEN NULL ELSE session_recap_jobs.lease_expires_at END
+             WHEN {resettable} THEN NULL ELSE session_recap_jobs.lease_expires_at END
         """,
         (session_id, input_hash, trigger, now, now),
     )
