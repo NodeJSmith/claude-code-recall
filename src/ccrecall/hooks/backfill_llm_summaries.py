@@ -39,6 +39,7 @@ from ccrecall.llm_summarizer import (
 from ccrecall.llm_summary_db import get_connection
 from ccrecall.parsing import extract_session_uuid
 from ccrecall.recap_input import ELIGIBILITY_POLICY_VERSION, RECAP_INPUT_CONTRACT_VERSION, refresh_recap_input
+from ccrecall.recap_state import recap_state_changed_input
 from ccrecall.summarizer import SUMMARY_VERSION
 from ccrecall.summary_enrichment import (
     STATUS_AUTH_REQUIRED,
@@ -464,6 +465,7 @@ def _process_branch(
             return BranchProcessResult(selected=False, enriched=False)
 
         recap_input = refresh_recap_input(cursor, branch_id)
+        recap_state_changed_input(cursor.connection, row["session_id"], recap_input.input_hash, None)
         if not recap_input.input_hash:
             return BranchProcessResult(selected=False, enriched=False)
 

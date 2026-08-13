@@ -1,7 +1,7 @@
 ---
 task_id: "T05"
 title: "Build durable recap lifecycle state"
-status: "planned"
+status: "done"
 depends_on: ["T02", "T03"]
 implements: ["FR#9", "FR#10", "FR#11", "FR#12", "FR#19", "FR#22", "FR#25", "AC#5", "AC#6", "AC#12", "AC#15", "AC#20"]
 ---

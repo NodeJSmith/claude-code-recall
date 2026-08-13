@@ -15,7 +15,7 @@ from ccrecall.schema import SCHEMA_CORE, SCHEMA_FTS4, SCHEMA_FTS5, detect_fts_su
 
 # Current schema version. Bump when adding a migration and wire the new DDL
 # delta into _apply_migrations (see _migrate_to_v1 for the version-1 shape).
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 V7_BRANCH_COLUMNS = {
     "summary_enrichment_json": "TEXT",
@@ -271,8 +271,10 @@ RECAP_INDEXES = {
     "idx_recap_attempts_input",
     "idx_recap_attempts_status",
     "idx_recap_attempts_live",
+    "idx_recap_attempts_lineage",
     "idx_recap_runs_started",
 }
+V8_RECAP_INDEXES = RECAP_INDEXES - {"idx_recap_attempts_lineage"}
 RECAP_BRANCH_COLUMNS = {
     "recap_input_hash",
     "recap_input_contract_version",
@@ -280,6 +282,14 @@ RECAP_BRANCH_COLUMNS = {
     "summary_enrichment_input_hash",
     "summary_enrichment_input_contract_version",
     "summary_enrichment_policy_version",
+}
+RECAP_BRANCH_COLUMN_DECLARATIONS = {
+    "recap_input_hash": "TEXT",
+    "recap_input_contract_version": "INTEGER",
+    "recap_eligibility_policy_version": "INTEGER",
+    "summary_enrichment_input_hash": "TEXT",
+    "summary_enrichment_input_contract_version": "INTEGER",
+    "summary_enrichment_policy_version": "INTEGER",
 }
 RECAP_TABLE_COLUMNS = {
     "session_recap_jobs": {
@@ -294,6 +304,7 @@ RECAP_TABLE_COLUMNS = {
         "next_eligible_at",
         "requested_at",
         "updated_at",
+        "retry_lineage",
     },
     "session_recap_attempts": {
         "id",
@@ -320,6 +331,8 @@ RECAP_TABLE_COLUMNS = {
         "started_at",
         "finished_at",
         "created_at",
+        "retry_lineage",
+        "provider_token",
     },
     "session_recap_runtime": {"singleton", "claim_token", "owner_pid", "lease_expires_at", "heartbeat_at"},
     "session_recap_provider_health": {
@@ -329,6 +342,10 @@ RECAP_TABLE_COLUMNS = {
         "diagnostic",
         "last_failed_at",
         "retry_after",
+        "probe_token",
+        "probe_active",
+        "probe_session_id",
+        "probe_claim_token",
     },
     "session_recap_runs": {"id", "trigger", "selector_json", "started_at", "finished_at", "state", "attempt_limit"},
     "session_recap_run_candidates": {
@@ -349,6 +366,11 @@ RECAP_TABLE_COLUMNS = {
         "cleanup_state",
         "created_at",
     },
+}
+V8_RECAP_TABLE_COLUMNS = {
+    table: columns
+    - {"retry_lineage", "provider_token", "probe_token", "probe_active", "probe_session_id", "probe_claim_token"}
+    for table, columns in RECAP_TABLE_COLUMNS.items()
 }
 
 
@@ -383,13 +405,15 @@ def _ownership_trigger_sql(name: str) -> str:
     )
 
 
-def _recap_schema_complete(conn: sqlite3.Connection) -> bool:
+def _recap_schema_complete(conn: sqlite3.Connection, *, v8: bool = False) -> bool:
+    required_indexes = V8_RECAP_INDEXES if v8 else RECAP_INDEXES
+    required_columns = V8_RECAP_TABLE_COLUMNS if v8 else RECAP_TABLE_COLUMNS
     objects = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type IN ('table', 'index')")}
-    if not (objects >= RECAP_TABLES and objects >= RECAP_INDEXES):
+    if not (objects >= RECAP_TABLES and objects >= required_indexes):
         return False
     if any(
         not columns <= {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
-        for table, columns in RECAP_TABLE_COLUMNS.items()
+        for table, columns in required_columns.items()
     ):
         return False
     branch_columns = {row[1] for row in conn.execute("PRAGMA table_info(branches)")}
@@ -416,6 +440,10 @@ def _recap_schema_complete(conn: sqlite3.Connection) -> bool:
         ("session_recap_attempts", "idx_recap_attempts_live", ("job_session_id",), True),
         ("session_recap_runs", "idx_recap_runs_started", ("started_at",), False),
     )
+    if not v8:
+        indexes += (
+            ("session_recap_attempts", "idx_recap_attempts_lineage", ("job_session_id", "retry_lineage", "id"), False),
+        )
     if not all(_has_index(conn, *index) for index in indexes):
         return False
     sql = {
@@ -453,13 +481,6 @@ def recap_schema_capability(conn: sqlite3.Connection) -> str:
 def _migrate_to_v8(conn: sqlite3.Connection) -> None:
     """Create the complete claim-capable recap schema in one transaction."""
     ddl = """
-        ALTER TABLE branches ADD COLUMN recap_input_hash TEXT;
-        ALTER TABLE branches ADD COLUMN recap_input_contract_version INTEGER;
-        ALTER TABLE branches ADD COLUMN recap_eligibility_policy_version INTEGER;
-        ALTER TABLE branches ADD COLUMN summary_enrichment_input_hash TEXT;
-        ALTER TABLE branches ADD COLUMN summary_enrichment_input_contract_version INTEGER;
-        ALTER TABLE branches ADD COLUMN summary_enrichment_policy_version INTEGER;
-
         CREATE TABLE branch_messages_new (
           branch_id INTEGER NOT NULL REFERENCES branches(id),
           message_id INTEGER NOT NULL REFERENCES messages(id),
@@ -479,8 +500,9 @@ def _migrate_to_v8(conn: sqlite3.Connection) -> None:
           session_id INTEGER PRIMARY KEY REFERENCES sessions(id), requested_input_hash TEXT,
           trigger TEXT NOT NULL,
           state TEXT NOT NULL CHECK (state IN ('pending', 'claimed', 'current', 'excluded', 'blocked')),
-          reason TEXT, claim_token INTEGER NOT NULL DEFAULT 0 CHECK (claim_token >= 0),
-          lease_expires_at TEXT, active_attempt_id INTEGER REFERENCES session_recap_attempts(id), next_eligible_at TEXT,
+           reason TEXT, claim_token INTEGER NOT NULL DEFAULT 0 CHECK (claim_token >= 0),
+           lease_expires_at TEXT, active_attempt_id INTEGER REFERENCES session_recap_attempts(id),
+           next_eligible_at TEXT,
           requested_at TEXT NOT NULL, updated_at TEXT NOT NULL
         );
         CREATE TABLE session_recap_attempts (
@@ -533,6 +555,10 @@ def _migrate_to_v8(conn: sqlite3.Connection) -> None:
           WHERE state IN ('reserved', 'running');
         CREATE INDEX idx_recap_runs_started ON session_recap_runs(started_at DESC);
     """
+    branch_columns = {row[1] for row in conn.execute("PRAGMA table_info(branches)")}
+    for column, declaration in RECAP_BRANCH_COLUMN_DECLARATIONS.items():
+        if column not in branch_columns:
+            conn.execute(f"ALTER TABLE branches ADD COLUMN {column} {declaration}")
     # executescript commits any active transaction before running its SQL. Keep
     # every claim object inside the caller's BEGIN IMMEDIATE instead.
     for statement in ddl.split(";"):
@@ -543,8 +569,53 @@ def _migrate_to_v8(conn: sqlite3.Connection) -> None:
         "session_recap_jobs_active_attempt_session_update",
     ):
         conn.execute(_ownership_trigger_sql(trigger))
-    if not _recap_schema_complete(conn):
+    if not _recap_schema_complete(conn, v8=True):
         raise sqlite3.OperationalError("recap migration postconditions failed")
+
+
+def _repair_v8_schema(conn: sqlite3.Connection) -> None:
+    """Replace an unshipped incomplete v8 recap shape within its migration transaction."""
+    for trigger in (
+        "session_recap_jobs_active_attempt_session",
+        "session_recap_jobs_active_attempt_session_update",
+    ):
+        conn.execute(f"DROP TRIGGER IF EXISTS {trigger}")
+    for index in RECAP_INDEXES:
+        conn.execute(f"DROP INDEX IF EXISTS {index}")
+    for table in (
+        "session_recap_quarantine",
+        "session_recap_run_candidates",
+        "session_recap_attempts",
+        "session_recap_jobs",
+        "session_recap_runtime",
+        "session_recap_provider_health",
+        "session_recap_runs",
+    ):
+        conn.execute(f"DROP TABLE IF EXISTS {table}")
+    _migrate_to_v8(conn)
+
+
+def _migrate_to_v9(conn: sqlite3.Connection) -> None:
+    """Add T05 recap lifecycle fencing without replacing committed v8 tables."""
+    additions = (
+        ("session_recap_jobs", "retry_lineage", "INTEGER NOT NULL DEFAULT 0"),
+        ("session_recap_attempts", "retry_lineage", "INTEGER NOT NULL DEFAULT 0"),
+        ("session_recap_attempts", "provider_token", "INTEGER"),
+        ("session_recap_provider_health", "probe_token", "INTEGER NOT NULL DEFAULT 0"),
+        ("session_recap_provider_health", "probe_active", "INTEGER NOT NULL DEFAULT 0"),
+        ("session_recap_provider_health", "probe_session_id", "INTEGER"),
+        ("session_recap_provider_health", "probe_claim_token", "INTEGER"),
+    )
+    for table, column, declaration in additions:
+        columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if column not in columns:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_recap_attempts_lineage "
+        "ON session_recap_attempts(job_session_id, retry_lineage, id)"
+    )
+    if not _recap_schema_complete(conn):
+        raise sqlite3.OperationalError("recap v9 migration postconditions failed")
 
 
 def _apply_migrations(
@@ -564,7 +635,7 @@ def _apply_migrations(
     _migrate_to_v7(conn)
     conn.commit()
 
-    if current >= SCHEMA_VERSION:
+    if current >= SCHEMA_VERSION and _recap_schema_complete(conn):
         return
     conn.execute("PRAGMA foreign_keys = OFF")
     try:
@@ -580,7 +651,19 @@ def _apply_migrations(
                     migrate_to_v2(conn)
                 if current < 8:
                     _migrate_to_v8(conn)
+                if current < 9:
+                    if not _recap_schema_complete(conn, v8=True):
+                        _repair_v8_schema(conn)
+                    _migrate_to_v9(conn)
                 conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+            elif not _recap_schema_complete(conn):
+                if current == 8 and _recap_schema_complete(conn, v8=True):
+                    _migrate_to_v9(conn)
+                    conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+                else:
+                    _repair_v8_schema(conn)
+                    _migrate_to_v9(conn)
+                    conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             conn.execute("COMMIT")
         except Exception:
             conn.execute("ROLLBACK")

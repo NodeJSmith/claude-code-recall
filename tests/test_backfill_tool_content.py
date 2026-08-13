@@ -33,6 +33,7 @@ def _make_conn() -> sqlite3.Connection:
     conn.executescript(SCHEMA)
     conn.execute("BEGIN IMMEDIATE")
     llm_summary_db._migrate_to_v8(conn)
+    llm_summary_db._migrate_to_v9(conn)
     conn.commit()
     return conn
 

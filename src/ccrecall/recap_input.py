@@ -5,11 +5,7 @@ import json
 import sqlite3
 from dataclasses import dataclass
 
-RECAP_CONTRACT_VERSION = 2
-RECAP_INPUT_CONTRACT_VERSION = 1
-# Frozen by design/specs/010-session-recaps/eligibility-audit.md.
-ELIGIBILITY_POLICY_VERSION = 1
-CONTENT_DEPENDENT_BLOCK_REASONS = ("budget_exceeded", "unusable_output")
+from ccrecall.recap_contract import ELIGIBILITY_POLICY_VERSION, RECAP_CONTRACT_VERSION, RECAP_INPUT_CONTRACT_VERSION
 
 
 @dataclass(frozen=True)
@@ -107,7 +103,7 @@ def load_recap_input(cursor: sqlite3.Cursor, branch_id: int) -> RecapInput:
 
 
 def refresh_recap_input(cursor: sqlite3.Cursor, branch_id: int) -> RecapInput:
-    """Persist current input identity and requeue terminal content-dependent jobs."""
+    """Persist current input identity without changing recap lifecycle state."""
     # The ordinary import code remains usable against an old, unmigrated DB.
     # Recap persistence begins only once T02's atomic schema is present.
     branch_columns = {row[1] for row in cursor.execute("PRAGMA table_info(branches)")}
@@ -125,12 +121,6 @@ def refresh_recap_input(cursor: sqlite3.Cursor, branch_id: int) -> RecapInput:
     ).fetchone()
     if previous is None:
         raise RuntimeError(f"active branch {branch_id} disappeared while refreshing recap input")
-    session_id, old_hash, old_contract, old_policy = previous
-    changed = (old_hash, old_contract, old_policy) != (
-        recap_input.input_hash,
-        RECAP_INPUT_CONTRACT_VERSION,
-        ELIGIBILITY_POLICY_VERSION,
-    )
     cursor.execute(
         """
         UPDATE branches
@@ -139,22 +129,4 @@ def refresh_recap_input(cursor: sqlite3.Cursor, branch_id: int) -> RecapInput:
         """,
         (recap_input.input_hash, RECAP_INPUT_CONTRACT_VERSION, ELIGIBILITY_POLICY_VERSION, branch_id),
     )
-    if changed:
-        cursor.execute(
-            "UPDATE session_recap_jobs SET requested_input_hash = ?, "
-            "updated_at = CURRENT_TIMESTAMP WHERE session_id = ?",
-            (recap_input.input_hash, session_id),
-        )
-        cursor.execute(
-            """
-            UPDATE session_recap_jobs
-            SET state = 'pending', reason = NULL,
-                lease_expires_at = NULL, active_attempt_id = NULL, next_eligible_at = NULL,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE session_id = ?
-              AND (state IN ('current', 'excluded')
-                    OR (state = 'blocked' AND reason IN (?, ?)))
-            """,
-            (session_id, *CONTENT_DEPENDENT_BLOCK_REASONS),
-        )
     return recap_input

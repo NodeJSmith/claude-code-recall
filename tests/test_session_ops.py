@@ -15,7 +15,7 @@ from ccrecall.embed_ops import MAX_WRITE_PATH_EMBEDS_PER_SYNC, embed_branch_chun
 from ccrecall.embeddings import EMBEDDING_DIM, EMBEDDING_MODEL, EMBEDDING_VERSION
 from ccrecall.hooks.import_conversations import get_file_hash
 from ccrecall.import_log_ops import has_pending_tool_content
-from ccrecall.llm_summary_db import _migrate_to_v8
+from ccrecall.llm_summary_db import _migrate_to_v8, _migrate_to_v9
 from ccrecall.parsing import extract_session_uuid
 from ccrecall.recap_input import refresh_recap_input
 from ccrecall.schema import SCHEMA
@@ -1032,6 +1032,7 @@ class TestEmbedOnWriteSuccess:
         assert conn is not None
         conn.execute("BEGIN IMMEDIATE")
         _migrate_to_v8(conn)
+        _migrate_to_v9(conn)
         conn.commit()
         fake_vec = [0.1] * EMBEDDING_DIM
 

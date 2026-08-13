@@ -5,12 +5,23 @@ import hashlib
 import pytest
 
 import ccrecall.recap_input as recap_input
+import ccrecall.recap_state as recap_state
 from ccrecall.recap_input import (
     ELIGIBILITY_POLICY_VERSION,
     RECAP_INPUT_CONTRACT_VERSION,
     canonical_json,
     load_recap_input,
     refresh_recap_input,
+)
+from ccrecall.recap_state import (
+    admit_provider,
+    claim_job,
+    complete_attempt,
+    recap_state_changed_input,
+    requeue_changed_input_after_cleanup,
+    reserve_attempt,
+    upsert_job,
+    verify_cleanup_removed,
 )
 
 
@@ -38,6 +49,12 @@ def _message(cursor, session_id, uuid, content, tool_content="", notification=0,
         (session_id, uuid, content, tool_content, notification, origin),
     )
     return cursor.lastrowid
+
+
+def _refresh_state(conn, cursor, branch_id, session_id):
+    recap = refresh_recap_input(cursor, branch_id)
+    recap_state_changed_input(conn, session_id, recap.input_hash, "2026-08-12T10:00:00Z")
+    return recap
 
 
 def test_packet_and_hash_share_one_canonical_projection_without_source_paths(memory_db):
@@ -178,7 +195,7 @@ def test_refresh_stores_versions_and_only_requeues_content_dependent_terminal_st
         ],
     )
     cursor.execute("UPDATE messages SET content = 'after' WHERE id = ?", (message_id,))
-    refreshed = refresh_recap_input(cursor, branch_id)
+    refreshed = _refresh_state(memory_db, cursor, branch_id, session_id)
     branch = cursor.execute(
         "SELECT recap_input_hash, recap_input_contract_version, recap_eligibility_policy_version FROM branches WHERE id = ?",
         (branch_id,),
@@ -195,6 +212,34 @@ def test_refresh_stores_versions_and_only_requeues_content_dependent_terminal_st
     ).fetchone() == (42, "unchanged")
 
 
+def test_changed_input_clears_timeout_retry_backoff_and_is_immediately_claimable(memory_db):
+    cursor = memory_db.cursor()
+    session_id, branch_id = _seed(cursor)
+    message_id = _message(cursor, session_id, "message", "before")
+    cursor.execute(
+        "INSERT INTO branch_messages (branch_id, message_id, position) VALUES (?, ?, 0)", (branch_id, message_id)
+    )
+    initial = refresh_recap_input(cursor, branch_id)
+    cursor.execute(
+        """INSERT INTO session_recap_jobs (
+            session_id, requested_input_hash, trigger, state, reason, next_eligible_at,
+            requested_at, updated_at, retry_lineage
+        ) VALUES (?, ?, 'test', 'pending', 'timeout_retry', '2026-08-12T11:00:00Z',
+                  '2026-08-12T10:00:00Z', '2026-08-12T10:00:00Z', 3)""",
+        (session_id, initial.input_hash),
+    )
+
+    cursor.execute("UPDATE messages SET content = 'after' WHERE id = ?", (message_id,))
+    refreshed = _refresh_state(memory_db, cursor, branch_id, session_id)
+
+    assert cursor.execute(
+        "SELECT requested_input_hash, state, reason, next_eligible_at, retry_lineage "
+        "FROM session_recap_jobs WHERE session_id = ?",
+        (session_id,),
+    ).fetchone() == (refreshed.input_hash, "pending", None, None, 4)
+    assert claim_job(memory_db, session_id, "2026-08-12T10:00:00Z", 60) == 2
+
+
 def test_platform_unsupported_block_is_preserved_when_input_changes(memory_db):
     cursor = memory_db.cursor()
     session_id, branch_id = _seed(cursor)
@@ -209,7 +254,7 @@ def test_platform_unsupported_block_is_preserved_when_input_changes(memory_db):
         (session_id, initial.input_hash),
     )
     cursor.execute("UPDATE messages SET tool_content = '[Edit: src/a.py]' WHERE id = ?", (message_id,))
-    refreshed = refresh_recap_input(cursor, branch_id)
+    refreshed = _refresh_state(memory_db, cursor, branch_id, session_id)
     assert cursor.execute(
         "SELECT requested_input_hash, state, reason FROM session_recap_jobs WHERE session_id = ?", (session_id,)
     ).fetchone() == (
@@ -219,7 +264,7 @@ def test_platform_unsupported_block_is_preserved_when_input_changes(memory_db):
     )
 
 
-@pytest.mark.parametrize("reason", ["cleanup_failed", "policy_disabled"])
+@pytest.mark.parametrize("reason", ["policy_disabled"])
 def test_stable_block_is_preserved_when_input_changes(memory_db, reason):
     cursor = memory_db.cursor()
     session_id, branch_id = _seed(cursor)
@@ -234,14 +279,68 @@ def test_stable_block_is_preserved_when_input_changes(memory_db, reason):
         (session_id, initial.input_hash, reason),
     )
     cursor.execute("UPDATE messages SET content = 'after' WHERE id = ?", (message_id,))
-    refreshed = refresh_recap_input(cursor, branch_id)
+    refreshed = _refresh_state(memory_db, cursor, branch_id, session_id)
 
     assert cursor.execute(
         "SELECT requested_input_hash, state, reason FROM session_recap_jobs WHERE session_id = ?", (session_id,)
     ).fetchone() == (refreshed.input_hash, "blocked", reason)
 
 
-def test_content_dependent_block_is_requeued_when_input_changes(memory_db):
+def test_changed_input_keeps_cleanup_failed_block_until_cleanup_is_proven(memory_db):
+    cursor = memory_db.cursor()
+    session_id, branch_id = _seed(cursor)
+    message_id = _message(cursor, session_id, "message", "before")
+    cursor.execute(
+        "INSERT INTO branch_messages (branch_id, message_id, position) VALUES (?, ?, 0)", (branch_id, message_id)
+    )
+    initial = refresh_recap_input(cursor, branch_id)
+    upsert_job(memory_db, session_id, initial.input_hash, "test", "2026-08-12T10:00:00Z")
+    token = claim_job(memory_db, session_id, "2026-08-12T10:00:00Z", 60)
+    attempt = reserve_attempt(memory_db, session_id, token, initial.input_hash, "test", "2026-08-12T10:00:00Z")
+    assert complete_attempt(memory_db, attempt, token, "cleanup_failed", "2026-08-12T10:00:00Z")
+
+    cursor.execute("UPDATE messages SET content = 'after' WHERE id = ?", (message_id,))
+    refreshed = _refresh_state(memory_db, cursor, branch_id, session_id)
+
+    assert cursor.execute(
+        "SELECT requested_input_hash, state, reason, active_attempt_id, retry_lineage "
+        "FROM session_recap_jobs WHERE session_id = ?",
+        (session_id,),
+    ).fetchone() == (refreshed.input_hash, "blocked", "cleanup_failed", attempt, 1)
+    assert claim_job(memory_db, session_id, "2026-08-12T10:00:01Z", 60) is None
+    assert admit_provider(memory_db, session_id, token, "2026-08-12T10:00:01Z") is None
+
+
+def test_proven_cleanup_requeues_changed_input_in_new_retry_lineage(memory_db):
+    cursor = memory_db.cursor()
+    session_id, branch_id = _seed(cursor)
+    message_id = _message(cursor, session_id, "message", "before")
+    cursor.execute(
+        "INSERT INTO branch_messages (branch_id, message_id, position) VALUES (?, ?, 0)", (branch_id, message_id)
+    )
+    initial = refresh_recap_input(cursor, branch_id)
+    upsert_job(memory_db, session_id, initial.input_hash, "test", "2026-08-12T10:00:00Z")
+    token = claim_job(memory_db, session_id, "2026-08-12T10:00:00Z", 60)
+    attempt = reserve_attempt(memory_db, session_id, token, initial.input_hash, "test", "2026-08-12T10:00:00Z")
+    assert complete_attempt(memory_db, attempt, token, "cleanup_failed", "2026-08-12T10:00:00Z")
+
+    cursor.execute("UPDATE messages SET content = 'after' WHERE id = ?", (message_id,))
+    _refresh_state(memory_db, cursor, branch_id, session_id)
+    refreshed = _refresh_state(memory_db, cursor, branch_id, session_id)
+    assert not requeue_changed_input_after_cleanup(memory_db, session_id, "2026-08-12T10:00:01Z")
+    assert verify_cleanup_removed(memory_db, attempt, token, "2026-08-12T10:00:01Z")
+    assert requeue_changed_input_after_cleanup(memory_db, session_id, "2026-08-12T10:00:01Z")
+
+    assert cursor.execute(
+        "SELECT requested_input_hash, state, reason, active_attempt_id, retry_lineage "
+        "FROM session_recap_jobs WHERE session_id = ?",
+        (session_id,),
+    ).fetchone() == (refreshed.input_hash, "pending", None, None, 2)
+    assert claim_job(memory_db, session_id, "2026-08-12T10:00:01Z", 60) == token + 3
+
+
+@pytest.mark.parametrize("reason", recap_state.CONTENT_DEPENDENT_BLOCK_REASONS)
+def test_content_dependent_block_is_requeued_when_input_changes(memory_db, reason):
     cursor = memory_db.cursor()
     session_id, branch_id = _seed(cursor)
     message_id = _message(cursor, session_id, "message", "before")
@@ -251,11 +350,11 @@ def test_content_dependent_block_is_requeued_when_input_changes(memory_db):
     initial = refresh_recap_input(cursor, branch_id)
     cursor.execute(
         """INSERT INTO session_recap_jobs (session_id, requested_input_hash, trigger, state, reason, requested_at, updated_at)
-        VALUES (?, ?, 'test', 'blocked', 'unusable_output', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)""",
-        (session_id, initial.input_hash),
+        VALUES (?, ?, 'test', 'blocked', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)""",
+        (session_id, initial.input_hash, reason),
     )
     cursor.execute("UPDATE messages SET content = 'after' WHERE id = ?", (message_id,))
-    refresh_recap_input(cursor, branch_id)
+    _refresh_state(memory_db, cursor, branch_id, session_id)
 
     assert cursor.execute(
         "SELECT state, reason FROM session_recap_jobs WHERE session_id = ?", (session_id,)

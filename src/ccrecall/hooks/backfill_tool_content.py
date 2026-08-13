@@ -82,6 +82,7 @@ from ccrecall.parsing import (
     parse_all_with_uuids,
 )
 from ccrecall.recap_input import refresh_recap_input
+from ccrecall.recap_state import recap_state_changed_input
 from ccrecall.tool_content_status import count_eligible, count_pending_missing_jsonl, count_total_sessions
 
 _PRINT_PREFIX = "ccrecall backfill tool-content"
@@ -510,7 +511,9 @@ def backfill_session(cursor: sqlite3.Cursor, session_id: int, filepaths: list[Pa
         )
     # Capture identity only after every recap-relevant tool_content value has
     # reached its final normalized value in this transaction.
-    refresh_recap_input(cursor, branch_db_id)
+    recap_input = refresh_recap_input(cursor, branch_db_id)
+    if recap_input.input_hash:
+        recap_state_changed_input(cursor.connection, session_id, recap_input.input_hash, None)
     return True
 
 

@@ -52,6 +52,9 @@ DEFAULT_SETTINGS = {
     "llm_summary_timeout_seconds": 180,
     "llm_summary_max_budget_usd": 1.00,
     "llm_summary_min_exchanges": 9,
+    "recap_job_lease_seconds": 180,
+    "recap_runtime_lease_seconds": 180,
+    "recap_cooldown_max_seconds": 3600,
 }
 
 # Rotating memory-log handler sizing.

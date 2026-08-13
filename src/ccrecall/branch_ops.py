@@ -13,6 +13,7 @@ from ccrecall.db import fetch_branch_messages
 from ccrecall.embed_ops import embed_branch_chunks, write_branch_summary
 from ccrecall.parsing import build_aggregated_content, compute_branch_metadata, extract_session_metadata
 from ccrecall.recap_input import refresh_recap_input
+from ccrecall.recap_state import recap_state_changed_input
 
 
 def _to_json_or_none(value) -> str | None:
@@ -254,7 +255,9 @@ def sync_branch(
     write_branch_summary(cursor, branch_db_id)
     # The recap identity is captured only after links, metadata, and the
     # deterministic summary are final for this import transaction.
-    refresh_recap_input(cursor, branch_db_id)
+    recap_input = refresh_recap_input(cursor, branch_db_id)
+    if recap_input.input_hash:
+        recap_state_changed_input(cursor.connection, session_id, recap_input.input_hash, None)
     # fetch_branch_messages returns flat {role, content, timestamp, uuid} dicts — the
     # format build_exchange_pairs expects. branch_msgs (raw JSONL) is the right input
     # for metadata computation above but not for embedding.

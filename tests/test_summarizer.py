@@ -12,7 +12,7 @@ from ccrecall.branch_ops import sync_branch
 from ccrecall.db import CONTENT_ERROR_VERSION
 from ccrecall.embed_ops import write_branch_summary
 from ccrecall.hooks import backfill_summaries, memory_setup
-from ccrecall.llm_summary_db import _migrate_to_v8
+from ccrecall.llm_summary_db import _migrate_to_v8, _migrate_to_v9
 from ccrecall.schema import SCHEMA
 from ccrecall.summarizer import (
     SUMMARY_VERSION,
@@ -468,6 +468,7 @@ class TestComputeContextSummary:
         conn.executescript(SCHEMA)
         conn.execute("BEGIN IMMEDIATE")
         _migrate_to_v8(conn)
+        _migrate_to_v9(conn)
         conn.commit()
 
         cursor = conn.cursor()
@@ -762,6 +763,7 @@ class TestSummarySourceHashMaintenance:
         conn.executescript(SCHEMA)
         conn.execute("BEGIN IMMEDIATE")
         _migrate_to_v8(conn)
+        _migrate_to_v9(conn)
         conn.commit()
         cursor = conn.cursor()
         cursor.execute(
@@ -905,6 +907,7 @@ class TestSummarySourceHashMaintenance:
         conn.executescript(SCHEMA)
         conn.execute("BEGIN IMMEDIATE")
         _migrate_to_v8(conn)
+        _migrate_to_v9(conn)
         conn.execute("PRAGMA user_version = 8")
         conn.commit()
         cursor = conn.cursor()
@@ -1077,6 +1080,7 @@ class TestSummarySourceHashMaintenance:
         conn.executescript(SCHEMA)
         conn.execute("BEGIN IMMEDIATE")
         _migrate_to_v8(conn)
+        _migrate_to_v9(conn)
         conn.commit()
         cursor = conn.cursor()
         cursor.execute(

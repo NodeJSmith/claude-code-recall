@@ -254,6 +254,169 @@ class TestRecapSchemaMigration:
             assert schema_shape(upgraded) == fresh_shape
             assert llm_summary_db.recap_schema_capability(upgraded) == "ready"
 
+    def test_recap_schema_is_final_v9_shape(self, tmp_path):
+        with get_connection(settings={"db_path": str(tmp_path / "v9.db")}) as conn:
+            assert llm_summary_db.SCHEMA_VERSION == 9
+            assert conn.execute("PRAGMA user_version").fetchone() == (9,)
+            assert llm_summary_db.recap_schema_capability(conn) == "ready"
+
+    def test_migration_leaves_complete_v9_schema_unchanged(self, tmp_path):
+        db_path = tmp_path / "complete-v9.db"
+        with get_connection(settings={"db_path": str(db_path)}) as conn:
+            recap_shape = conn.execute(
+                "SELECT name, sql FROM sqlite_master "
+                "WHERE name = 'branch_messages' "
+                "OR name LIKE 'session_recap_%' OR name LIKE 'idx_recap_%' "
+                "ORDER BY name"
+            ).fetchall()
+
+        with get_connection(settings={"db_path": str(db_path)}) as migrated:
+            assert (
+                migrated.execute(
+                    "SELECT name, sql FROM sqlite_master "
+                    "WHERE name = 'branch_messages' "
+                    "OR name LIKE 'session_recap_%' OR name LIKE 'idx_recap_%' "
+                    "ORDER BY name"
+                ).fetchall()
+                == recap_shape
+            )
+            assert llm_summary_db.recap_schema_capability(migrated) == "ready"
+
+    def test_migration_upgrades_complete_v8_without_rewriting_durable_state(self, tmp_path):
+        db_path = tmp_path / "complete-v8.db"
+        conn = sqlite3.connect(db_path)
+        conn.executescript(SCHEMA_CORE)
+        conn.execute("INSERT INTO projects(path, key) VALUES ('/p', 'p')")
+        conn.execute("INSERT INTO sessions(uuid, project_id) VALUES ('s', 1)")
+        conn.execute("INSERT INTO branches(session_id, leaf_uuid) VALUES (1, 'leaf')")
+        conn.execute(
+            "INSERT INTO messages(session_id, uuid, timestamp, role, content) "
+            "VALUES (1, 'late', '2025-01-02', 'user', 'late'), "
+            "(1, 'early', '2025-01-01', 'assistant', 'early')"
+        )
+        conn.commit()
+        conn.execute("BEGIN IMMEDIATE")
+        llm_summary_db._migrate_to_v8(conn)
+        conn.execute("COMMIT")
+        conn.execute("INSERT INTO branch_messages VALUES (1, 1, 0), (1, 2, 1)")
+        conn.execute(
+            "INSERT INTO session_recap_jobs(session_id, requested_input_hash, trigger, state, reason, "
+            "claim_token, lease_expires_at, next_eligible_at, requested_at, updated_at) "
+            "VALUES (1, 'input', 'manual', 'claimed', 'waiting', 7, 'lease', 'eligible', 'requested', 'updated')"
+        )
+        conn.execute(
+            "INSERT INTO session_recap_attempts(id, session_id, job_session_id, input_hash, "
+            "input_contract_version, policy_version, recap_contract_version, claim_token, trigger, state, "
+            "diagnostic, packet_path, packet_nonce, owner_pid, process_group_id, process_started_at, "
+            "cleanup_state, started_at, finished_at, created_at) "
+            "VALUES (11, 1, 1, 'input', 1, 2, 3, 7, 'manual', 'succeeded', 'provider_error', "
+            "'/packet', 'nonce', 42, 43, 'started', 'verified_removed', 'started', 'finished', 'created')"
+        )
+        conn.execute("UPDATE session_recap_jobs SET active_attempt_id = 11 WHERE session_id = 1")
+        conn.execute("INSERT INTO session_recap_runtime VALUES (1, 4, 99, 'runtime-lease', 'heartbeat')")
+        conn.execute(
+            "INSERT INTO session_recap_provider_health VALUES (1, 'provider_error', 3, 'diagnostic', 'failed', 'retry')"
+        )
+        conn.execute(
+            "INSERT INTO session_recap_runs VALUES (5, 'manual', '{\"all\":true}', 'run-start', 'run-finish', 'done', 4)"
+        )
+        conn.execute("INSERT INTO session_recap_run_candidates VALUES (5, 1, 'input', 'selected', 'succeeded', 11)")
+        conn.execute(
+            "INSERT INTO session_recap_quarantine VALUES (11, '/packet', 'nonce', 12, 43, 'started', "
+            "'verified_removed', 'created')"
+        )
+        conn.execute("PRAGMA user_version = 8")
+        conn.commit()
+        conn.close()
+
+        with get_connection(settings={"db_path": str(db_path)}) as migrated:
+            assert migrated.execute("PRAGMA user_version").fetchone() == (9,)
+            assert migrated.execute(
+                "SELECT message_id, position FROM branch_messages WHERE branch_id = 1 ORDER BY position"
+            ).fetchall() == [(1, 0), (2, 1)]
+            assert migrated.execute(
+                "SELECT requested_input_hash, state, reason, claim_token, lease_expires_at, active_attempt_id, "
+                "next_eligible_at, requested_at, updated_at, retry_lineage FROM session_recap_jobs"
+            ).fetchone() == ("input", "claimed", "waiting", 7, "lease", 11, "eligible", "requested", "updated", 0)
+            assert migrated.execute(
+                "SELECT id, diagnostic, packet_path, cleanup_state, retry_lineage, provider_token "
+                "FROM session_recap_attempts"
+            ).fetchone() == (11, "provider_error", "/packet", "verified_removed", 0, None)
+            assert migrated.execute(
+                "SELECT claim_token, owner_pid, lease_expires_at, heartbeat_at FROM session_recap_runtime"
+            ).fetchone() == (4, 99, "runtime-lease", "heartbeat")
+            assert migrated.execute(
+                "SELECT reason, consecutive_failures, diagnostic, last_failed_at, retry_after, probe_token, "
+                "probe_active, probe_session_id, probe_claim_token FROM session_recap_provider_health"
+            ).fetchone() == ("provider_error", 3, "diagnostic", "failed", "retry", 0, 0, None, None)
+            assert migrated.execute("SELECT * FROM session_recap_runs").fetchone() == (
+                5,
+                "manual",
+                '{"all":true}',
+                "run-start",
+                "run-finish",
+                "done",
+                4,
+            )
+            assert migrated.execute("SELECT * FROM session_recap_run_candidates").fetchone() == (
+                5,
+                1,
+                "input",
+                "selected",
+                "succeeded",
+                11,
+            )
+            assert migrated.execute("SELECT * FROM session_recap_quarantine").fetchone() == (
+                11,
+                "/packet",
+                "nonce",
+                12,
+                43,
+                "started",
+                "verified_removed",
+                "created",
+            )
+            assert llm_summary_db.recap_schema_capability(migrated) == "ready"
+
+    def test_migration_repairs_seeded_incomplete_v8_schema_atomically(self, tmp_path):
+        db_path = tmp_path / "old-v8.db"
+        conn = sqlite3.connect(db_path)
+        conn.executescript(SCHEMA_CORE)
+        conn.executescript("""
+            ALTER TABLE branches ADD COLUMN recap_input_hash TEXT;
+            ALTER TABLE branches ADD COLUMN recap_input_contract_version INTEGER;
+            ALTER TABLE branches ADD COLUMN recap_eligibility_policy_version INTEGER;
+            CREATE TABLE branch_messages_new (
+              branch_id INTEGER NOT NULL REFERENCES branches(id),
+              message_id INTEGER NOT NULL REFERENCES messages(id),
+              position INTEGER NOT NULL,
+              PRIMARY KEY (branch_id, message_id)
+            );
+            INSERT INTO branch_messages_new (branch_id, message_id, position)
+            SELECT branch_id, message_id, 0 FROM branch_messages;
+            DROP TABLE branch_messages;
+            ALTER TABLE branch_messages_new RENAME TO branch_messages;
+            CREATE TABLE session_recap_jobs (
+              session_id INTEGER PRIMARY KEY REFERENCES sessions(id),
+              requested_input_hash TEXT, trigger TEXT NOT NULL, state TEXT NOT NULL,
+              reason TEXT, claim_token INTEGER NOT NULL DEFAULT 0,
+              lease_expires_at TEXT, active_attempt_id INTEGER, next_eligible_at TEXT,
+              requested_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            );
+        """)
+        conn.execute("PRAGMA user_version = 8")
+        conn.commit()
+        conn.close()
+
+        with get_connection(settings={"db_path": str(db_path)}) as migrated:
+            assert migrated.execute("PRAGMA user_version").fetchone() == (9,)
+            assert llm_summary_db.recap_schema_capability(migrated) == "ready"
+            assert "retry_lineage" in {row[1] for row in migrated.execute("PRAGMA table_info(session_recap_jobs)")}
+            assert migrated.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'trigger' "
+                "AND name = 'session_recap_jobs_active_attempt_session'"
+            ).fetchone()
+
     def test_active_attempt_must_belong_to_its_job_session(self, tmp_path):
         with get_connection(settings={"db_path": str(tmp_path / "owners.db")}) as conn:
             conn.execute("INSERT INTO sessions(uuid) VALUES ('one'), ('two')")
@@ -1554,6 +1717,7 @@ class TestSchemaEquivalencePin:
         "idx_projects_key",
         "idx_recap_attempts_input",
         "idx_recap_attempts_job_latest",
+        "idx_recap_attempts_lineage",
         "idx_recap_attempts_live",
         "idx_recap_attempts_status",
         "idx_recap_jobs_lease",
