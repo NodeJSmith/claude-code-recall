@@ -13,6 +13,7 @@ import sys
 import ccrecall.hooks.backfill_llm_summaries
 assert 'ccrecall.db' not in sys.modules
 assert 'ccrecall.llm_summarizer' not in sys.modules
+assert 'ccrecall.recap_eligibility' not in sys.modules
 """
         completed = __import__("subprocess").run(
             [sys.executable, "-c", probe], capture_output=True, text=True, timeout=30, check=False

@@ -1,7 +1,7 @@
 ---
 task_id: "T07"
 title: "Implement audited recap eligibility"
-status: "planned"
+status: "done"
 depends_on: ["T01", "T02"]
 implements: ["FR#14", "AC#8"]
 ---
