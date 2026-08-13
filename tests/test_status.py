@@ -9,7 +9,9 @@ from unittest.mock import patch
 from ccrecall.config import load_settings
 from ccrecall.db import get_connection
 from ccrecall.embeddings import EMBEDDING_MODEL, EMBEDDING_VERSION
+from ccrecall.recap_eligibility import ELIGIBLE_SUBSTANTIVE_PROSE, NO_ELIGIBLE_MESSAGES
 from ccrecall.status import collect_status, print_status_report, run
+from ccrecall.summarizer import SUMMARY_VERSION
 from ccrecall.summary_enrichment import build_stored_enrichment_envelope
 from ccrecall.tool_content_status import count_pending_missing_jsonl
 
@@ -215,6 +217,36 @@ def test_recap_status_reports_defaults_platform_and_read_only_lifecycle(tmp_path
     assert status["recap"]["quarantine"]["max_count"] > 0
     assert status["recap"]["latest_attempt_outcomes"] == {}
     assert db_path.stat().st_mtime_ns == before
+
+
+def test_recap_status_uses_shared_eligibility_evaluator_for_active_branches(tmp_path):
+    db_path = tmp_path / "status.db"
+    with get_connection({"db_path": str(db_path)}, load_vec=False) as conn:
+        for session_id in (1, 2):
+            conn.execute("INSERT INTO sessions(id, uuid) VALUES (?, ?)", (session_id, f"session-{session_id}"))
+            conn.execute(
+                "INSERT INTO branches(session_id, leaf_uuid, is_active, context_summary, context_summary_json, "
+                "summary_version) VALUES (?, 'leaf', 1, 'summary', '{}', ?)",
+                (session_id, SUMMARY_VERSION),
+            )
+        conn.execute("INSERT INTO sessions(id, uuid) VALUES (3, 'inactive-session')")
+        conn.execute("INSERT INTO branches(session_id, leaf_uuid, is_active) VALUES (3, 'old-leaf', 0)")
+        for position, (role, content) in enumerate((("user", "u" * 300), ("assistant", "a" * 300), ("user", "next"))):
+            conn.execute(
+                "INSERT INTO messages(session_id, uuid, role, content) VALUES (1, ?, ?, ?)",
+                (f"message-{position}", role, content),
+            )
+            conn.execute(
+                "INSERT INTO branch_messages(branch_id, message_id, position) VALUES (1, last_insert_rowid(), ?)",
+                (position,),
+            )
+
+    status = collect_status(db=db_path)
+
+    assert status["recap"]["eligibility"]["by_reason"] == {
+        ELIGIBLE_SUBSTANTIVE_PROSE: 1,
+        NO_ELIGIBLE_MESSAGES: 1,
+    }
 
 
 def test_recap_status_reports_queued_jobs_as_provider_disabled_when_unsupported(tmp_path, monkeypatch, capsys):

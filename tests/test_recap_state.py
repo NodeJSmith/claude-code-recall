@@ -17,6 +17,7 @@ from ccrecall.recap_state import (
     mark_current,
     mark_excluded,
     open_cooldown,
+    prune_retention,
     recap_state_changed_input,
     requeue_changed_input_after_cleanup,
     reserve_attempt,
@@ -417,7 +418,8 @@ def test_targeted_retry_requires_cleanup_proof_before_replacement_admission(tmp_
         )
         assert admit_provider(conn, 1, first, NOW) is None
 
-        assert targeted_retry(conn, 1, NOW, cleanup_proven=True)
+        assert verify_cleanup_removed(conn, attempt, first, NOW)
+        assert targeted_retry(conn, 1, NOW)
         second = claim_job(conn, 1, NOW, 60)
         assert admit_provider(conn, 1, second, NOW) == probe + 1
 
@@ -546,3 +548,41 @@ def test_retention_keeps_retained_terminal_ancestors_but_prunes_old_lineages(tmp
             assert complete_attempt(conn, attempt, token, "timeout", timestamp)
         assert retention_candidates(conn, "2026-01-01T00:00:00Z", limit=10) == old_ids
         assert not set(retained_ids) & set(retention_candidates(conn, "2026-01-01T00:00:00Z", limit=10))
+
+
+def test_retention_keeps_uncertain_cleanup_artifacts_until_persisted_proof(tmp_path):
+    with get_connection(_connection(tmp_path)) as conn:
+        upsert_job(conn, 1, "input-a", "end", NOW)
+        failed_attempt = conn.execute(
+            "INSERT INTO session_recap_attempts(session_id, job_session_id, input_hash, input_contract_version, "
+            "policy_version, recap_contract_version, claim_token, trigger, state, cleanup_state, created_at, "
+            "finished_at, retry_lineage) VALUES (1, 1, 'old-input', 1, 1, 2, 0, 'test', 'cleanup_failed', "
+            "'uncertain', '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z', 0) RETURNING id"
+        ).fetchone()[0]
+        conn.execute(
+            "INSERT INTO session_recap_quarantine(attempt_id, path, nonce, cleanup_state, created_at) "
+            "VALUES (?, 'packet.json', 'nonce', 'uncertain', '2025-01-01T00:00:00Z')",
+            (failed_attempt,),
+        )
+        upsert_job(conn, 1, "input-b", "end", "2025-01-01T00:00:01Z")
+        token = claim_job(conn, 1, NOW, 60)
+        replacement = _attempt(conn, 1, token, "input-b")
+        assert complete_attempt(conn, replacement, token, "succeeded", NOW)
+
+        assert retention_candidates(conn, "2026-01-01T00:00:00Z", limit=10) == []
+        assert prune_retention(conn, "2026-01-01T00:00:00Z", limit=10) == (0, 0)
+        assert conn.execute(
+            "SELECT COUNT(*) FROM session_recap_attempts WHERE id = ?", (failed_attempt,)
+        ).fetchone() == (1,)
+        assert conn.execute(
+            "SELECT COUNT(*) FROM session_recap_quarantine WHERE attempt_id = ?", (failed_attempt,)
+        ).fetchone() == (1,)
+
+        conn.execute(
+            "UPDATE session_recap_attempts SET cleanup_state = 'verified_removed' WHERE id = ?", (failed_attempt,)
+        )
+        assert retention_candidates(conn, "2026-01-01T00:00:00Z", limit=10) == [failed_attempt]
+        assert prune_retention(conn, "2026-01-01T00:00:00Z", limit=10) == (1, 0)
+        assert conn.execute(
+            "SELECT COUNT(*) FROM session_recap_quarantine WHERE attempt_id = ?", (failed_attempt,)
+        ).fetchone() == (0,)

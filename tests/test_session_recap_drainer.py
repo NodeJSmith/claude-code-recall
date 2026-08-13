@@ -8,9 +8,16 @@ from unittest.mock import patch
 import pytest
 
 import ccrecall.recap_input as recap_input
-from ccrecall.hooks import drain_session_recaps, session_end
+from ccrecall.hooks import backfill_llm_summaries, drain_session_recaps, session_end
 from ccrecall.hooks.durability import journal_lock
-from ccrecall.llm_summarizer import STATUS_INVALID_OUTPUT, InvocationResult, invoke_claude
+from ccrecall.llm_summarizer import (
+    STATUS_BUDGET_EXCEEDED,
+    STATUS_CLEANUP_FAILED,
+    STATUS_INVALID_OUTPUT,
+    STATUS_TIMEOUT,
+    InvocationResult,
+    invoke_claude,
+)
 from ccrecall.llm_summary_db import get_connection
 from ccrecall.recap_input import load_recap_input
 from ccrecall.recap_state import create_run, upsert_job
@@ -62,6 +69,197 @@ def _insert_recap_session(settings):
         conn.execute("INSERT INTO sessions(uuid, project_id) VALUES (?, 1)", (UUID,))
         conn.execute(
             "INSERT INTO branches(session_id, leaf_uuid, is_active, recap_input_hash) VALUES (1, 'leaf', 1, 'input')"
+        )
+
+
+def _queue_eligible_job(settings):
+    _insert_recap_session(settings)
+    with get_connection(settings) as conn:
+        recap = load_recap_input(conn.cursor(), 1)
+        conn.execute("UPDATE branches SET recap_input_hash = ? WHERE id = 1", (recap.input_hash,))
+        upsert_job(conn, 1, recap.input_hash, "session_end", "2026-08-12T10:00:00Z")
+
+
+@pytest.mark.parametrize(
+    ("status", "attempt_state", "job_state", "reason", "active_attempt"),
+    [
+        (STATUS_TIMEOUT, "timeout", "pending", "timeout_retry", False),
+        (STATUS_BUDGET_EXCEEDED, "budget_exceeded", "blocked", "budget_exceeded", False),
+        (STATUS_INVALID_OUTPUT, "unusable_output", "blocked", "unusable_output", False),
+        (STATUS_CLEANUP_FAILED, "cleanup_failed", "blocked", "cleanup_failed", True),
+    ],
+)
+def test_drainer_terminalizes_content_free_provider_outcomes(
+    tmp_path, monkeypatch, status, attempt_state, job_state, reason, active_attempt
+):
+    settings = _settings(tmp_path)
+    _queue_eligible_job(settings)
+    monkeypatch.setattr(drain_session_recaps, "sync_session_for_finalization", lambda *_args: 0)
+    monkeypatch.setattr(
+        drain_session_recaps, "evaluate_branch", lambda *_args: type("Decision", (), {"eligible": True})()
+    )
+    monkeypatch.setattr(drain_session_recaps, "posix_process_groups_supported", lambda: True)
+    monkeypatch.setattr(
+        drain_session_recaps,
+        "invoke_claude",
+        lambda *_args, **_kwargs: InvocationResult(status, diagnostic="private provider response"),
+    )
+
+    assert drain_session_recaps._process_job(settings, 1, 1)
+
+    with get_connection(settings) as conn:
+        assert conn.execute("SELECT state, diagnostic FROM session_recap_attempts").fetchone() == (
+            attempt_state,
+            attempt_state,
+        )
+        state, stored_reason, active = conn.execute(
+            "SELECT state, reason, active_attempt_id FROM session_recap_jobs"
+        ).fetchone()
+        assert (state, stored_reason, active is not None) == (job_state, reason, active_attempt)
+
+
+def _insert_cleanup_failed_attempt(
+    settings, packet, *, launched=True, input_hash="old-input", requested_input_hash="new-input"
+):
+    with get_connection(settings) as conn:
+        conn.execute("INSERT INTO projects(path, key) VALUES ('/p', 'p')")
+        conn.execute("INSERT INTO sessions(uuid, project_id) VALUES (?, 1)", (UUID,))
+        conn.execute("INSERT INTO branches(session_id, leaf_uuid, is_active) VALUES (1, 'leaf', 1)")
+        upsert_job(conn, 1, requested_input_hash, "session_end", "2026-08-12T10:00:00Z")
+        attempt_id = 1
+        nonce = "nonce"
+        expected_packet = drain_session_recaps._packet_path(settings, 1, attempt_id, nonce)
+        expected_packet.parent.mkdir(parents=True)
+        assert expected_packet == packet
+        packet.write_text("sensitive")
+        values = (99, 99, "old") if launched else (None, None, None)
+        conn.execute(
+            "INSERT INTO session_recap_attempts (id, session_id, job_session_id, input_hash, input_contract_version, "
+            "policy_version, recap_contract_version, claim_token, trigger, state, created_at, packet_path, packet_nonce, "
+            "owner_pid, process_group_id, process_started_at, cleanup_state) VALUES "
+            "(?, 1, 1, ?, 1, 1, 2, 1, 'session_end', 'cleanup_failed', '2026-08-12T10:00:00Z', ?, ?, ?, ?, ?, 'uncertain')",
+            (attempt_id, input_hash, str(packet), nonce, *values),
+        )
+        conn.execute(
+            "UPDATE session_recap_jobs SET state = 'blocked', reason = 'cleanup_failed', claim_token = 1, "
+            "active_attempt_id = 1 WHERE session_id = 1"
+        )
+        conn.execute(
+            "INSERT INTO session_recap_quarantine (attempt_id, path, nonce, cleanup_state, created_at) "
+            "VALUES (1, ?, ?, 'uncertain', '2026-08-12T10:00:00Z')",
+            (str(packet), nonce),
+        )
+
+
+def test_recover_reconciles_cleanup_failed_packet_after_process_proof(tmp_path, monkeypatch):
+    settings = _settings(tmp_path)
+    packet = drain_session_recaps._packet_path(settings, 1, 1, "nonce")
+    _insert_cleanup_failed_attempt(settings, packet)
+    monkeypatch.setattr(drain_session_recaps, "load_settings", lambda: settings)
+    monkeypatch.setattr(drain_session_recaps, "try_acquire_pid_file", lambda _key: True)
+    monkeypatch.setattr(drain_session_recaps, "remove_pid_file", lambda _key: None)
+    monkeypatch.setattr(drain_session_recaps, "process_group_absent", lambda _group: True)
+    processed = []
+    monkeypatch.setattr(
+        drain_session_recaps,
+        "_process_job",
+        lambda _settings, session_id, _token, **kwargs: processed.append(kwargs) and False,
+    )
+
+    assert drain_session_recaps.run() == 0
+    assert processed == [{"cleanup_proven": True, "run_id": None, "controls": {}}]
+    assert not packet.exists()
+    with get_connection(settings) as conn:
+        assert conn.execute("SELECT cleanup_state FROM session_recap_attempts").fetchone() == ("verified_removed",)
+        assert conn.execute("SELECT state, active_attempt_id FROM session_recap_jobs").fetchone() == ("pending", None)
+        assert conn.execute("SELECT COUNT(*) FROM session_recap_quarantine").fetchone() == (0,)
+
+
+def test_recover_only_reports_busy_when_another_drainer_holds_the_guard(tmp_path, monkeypatch):
+    settings = _settings(tmp_path)
+    monkeypatch.setattr(drain_session_recaps, "load_settings", lambda: settings)
+    monkeypatch.setattr(drain_session_recaps, "try_acquire_pid_file", lambda _key: False)
+
+    assert drain_session_recaps.run(recover_only=True) == drain_session_recaps.EXIT_BUSY
+
+
+def test_recover_only_reports_unresolved_cleanup(tmp_path, monkeypatch):
+    settings = _settings(tmp_path)
+    packet = drain_session_recaps._packet_path(settings, 1, 1, "nonce")
+    _insert_cleanup_failed_attempt(settings, packet)
+    monkeypatch.setattr(drain_session_recaps, "load_settings", lambda: settings)
+    monkeypatch.setattr(drain_session_recaps, "try_acquire_pid_file", lambda _key: True)
+    monkeypatch.setattr(drain_session_recaps, "remove_pid_file", lambda _key: None)
+    monkeypatch.setattr(drain_session_recaps, "process_group_absent", lambda _group: False)
+    monkeypatch.setattr(drain_session_recaps, "_terminate_exact_group", lambda *_args: False)
+
+    assert drain_session_recaps.run(recover_only=True) == drain_session_recaps.EXIT_CLEANUP_UNRESOLVED
+    assert packet.exists()
+
+
+def test_targeted_retry_requeues_verified_same_input_cleanup_failure(tmp_path, monkeypatch):
+    settings = _settings(tmp_path)
+    packet = drain_session_recaps._packet_path(settings, 1, 1, "nonce")
+    _insert_cleanup_failed_attempt(settings, packet, requested_input_hash="old-input")
+    monkeypatch.setattr(drain_session_recaps, "load_settings", lambda: settings)
+    monkeypatch.setattr(drain_session_recaps, "try_acquire_pid_file", lambda _key: True)
+    monkeypatch.setattr(drain_session_recaps, "remove_pid_file", lambda _key: None)
+    monkeypatch.setattr(drain_session_recaps, "process_group_absent", lambda _group: True)
+    monkeypatch.setattr(drain_session_recaps, "_process_job", lambda *_args, **_kwargs: False)
+
+    monkeypatch.setattr(backfill_llm_summaries, "load_settings", lambda: settings)
+    monkeypatch.setattr(backfill_llm_summaries, "try_acquire_pid_file", lambda _key: True)
+    monkeypatch.setattr(backfill_llm_summaries, "remove_pid_file", lambda _key: None)
+    monkeypatch.setattr(backfill_llm_summaries, "posix_process_groups_supported", lambda: True)
+    monkeypatch.setattr(
+        backfill_llm_summaries,
+        "evaluate_branch",
+        lambda *_args: type("Decision", (), {"eligible": True})(),
+    )
+    calls = []
+
+    def run_drainer(args, *, check):
+        calls.append(args)
+        if args[-1] == "--recover-only":
+            assert drain_session_recaps.run(recover_only=True) == 0
+        return type("Completed", (), {"returncode": 0})()
+
+    monkeypatch.setattr(backfill_llm_summaries.subprocess, "run", run_drainer)
+
+    assert backfill_llm_summaries.run(session=UUID, retry_failures=True) == 0
+    assert calls == [
+        ["ccrecall-drain-session-recaps", "--recover-only"],
+        ["ccrecall-drain-session-recaps"],
+    ]
+    assert not packet.exists()
+    with get_connection(settings) as conn:
+        assert conn.execute("SELECT state, active_attempt_id FROM session_recap_jobs").fetchone() == ("pending", None)
+
+
+def test_recover_retains_cleanup_failed_packet_when_process_cannot_be_proven_gone(tmp_path, monkeypatch):
+    settings = _settings(tmp_path)
+    packet = drain_session_recaps._packet_path(settings, 1, 1, "nonce")
+    _insert_cleanup_failed_attempt(settings, packet)
+    monkeypatch.setattr(drain_session_recaps, "load_settings", lambda: settings)
+    monkeypatch.setattr(drain_session_recaps, "try_acquire_pid_file", lambda _key: True)
+    monkeypatch.setattr(drain_session_recaps, "remove_pid_file", lambda _key: None)
+    monkeypatch.setattr(drain_session_recaps, "process_group_absent", lambda _group: False)
+    monkeypatch.setattr(drain_session_recaps, "_terminate_exact_group", lambda *_args: False)
+    monkeypatch.setattr(
+        drain_session_recaps, "_process_job", lambda *_args, **_kwargs: pytest.fail("unsafe recovery ran")
+    )
+
+    assert drain_session_recaps.run() == 0
+    assert packet.exists()
+    with get_connection(settings) as conn:
+        assert conn.execute("SELECT state, cleanup_state FROM session_recap_attempts").fetchone() == (
+            "cleanup_failed",
+            "uncertain",
+        )
+        assert conn.execute("SELECT state, reason, active_attempt_id FROM session_recap_jobs").fetchone() == (
+            "blocked",
+            "cleanup_failed",
+            1,
         )
 
 

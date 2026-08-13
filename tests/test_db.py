@@ -478,7 +478,6 @@ class TestLoadSettings:
         assert DEFAULT_SETTINGS["llm_summary_effort"] == "medium"
         assert DEFAULT_SETTINGS["llm_summary_timeout_seconds"] == 120
         assert DEFAULT_SETTINGS["llm_summary_max_budget_usd"] == 1.00
-        assert DEFAULT_SETTINGS["llm_summary_min_exchanges"] == 9
 
 
 class TestLoadConfig:
@@ -642,7 +641,6 @@ class TestLoadSettingsWithConfig:
                     "llm_summary_effort": "low",
                     "llm_summary_timeout_seconds": 45,
                     "llm_summary_max_budget_usd": 2.5,
-                    "llm_summary_min_exchanges": 3,
                 }
             )
         )
@@ -654,7 +652,6 @@ class TestLoadSettingsWithConfig:
         assert result["llm_summary_effort"] == "low"
         assert result["llm_summary_timeout_seconds"] == 45
         assert result["llm_summary_max_budget_usd"] == 2.5
-        assert result["llm_summary_min_exchanges"] == 3
 
     def test_missing_config_returns_defaults(self, tmp_path, monkeypatch):
         """load_settings() returns DEFAULT_SETTINGS when config.json does not exist."""

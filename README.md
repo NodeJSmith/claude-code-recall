@@ -163,7 +163,7 @@ These are wired by the plugin's `hooks/hooks.json` and fire on their respective 
 | `ccrecall sync-current` | Syncs a single session file to the DB. Called by `ccrecall-sync` with the session ID from stdin |
 | `ccrecall import` | Full import of all JSONL files in `~/.claude/projects/`. Skips files that haven't changed since last import (file hash check). Run on first install and whenever new sessions need backfilling |
 | `ccrecall backfill summaries` | Generates context summaries for any DB branches that don't have one yet. Runs in the background after `ccrecall-setup` |
-| `ccrecall-drain-session-recaps` | Internal detached drainer that final-syncs queued sessions and serially generates opt-in DB-backed Session Recaps on supported platforms. |
+| `ccrecall-drain-session-recaps` | Internal detached drainer that final-syncs queued sessions and serially generates opt-in DB-backed Session Recaps on supported platforms. Use `ccrecall recap recover` for cleanup recovery. |
 
 ### Skill CLIs (called from skill files — can also be used directly)
 
@@ -222,6 +222,12 @@ Session starts
 | `llm_summary_effort` | str | `"medium"` | Claude effort setting for recap requests. |
 | `llm_summary_timeout_seconds` | int | `120` | Per-recap provider timeout; a one-run override is available. |
 | `llm_summary_max_budget_usd` | float | `1.00` | Upstream provider budget stop threshold, not a guaranteed maximum charge. |
+| Advanced recap lifecycle controls | | | Normally leave these safeguards at their defaults. Increase them only when `ccrecall status` identifies a local recovery, cooldown, or quarantine limit that needs adjustment. |
+| `recap_job_lease_seconds` | int | `180` | Lease duration for one queued recap job before write-capable recovery can reconcile it. |
+| `recap_runtime_lease_seconds` | int | `180` | Lease duration for the installation-wide serialized recap drainer. |
+| `recap_cooldown_max_seconds` | int | `3600` | Maximum provider-failure cooldown before eligible queued work can probe again. |
+| `recap_quarantine_max_count` | int | `10` | Maximum retained cleanup-uncertain packets before provider admission pauses. |
+| `recap_quarantine_max_bytes` | int | `10000000` | Maximum retained cleanup-uncertain packet bytes before provider admission pauses. |
 
 Example config:
 

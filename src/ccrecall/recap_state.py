@@ -18,7 +18,18 @@ TERMINAL_ATTEMPTS = frozenset(
         "cancelled_before_launch",
     }
 )
-DIAGNOSTICS = frozenset({"rate_limited", "service_unavailable", "authentication_failed", "provider_error"})
+DIAGNOSTICS = frozenset(
+    {
+        "rate_limited",
+        "service_unavailable",
+        "authentication_failed",
+        "provider_error",
+        "timeout",
+        "budget_exceeded",
+        "unusable_output",
+        "cleanup_failed",
+    }
+)
 CONTENT_DEPENDENT_BLOCK_REASONS = ("budget_exceeded", "unusable_output", "timeout_exhausted")
 
 
@@ -695,34 +706,20 @@ def targeted_retry(
     conn: sqlite3.Connection,
     session_id: int,
     now: str,
-    *,
-    cleanup_proven: bool = False,
 ) -> bool:
-    """Start a new user-authorized retry lineage without bypassing cleanup proof."""
+    """Start a new user-authorized retry lineage after persisted cleanup proof."""
     row = conn.execute(
         "UPDATE session_recap_jobs SET state = 'pending', reason = NULL, next_eligible_at = NULL, "
         "active_attempt_id = NULL, retry_lineage = retry_lineage + 1, "
         "claim_token = claim_token + 1, updated_at = ? "
         "WHERE session_id = ? AND state = 'blocked' "
-        "AND (active_attempt_id IS NULL OR ?) RETURNING claim_token",
-        (now, session_id, int(cleanup_proven)),
+        "AND (active_attempt_id IS NULL OR EXISTS ("
+        "SELECT 1 FROM session_recap_attempts a WHERE a.id = session_recap_jobs.active_attempt_id "
+        "AND a.state = 'cleanup_failed' AND a.cleanup_state = 'verified_removed')) RETURNING claim_token",
+        (now, session_id),
     ).fetchone()
     if row is None:
         return False
-    if cleanup_proven:
-        token = row[0]
-        conn.execute(
-            "UPDATE session_recap_attempts SET state = 'abandoned', finished_at = ? "
-            "WHERE job_session_id = ? AND claim_token < ? AND state IN ('reserved', 'running')",
-            (now, session_id, token),
-        )
-        conn.execute(
-            "UPDATE session_recap_provider_health SET probe_active = 0, "
-            "probe_session_id = NULL, probe_claim_token = NULL "
-            "WHERE singleton = 1 AND probe_active = 1 AND probe_session_id = ? "
-            "AND probe_claim_token < ?",
-            (session_id, token),
-        )
     return True
 
 
@@ -796,8 +793,8 @@ def recover_expired_attempt(conn: sqlite3.Connection, attempt_id: int, now: str,
 
 
 def verify_cleanup_removed(conn: sqlite3.Connection, attempt_id: int, token: int, now: str) -> bool:
-    """Persist token-fenced removal proof for the active failed-cleanup attempt."""
-    return bool(
+    """Persist removal proof and discard matching quarantine metadata."""
+    verified = bool(
         conn.execute(
             """UPDATE session_recap_attempts SET cleanup_state = 'verified_removed', finished_at = ?
                WHERE id = ? AND claim_token = ? AND state = 'cleanup_failed' AND EXISTS (
@@ -809,6 +806,9 @@ def verify_cleanup_removed(conn: sqlite3.Connection, attempt_id: int, token: int
             (now, attempt_id, token),
         ).rowcount
     )
+    if verified:
+        conn.execute("DELETE FROM session_recap_quarantine WHERE attempt_id = ?", (attempt_id,))
+    return verified
 
 
 def create_run(
@@ -986,9 +986,11 @@ def retention_candidates(conn: sqlite3.Connection, cutoff: str, *, limit: int) -
               SELECT DISTINCT a.job_session_id, a.retry_lineage FROM session_recap_attempts a
               JOIN protected_attempts p ON p.id = a.id
             ) SELECT a.id FROM session_recap_attempts a
-           WHERE a.finished_at < ? AND a.state IN ('succeeded', 'stale_discarded', 'timeout',
-               'budget_exceeded', 'unusable_output', 'global_abort', 'cleanup_failed',
-               'abandoned', 'cancelled_before_launch') AND NOT EXISTS (
+            WHERE a.finished_at < ? AND a.state IN ('succeeded', 'stale_discarded', 'timeout',
+                'budget_exceeded', 'unusable_output', 'global_abort', 'cleanup_failed',
+                'abandoned', 'cancelled_before_launch')
+              AND (a.state IS NOT 'cleanup_failed' OR a.cleanup_state = 'verified_removed')
+              AND NOT EXISTS (
                  SELECT 1 FROM retained_lineages r WHERE r.job_session_id = a.job_session_id
                    AND r.retry_lineage = a.retry_lineage
                ) AND NOT EXISTS (
@@ -1035,6 +1037,8 @@ def prune_retention(conn: sqlite3.Connection, cutoff: str, *, limit: int) -> tup
     # only eligible closed-run accounting before considering those attempts.
     conn.executemany("DELETE FROM session_recap_run_candidates WHERE run_id = ?", [(value,) for value in runs])
     attempts = retention_candidates(conn, cutoff, limit=limit)
+    # Only cleanup-proven attempts reach this list, so their owner metadata can
+    # be removed with the corresponding terminal history.
     conn.executemany("DELETE FROM session_recap_quarantine WHERE attempt_id = ?", [(value,) for value in attempts])
     conn.executemany("DELETE FROM session_recap_attempts WHERE id = ?", [(value,) for value in attempts])
     conn.executemany("DELETE FROM session_recap_runs WHERE id = ?", [(value,) for value in runs])

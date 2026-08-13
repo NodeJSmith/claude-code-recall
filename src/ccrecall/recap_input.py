@@ -105,21 +105,14 @@ def load_recap_input(cursor: sqlite3.Cursor, branch_id: int) -> RecapInput:
 def refresh_recap_input(cursor: sqlite3.Cursor, branch_id: int) -> RecapInput:
     """Persist current input identity without changing recap lifecycle state."""
     # The ordinary import code remains usable against an old, unmigrated DB.
-    # Recap persistence begins only once T02's atomic schema is present.
+    # Recap persistence begins only once its atomic schema is present.
     branch_columns = {row[1] for row in cursor.execute("PRAGMA table_info(branches)")}
     link_columns = {row[1] for row in cursor.execute("PRAGMA table_info(branch_messages)")}
     if "recap_input_hash" not in branch_columns or "position" not in link_columns:
         return RecapInput({}, b"", "")
     recap_input = load_recap_input(cursor, branch_id)
-    previous = cursor.execute(
-        """
-        SELECT session_id, recap_input_hash, recap_input_contract_version,
-               recap_eligibility_policy_version
-        FROM branches WHERE id = ?
-        """,
-        (branch_id,),
-    ).fetchone()
-    if previous is None:
+    branch_exists = cursor.execute("SELECT 1 FROM branches WHERE id = ?", (branch_id,)).fetchone()
+    if branch_exists is None:
         raise RuntimeError(f"active branch {branch_id} disappeared while refreshing recap input")
     cursor.execute(
         """

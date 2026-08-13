@@ -4,6 +4,7 @@ This module is deliberately the only hook-side module that imports the provider
 boundary.  It operates exclusively on imported SQLite state after startup.
 """
 
+import argparse
 import contextlib
 import json
 import os
@@ -60,14 +61,18 @@ from ccrecall.recap_state import (
     record_attempt_launch,
     recover_expired_attempt,
     release_runtime,
+    requeue_changed_input_after_cleanup,
     reserve_attempt,
     reserve_attempt_for_run,
     upsert_job,
+    verify_cleanup_removed,
 )
 from ccrecall.summary_enrichment import build_stored_enrichment_envelope, valid_current_enrichment
 
 PID_KEY = "ccrecall-drain-session-recaps"
 JOURNAL_BATCH_SIZE = 32
+EXIT_BUSY = 75
+EXIT_CLEANUP_UNRESOLVED = 76
 _UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 
 
@@ -196,6 +201,35 @@ def _recover_expired_claims(settings: dict, now: str) -> tuple[bool, set[int]]:
                 )
                 recover_expired_attempt(conn, attempt_id, now, cleanup_proven=False)
     return all_proven, recovered
+
+
+def _recover_cleanup_failed_attempts(settings: dict, now: str) -> tuple[bool, set[int]]:
+    """Repair cleanup obligations and return only jobs requeued by changed input."""
+    requeued: set[int] = set()
+    all_proven = True
+    with get_connection(settings) as conn:
+        rows = conn.execute(
+            "SELECT a.id, a.job_session_id, a.claim_token, a.packet_path, a.packet_nonce, a.owner_pid, "
+            "a.process_group_id, a.process_started_at FROM session_recap_attempts a JOIN session_recap_jobs j "
+            "ON j.session_id = a.job_session_id WHERE a.state = 'cleanup_failed' "
+            "AND j.state = 'blocked' AND j.reason = 'cleanup_failed' AND j.active_attempt_id = a.id"
+        ).fetchall()
+        for attempt_id, session_id, token, packet, nonce, pid, group, started in rows:
+            expected_packet = _packet_path(settings, session_id, attempt_id, nonce) if isinstance(nonce, str) else None
+            owner_bound = isinstance(packet, str) and expected_packet == Path(packet)
+            if pid is None and group is None and started is None:
+                group_gone = True
+            elif isinstance(pid, int) and isinstance(group, int) and isinstance(started, str):
+                group_gone = process_group_absent(group) or _terminate_exact_group(pid, group, started)
+            else:
+                group_gone = False
+            removed = group_gone and owner_bound and remove_packet(Path(packet))
+            if removed and verify_cleanup_removed(conn, attempt_id, token, now):
+                if requeue_changed_input_after_cleanup(conn, session_id, now):
+                    requeued.add(session_id)
+            else:
+                all_proven = False
+    return all_proven, requeued
 
 
 def _next_pending(conn, now: str) -> tuple[int, int | None, dict] | None:
@@ -493,23 +527,31 @@ def _process_job(
                 token,
                 outcomes.get(result.status, "cleanup_failed"),
                 _now(),
-                diagnostic=result.diagnostic,
+                # Provider diagnostics may contain transcript or provider text;
+                # persist only the lifecycle's content-free outcome code.
+                diagnostic=outcomes.get(result.status, "cleanup_failed"),
             )
     return True
 
 
-def run() -> int:
+def run(*, recover_only: bool = False) -> int:
+    """Replay durable intent, reconcile cleanup, and optionally skip provider work."""
     settings = load_settings()
     logger = setup_logging(settings, process_name="drain-session-recaps")
     replay_journal(settings)
     if not try_acquire_pid_file(PID_KEY):
-        return 0
+        return EXIT_BUSY if recover_only else 0
     try:
         with get_connection(settings) as conn:
             if recap_schema_capability(conn) != "ready":
                 return 0
         cleanup_proven, recovered = _recover_expired_claims(settings, _now())
+        cleanup_failed_proven, cleanup_failed_requeued = _recover_cleanup_failed_attempts(settings, _now())
+        cleanup_proven = cleanup_proven and cleanup_failed_proven
+        recovered |= cleanup_failed_requeued
         if not cleanup_proven:
+            return EXIT_CLEANUP_UNRESOLVED if recover_only else 0
+        if recover_only:
             return 0
         with get_connection(settings) as conn:
             runtime_token = claim_runtime(
@@ -559,8 +601,15 @@ def run() -> int:
         remove_pid_file(PID_KEY)
 
 
-def main() -> None:
-    raise SystemExit(run())
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(prog="ccrecall-drain-session-recaps", allow_abbrev=False)
+    parser.add_argument(
+        "--recover-only",
+        action="store_true",
+        help="Internal: replay intent and reconcile cleanup without provider work; nonzero when busy or unresolved.",
+    )
+    args = parser.parse_args(argv)
+    raise SystemExit(run(recover_only=args.recover_only))
 
 
 if __name__ == "__main__":

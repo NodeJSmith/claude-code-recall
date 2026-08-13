@@ -18,6 +18,7 @@ from ccrecall.ingestion_status import summarize_ingestion
 from ccrecall.llm_summary_db import recap_schema_capability
 from ccrecall.process_cleanup import posix_process_groups_supported
 from ccrecall.recap_contract import ELIGIBILITY_POLICY_VERSION, RECAP_CONTRACT_VERSION, RECAP_INPUT_CONTRACT_VERSION
+from ccrecall.recap_eligibility import iter_evaluate_branches
 from ccrecall.recap_state import latest_attempts, quarantine_admission
 from ccrecall.summary_enrichment import valid_current_enrichment
 from ccrecall.tool_content_status import (
@@ -108,6 +109,9 @@ def _recap_status(conn: sqlite3.Connection, settings: dict) -> dict:
     }
     if capability != "ready":
         return result
+    eligibility_reasons: dict[str, int] = {}
+    for _branch_id, decision in iter_evaluate_branches(conn.cursor(), active_only=True):
+        eligibility_reasons[decision.reason] = eligibility_reasons.get(decision.reason, 0) + 1
     jobs = dict(conn.execute("SELECT state, COUNT(*) FROM session_recap_jobs GROUP BY state"))
     blocked_platform = conn.execute(
         "SELECT COUNT(*) FROM session_recap_jobs WHERE state = 'blocked' AND reason = 'platform_unsupported'"
@@ -187,6 +191,7 @@ def _recap_status(conn: sqlite3.Connection, settings: dict) -> dict:
             "overdue_claims": overdue,
             "provider_health": {"reason": health[0], "consecutive_failures": health[1], "retry_after": health[2]},
             "populations": populations,
+            "eligibility": {"by_reason": eligibility_reasons},
             "latest_attempt_outcomes": {},
             "quarantine": {
                 "count": quarantine_count,
@@ -337,6 +342,7 @@ def print_status_report(status: dict) -> None:
                 f"overdue: {recap['overdue_claims']}"
             )
             print(f"  populations: {recap['populations']}; latest outcomes: {recap['latest_attempt_outcomes']}")
+            print(f"  eligibility: {recap['eligibility']['by_reason']}")
             print(f"  cooldown: {health['reason'] or 'none'}; retry after: {health['retry_after'] or 'none'}")
             quarantine = recap["quarantine"]
             print(

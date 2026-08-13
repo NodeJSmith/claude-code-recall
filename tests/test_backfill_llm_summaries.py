@@ -1,6 +1,7 @@
 import json
 import sys
 from contextlib import contextmanager
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -93,6 +94,64 @@ assert 'ccrecall.llm_summarizer' not in sys.modules
         with pytest.raises(SystemExit) as error:
             worker.main(["--retry"])
         assert error.value.code == 2
+
+    @pytest.mark.parametrize(
+        ("exit_code", "message"),
+        [
+            (75, "another recap recovery is active. Wait for it to finish"),
+            (76, "prior provider cleanup could not be verified. Run ccrecall recap recover"),
+        ],
+    )
+    def test_manual_retry_reports_deferred_recovery(self, monkeypatch, capsys, exit_code, message):
+        monkeypatch.setattr(worker, "load_settings", lambda: {"db_path": "unused"})
+        monkeypatch.setattr(worker, "posix_process_groups_supported", lambda: True)
+        monkeypatch.setattr(worker, "try_acquire_pid_file", lambda _key: True)
+        monkeypatch.setattr(worker, "remove_pid_file", lambda _key: None)
+        with patch(
+            "ccrecall.hooks.backfill_llm_summaries.subprocess.run",
+            return_value=SimpleNamespace(returncode=exit_code),
+        ) as run:
+            assert worker.run(retry_failures=True) == worker.EXIT_OK
+        run.assert_called_once_with(["ccrecall-drain-session-recaps", "--recover-only"], check=False)
+        output = capsys.readouterr().out
+        assert message in output
+        assert "ccrecall backfill llm-summaries --retry-failures" in output
+
+    def test_manual_retry_reports_deferred_recovery_as_json(self, monkeypatch, capsys):
+        monkeypatch.setattr(worker, "load_settings", lambda: {"db_path": "unused"})
+        monkeypatch.setattr(worker, "posix_process_groups_supported", lambda: True)
+        monkeypatch.setattr(worker, "try_acquire_pid_file", lambda _key: True)
+        monkeypatch.setattr(worker, "remove_pid_file", lambda _key: None)
+        with patch(
+            "ccrecall.hooks.backfill_llm_summaries.subprocess.run",
+            return_value=SimpleNamespace(returncode=76),
+        ):
+            assert (
+                worker.run(
+                    days=3,
+                    limit=4,
+                    session="session with spaces",
+                    retry_failures=True,
+                    model="sonnet",
+                    max_budget_usd=1.5,
+                    timeout_seconds=120,
+                    json_mode=True,
+                )
+                == worker.EXIT_OK
+            )
+        assert json.loads(capsys.readouterr().out) == {
+            "recovery": {
+                "command": "ccrecall recap recover",
+                "reason": "cleanup_unresolved",
+                "retry_command": (
+                    "ccrecall --json backfill llm-summaries --days 3 --limit 4 "
+                    "--session 'session with spaces' --retry-failures --model sonnet "
+                    "--max-budget-usd 1.5 --timeout-seconds 120"
+                ),
+                "state": "retry_deferred",
+            },
+            "session_recap_run": None,
+        }
 
     def test_retention_prunes_run_candidates_before_runs(self, tmp_path):
         settings = {"db_path": str(tmp_path / "recaps.db")}

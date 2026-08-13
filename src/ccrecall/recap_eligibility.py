@@ -199,6 +199,11 @@ def load_eligibility_input(cursor: sqlite3.Cursor, branch_id: int) -> Eligibilit
         """,
         (branch_id, branch_id),
     ).fetchall()
+    return _eligibility_input_from_rows(branch, messages)
+
+
+def _eligibility_input_from_rows(branch: tuple, messages: list[tuple]) -> EligibilityInput:
+    """Build policy input from one branch row and its ordered normalized messages."""
     summary_current = (
         branch[2] == SUMMARY_VERSION
         and isinstance(branch[3], str)
@@ -225,8 +230,45 @@ def evaluate_branch(cursor: sqlite3.Cursor, branch_id: int) -> EligibilityDecisi
     return evaluate_eligibility(load_eligibility_input(cursor, branch_id))
 
 
+def iter_evaluate_branches(
+    cursor: sqlite3.Cursor,
+    *,
+    active_only: bool = False,
+    batch_size: int = 100,
+):
+    """Yield shared policy decisions in bounded keyset batches."""
+    if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size < 1:
+        raise ValueError("batch_size must be a positive integer")
+    last_branch_id = 0
+    active_clause = "AND is_active = 1" if active_only else ""
+    while True:
+        branches = cursor.execute(
+            "SELECT id, is_active, summary_version, context_summary, context_summary_json, "
+            "started_at, ended_at, files_modified, commits FROM branches "
+            f"WHERE id > ? {active_clause} ORDER BY id LIMIT ?",
+            (last_branch_id, batch_size),
+        ).fetchall()
+        if not branches:
+            return
+        branch_ids = [branch[0] for branch in branches]
+        placeholders = ", ".join("?" for _ in branch_ids)
+        messages_by_branch = {branch_id: [] for branch_id in branch_ids}
+        for branch_id, role, content, tool_content in cursor.execute(
+            "SELECT bm.branch_id, m.role, m.content, m.tool_content FROM branch_messages bm "
+            "JOIN messages m ON m.id = bm.message_id JOIN branches b ON b.id = bm.branch_id "
+            f"WHERE bm.branch_id IN ({placeholders}) AND m.session_id = b.session_id "
+            "AND COALESCE(m.is_notification, 0) = 0 ORDER BY bm.branch_id, bm.position",
+            branch_ids,
+        ):
+            messages_by_branch[branch_id].append((role, content, tool_content))
+        for branch in branches:
+            branch_id = branch[0]
+            yield branch_id, evaluate_eligibility(_eligibility_input_from_rows(branch, messages_by_branch[branch_id]))
+        last_branch_id = branch_ids[-1]
+
+
 def evaluate_branches(cursor: sqlite3.Cursor, branch_ids: list[int] | None = None) -> dict[int, EligibilityDecision]:
     """Evaluate selected branches, or all branches when no selection is supplied."""
     if branch_ids is None:
-        branch_ids = [row[0] for row in cursor.execute("SELECT id FROM branches ORDER BY id")]
+        return dict(iter_evaluate_branches(cursor))
     return {branch_id: evaluate_branch(cursor, branch_id) for branch_id in branch_ids}

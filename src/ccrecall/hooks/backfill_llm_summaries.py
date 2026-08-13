@@ -3,6 +3,7 @@
 import argparse
 import json
 import logging
+import shlex
 import subprocess
 
 from whenever import Instant
@@ -38,6 +39,62 @@ def run(
         settings = load_settings()
         now = Instant.now().format_iso()
         platform_supported = posix_process_groups_supported()
+        rerun_args = ["ccrecall"]
+        if json_mode:
+            rerun_args.append("--json")
+        rerun_args.extend(["backfill", "llm-summaries"])
+        if days is not None:
+            rerun_args.extend(["--days", str(days)])
+        if limit is not None:
+            rerun_args.extend(["--limit", str(limit)])
+        if session is not None:
+            rerun_args.extend(["--session", session])
+        if retry_failures:
+            rerun_args.append("--retry-failures")
+        if model is not None:
+            rerun_args.extend(["--model", model])
+        if max_budget_usd is not None:
+            rerun_args.extend(["--max-budget-usd", str(max_budget_usd)])
+        if timeout_seconds is not None:
+            rerun_args.extend(["--timeout-seconds", str(timeout_seconds)])
+        rerun_command = shlex.join(rerun_args)
+        if platform_supported:
+            # Reconcile cleanup ownership before explicit retries examine blocked jobs.
+            recovered = subprocess.run(
+                ["ccrecall-drain-session-recaps", "--recover-only"],  # noqa: S607 - installed internal entry point
+                check=False,
+            )
+            if recovered.returncode != 0:
+                reason = (
+                    "recovery_busy"
+                    if recovered.returncode == 75
+                    else "cleanup_unresolved"
+                    if recovered.returncode == 76
+                    else "recovery_failed"
+                )
+                messages = {
+                    "recovery_busy": "another recap recovery is active. Wait for it to finish",
+                    "cleanup_unresolved": "prior provider cleanup could not be verified. Run ccrecall recap recover",
+                    "recovery_failed": "recovery failed. Run ccrecall recap recover",
+                }
+                if json_mode:
+                    print(
+                        json.dumps(
+                            {
+                                "recovery": {
+                                    "command": "ccrecall recap recover",
+                                    "reason": reason,
+                                    "retry_command": rerun_command,
+                                    "state": "retry_deferred",
+                                },
+                                "session_recap_run": None,
+                            },
+                            sort_keys=True,
+                        )
+                    )
+                else:
+                    print(f"Session Recap retry deferred: {messages[reason]}, then rerun: {rerun_command}")
+                return EXIT_OK
         selectors = {
             "days": days,
             "session": session,

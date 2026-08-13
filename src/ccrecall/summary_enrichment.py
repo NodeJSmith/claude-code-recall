@@ -3,10 +3,9 @@
 import hashlib
 import json
 import sqlite3
-from pathlib import PurePosixPath
 from typing import Any
 
-from ccrecall.recap_input import ELIGIBILITY_POLICY_VERSION, RECAP_CONTRACT_VERSION, RECAP_INPUT_CONTRACT_VERSION
+from ccrecall.recap_contract import ELIGIBILITY_POLICY_VERSION, RECAP_CONTRACT_VERSION, RECAP_INPUT_CONTRACT_VERSION
 from ccrecall.serialization import decode_json_field
 
 SUMMARY_ENRICHMENT_VERSION = RECAP_CONTRACT_VERSION
@@ -14,13 +13,6 @@ SUMMARY_ENRICHMENT_VERSION = RECAP_CONTRACT_VERSION
 STATUS_OK = "ok"
 STATUS_INVALID_OUTPUT = "invalid_output"
 STATUS_ERROR = "error"
-# Retained until the provider/lifecycle replacement removes v1 worker callers.
-STATUS_CAPABILITY_UNVERIFIED = "capability_unverified"
-STATUS_MISSING_SOURCE = "missing_source"
-STATUS_UNSAFE_SOURCE_PATH = "unsafe_source_path"
-STATUS_SOURCE_CHANGED = "source_changed"
-STATUS_SOURCE_INCOMPLETE = "source_incomplete"
-STATUS_SOURCE_UNVERIFIED = "source_unverified"
 STATUS_UNSUPPORTED_CLI = "unsupported_cli"
 STATUS_CLAUDE_UNAVAILABLE = "claude_unavailable"
 STATUS_AUTH_REQUIRED = "auth_required"
@@ -51,17 +43,6 @@ CLAUDE_RESPONSE_SCHEMA: dict[str, Any] = {
 
 class SummaryEnrichmentValidationError(ValueError):
     """Raised when the required recap core cannot be rendered safely."""
-
-
-def normalize_project_file_reference(value: str) -> str | None:
-    """Keep the transitional v1 packet helper importable until T06 removes it."""
-    normalized = value.strip()
-    if not normalized or "\\" in normalized or normalized.startswith(("/", "./", "../", "~/")):
-        return None
-    parts = PurePosixPath(normalized).parts
-    if not parts or any(part in ("", ".", "..") for part in parts) or parts[0].endswith(":"):
-        return None
-    return normalized
 
 
 def _coerce_mapping(value: object, *, label: str) -> dict[str, Any]:

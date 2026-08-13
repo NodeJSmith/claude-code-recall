@@ -16,6 +16,7 @@ from ccrecall.recap_eligibility import (
     evaluate_branch,
     evaluate_branches,
     evaluate_eligibility,
+    iter_evaluate_branches,
 )
 from ccrecall.summarizer import SUMMARY_VERSION
 
@@ -146,6 +147,26 @@ def test_query_and_evaluator_have_identical_decisions(eligibility_db, memory_db)
     all_branches = evaluate_branches(memory_db.cursor())
     assert from_db == all_branches[eligibility_db]
     assert from_db.reason == ELIGIBLE_SUBSTANTIVE_PROSE
+
+
+def test_batched_evaluator_limits_results_to_active_branches(eligibility_db, memory_db):
+    memory_db.execute("INSERT INTO sessions(uuid) VALUES ('inactive-session')")
+    inactive_session = memory_db.execute("SELECT last_insert_rowid()").fetchone()[0]
+    memory_db.execute(
+        "INSERT INTO branches(session_id, leaf_uuid, is_active) VALUES (?, 'old-leaf', 0)",
+        (inactive_session,),
+    )
+    memory_db.commit()
+
+    decisions = dict(iter_evaluate_branches(memory_db.cursor(), active_only=True, batch_size=1))
+
+    assert decisions == {eligibility_db: evaluate_branch(memory_db.cursor(), eligibility_db)}
+
+
+@pytest.mark.parametrize("batch_size", [0, -1, True, 1.5])
+def test_batched_evaluator_requires_a_positive_integer_batch_size(eligibility_db, memory_db, batch_size):
+    with pytest.raises(ValueError, match="positive integer"):
+        list(iter_evaluate_branches(memory_db.cursor(), batch_size=batch_size))
 
 
 def test_query_excludes_notification_only_messages(eligibility_db, memory_db):
