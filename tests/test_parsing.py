@@ -428,3 +428,18 @@ class TestAggregateBranchContent:
         tools_idx = result.index("__tools__")
         assert files_idx < commits_idx < tools_idx
         conn.close()
+
+
+def test_find_all_branches_terminates_on_a_parent_uuid_cycle():
+    """A transcript is untrusted input; a parentUuid cycle must not hang the import."""
+    entries = [
+        {"uuid": "a", "parentUuid": "b", "type": "user", "message": {"role": "user", "content": "one"}},
+        {"uuid": "b", "parentUuid": "a", "type": "user", "message": {"role": "user", "content": "two"}},
+    ]
+
+    branches = find_all_branches(entries)
+
+    assert len(branches) == 1
+    ordered = branches[0]["ordered_uuids"]
+    assert len(ordered) == len(set(ordered))
+    assert set(ordered) <= {"a", "b"}

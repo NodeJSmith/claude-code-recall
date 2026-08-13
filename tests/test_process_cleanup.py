@@ -34,3 +34,26 @@ def test_process_group_absent_ignores_zombies_and_detects_live_members(monkeypat
 
     assert process_cleanup.process_group_absent(99)
     assert not process_cleanup.process_group_absent(42)
+
+
+def test_process_group_absent_skips_a_proc_entry_that_vanishes_mid_scan(monkeypatch):
+    """Unrelated process churn must not report every group as still present."""
+
+    class VanishedPath:
+        def read_text(self, **_kwargs):
+            raise FileNotFoundError
+
+    class StatPath:
+        def __init__(self, contents):
+            self.contents = contents
+
+        def read_text(self, **_kwargs):
+            return self.contents
+
+    monkeypatch.setattr(
+        "ccrecall.process_cleanup.Path.glob",
+        lambda *_args, **_kwargs: [VanishedPath(), StatPath("2 (live) S 1 42")],
+    )
+
+    assert process_cleanup.process_group_absent(99)
+    assert not process_cleanup.process_group_absent(42)

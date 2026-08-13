@@ -37,6 +37,11 @@ def journal_lock(marker: Path) -> Iterator[None]:
 
 def fsync_directory(path: Path) -> None:
     """Persist a directory entry change or raise so durable callers can report it."""
+    if sys.platform == "win32":
+        # Windows has no O_DIRECTORY and cannot open a directory as a file, so
+        # there is nothing to fsync. The durability this buys only matters for
+        # the drainer's marker replay, which is POSIX-only anyway.
+        return
     fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
     try:
         os.fsync(fd)

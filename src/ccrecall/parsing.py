@@ -223,8 +223,13 @@ def find_all_branches(all_entries: list[dict]) -> list[dict]:
     if latest is None:
         return []
     reverse_path: list[str] = []
+    # A transcript is not trusted to be acyclic. Without this the walk never
+    # ends, and every iteration grows reverse_path, so the import hangs while
+    # consuming memory rather than failing.
+    seen: set[str] = set()
     current: str | None = latest["uuid"]
-    while current:
+    while current and current not in seen:
+        seen.add(current)
         reverse_path.append(current)
         current = uuid_to_parent.get(current)
     ordered_uuids = list(reversed(reverse_path))

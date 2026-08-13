@@ -342,7 +342,9 @@ def test_session_end_stays_importable_without_posix_locking():
     """SessionEnd writes the clear-session handoff, which no platform opts out of."""
     source = Path(drain_session_recaps.__file__).parent / "durability.py"
     tree = ast.parse(source.read_text(encoding="utf-8"))
+    # Both spellings fail the same way: `import fcntl` and `from fcntl import flock`.
     unconditional = {alias.name for node in tree.body if isinstance(node, ast.Import) for alias in node.names}
+    unconditional |= {node.module for node in tree.body if isinstance(node, ast.ImportFrom) and node.module}
     assert "fcntl" not in unconditional, "a top-level fcntl import breaks the hook on Windows"
 
 

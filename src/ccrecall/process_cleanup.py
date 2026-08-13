@@ -27,7 +27,13 @@ def process_group_absent(group_id: int) -> bool:
     """Prove a Linux process group has no non-zombie members; errors fail closed."""
     try:
         for stat_path in Path("/proc").glob("[0-9]*/stat"):
-            fields = stat_path.read_text(encoding="utf-8").rsplit(") ", 1)[1].split()
+            try:
+                fields = stat_path.read_text(encoding="utf-8").rsplit(") ", 1)[1].split()
+            except FileNotFoundError:
+                # An unrelated process exited between the glob and the read. It
+                # cannot be a live member, and failing closed on it would report
+                # every group as present whenever the machine is busy.
+                continue
             if fields[0] != "Z" and int(fields[2]) == group_id:
                 return False
     except (IndexError, OSError, ValueError):

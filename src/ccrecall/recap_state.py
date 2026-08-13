@@ -206,7 +206,7 @@ def heartbeat_job(
         conn.execute(
             f"UPDATE session_recap_jobs SET lease_expires_at = {_deadline(now, lease_seconds)}, "
             "updated_at = ? WHERE session_id = ? AND state = 'claimed' AND claim_token = ?",
-            (now, now, lease_seconds, session_id, token),
+            (now, lease_seconds, now, session_id, token),
         ).rowcount
     )
 

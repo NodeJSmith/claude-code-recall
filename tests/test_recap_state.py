@@ -104,6 +104,24 @@ def test_cancel_before_launch_requires_a_fenced_cleaned_reservation(tmp_path):
         )
 
 
+def test_heartbeat_extends_the_lease_by_exactly_the_requested_seconds(tmp_path):
+    with get_connection(_connection(tmp_path)) as conn:
+        upsert_job(conn, 1, "input-a", "end", NOW)
+        token = claim_job(conn, 1, NOW, 60)
+        assert conn.execute("SELECT lease_expires_at FROM session_recap_jobs").fetchone() == (
+            "2026-08-12T10:01:00.000Z",
+        )
+
+        assert heartbeat_job(conn, 1, token, NOW, 600)
+
+        # A lease that does not mean what recovery reads it to mean is how a
+        # live attempt gets reclaimed, or a dead one held.
+        assert conn.execute("SELECT lease_expires_at, updated_at FROM session_recap_jobs").fetchone() == (
+            "2026-08-12T10:10:00.000Z",
+            NOW,
+        )
+
+
 def test_changed_input_leaves_a_live_attempt_recoverable(tmp_path):
     with get_connection(_connection(tmp_path)) as conn:
         upsert_job(conn, 1, "input-a", "end", NOW)
