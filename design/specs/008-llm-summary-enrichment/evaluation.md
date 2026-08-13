@@ -1,5 +1,7 @@
 # LLM Summary Enrichment Evaluation
 
+> **Superseded:** This is an archived v1 evaluation procedure for Branch Resume Briefs. It is not an active procedure. For current aggregate-only Session Recap evidence, see [the v2 evaluation](../010-session-recaps/evaluation.md). Do not use the v1 capability checks, packet, citation, rendering, or command instructions below.
+
 Run this manual gate before you accept prompt, schema, packet-shape, or renderer changes for Branch Resume Briefs.
 
 ## What you verify

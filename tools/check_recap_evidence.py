@@ -4,7 +4,7 @@ import re
 import sys
 from pathlib import Path
 
-REQUIRED_HEADINGS = (
+ELIGIBILITY_HEADINGS = (
     "## Sample strata",
     "## Measures",
     "## Labels",
@@ -12,7 +12,7 @@ REQUIRED_HEADINGS = (
     "## Selected policy",
     "## Reason codes",
 )
-REQUIRED_TABLES = {
+ELIGIBILITY_TABLES = {
     "## Sample strata": ("stratum", "sample count"),
     "## Measures": ("measure", "definition"),
     "## Labels": ("label", "count"),
@@ -27,9 +27,33 @@ REQUIRED_TABLES = {
 }
 UUID_RE = re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b", re.IGNORECASE)
 PATH_RE = re.compile(r"(?:[A-Za-z]:\\|~/|(?<!\d)/|(?:[A-Za-z_.-][\w.-]*/)+)[^\s|)`]*")
-EXCERPT_RE = re.compile(r"(?:^|\n)\s*(?:excerpt|transcript|quote)\s*:", re.IGNORECASE)
-REVIEWER_NOTES_RE = re.compile(r"(?:^|\n)\s*reviewer notes?\s*:", re.IGNORECASE)
+MARKDOWN_LINK_RE = re.compile(r"\]\s*(?:\(|\[)")
+MARKDOWN_REFERENCE_DEF_RE = re.compile(r"^\s*\[[^\]\n]+\]:\s*\S+", re.MULTILINE)
+EXCERPT_RE = re.compile(r"\b(?:excerpt|transcript(?:\s+excerpt)?|recap|quote|user|assistant)\s*:", re.IGNORECASE)
+REVIEWER_NOTES_RE = re.compile(r"\b(?:reviewer notes?|notes)\s*:", re.IGNORECASE)
 POLICY_VERSION_RE = re.compile(r"\bELIGIBILITY_POLICY_VERSION\s*=\s*\d+\b")
+RECAP_HEADINGS = (
+    "## Method",
+    "## Aggregate input results",
+    "## Aggregate model results",
+    "## Decision",
+    "## Privacy boundary",
+)
+RECAP_TABLES = {
+    "## Aggregate input results": (
+        "input authority",
+        "completed recaps",
+        "recognition",
+        "work arc",
+        "outcome",
+        "relative packet size",
+    ),
+    "## Aggregate model results": ("model", "completed db-input calls", "recognition", "work arc", "outcome"),
+}
+PRIVATE_MAPPING_RE = re.compile(
+    r"\b(?:private\s+|per[- ]sample\s+)?(?:mapping|identifier map|sample map)\s*:", re.IGNORECASE
+)
+RAW_OUTPUT_RE = re.compile(r"\b(?:raw output|model output|provider output|prompt)\s*:", re.IGNORECASE)
 
 
 def table_in_section(text: str, heading: str) -> tuple[list[str], list[list[str]]] | None:
@@ -66,10 +90,13 @@ def has_private_label_table(text: str) -> bool:
 
 def check_evidence(text: str) -> list[str]:
     """Return all structural and privacy violations in an audit artifact."""
-    errors = [f"missing required section: {heading}" for heading in REQUIRED_HEADINGS if heading not in text]
-    if not POLICY_VERSION_RE.search(text):
+    eligibility = "# Eligibility Audit" in text
+    headings = ELIGIBILITY_HEADINGS if eligibility else RECAP_HEADINGS
+    tables = ELIGIBILITY_TABLES if eligibility else RECAP_TABLES
+    errors = [f"missing required section: {heading}" for heading in headings if heading not in text]
+    if eligibility and not POLICY_VERSION_RE.search(text):
         errors.append("missing ELIGIBILITY_POLICY_VERSION")
-    for heading, expected_header in REQUIRED_TABLES.items():
+    for heading, expected_header in tables.items():
         if heading not in text:
             continue
         table = table_in_section(text, heading)
@@ -86,15 +113,24 @@ def check_evidence(text: str) -> list[str]:
             continue
         if heading == "## Selected policy" and not any(re.search(r"\d", row[1]) for row in rows if len(row) == 2):
             errors.append("missing selected threshold values")
-    if UUID_RE.search(text):
+    # Normalize Markdown labels so emphasis cannot evade the privacy gate.
+    privacy_text = text
+    privacy_text = re.sub(r"(?<=\w)[*_`]+(?=\s*:)", "", privacy_text)
+    if UUID_RE.search(privacy_text):
         errors.append("contains UUID-shaped identifier")
-    if has_private_label_table(text):
+    if has_private_label_table(privacy_text):
         errors.append("contains private label row")
-    if EXCERPT_RE.search(text):
+    if EXCERPT_RE.search(privacy_text):
         errors.append("contains transcript excerpt")
-    if REVIEWER_NOTES_RE.search(text):
+    if REVIEWER_NOTES_RE.search(privacy_text):
         errors.append("contains reviewer notes")
-    if PATH_RE.search(text):
+    if PRIVATE_MAPPING_RE.search(privacy_text) or has_private_label_table(privacy_text):
+        errors.append("contains private mapping")
+    if RAW_OUTPUT_RE.search(privacy_text) or "```" in text:
+        errors.append("contains prompt or raw output")
+    if MARKDOWN_LINK_RE.search(text) or MARKDOWN_REFERENCE_DEF_RE.search(text):
+        errors.append("contains Markdown link")
+    if PATH_RE.search(privacy_text):
         errors.append("contains path-like content")
     return errors
 

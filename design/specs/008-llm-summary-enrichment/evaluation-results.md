@@ -1,5 +1,7 @@
 # LLM Summary Enrichment Evaluation Results
 
+> **Superseded:** These are archived v1 Branch Resume Brief results, not current Session Recap evidence. Current aggregate DB-input and model evidence is in [the v2 evaluation](../010-session-recaps/evaluation.md). The v1 citation and continuation-review results do not describe the shipped recap contract.
+
 **Corpus:** `tests/fixtures/llm_summary_evaluation/`
 
 **Scope:** de-identified manual review of rendered Branch Resume Briefs and stored enrichment envelopes generated from the synthetic bug-investigation, implementation-refactor, and planning-discovery scenarios.

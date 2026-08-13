@@ -5,6 +5,8 @@
 **Scope-mode:** hold
 **Research:** design/research/2026-08-07-issue-32-llm-session-summaries/research.md
 
+> **Superseded:** This archived v1 design describes the retired Branch Resume Brief architecture. Current behavior is specified by [Session Recaps](../010-session-recaps/design.md): DB-only canonical input, explicit opt-in SessionEnd intent, detached serialized draining, and recap-as-orientation rather than continuation evidence. Do not use the v1 commands, capability checks, packet format, citations, or rendering instructions below for current work.
+
 ## Problem
 
 `ccrecall` currently stores deterministic branch context that is safe, local, fast, and predictable, but it loses much of the "what happened and why" context in long branches. The current middle-branch summary is mostly a file-name gap marker, so recalled work can preserve endpoints while still missing decision rationale, unresolved work, failed approaches, and continuation hints.

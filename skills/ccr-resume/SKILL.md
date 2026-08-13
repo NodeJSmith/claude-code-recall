@@ -7,6 +7,8 @@ disable-model-invocation: true
 
 # Resume
 
+A Session Recap may help recognize the prior session, but it is not authoritative continuation evidence. The transcript tail and pending-question workflow below remain the source of truth for the last instruction and unresolved decisions.
+
 Pick up work in a fresh session after the previous one ended — via `/clear` (to avoid resending a large uncached context), after being stopped, or after a question the prior session left open (a rejected `AskUserQuestion` *or* one asked in prose). `/clear` starts a **new session with a new transcript file**; the prior session's transcript stays on disk. This skill reads its **tail** to recover what the disk can't tell you: the user's last instruction and any decision that was never resolved.
 
 ## Why this exists — the failure mode it prevents

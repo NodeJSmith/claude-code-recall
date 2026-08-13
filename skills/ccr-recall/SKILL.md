@@ -18,6 +18,8 @@ Under a plugin install this skill is invoked as `/ccrecall:ccr-recall`; under a 
 
 Semantic recall is active: `ccrecall search` fuses keyword ranking with chunk-vector similarity by default.
 
+A rendered **Session Recap** is a recognition/orientation aid, not authoritative continuation evidence. For the exact final instruction or an unresolved question, use `ccrecall tail` and follow the pending-question workflow.
+
 **recent_chats.py** — retrieve recent sessions with full transcript:
 ```bash
 ccrecall recent --n 3
@@ -94,7 +96,7 @@ Search terms should be content-bearing words that discriminate between sessions 
 ### Principles
 
 - **3-5 key findings**, not exhaustive lists — each specific (file paths, dates, project names) and backed by a quote or reference.
-- **Make it actionable** — every finding suggests a response.
+- **Separate evidence from interpretation** — do not treat a Session Recap as proof of an unfinished task or a user decision.
 
 ### Structure
 
