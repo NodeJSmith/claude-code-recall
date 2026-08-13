@@ -769,6 +769,29 @@ def test_concurrent_drainers_admit_one_provider_invocation(tmp_path, monkeypatch
     assert calls == [True]
 
 
+def test_drainer_persists_a_recomputed_hash_a_branch_never_stored(tmp_path, monkeypatch):
+    """A DB upgraded from v7 has recap_input_hash as NULL with no backfill."""
+    settings = _settings(tmp_path)
+    with get_connection(settings) as conn:
+        conn.execute("INSERT INTO projects(path, key) VALUES ('/p', 'p')")
+        conn.execute("INSERT INTO sessions(uuid, project_id) VALUES (?, 1)", (UUID,))
+        conn.execute("INSERT INTO branches(session_id, leaf_uuid, is_active) VALUES (1, 'leaf', 1)")
+        expected = load_recap_input(conn.cursor(), 1).input_hash
+        # `ccrecall backfill llm-summaries` queues whatever the branch stored.
+        upsert_job(conn, 1, None, "manual", "2026-08-12T10:00:00Z")
+    monkeypatch.setattr(drain_session_recaps, "sync_session_for_finalization", lambda *_args: 0)
+    monkeypatch.setattr(
+        drain_session_recaps, "evaluate_branch", lambda *_args: type("Decision", (), {"eligible": True})()
+    )
+    monkeypatch.setattr(drain_session_recaps, "posix_process_groups_supported", lambda: True)
+
+    # The capture snapshot recomputes the identity; without persisting it the
+    # next claim recomputes the same mismatch and never reaches a provider.
+    assert drain_session_recaps._process_job(settings, 1, 1)
+    with get_connection(settings) as conn:
+        assert conn.execute("SELECT recap_input_hash FROM branches WHERE id = 1").fetchone() == (expected,)
+
+
 def test_drainer_initial_admission_denial_cancels_attempt_and_releases_provider(tmp_path, monkeypatch):
     settings = _settings(tmp_path)
     settings["recap_quarantine_max_count"] = 0

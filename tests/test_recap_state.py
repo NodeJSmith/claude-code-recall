@@ -23,6 +23,7 @@ from ccrecall.recap_state import (
     requeue_changed_input_after_cleanup,
     reserve_attempt,
     reserve_attempt_for_run,
+    reset_health,
     retention_candidates,
     run_partitions,
     run_retention_candidates,
@@ -99,6 +100,59 @@ def test_cancel_before_launch_requires_a_fenced_cleaned_reservation(tmp_path):
             "pending",
             None,
         )
+
+
+def test_changed_input_leaves_a_live_attempt_recoverable(tmp_path):
+    with get_connection(_connection(tmp_path)) as conn:
+        upsert_job(conn, 1, "input-a", "end", NOW)
+        token = claim_job(conn, 1, NOW, 60)
+        attempt = _attempt(conn, 1, token)
+
+        upsert_job(conn, 1, "input-b", "end", "2026-08-12T10:00:01Z")
+        state, active, lease, fenced = conn.execute(
+            "SELECT state, active_attempt_id, lease_expires_at, claim_token FROM session_recap_jobs"
+        ).fetchone()
+        # The newest input still fences the old claimant, exactly as
+        # recap_state_changed_input does for the same job shape.
+        assert fenced > token
+        # But state and lease are the only handles recovery has on a live
+        # attempt. Clearing them strands the attempt with no way back.
+        assert (state, active) == ("claimed", attempt)
+        assert lease is not None
+        assert recover_expired_attempt(conn, attempt, "2026-08-12T11:00:00Z", cleanup_proven=True)
+
+
+def test_reset_health_preserves_an_admission_a_live_attempt_still_owns(tmp_path):
+    with get_connection(_connection(tmp_path)) as conn:
+        upsert_job(conn, 1, "input-a", "end", NOW)
+        token = claim_job(conn, 1, NOW, 60)
+        provider = admit_provider(conn, 1, token, NOW)
+        attempt = _attempt(conn, 1, token, provider_token=provider)
+
+        reset_health(conn)
+        assert conn.execute(
+            "SELECT retry_after, consecutive_failures FROM session_recap_provider_health"
+        ).fetchone() == (None, 0)
+        # The cooldown is cleared, but the in-flight call keeps its admission so
+        # it can still close itself and so no second call is admitted alongside it.
+        assert open_cooldown(conn, attempt, token, provider, "rate_limited", NOW, 60, 3600) is not None
+        assert conn.execute("SELECT state FROM session_recap_attempts WHERE id = ?", (attempt,)).fetchone() == (
+            "global_abort",
+        )
+
+
+def test_reset_health_still_clears_an_admission_no_attempt_owns(tmp_path):
+    with get_connection(_connection(tmp_path)) as conn:
+        upsert_job(conn, 1, "input-a", "end", NOW)
+        token = claim_job(conn, 1, NOW, 60)
+        # A crash between admission and reservation leaks the global gate; the
+        # operator command stays the manual way to release it.
+        assert admit_provider(conn, 1, token, NOW) is not None
+
+        reset_health(conn)
+        assert conn.execute(
+            "SELECT probe_active, probe_session_id, probe_claim_token FROM session_recap_provider_health"
+        ).fetchone() == (0, None, None)
 
 
 def test_running_attempt_cannot_be_cancelled_before_launch(tmp_path):
