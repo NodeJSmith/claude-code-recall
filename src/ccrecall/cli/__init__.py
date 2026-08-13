@@ -1,6 +1,6 @@
 """ccrecall CLI — single entry point consolidating the former cm-* binaries.
 
-Root ``App`` plus a ``backfill`` sub-``App``. Command functions live in
+Root ``App`` plus ``backfill`` and ``recap`` sub-apps. Command functions live in
 ``commands.py`` and register themselves on import (the import at the bottom of
 this module triggers that registration).
 """
@@ -46,6 +46,8 @@ app.meta.group_parameters = Group("Global Options", sort_key=0)
 
 backfill_app = App(name="backfill", help="Seed historical summaries and embeddings.")
 app.command(backfill_app)
+recap_app = App(name="recap", help="Manage durable Session Recap work.")
+app.command(recap_app)
 
 
 @app.meta.default

@@ -6,20 +6,22 @@ PID-file lifecycle are preserved from the former cm-* entry points; only the
 argument-parsing layer changed (argparse -> cyclopts).
 """
 
+import json
 import sys
 from pathlib import Path
 from typing import Annotated, Literal
 
 from cyclopts import ArgumentCollection, Group, Parameter
 from cyclopts.validators import Number
+from whenever import Instant, TimeDelta
 
 from ccrecall import recent_chats as recent_chats_mod
 from ccrecall import search_cli as search_mod
 from ccrecall import session_tail as session_tail_mod
 from ccrecall import status as status_mod
-from ccrecall.cli import app, backfill_app
+from ccrecall.cli import app, backfill_app, recap_app
 from ccrecall.cli.context import DEFAULT_CLI_CONTEXT, CLIContextParam
-from ccrecall.config import DEFAULT_DB_PATH, try_acquire_pid_file
+from ccrecall.config import DEFAULT_DB_PATH, load_settings, try_acquire_pid_file
 from ccrecall.db import DEFAULT_PROJECTS_DIR
 from ccrecall.embeddings import DEFAULT_EMBED_THREADS
 from ccrecall.hooks import backfill_embeddings as backfill_embeddings_mod
@@ -27,8 +29,11 @@ from ccrecall.hooks import backfill_llm_summaries as backfill_llm_summaries_mod
 from ccrecall.hooks import backfill_query as backfill_query_mod
 from ccrecall.hooks import backfill_summaries as backfill_summaries_mod
 from ccrecall.hooks import backfill_tool_content as backfill_tool_content_mod
+from ccrecall.hooks import drain_session_recaps as drain_session_recaps_mod
 from ccrecall.hooks import import_conversations as import_mod
 from ccrecall.hooks import sync_current as sync_current_mod
+from ccrecall.llm_summary_db import get_connection as get_recap_connection
+from ccrecall.recap_state import prune_retention, reset_health, retention_candidates, run_retention_candidates
 
 # store_true flags carry no --no-<flag> negation, matching the former argparse.
 _FLAG = Parameter(negative=[])
@@ -55,10 +60,7 @@ _SEARCH_MODE = Group("Search mode", validator=_exactly_one_query_or_status)
 
 
 _LLM_SUMMARY_MODE = Group("Selection")
-_LLM_SUMMARY_DOC = """Compatibility command for queued Session Recaps.
-
-The durable recap drainer will process these selectors in a later release.
-"""
+_LLM_SUMMARY_DOC = """Queue selected Session Recaps (legacy command name retained)."""
 
 # Output format is global: the meta launcher's --json fills ctx.json_mode, which
 # read commands map to their run()'s output_format kwd. list_sessions -> --list
@@ -233,27 +235,74 @@ def cmd_backfill_llm_summaries(
     limit: Annotated[
         int | None,
         _LLM_SUMMARY_MODE,
-        Parameter(validator=Number(gte=1), help="Process at most N eligible branch candidates this run (>= 1)."),
+        Parameter(validator=Number(gte=1), help="Start at most N provider attempts from this run (>= 1)."),
     ] = None,
     session: Annotated[
         str | None,
         _LLM_SUMMARY_MODE,
         Parameter(help="Only enrich this session UUID."),
     ] = None,
+    retry_failures: Annotated[
+        bool, _FLAG, Parameter(name="--retry-failures", help="Retry selected blocked recaps in a new lineage.")
+    ] = False,
+    model: Annotated[str | None, Parameter(help="One-run provider model override (not persisted).")] = None,
+    max_budget_usd: Annotated[
+        float | None, Parameter(validator=Number(gt=0), help="One-run maximum provider budget in USD.")
+    ] = None,
+    timeout_seconds: Annotated[
+        int | None, Parameter(validator=Number(gte=1), help="One-run provider timeout in seconds.")
+    ] = None,
     ctx: CLIContextParam = DEFAULT_CLI_CONTEXT,
 ) -> None:
-    raise SystemExit(
-        backfill_llm_summaries_mod.run(
-            days=days,
-            limit=limit,
-            session=session,
-            verbose=ctx.debug,
-            current_session=False,
-        )
-    )
+    options = {"days": days, "limit": limit, "session": session, "verbose": ctx.debug, "current_session": False}
+    if retry_failures:
+        options["retry_failures"] = retry_failures
+    if model is not None:
+        options["model"] = model
+    if max_budget_usd is not None:
+        options["max_budget_usd"] = max_budget_usd
+    if timeout_seconds is not None:
+        options["timeout_seconds"] = timeout_seconds
+    options["json_mode"] = ctx.json_mode
+    raise SystemExit(backfill_llm_summaries_mod.run(**options))
 
 
 cmd_backfill_llm_summaries.__doc__ = _LLM_SUMMARY_DOC
+
+
+@recap_app.command(name="recover")
+def cmd_recap_recover() -> None:
+    """Recover expired recap claims, then drain eligible queued work."""
+    raise SystemExit(drain_session_recaps_mod.run())
+
+
+@recap_app.command(name="reset-health")
+def cmd_recap_reset_health() -> None:
+    """Clear the provider cooldown; this never overrides job safety blocks."""
+    with get_recap_connection(load_settings()) as conn:
+        reset_health(conn)
+
+
+@recap_app.command(name="maintain")
+def cmd_recap_maintain(
+    *,
+    prune: Annotated[bool, _FLAG, Parameter(help="Delete eligible retained lifecycle records.")] = False,
+    limit: Annotated[int, Parameter(validator=Number(gte=1), help="Maximum records to inspect.")] = 100,
+    ctx: CLIContextParam = DEFAULT_CLI_CONTEXT,
+) -> None:
+    """Preview bounded recap retention work; use --prune to apply it."""
+    cutoff = (Instant.now() - TimeDelta(days=90)).format_iso()
+    with get_recap_connection(load_settings()) as conn:
+        attempts = retention_candidates(conn, cutoff, limit=limit)
+        runs = run_retention_candidates(conn, cutoff, limit=limit)
+        if prune:
+            attempts, runs = prune_retention(conn, cutoff, limit=limit)
+    action = "pruned" if prune else "would prune"
+    result = {"attempts": len(attempts), "runs": len(runs), "pruned": prune}
+    if ctx.json_mode:
+        print(json.dumps({"session_recap_maintenance": result}, sort_keys=True))
+    else:
+        print(f"Session Recap maintenance: {result['attempts']} attempts, {result['runs']} runs {action}")
 
 
 @app.command(name="recent")

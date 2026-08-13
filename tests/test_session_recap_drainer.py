@@ -13,7 +13,7 @@ from ccrecall.hooks.durability import journal_lock
 from ccrecall.llm_summarizer import STATUS_INVALID_OUTPUT, InvocationResult, invoke_claude
 from ccrecall.llm_summary_db import get_connection
 from ccrecall.recap_input import load_recap_input
-from ccrecall.recap_state import upsert_job
+from ccrecall.recap_state import create_run, upsert_job
 
 UUID = "12345678-1234-1234-1234-123456789abc"
 
@@ -698,3 +698,194 @@ def test_drainer_does_not_invoke_when_runtime_lease_is_contended(tmp_path, monke
         drain_session_recaps, "invoke_claude", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError())
     )
     assert drain_session_recaps.run() == 0
+
+
+def test_manual_controls_are_used_for_attempt_invocation_and_materialization(tmp_path, monkeypatch):
+    settings = _settings(tmp_path)
+    with get_connection(settings) as conn:
+        conn.execute("INSERT INTO projects(path, key) VALUES ('/p', 'p')")
+        conn.execute("INSERT INTO sessions(uuid, project_id) VALUES (?, 1)", (UUID,))
+        conn.execute("INSERT INTO branches(session_id, leaf_uuid, is_active) VALUES (1, 'leaf', 1)")
+        recap = load_recap_input(conn.cursor(), 1)
+        conn.execute("UPDATE branches SET recap_input_hash = ? WHERE id = 1", (recap.input_hash,))
+        upsert_job(conn, 1, recap.input_hash, "manual", "2026-08-12T10:00:00Z")
+    monkeypatch.setattr(drain_session_recaps, "sync_session_for_finalization", lambda *_args: 0)
+    monkeypatch.setattr(
+        drain_session_recaps, "evaluate_branch", lambda *_args: type("Decision", (), {"eligible": True})()
+    )
+    monkeypatch.setattr(drain_session_recaps, "posix_process_groups_supported", lambda: True)
+    seen = []
+
+    def invoke(_path, effective, **_kwargs):
+        seen.append(effective.copy())
+        return InvocationResult(STATUS_INVALID_OUTPUT)
+
+    monkeypatch.setattr(drain_session_recaps, "invoke_claude", invoke)
+    assert drain_session_recaps._process_job(
+        settings, 1, 1, controls={"model": "opus", "max_budget_usd": 2.5, "timeout_seconds": 42}
+    )
+    assert seen[0]["llm_summary_model"] == "opus"
+    assert seen[0]["llm_summary_max_budget_usd"] == 2.5
+    assert seen[0]["llm_summary_timeout_seconds"] == 42
+    assert settings["llm_summary_model"] == "sonnet"
+    with get_connection(settings) as conn:
+        assert conn.execute("SELECT model, max_budget_usd, timeout_seconds FROM session_recap_attempts").fetchone() == (
+            "opus",
+            2.5,
+            42,
+        )
+
+
+def test_drainer_limit_never_falls_through_to_unowned_pending_work(tmp_path, monkeypatch):
+    settings = _settings(tmp_path)
+    with get_connection(settings) as conn:
+        conn.execute("INSERT INTO projects(path, key) VALUES ('/p', 'p')")
+        candidates = []
+        for session_id, session_uuid in enumerate((UUID, "87654321-4321-4321-4321-cba987654321"), 1):
+            conn.execute("INSERT INTO sessions(uuid, project_id) VALUES (?, 1)", (session_uuid,))
+            conn.execute("INSERT INTO branches(session_id, leaf_uuid, is_active) VALUES (?, 'leaf', 1)", (session_id,))
+            recap = load_recap_input(conn.cursor(), session_id)
+            conn.execute("UPDATE branches SET recap_input_hash = ? WHERE id = ?", (recap.input_hash, session_id))
+            upsert_job(conn, session_id, recap.input_hash, "manual", "2026-08-12T10:00:00Z")
+            candidates.append((session_id, recap.input_hash, "pending"))
+        run_id = create_run(conn, "manual", "{}", candidates, "2026-08-12T10:00:00Z", attempt_limit=1)
+    monkeypatch.setattr(drain_session_recaps, "load_settings", lambda: settings)
+    monkeypatch.setattr(drain_session_recaps, "try_acquire_pid_file", lambda _key: True)
+    monkeypatch.setattr(drain_session_recaps, "remove_pid_file", lambda _key: None)
+    monkeypatch.setattr(drain_session_recaps, "sync_session_for_finalization", lambda *_args: 0)
+    monkeypatch.setattr(
+        drain_session_recaps, "evaluate_branch", lambda *_args: type("Decision", (), {"eligible": True})()
+    )
+    monkeypatch.setattr(drain_session_recaps, "posix_process_groups_supported", lambda: True)
+    invocations = []
+    monkeypatch.setattr(
+        drain_session_recaps,
+        "invoke_claude",
+        lambda *_args, **_kwargs: (invocations.append(True), InvocationResult(STATUS_INVALID_OUTPUT))[1],
+    )
+
+    assert drain_session_recaps.run() == 0
+    assert invocations == [True]
+    with get_connection(settings) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM session_recap_attempts").fetchone() == (1,)
+        assert conn.execute(
+            "SELECT final_disposition FROM session_recap_run_candidates WHERE run_id = ? ORDER BY session_id", (run_id,)
+        ).fetchall() == [("attempted",), ("deferred_by_limit",)]
+
+
+def test_drainer_terminalizes_changed_manual_snapshot_and_processes_current_generation(tmp_path, monkeypatch):
+    settings = _settings(tmp_path)
+    with get_connection(settings) as conn:
+        conn.execute("INSERT INTO projects(path, key) VALUES ('/p', 'p')")
+        conn.execute("INSERT INTO sessions(uuid, project_id) VALUES (?, 1)", (UUID,))
+        conn.execute("INSERT INTO branches(session_id, leaf_uuid, is_active) VALUES (1, 'leaf', 1)")
+        original = load_recap_input(conn.cursor(), 1)
+        conn.execute("UPDATE branches SET recap_input_hash = ? WHERE id = 1", (original.input_hash,))
+        upsert_job(conn, 1, original.input_hash, "manual", "2026-08-12T10:00:00Z")
+        run_id = create_run(
+            conn, "manual", "{}", [(1, original.input_hash, "pending")], "2026-08-12T10:00:00Z", attempt_limit=None
+        )
+        conn.execute(
+            "INSERT INTO messages(session_id, uuid, role, content) VALUES (1, 'changed', 'user', 'changed input')"
+        )
+        message_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.execute("INSERT INTO branch_messages(branch_id, message_id, position) VALUES (1, ?, 0)", (message_id,))
+        current = load_recap_input(conn.cursor(), 1)
+        conn.execute("UPDATE branches SET recap_input_hash = ? WHERE id = 1", (current.input_hash,))
+        upsert_job(conn, 1, current.input_hash, "session_end", "2026-08-12T10:01:00Z")
+    monkeypatch.setattr(drain_session_recaps, "load_settings", lambda: settings)
+    monkeypatch.setattr(drain_session_recaps, "try_acquire_pid_file", lambda _key: True)
+    monkeypatch.setattr(drain_session_recaps, "remove_pid_file", lambda _key: None)
+    monkeypatch.setattr(drain_session_recaps, "sync_session_for_finalization", lambda *_args: 0)
+    monkeypatch.setattr(
+        drain_session_recaps, "evaluate_branch", lambda *_args: type("Decision", (), {"eligible": True})()
+    )
+    monkeypatch.setattr(drain_session_recaps, "posix_process_groups_supported", lambda: True)
+    invocations = []
+    monkeypatch.setattr(
+        drain_session_recaps,
+        "invoke_claude",
+        lambda *_args, **_kwargs: (invocations.append(True), InvocationResult(STATUS_INVALID_OUTPUT))[1],
+    )
+
+    assert drain_session_recaps.run() == 0
+    assert invocations == [True]
+    with get_connection(settings) as conn:
+        assert conn.execute("SELECT state FROM session_recap_runs WHERE id = ?", (run_id,)).fetchone() == ("complete",)
+        assert conn.execute(
+            "SELECT final_disposition, started_attempt_id FROM session_recap_run_candidates WHERE run_id = ?", (run_id,)
+        ).fetchone() == ("stale_input_changed", None)
+        assert conn.execute("SELECT input_hash, trigger FROM session_recap_attempts").fetchone() == (
+            current.input_hash,
+            "session_end",
+        )
+
+
+def test_drainer_global_abort_only_marks_the_run_that_owned_the_failed_attempt(tmp_path, monkeypatch):
+    settings = _settings(tmp_path)
+    with get_connection(settings) as conn:
+        conn.execute("INSERT INTO projects(path, key) VALUES ('/p', 'p')")
+        candidates = []
+        for session_id, session_uuid in enumerate((UUID, "87654321-4321-4321-4321-cba987654321"), 1):
+            conn.execute("INSERT INTO sessions(uuid, project_id) VALUES (?, 1)", (session_uuid,))
+            conn.execute("INSERT INTO branches(session_id, leaf_uuid, is_active) VALUES (?, 'leaf', 1)", (session_id,))
+            recap = load_recap_input(conn.cursor(), session_id)
+            conn.execute("UPDATE branches SET recap_input_hash = ? WHERE id = ?", (recap.input_hash, session_id))
+            upsert_job(conn, session_id, recap.input_hash, "manual", "2026-08-12T10:00:00Z")
+            candidates.append((session_id, recap.input_hash, "pending"))
+        failed_run = create_run(conn, "manual", "{}", [candidates[0]], "2026-08-12T10:00:00Z", attempt_limit=None)
+        other_run = create_run(conn, "manual", "{}", [candidates[1]], "2026-08-12T10:00:00Z", attempt_limit=None)
+    monkeypatch.setattr(drain_session_recaps, "load_settings", lambda: settings)
+    monkeypatch.setattr(drain_session_recaps, "try_acquire_pid_file", lambda _key: True)
+    monkeypatch.setattr(drain_session_recaps, "remove_pid_file", lambda _key: None)
+    monkeypatch.setattr(drain_session_recaps, "_process_job", lambda *_args, **_kwargs: False)
+
+    assert drain_session_recaps.run() == 0
+
+    with get_connection(settings) as conn:
+        assert conn.execute("SELECT state FROM session_recap_runs WHERE id = ?", (failed_run,)).fetchone() == (
+            "incomplete",
+        )
+        assert conn.execute(
+            "SELECT final_disposition FROM session_recap_run_candidates WHERE run_id = ?", (failed_run,)
+        ).fetchone() == ("deferred_after_abort",)
+        assert conn.execute("SELECT state FROM session_recap_runs WHERE id = ?", (other_run,)).fetchone() == (
+            "complete",
+        )
+        assert conn.execute(
+            "SELECT final_disposition FROM session_recap_run_candidates WHERE run_id = ?", (other_run,)
+        ).fetchone() == ("deferred_by_limit",)
+
+
+def test_drainer_does_not_finalize_run_created_after_empty_dequeue(tmp_path, monkeypatch):
+    settings = _settings(tmp_path)
+    monkeypatch.setattr(drain_session_recaps, "load_settings", lambda: settings)
+    monkeypatch.setattr(drain_session_recaps, "try_acquire_pid_file", lambda _key: True)
+    monkeypatch.setattr(drain_session_recaps, "remove_pid_file", lambda _key: None)
+    original_next_pending = drain_session_recaps._next_pending
+    created_run = None
+
+    def next_pending_then_create(conn, now):
+        nonlocal created_run
+        assert original_next_pending(conn, now) is None
+        conn.execute("INSERT INTO projects(path, key) VALUES ('/p', 'p')")
+        conn.execute("INSERT INTO sessions(uuid, project_id) VALUES (?, 1)", (UUID,))
+        conn.execute("INSERT INTO branches(session_id, leaf_uuid, is_active) VALUES (1, 'leaf', 1)")
+        recap = load_recap_input(conn.cursor(), 1)
+        conn.execute("UPDATE branches SET recap_input_hash = ? WHERE id = 1", (recap.input_hash,))
+        upsert_job(conn, 1, recap.input_hash, "manual", now)
+        created_run = create_run(conn, "manual", "{}", [(1, recap.input_hash, "pending")], now, attempt_limit=None)
+        return
+
+    monkeypatch.setattr(drain_session_recaps, "_next_pending", next_pending_then_create)
+
+    assert drain_session_recaps.run() == 0
+
+    with get_connection(settings) as conn:
+        assert conn.execute("SELECT state FROM session_recap_runs WHERE id = ?", (created_run,)).fetchone() == (
+            "running",
+        )
+        assert conn.execute(
+            "SELECT final_disposition FROM session_recap_run_candidates WHERE run_id = ?", (created_run,)
+        ).fetchone() == (None,)
+        assert conn.execute("SELECT state FROM session_recap_jobs WHERE session_id = 1").fetchone() == ("pending",)

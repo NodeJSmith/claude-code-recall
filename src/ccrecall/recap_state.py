@@ -946,15 +946,24 @@ def run_partitions(conn: sqlite3.Connection, run_id: int) -> tuple[int, int]:
     return candidates, finalized
 
 
-def latest_attempts(conn: sqlite3.Connection, session_id: int | None = None) -> list[sqlite3.Row | tuple]:
+def latest_attempts(
+    conn: sqlite3.Connection, session_id: int | None = None, *, limit: int | None = None
+) -> list[sqlite3.Row | tuple]:
     sql = (
         "SELECT a.* FROM session_recap_attempts a WHERE a.id = ("
         "SELECT b.id FROM session_recap_attempts b WHERE b.job_session_id = a.job_session_id "
         "ORDER BY b.id DESC LIMIT 1)"
     )
     if session_id is not None:
-        return conn.execute(sql + " AND a.job_session_id = ?", (session_id,)).fetchall()
-    return conn.execute(sql).fetchall()
+        sql += " AND a.job_session_id = ?"
+        params: tuple[object, ...] = (session_id,)
+    else:
+        params = ()
+    sql += " ORDER BY a.id DESC"
+    if limit is not None:
+        sql += " LIMIT ?"
+        params += (limit,)
+    return conn.execute(sql, params).fetchall()
 
 
 def retention_candidates(conn: sqlite3.Connection, cutoff: str, *, limit: int) -> list[int]:
@@ -978,11 +987,13 @@ def retention_candidates(conn: sqlite3.Connection, cutoff: str, *, limit: int) -
               JOIN protected_attempts p ON p.id = a.id
             ) SELECT a.id FROM session_recap_attempts a
            WHERE a.finished_at < ? AND a.state IN ('succeeded', 'stale_discarded', 'timeout',
-              'budget_exceeded', 'unusable_output', 'global_abort', 'cleanup_failed',
-              'abandoned', 'cancelled_before_launch') AND NOT EXISTS (
-                SELECT 1 FROM retained_lineages r WHERE r.job_session_id = a.job_session_id
-                  AND r.retry_lineage = a.retry_lineage
-              ) ORDER BY a.job_session_id, a.retry_lineage, a.id LIMIT ?""",
+               'budget_exceeded', 'unusable_output', 'global_abort', 'cleanup_failed',
+               'abandoned', 'cancelled_before_launch') AND NOT EXISTS (
+                 SELECT 1 FROM retained_lineages r WHERE r.job_session_id = a.job_session_id
+                   AND r.retry_lineage = a.retry_lineage
+               ) AND NOT EXISTS (
+                 SELECT 1 FROM session_recap_run_candidates c WHERE c.started_attempt_id = a.id
+               ) ORDER BY a.job_session_id, a.retry_lineage, a.id LIMIT ?""",
         (cutoff, limit),
     ).fetchall()
     return [row[0] for row in rows]
@@ -991,8 +1002,78 @@ def retention_candidates(conn: sqlite3.Connection, cutoff: str, *, limit: int) -
 def run_retention_candidates(conn: sqlite3.Connection, cutoff: str, *, limit: int) -> list[int]:
     """Detailed closed run records become prune-eligible after the retention window."""
     rows = conn.execute(
-        "SELECT id FROM session_recap_runs WHERE started_at < ? AND state IN ('complete', 'incomplete') "
-        "ORDER BY started_at, id LIMIT ?",
-        (cutoff, limit),
+        """SELECT r.id FROM session_recap_runs r WHERE r.started_at < ?
+           AND r.state IN ('complete', 'incomplete') AND NOT EXISTS (
+             SELECT 1 FROM session_recap_run_candidates c JOIN session_recap_attempts a
+               ON a.id = c.started_attempt_id WHERE c.run_id = r.id AND (
+                 a.finished_at >= ? OR a.state NOT IN ('succeeded', 'stale_discarded', 'timeout',
+                   'budget_exceeded', 'unusable_output', 'global_abort', 'cleanup_failed',
+                   'abandoned', 'cancelled_before_launch') OR EXISTS (
+                     SELECT 1 FROM session_recap_attempts p WHERE p.job_session_id = a.job_session_id
+                       AND p.retry_lineage = a.retry_lineage AND (p.state IN ('reserved', 'running')
+                         OR (p.state = 'succeeded' AND p.input_hash IS (
+                           SELECT j.requested_input_hash FROM session_recap_jobs j WHERE j.session_id = p.job_session_id
+                         ) AND p.id = (SELECT MAX(s.id) FROM session_recap_attempts s
+                           WHERE s.job_session_id = p.job_session_id AND s.input_hash IS p.input_hash
+                             AND s.state = 'succeeded'))
+                         OR p.id = (SELECT MAX(t.id) FROM session_recap_attempts t
+                           WHERE t.job_session_id = p.job_session_id AND t.state IN ('succeeded', 'stale_discarded',
+                             'timeout', 'budget_exceeded', 'unusable_output', 'global_abort', 'cleanup_failed',
+                             'abandoned', 'cancelled_before_launch')))
+                   )
+               )
+           ) ORDER BY r.started_at, r.id LIMIT ?""",
+        (cutoff, cutoff, limit),
     ).fetchall()
     return [row[0] for row in rows]
+
+
+def prune_retention(conn: sqlite3.Connection, cutoff: str, *, limit: int) -> tuple[int, int]:
+    """Prune bounded terminal detail without deleting jobs, recaps, or uncertain packets."""
+    runs = run_retention_candidates(conn, cutoff, limit=limit)
+    # Run candidates retain their selected attempt for immutable accounting. Remove
+    # only eligible closed-run accounting before considering those attempts.
+    conn.executemany("DELETE FROM session_recap_run_candidates WHERE run_id = ?", [(value,) for value in runs])
+    attempts = retention_candidates(conn, cutoff, limit=limit)
+    conn.executemany("DELETE FROM session_recap_quarantine WHERE attempt_id = ?", [(value,) for value in attempts])
+    conn.executemany("DELETE FROM session_recap_attempts WHERE id = ?", [(value,) for value in attempts])
+    conn.executemany("DELETE FROM session_recap_runs WHERE id = ?", [(value,) for value in runs])
+    return len(attempts), len(runs)
+
+
+def run_accounting(conn: sqlite3.Connection, run_id: int) -> dict[str, object]:
+    """Return durable immutable membership and started-attempt partitions."""
+    population, finalized = run_partitions(conn, run_id)
+    initial = dict(
+        conn.execute(
+            "SELECT initial_disposition, COUNT(*) FROM session_recap_run_candidates WHERE run_id = ? "
+            "GROUP BY initial_disposition",
+            (run_id,),
+        )
+    )
+    final = dict(
+        conn.execute(
+            "SELECT final_disposition, COUNT(*) FROM session_recap_run_candidates WHERE run_id = ? "
+            "AND final_disposition IS NOT NULL GROUP BY final_disposition",
+            (run_id,),
+        )
+    )
+    outcomes = dict(
+        conn.execute(
+            "SELECT a.state, COUNT(*) FROM session_recap_run_candidates c "
+            "JOIN session_recap_attempts a ON a.id = c.started_attempt_id WHERE c.run_id = ? GROUP BY a.state",
+            (run_id,),
+        )
+    )
+    run = conn.execute("SELECT state, attempt_limit FROM session_recap_runs WHERE id = ?", (run_id,)).fetchone()
+    return {
+        "run_id": run_id,
+        "state": run[0] if run else "missing",
+        "attempt_limit": run[1] if run else None,
+        "population": population,
+        "finalized": finalized,
+        "initial_dispositions": initial,
+        "final_dispositions": final,
+        "started_attempts": sum(outcomes.values()),
+        "attempt_outcomes": outcomes,
+    }

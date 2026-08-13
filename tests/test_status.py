@@ -2,11 +2,15 @@
 
 import json
 import sqlite3
+import subprocess
+import sys
 from unittest.mock import patch
 
+from ccrecall.config import load_settings
 from ccrecall.db import get_connection
 from ccrecall.embeddings import EMBEDDING_MODEL, EMBEDDING_VERSION
-from ccrecall.status import collect_status, run
+from ccrecall.status import collect_status, print_status_report, run
+from ccrecall.summary_enrichment import build_stored_enrichment_envelope
 from ccrecall.tool_content_status import count_pending_missing_jsonl
 
 
@@ -22,6 +26,16 @@ def test_collect_status_skips_deep_ingestion_by_default(tmp_path):
     assert status["ingestion"] is None
     assert "tool_content" in status
     assert "embeddings" in status
+
+
+def test_status_import_stays_outside_provider_boundary():
+    probe = """
+import sys
+import ccrecall.status
+assert 'ccrecall.llm_summarizer' not in sys.modules
+"""
+    completed = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, timeout=30, check=False)
+    assert completed.returncode == 0, completed.stderr
 
 
 def test_collect_status_does_not_create_missing_database(tmp_path):
@@ -67,6 +81,7 @@ def test_collect_status_reports_outdated_schema_without_migrating(tmp_path):
 
     assert status["schema"]["current"] is False
     assert "tool_content" in status["schema"]["reason"]
+    assert status["recap"]["capability"] == "unavailable"
 
 
 def test_collect_status_check_ingestion_reports_outdated_schema_without_migrating(tmp_path):
@@ -183,6 +198,158 @@ def test_run_human_mentions_consolidated_sections(tmp_path, capsys):
     assert "Ingestion:" in out
     assert "Tool content:" in out
     assert "Embeddings:" in out
+
+
+def test_recap_status_reports_defaults_platform_and_read_only_lifecycle(tmp_path, monkeypatch):
+    db_path = tmp_path / "status.db"
+    with get_connection({"db_path": str(db_path)}, load_vec=False) as conn:
+        conn.execute(
+            "INSERT INTO session_recap_provider_health(singleton, retry_after) VALUES (1, '2999-01-01T00:00:00Z')"
+        )
+    before = db_path.stat().st_mtime_ns
+    monkeypatch.setattr("ccrecall.status.posix_process_groups_supported", lambda: False)
+    status = collect_status(db=db_path)
+    assert status["recap"]["capability"] == "ready"
+    assert status["recap"]["defaults"]["model"] == "sonnet"
+    assert status["recap"]["platform"] == {"provider_supported": False, "reason": "platform_unsupported"}
+    assert status["recap"]["quarantine"]["max_count"] > 0
+    assert status["recap"]["latest_attempt_outcomes"] == {}
+    assert db_path.stat().st_mtime_ns == before
+
+
+def test_recap_status_reports_queued_jobs_as_provider_disabled_when_unsupported(tmp_path, monkeypatch, capsys):
+    db_path = tmp_path / "status.db"
+    with get_connection({"db_path": str(db_path)}, load_vec=False) as conn:
+        session_id = conn.execute("INSERT INTO sessions(uuid) VALUES ('queued') RETURNING id").fetchone()[0]
+        conn.execute(
+            "INSERT INTO session_recap_jobs(session_id, trigger, state, requested_at, updated_at) "
+            "VALUES (?, 'test', 'pending', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+            (session_id,),
+        )
+    before = db_path.stat().st_mtime_ns
+    monkeypatch.setattr("ccrecall.status.posix_process_groups_supported", lambda: False)
+
+    run(db=db_path, output_format="json")
+
+    status = json.loads(capsys.readouterr().out)
+    assert status["recap"]["jobs"]["runnable"] == 0
+    assert status["recap"]["jobs"]["provider_disabled_pending"] == 1
+
+    run(db=db_path)
+
+    assert "runnable: 0; provider-disabled pending: 1" in capsys.readouterr().out
+    assert db_path.stat().st_mtime_ns == before
+    verify = sqlite3.connect(db_path)
+    try:
+        assert verify.execute("SELECT state, reason FROM session_recap_jobs").fetchone() == ("pending", None)
+    finally:
+        verify.close()
+
+
+def test_recap_status_classifies_invalid_renderer_caches_as_stale(tmp_path):
+    db_path = tmp_path / "status.db"
+    with get_connection({"db_path": str(db_path)}, load_vec=False) as conn:
+        for session_id, input_contract, policy, envelope in (
+            (
+                1,
+                0,
+                1,
+                build_stored_enrichment_envelope(
+                    {"summary": "obsolete input contract"},
+                    model="test",
+                    generated_at="2026-01-01T00:00:00Z",
+                    attempt_id=1,
+                    recap_input_hash="input",
+                ),
+            ),
+            (
+                2,
+                1,
+                0,
+                build_stored_enrichment_envelope(
+                    {"summary": "obsolete eligibility policy"},
+                    model="test",
+                    generated_at="2026-01-01T00:00:00Z",
+                    attempt_id=2,
+                    recap_input_hash="input",
+                ),
+            ),
+            (
+                3,
+                1,
+                1,
+                build_stored_enrichment_envelope(
+                    {"summary": "current"},
+                    model="test",
+                    generated_at="2026-01-01T00:00:00Z",
+                    attempt_id=3,
+                    recap_input_hash="input",
+                ),
+            ),
+            (4, 1, 1, {"version": 2, "summary": "missing required metadata"}),
+        ):
+            conn.execute("INSERT INTO sessions(id, uuid) VALUES (?, ?)", (session_id, f"session-{session_id}"))
+            conn.execute(
+                "INSERT INTO branches(session_id, leaf_uuid, is_active, recap_input_hash, "
+                "summary_enrichment_json, summary_enrichment_version, summary_enrichment_status, "
+                "summary_enrichment_input_hash, summary_enrichment_input_contract_version, "
+                "summary_enrichment_policy_version) VALUES (?, 'leaf', 1, 'input', ?, 2, 'ok', 'input', ?, ?)",
+                (session_id, json.dumps(envelope) if isinstance(envelope, dict) else envelope, input_contract, policy),
+            )
+    before = db_path.stat().st_mtime_ns
+
+    status = collect_status(db=db_path)
+
+    assert status["recap"]["populations"] == {"current": 1, "stale": 3, "legacy": 0, "pre_recap": 0}
+    assert db_path.stat().st_mtime_ns == before
+
+
+def test_recap_status_lists_safe_recovery_commands_for_blocked_work_and_quarantine(tmp_path, monkeypatch, capsys):
+    db_path = tmp_path / "status.db"
+    retryable_uuid = "12345678-1234-1234-1234-123456789abc"
+    with get_connection({"db_path": str(db_path)}, load_vec=False) as conn:
+        for session_uuid, reason in ((retryable_uuid, "timeout_exhausted"), ("cleanup", "cleanup_failed")):
+            session_id = conn.execute("INSERT INTO sessions(uuid) VALUES (?) RETURNING id", (session_uuid,)).fetchone()[
+                0
+            ]
+            conn.execute(
+                "INSERT INTO session_recap_jobs(session_id, trigger, state, reason, requested_at, updated_at) "
+                "VALUES (?, 'test', 'blocked', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+                (session_id, reason),
+            )
+        conn.execute(
+            "INSERT INTO session_recap_attempts(id, session_id, job_session_id, input_hash, input_contract_version, "
+            "policy_version, recap_contract_version, claim_token, trigger, state, created_at) "
+            "VALUES (1, 2, 2, 'input', 1, 1, 2, 0, 'test', 'cleanup_failed', CURRENT_TIMESTAMP)"
+        )
+        conn.execute(
+            "INSERT INTO session_recap_quarantine(attempt_id, path, nonce, byte_size, cleanup_state, created_at) "
+            "VALUES (1, '/packet', 'nonce', 1, 'uncertain', CURRENT_TIMESTAMP)"
+        )
+    before = db_path.stat().st_mtime_ns
+    settings = load_settings()
+    settings.update({"recap_quarantine_max_count": 1, "recap_quarantine_max_bytes": 1})
+    monkeypatch.setattr(
+        "ccrecall.status.load_settings",
+        lambda: settings,
+    )
+    status = collect_status(db=db_path)
+    assert status["recap"]["guidance"]["retry"] == [
+        {
+            "session": retryable_uuid,
+            "command": f"ccrecall backfill llm-summaries --session {retryable_uuid} --retry-failures",
+        }
+    ]
+    assert status["recap"]["guidance"]["cleanup"] == [{"session": "cleanup", "command": "ccrecall recap recover"}]
+    assert status["recap"]["guidance"]["quarantine"] == "ccrecall recap maintain"
+    print_status_report(status)
+    output = capsys.readouterr().out
+    assert f"--session {retryable_uuid} --retry-failures" in output
+    assert "--session cleanup --retry-failures" not in output
+    assert "cleanup recovery (cleanup): ccrecall recap recover" in output
+    assert "quarantine recovery: ccrecall recap maintain" in output
+    assert "force" not in output
+    assert db_path.stat().st_mtime_ns == before
 
 
 def test_pending_missing_jsonl_counts_only_unrecoverable_pending_rows(memory_db, tmp_path):

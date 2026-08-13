@@ -1,7 +1,7 @@
 ---
 task_id: "T09"
 title: "Build recap CLI status and lifecycle"
-status: "planned"
+status: "done"
 depends_on: ["T05", "T06", "T07", "T08"]
 implements: ["FR#12", "FR#13", "FR#15", "FR#18", "FR#19", "FR#20", "FR#22", "FR#25", "FR#26", "AC#6", "AC#7", "AC#9", "AC#11", "AC#12", "AC#13", "AC#15", "AC#20", "AC#21"]
 ---

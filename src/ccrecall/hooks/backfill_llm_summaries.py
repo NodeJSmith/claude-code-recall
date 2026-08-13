@@ -1,9 +1,17 @@
-"""Compatibility entry point superseded by the durable recap drainer."""
+"""Manual, queue-backed Session Recap selection and lifecycle operations."""
 
 import argparse
+import json
 import logging
+import subprocess
 
-from ccrecall.config import remove_pid_file, try_acquire_pid_file
+from whenever import Instant
+
+from ccrecall.config import load_settings, remove_pid_file, try_acquire_pid_file
+from ccrecall.llm_summary_db import get_connection, recap_schema_capability
+from ccrecall.process_cleanup import posix_process_groups_supported
+from ccrecall.recap_eligibility import evaluate_branch
+from ccrecall.recap_state import create_run, finalize_run, run_accounting, targeted_retry, upsert_job
 
 PID_KEY = "ccrecall-backfill-llm-summaries"
 EXIT_OK = 0
@@ -15,27 +23,119 @@ def run(
     limit: int | None = None,
     session: str | None = None,
     current_session: bool = False,
-    force: bool = False,
+    retry_failures: bool = False,
+    model: str | None = None,
+    max_budget_usd: float | None = None,
+    timeout_seconds: int | None = None,
     verbose: bool = False,
+    json_mode: bool = False,
 ) -> int:
-    """Keep the public command inert until T07 wires the durable drainer."""
-    del days, limit, session, current_session, force, verbose
+    """Commit a durable manual snapshot, then ask the shared drainer to process it."""
+    del current_session, verbose
     if not try_acquire_pid_file(PID_KEY):
         return EXIT_OK
     try:
-        logging.getLogger(__name__).info("LLM summary compatibility worker awaits the recap drainer")
+        settings = load_settings()
+        now = Instant.now().format_iso()
+        platform_supported = posix_process_groups_supported()
+        selectors = {
+            "days": days,
+            "session": session,
+            "retry_failures": retry_failures,
+            "model": model,
+            "max_budget_usd": max_budget_usd,
+            "timeout_seconds": timeout_seconds,
+        }
+        with get_connection(settings) as conn:
+            if recap_schema_capability(conn) != "ready":
+                logging.getLogger(__name__).warning("Session Recap schema is unavailable; run ccrecall import")
+                return EXIT_OK
+            sql = (
+                "SELECT s.id, s.uuid, b.id, b.recap_input_hash FROM sessions s "
+                "JOIN branches b ON b.session_id = s.id WHERE b.is_active = 1"
+            )
+            params: list[object] = []
+            if session:
+                sql += " AND s.uuid LIKE ?"
+                params.append(f"{session}%")
+            if days:
+                sql += " AND b.ended_at >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ? || ' days')"
+                params.append(f"-{days}")
+            sql += " ORDER BY b.ended_at, s.id"
+            candidates: list[tuple[int, str | None, str]] = []
+            for session_id, _uuid, branch_id, input_hash in conn.execute(sql, params):
+                decision = evaluate_branch(conn.cursor(), branch_id)
+                if not decision.eligible:
+                    candidates.append((session_id, input_hash, "excluded"))
+                    continue
+                existing = conn.execute(
+                    "SELECT state, reason FROM session_recap_jobs WHERE session_id = ?", (session_id,)
+                ).fetchone()
+                if retry_failures and existing is not None and existing[0] == "blocked":
+                    targeted_retry(conn, session_id, now)
+                upsert_job(conn, session_id, input_hash, "manual", now)
+                if not platform_supported:
+                    conn.execute(
+                        "UPDATE session_recap_jobs SET state = 'blocked', reason = 'platform_unsupported', "
+                        "lease_expires_at = NULL WHERE session_id = ?",
+                        (session_id,),
+                    )
+                state, reason = conn.execute(
+                    "SELECT state, reason FROM session_recap_jobs WHERE session_id = ?", (session_id,)
+                ).fetchone()
+                candidates.append((session_id, input_hash, "pending" if state == "pending" else (reason or state)))
+            run_id = create_run(
+                conn,
+                "manual",
+                json.dumps(selectors, sort_keys=True, separators=(",", ":")),
+                candidates,
+                now,
+                attempt_limit=limit,
+            )
+            if not platform_supported:
+                finalize_run(conn, run_id, now)
+        if platform_supported:
+            # Intent is committed before the detached shared worker can observe it.
+            subprocess.run(["ccrecall-drain-session-recaps"], check=False)  # noqa: S607 - installed internal entry point
+        with get_connection(settings) as conn:
+            accounting = run_accounting(conn, run_id)
+        if json_mode:
+            print(
+                json.dumps(
+                    {
+                        "session_recap_run": accounting,
+                        "provider_work_disabled": not platform_supported,
+                        "provider_work_reason": None if platform_supported else "platform_unsupported",
+                    },
+                    sort_keys=True,
+                )
+            )
+        else:
+            print(
+                f"Session Recap run {run_id}: population {accounting['population']}; "
+                f"started {accounting['started_attempts']}; state {accounting['state']}"
+            )
+            if not platform_supported:
+                print("  provider work disabled: platform_unsupported")
+            print(f"  initial: {accounting['initial_dispositions']}")
+            print(f"  final: {accounting['final_dispositions']}")
+            print(f"  outcomes: {accounting['attempt_outcomes']}")
+        logging.getLogger(__name__).info("Session Recap run %s created with %s candidates", run_id, len(candidates))
         return EXIT_OK
     finally:
         remove_pid_file(PID_KEY)
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="ccrecall-llm-summaries")
+    parser = argparse.ArgumentParser(prog="ccrecall-llm-summaries", allow_abbrev=False)
     parser.add_argument("--days", type=int)
     parser.add_argument("--limit", type=int)
     parser.add_argument("--session")
     parser.add_argument("--current-session", action="store_true")
-    parser.add_argument("--force", action="store_true")
+    parser.add_argument("--retry-failures", action="store_true")
+    parser.add_argument("--model")
+    parser.add_argument("--max-budget-usd", type=float)
+    parser.add_argument("--timeout-seconds", type=int)
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args(argv)
     if args.days is not None and args.days < 1:
@@ -44,12 +144,19 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--limit must be >= 1")
     if args.current_session and args.session is None:
         parser.error("--current-session requires --session")
+    if args.max_budget_usd is not None and args.max_budget_usd <= 0:
+        parser.error("--max-budget-usd must be > 0")
+    if args.timeout_seconds is not None and args.timeout_seconds < 1:
+        parser.error("--timeout-seconds must be >= 1")
     return run(
         days=args.days,
         limit=args.limit,
         session=args.session,
         current_session=args.current_session,
-        force=args.force,
+        retry_failures=args.retry_failures,
+        model=args.model,
+        max_budget_usd=args.max_budget_usd,
+        timeout_seconds=args.timeout_seconds,
         verbose=args.verbose,
     )
 

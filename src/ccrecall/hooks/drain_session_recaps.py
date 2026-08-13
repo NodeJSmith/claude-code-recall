@@ -49,6 +49,7 @@ from ccrecall.recap_state import (
     claim_runtime,
     complete_attempt,
     defer_for_cooldown,
+    finalize_run,
     heartbeat_job,
     heartbeat_runtime,
     mark_current,
@@ -60,6 +61,7 @@ from ccrecall.recap_state import (
     recover_expired_attempt,
     release_runtime,
     reserve_attempt,
+    reserve_attempt_for_run,
     upsert_job,
 )
 from ccrecall.summary_enrichment import build_stored_enrichment_envelope, valid_current_enrichment
@@ -196,13 +198,39 @@ def _recover_expired_claims(settings: dict, now: str) -> tuple[bool, set[int]]:
     return all_proven, recovered
 
 
-def _next_pending(conn, now: str) -> int | None:
+def _next_pending(conn, now: str) -> tuple[int, int | None, dict] | None:
+    """Prefer durable manual-run membership over ordinary queued work."""
+    # Run membership owns an immutable input snapshot. A later import creates a
+    # new job generation, so close the old member without reserving an attempt.
+    conn.execute(
+        "UPDATE session_recap_run_candidates AS c SET final_disposition = 'stale_input_changed' "
+        "WHERE final_disposition IS NULL AND EXISTS ("
+        "SELECT 1 FROM session_recap_runs r WHERE r.id = c.run_id AND r.state = 'running') "
+        "AND EXISTS (SELECT 1 FROM session_recap_jobs j WHERE j.session_id = c.session_id "
+        "AND j.requested_input_hash IS NOT c.input_hash)"
+    )
     row = conn.execute(
-        "SELECT session_id FROM session_recap_jobs WHERE state = 'pending' "
-        "AND (next_eligible_at IS NULL OR next_eligible_at <= ?) ORDER BY requested_at LIMIT 1",
+        "SELECT c.session_id, c.run_id, r.selector_json FROM session_recap_run_candidates c "
+        "JOIN session_recap_runs r ON r.id = c.run_id JOIN session_recap_jobs j ON j.session_id = c.session_id "
+        "WHERE r.state = 'running' AND c.final_disposition IS NULL AND j.state = 'pending' "
+        "AND j.requested_input_hash IS c.input_hash "
+        "AND (j.next_eligible_at IS NULL OR j.next_eligible_at <= ?) AND (r.attempt_limit IS NULL "
+        "OR (SELECT COUNT(*) FROM session_recap_run_candidates rc WHERE rc.run_id = r.id "
+        "AND rc.started_attempt_id IS NOT NULL) < r.attempt_limit) ORDER BY r.id, j.requested_at LIMIT 1",
         (now,),
     ).fetchone()
-    return row[0] if row else None
+    if row:
+        return row[0], row[1], json.loads(row[2] or "{}")
+    row = conn.execute(
+        "SELECT session_id FROM session_recap_jobs WHERE state = 'pending' "
+        "AND (next_eligible_at IS NULL OR next_eligible_at <= ?) AND NOT EXISTS ("
+        "SELECT 1 FROM session_recap_run_candidates c JOIN session_recap_runs r ON r.id = c.run_id "
+        "WHERE c.session_id = session_recap_jobs.session_id AND r.state = 'running' "
+        "AND c.final_disposition IS NULL AND session_recap_jobs.requested_input_hash IS c.input_hash) "
+        "ORDER BY requested_at LIMIT 1",
+        (now,),
+    ).fetchone()
+    return (row[0], None, {}) if row else None
 
 
 def _packet_path(settings: dict, session_id: int, attempt_id: int, nonce: str) -> Path:
@@ -257,7 +285,15 @@ def _materialize(
         return bool(changed)
 
 
-def _process_job(settings: dict, session_id: int, runtime_token: int, *, cleanup_proven: bool = False) -> bool:
+def _process_job(
+    settings: dict,
+    session_id: int,
+    runtime_token: int,
+    *,
+    cleanup_proven: bool = False,
+    run_id: int | None = None,
+    controls: dict | None = None,
+) -> bool:
     """Capture, invoke, and materialize one fenced job. Returns false after global abort."""
     now = _now()
     with get_connection(settings) as conn:
@@ -321,18 +357,29 @@ def _process_job(settings: dict, session_id: int, runtime_token: int, *, cleanup
             return True
         nonce = uuid.uuid4().hex
         try:
-            attempt_id = reserve_attempt(
-                conn,
-                session_id,
-                token,
-                input_hash,
-                "session_end",
-                now,
-                provider_token=provider_token,
-                model=settings["llm_summary_model"],
-                max_budget_usd=settings["llm_summary_max_budget_usd"],
-                timeout_seconds=settings["llm_summary_timeout_seconds"],
+            controls = controls or {}
+            effective_settings = {
+                **settings,
+                "llm_summary_model": controls.get("model") or settings["llm_summary_model"],
+                "llm_summary_max_budget_usd": controls.get("max_budget_usd") or settings["llm_summary_max_budget_usd"],
+                "llm_summary_timeout_seconds": controls.get("timeout_seconds")
+                or settings["llm_summary_timeout_seconds"],
+            }
+            reserve = reserve_attempt_for_run if run_id is not None else reserve_attempt
+            args = (
+                (conn, run_id, session_id, token, input_hash, "manual", now)
+                if run_id is not None
+                else (conn, session_id, token, input_hash, "session_end", now)
             )
+            attempt_id = reserve(
+                *args,
+                provider_token=provider_token,
+                model=effective_settings["llm_summary_model"],
+                max_budget_usd=effective_settings["llm_summary_max_budget_usd"],
+                timeout_seconds=effective_settings["llm_summary_timeout_seconds"],
+            )
+            if attempt_id is None:
+                return True
         except RuntimeError:
             return True
         packet_path = _packet_path(settings, session_id, attempt_id, nonce)
@@ -385,7 +432,7 @@ def _process_job(settings: dict, session_id: int, runtime_token: int, *, cleanup
         return True
     result = invoke_claude(
         packet_path,
-        settings,
+        effective_settings,
         persist_launch=persist_launch,
         persist_cleanup=persist_prelaunch_cleanup,
         admit_launch=admit_launch,
@@ -402,7 +449,7 @@ def _process_job(settings: dict, session_id: int, runtime_token: int, *, cleanup
                 attempt_id,
                 input_hash,
                 result.response_body,
-                settings["llm_summary_model"],
+                effective_settings["llm_summary_model"],
             )
             else "stale_discarded"
         )
@@ -474,17 +521,36 @@ def run() -> int:
             )
         if runtime_token is None:
             return 0
+        with get_connection(settings) as conn:
+            observed_run_ids = {
+                row[0] for row in conn.execute("SELECT id FROM session_recap_runs WHERE state = 'running'")
+            }
+        aborted_run_id = None
         try:
             while True:
                 with get_connection(settings) as conn:
-                    session_id = _next_pending(conn, _now())
-                if session_id is None or not _process_job(
-                    settings, session_id, runtime_token, cleanup_proven=session_id in recovered
+                    next_job = _next_pending(conn, _now())
+                if next_job is None:
+                    break
+                session_id, run_id, controls = next_job
+                if run_id is not None:
+                    observed_run_ids.add(run_id)
+                if not _process_job(
+                    settings,
+                    session_id,
+                    runtime_token,
+                    cleanup_proven=session_id in recovered,
+                    run_id=run_id,
+                    controls=controls,
                 ):
+                    aborted_run_id = run_id
                     break
         finally:
             with get_connection(settings) as conn:
                 release_runtime(conn, runtime_token)
+        with get_connection(settings) as conn:
+            for run_id in observed_run_ids:
+                finalize_run(conn, run_id, _now(), global_abort=run_id == aborted_run_id)
         return 0
     except Exception:
         logger.exception("Session recap drainer failed")
