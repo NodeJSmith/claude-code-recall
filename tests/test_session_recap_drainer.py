@@ -3,6 +3,7 @@ import io
 import json
 import sqlite3
 import threading
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -335,6 +336,14 @@ def test_finalization_sync_imports_a_project_that_is_not_excluded(tmp_path, monk
 
     assert sync_current.sync_session_for_finalization(settings, UUID) == 1
     assert len(imported) == 1
+
+
+def test_session_end_stays_importable_without_posix_locking():
+    """SessionEnd writes the clear-session handoff, which no platform opts out of."""
+    source = Path(drain_session_recaps.__file__).parent / "durability.py"
+    tree = ast.parse(source.read_text(encoding="utf-8"))
+    unconditional = {alias.name for node in tree.body if isinstance(node, ast.Import) for alias in node.names}
+    assert "fcntl" not in unconditional, "a top-level fcntl import breaks the hook on Windows"
 
 
 def test_journal_replay_drops_a_marker_for_an_excluded_project(tmp_path, monkeypatch):
