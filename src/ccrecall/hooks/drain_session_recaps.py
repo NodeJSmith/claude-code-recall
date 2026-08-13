@@ -107,7 +107,12 @@ def replay_journal(settings: dict, *, limit: int = JOURNAL_BATCH_SIZE) -> int:
     """Replay committed intent before deleting its owner-only journal marker."""
     root = get_db_path(settings).parent
     replayed = 0
-    for marker in sorted(root.glob(f"{JOURNAL_PREFIX}*.json"))[:limit]:
+    # Bound successful replays, not markers examined. A marker whose session is
+    # not imported yet is retained, so slicing the sorted scan would let a fixed
+    # prefix of unresolved markers starve every later intent indefinitely.
+    for marker in sorted(root.glob(f"{JOURNAL_PREFIX}*.json")):
+        if replayed >= limit:
+            break
         try:
             with journal_lock(marker):
                 try:
