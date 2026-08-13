@@ -190,6 +190,36 @@ class TestRecapSchemaMigration:
             with pytest.raises(sqlite3.IntegrityError):
                 migrated.execute("INSERT INTO branch_messages(branch_id, message_id, position) VALUES (1, 1, 0)")
 
+    def test_a_pre_recap_db_with_vec_objects_still_migrates(self, tmp_path):
+        """Reshaping a table reparses the schema, which needs vec0 resolvable.
+
+        Every real install that has run embeddings carries a vec0 virtual table
+        and a trigger referencing it. Without the extension loaded, the reparse
+        fails and get_connection raises — making the whole database unopenable
+        rather than merely unmigrated.
+        """
+        db_path = tmp_path / "pre-recap-with-vec.db"
+        conn = sqlite3.connect(db_path)
+        if not vec_available(conn):
+            conn.close()
+            pytest.skip("sqlite-vec not loadable in this environment")
+        conn.executescript(SCHEMA)
+        conn.execute(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS chunk_vec"
+            f" USING vec0(chunk_id INTEGER PRIMARY KEY, embedding float[{EMBEDDING_DIM}])"
+        )
+        conn.execute(
+            "CREATE TRIGGER IF NOT EXISTS chunks_vec_ad AFTER DELETE ON chunks BEGIN "
+            "DELETE FROM chunk_vec WHERE chunk_id = OLD.id; END"
+        )
+        conn.execute("PRAGMA user_version = 7")
+        conn.commit()
+        conn.close()
+
+        with get_connection(settings={"db_path": str(db_path)}) as migrated:
+            assert migrated.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+            assert llm_summary_db.recap_schema_capability(migrated) == "ready"
+
     def test_a_current_db_missing_one_recap_object_keeps_its_recap_state(self, tmp_path):
         """The rebuild drops quarantine rows, the only record of uncleaned packets."""
         db_path = tmp_path / "damaged-index.db"

@@ -666,7 +666,7 @@ def _migrate_to_v9(conn: sqlite3.Connection) -> None:
 def _apply_migrations(
     conn: sqlite3.Connection,
     *,
-    pre_v1_prepare: Callable[[sqlite3.Connection], object] | None = None,
+    prepare: Callable[[sqlite3.Connection], object] | None = None,
     migrate_to_v1: Callable[[sqlite3.Connection], None] = _migrate_to_v1,
     migrate_to_v2: Callable[[sqlite3.Connection], None] = _migrate_to_v2,
 ) -> None:
@@ -688,9 +688,14 @@ def _apply_migrations(
         try:
             current = conn.execute("PRAGMA user_version").fetchone()[0]
             if current < SCHEMA_VERSION:
+                # Before any migration, not just v1. Every one of these reshapes
+                # a table, and a reshape reparses the schema — which fails on a
+                # DB carrying vec0 objects unless the extension is loaded. A user
+                # who has run embeddings has those objects, so without this the
+                # whole database becomes unopenable rather than merely unmigrated.
+                if prepare is not None:
+                    prepare(conn)
                 if current < 1:
-                    if pre_v1_prepare is not None:
-                        pre_v1_prepare(conn)
                     migrate_to_v1(conn)
                 if current < 2:
                     migrate_to_v2(conn)
