@@ -155,6 +155,14 @@ def _insert_cleanup_failed_attempt(
         )
 
 
+def _packet_path_for_spawning_attempt(settings):
+    """Build the owner-bound packet path the cleanup-failed pass expects to find."""
+    packet = drain_session_recaps._packet_path(settings, 1, 1, "nonce")
+    packet.parent.mkdir(parents=True, exist_ok=True)
+    packet.write_text("payload")
+    return packet
+
+
 def test_recover_reconciles_cleanup_failed_packet_after_process_proof(tmp_path, monkeypatch):
     settings = _settings(tmp_path)
     packet = drain_session_recaps._packet_path(settings, 1, 1, "nonce")
@@ -1051,10 +1059,90 @@ def test_recovery_will_not_claim_cleanup_for_an_attempt_that_may_have_spawned(tm
     assert not proven
     assert recovered == set()
     with get_connection(settings) as conn:
+        # 'spawning' survives rather than flattening to 'uncertain'. This assertion
+        # used to pin the flattening, which is what let the cleanup-failed pass
+        # later read the missing identity as proof the group was gone and undo
+        # this refusal — see the two-pass test below.
         assert conn.execute("SELECT state, cleanup_state FROM session_recap_attempts").fetchone() == (
             "cleanup_failed",
-            "uncertain",
+            "spawning",
         )
+
+
+def test_second_recovery_pass_does_not_clear_an_attempt_that_may_have_spawned(tmp_path):
+    """The cleanup-failed pass must not undo what the expired-claim pass refused.
+
+    Pass one correctly refuses to prove cleanup for an all-NULL identity that had
+    reached 'spawning'. That leaves the job blocked/cleanup_failed, which is
+    exactly what pass two selects — and pass two reads the same missing identity
+    as proof the group is gone. Between them the orphan is declared cleaned and
+    the job becomes launchable again, beside a process that may still be running.
+    """
+    settings = _settings(tmp_path)
+    packet = _packet_path_for_spawning_attempt(settings)
+    with get_connection(settings) as conn:
+        conn.execute("INSERT INTO projects(path, key) VALUES ('/p', 'p')")
+        conn.execute("INSERT INTO sessions(uuid, project_id) VALUES (?, 1)", (UUID,))
+        conn.execute("INSERT INTO branches(session_id, leaf_uuid, is_active) VALUES (1, 'leaf', 1)")
+        upsert_job(conn, 1, "input", "session_end", "2026-08-12T10:00:00Z")
+        conn.execute(
+            "UPDATE session_recap_jobs SET state = 'claimed', claim_token = 1, "
+            "lease_expires_at = '2000-01-01T00:00:00Z'"
+        )
+        attempt = conn.execute(
+            "INSERT INTO session_recap_attempts (session_id, job_session_id, input_hash, input_contract_version, "
+            "policy_version, recap_contract_version, claim_token, trigger, state, created_at, packet_path, "
+            "packet_nonce, cleanup_state) VALUES (1, 1, 'input', 1, 1, 2, 1, 'session_end', 'reserved', "
+            "'2026-08-12T10:00:00Z', ?, 'nonce', 'spawning') RETURNING id",
+            (str(packet),),
+        ).fetchone()[0]
+        conn.execute("UPDATE session_recap_jobs SET active_attempt_id = ?", (attempt,))
+
+    assert drain_session_recaps._recover_expired_claims(settings, "2026-08-12T11:00:00Z") == (False, set())
+    drain_session_recaps._recover_cleanup_failed_attempts(settings, "2026-08-12T11:01:00Z")
+
+    with get_connection(settings) as conn:
+        cleanup_state = conn.execute("SELECT cleanup_state FROM session_recap_attempts").fetchone()[0]
+        job_state = conn.execute("SELECT state, reason FROM session_recap_jobs").fetchone()
+    assert cleanup_state != "verified_removed", "an attempt that may have spawned was declared cleaned"
+    assert job_state == ("blocked", "cleanup_failed"), "the job became launchable beside a possible orphan"
+
+
+def test_second_recovery_pass_does_not_clear_a_spawn_whose_termination_was_unproven(tmp_path):
+    """The other way a spawn goes unrecorded, reached without pass one at all.
+
+    invoke_claude spawns, fails to persist the launch, then fails to prove the
+    group died. persist_prelaunch_cleanup writes that state and blocks the job,
+    landing it directly in the cleanup-failed pass's selector with no owner
+    identity — the same shape as the 'spawning' case and the same live orphan.
+    """
+    settings = _settings(tmp_path)
+    packet = _packet_path_for_spawning_attempt(settings)
+    with get_connection(settings) as conn:
+        conn.execute("INSERT INTO projects(path, key) VALUES ('/p', 'p')")
+        conn.execute("INSERT INTO sessions(uuid, project_id) VALUES (?, 1)", (UUID,))
+        conn.execute("INSERT INTO branches(session_id, leaf_uuid, is_active) VALUES (1, 'leaf', 1)")
+        upsert_job(conn, 1, "input", "session_end", "2026-08-12T10:00:00Z")
+        conn.execute(
+            "INSERT INTO session_recap_attempts (id, session_id, job_session_id, input_hash, "
+            "input_contract_version, policy_version, recap_contract_version, claim_token, trigger, state, "
+            "created_at, packet_path, packet_nonce, cleanup_state) VALUES (1, 1, 1, 'input', 1, 1, 2, 1, "
+            "'session_end', 'cleanup_failed', '2026-08-12T10:00:00Z', ?, 'nonce', ?)",
+            (str(packet), llm_summarizer.CLEANUP_UNCERTAIN_SPAWNED),
+        )
+        conn.execute(
+            "UPDATE session_recap_jobs SET state = 'blocked', reason = 'cleanup_failed', "
+            "claim_token = 1, active_attempt_id = 1"
+        )
+
+    drain_session_recaps._recover_cleanup_failed_attempts(settings, "2026-08-12T11:00:00Z")
+
+    with get_connection(settings) as conn:
+        cleanup_state = conn.execute("SELECT cleanup_state FROM session_recap_attempts").fetchone()[0]
+        job_state = conn.execute("SELECT state, reason FROM session_recap_jobs").fetchone()
+    assert cleanup_state != "verified_removed", "an unproven spawn was declared cleaned"
+    assert job_state == ("blocked", "cleanup_failed"), "the job became launchable beside a possible orphan"
+    assert packet.exists(), "the packet was removed as though its owner were proven gone"
 
 
 def test_recovery_still_clears_an_attempt_that_never_reached_the_spawn(tmp_path):

@@ -38,6 +38,7 @@ from ccrecall.llm_summarizer import (
     STATUS_RATE_LIMITED,
     STATUS_TIMEOUT,
     STATUS_UNSUPPORTED_CLI,
+    UNPROVABLE_WITHOUT_IDENTITY,
     invoke_claude,
     posix_process_groups_supported,
     remove_packet,
@@ -86,6 +87,25 @@ JOURNAL_BATCH_SIZE = 32
 EXIT_BUSY = 75
 EXIT_CLEANUP_UNRESOLVED = 76
 _UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+
+
+def _cleanup_provable_without_identity(cleanup_state: str | None) -> bool:
+    """Whether an attempt carrying no owner identity can be treated as cleaned up.
+
+    A missing pid/group/start-time means one of two things: the attempt never
+    reached the spawn, or a process really started and its identity never got
+    recorded. Only the first is provably clean — deleting a packet says nothing
+    about a process sitting in its own session, and requeuing on that would
+    launch a second provider call beside one still running.
+
+    ``UNPROVABLE_WITHOUT_IDENTITY`` is what separates them, and it has two
+    members because a spawn can go unrecorded two ways: dying in the window
+    between the spawn and ``record_attempt_launch`` (``CLEANUP_SPAWNING``), or
+    spawning and then failing to prove termination (``CLEANUP_UNCERTAIN_SPAWNED``).
+    Both recovery passes ask this question and must answer it the same way; when
+    they disagreed, the second pass undid the first one's refusal.
+    """
+    return cleanup_state not in UNPROVABLE_WITHOUT_IDENTITY
 
 
 def _now() -> str:
@@ -216,13 +236,9 @@ def _recover_expired_claims(settings: dict, now: str) -> tuple[bool, set[int]]:
         for attempt_id, session_id, packet, pid, group, started, cleanup_state in rows:
             proven = False
             if pid is None and group is None and started is None:
-                # No owner identity. That means the attempt never reached the
-                # spawn, or died in the window between spawning and recording
-                # who it spawned. Only the first is provably clean: deleting a
-                # packet says nothing about a process in its own session, and
-                # requeuing on that would launch a second provider call
-                # alongside one still running.
-                proven = cleanup_state != "spawning" and (packet is None or remove_packet(Path(packet)))
+                proven = _cleanup_provable_without_identity(cleanup_state) and (
+                    packet is None or remove_packet(Path(packet))
+                )
             elif isinstance(pid, int) and isinstance(group, int) and isinstance(started, str):
                 proven = True if process_group_absent(group) else _terminate_exact_group(pid, group, started)
                 if proven and packet is not None:
@@ -237,9 +253,17 @@ def _recover_expired_claims(settings: dict, now: str) -> tuple[bool, set[int]]:
                     recovered.add(session_id)
             else:
                 all_proven = False
+                # Keep the spawn marker rather than flattening it to 'uncertain'.
+                # It is the only surviving record that this attempt reached a
+                # spawn, and _cleanup_provable_without_identity reads it to reach
+                # the same verdict this pass just reached. Overwriting it
+                # unconditionally is what let the next pass resurrect the orphan.
+                # The quarantine row takes the same value, so the two tables never
+                # disagree about the cleanup phase of one attempt.
+                unresolved_state = cleanup_state if cleanup_state in UNPROVABLE_WITHOUT_IDENTITY else "uncertain"
                 conn.execute(
-                    "UPDATE session_recap_attempts SET cleanup_state = 'uncertain', finished_at = ? WHERE id = ?",
-                    (now, attempt_id),
+                    "UPDATE session_recap_attempts SET cleanup_state = ?, finished_at = ? WHERE id = ?",
+                    (unresolved_state, now, attempt_id),
                 )
                 quarantine_attempt(
                     conn,
@@ -248,7 +272,7 @@ def _recover_expired_claims(settings: dict, now: str) -> tuple[bool, set[int]]:
                         "SELECT claim_token FROM session_recap_attempts WHERE id = ?", (attempt_id,)
                     ).fetchone()[0],
                     None,
-                    "uncertain",
+                    unresolved_state,
                     now,
                 )
                 recover_expired_attempt(conn, attempt_id, now, cleanup_proven=False)
@@ -262,15 +286,15 @@ def _recover_cleanup_failed_attempts(settings: dict, now: str) -> tuple[bool, se
     with get_connection(settings) as conn:
         rows = conn.execute(
             "SELECT a.id, a.job_session_id, a.claim_token, a.packet_path, a.packet_nonce, a.owner_pid, "
-            "a.process_group_id, a.process_started_at FROM session_recap_attempts a JOIN session_recap_jobs j "
-            "ON j.session_id = a.job_session_id WHERE a.state = 'cleanup_failed' "
+            "a.process_group_id, a.process_started_at, a.cleanup_state FROM session_recap_attempts a "
+            "JOIN session_recap_jobs j ON j.session_id = a.job_session_id WHERE a.state = 'cleanup_failed' "
             "AND j.state = 'blocked' AND j.reason = 'cleanup_failed' AND j.active_attempt_id = a.id"
         ).fetchall()
-        for attempt_id, session_id, token, packet, nonce, pid, group, started in rows:
+        for attempt_id, session_id, token, packet, nonce, pid, group, started, cleanup_state in rows:
             expected_packet = _packet_path(settings, session_id, attempt_id, nonce) if isinstance(nonce, str) else None
             owner_bound = isinstance(packet, str) and expected_packet == Path(packet)
             if pid is None and group is None and started is None:
-                group_gone = True
+                group_gone = _cleanup_provable_without_identity(cleanup_state)
             elif isinstance(pid, int) and isinstance(group, int) and isinstance(started, str):
                 group_gone = process_group_absent(group) or _terminate_exact_group(pid, group, started)
             else:

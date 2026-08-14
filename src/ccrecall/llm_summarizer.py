@@ -26,6 +26,14 @@ STATUS_TIMEOUT = "timeout"
 STATUS_UNSUPPORTED_CLI = "unsupported_cli"
 STATUS_PLATFORM_UNSUPPORTED = "platform_unsupported"
 STATUS_CLEANUP_FAILED = "cleanup_failed"
+# Cleanup states that mean "a process was spawned and we cannot prove it is gone",
+# as distinct from a plain 'uncertain' where nothing was ever spawned. Recovery
+# must never read either as proof the group is dead: there is no owner identity
+# recorded for these attempts, so deleting the packet says nothing about the
+# process, and requeuing would start a second provider beside a live one.
+CLEANUP_SPAWNING = "spawning"
+CLEANUP_UNCERTAIN_SPAWNED = "uncertain_spawned"
+UNPROVABLE_WITHOUT_IDENTITY = (CLEANUP_SPAWNING, CLEANUP_UNCERTAIN_SPAWNED)
 DIAGNOSTIC_CAP = 240
 TERM_GRACE_SECONDS = 5
 
@@ -344,10 +352,14 @@ def invoke_claude(
         persisted = False
         group_id = process.pid
     if not persisted:
+        # A process is genuinely running here and its identity never reached the
+        # database, so recovery has nothing to find it by. If termination cannot
+        # be proven, say so in a way that survives: plain 'uncertain' is what a
+        # never-spawned attempt reports, and recovery is entitled to clear that.
         reaped = _terminate_group(process, group_id, grace_seconds)
         _persist_cleanup(
             persist_cleanup,
-            "reaped" if reaped else "uncertain",
+            "reaped" if reaped else CLEANUP_UNCERTAIN_SPAWNED,
             _cleanup_metadata(packet_path, packet_nonce, process.pid, group_id, started_at),
         )
         return InvocationResult(STATUS_CLEANUP_FAILED, diagnostic=STATUS_CLEANUP_FAILED)

@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from ccrecall import llm_summarizer
 from ccrecall.llm_summarizer import (
     STATUS_CLAUDE_UNAVAILABLE,
     STATUS_CLEANUP_FAILED,
@@ -235,6 +236,42 @@ def test_ambiguous_launch_blocks_normal_completion_and_retains_packet(tmp_path):
     assert result.status == STATUS_CLEANUP_FAILED
     assert cleanup == ["reaped"]
     assert packet.exists()
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux /proc process groups are required")
+def test_unproven_termination_after_a_spawn_is_distinguishable_from_never_spawning(tmp_path, monkeypatch):
+    """A live process with no recorded identity must not report a clearable state.
+
+    Recovery is allowed to clear a plain 'uncertain' attempt, because that is
+    what a never-spawned one reports. This path spawned a real process and could
+    not prove it died, so it has to say something recovery will refuse.
+    """
+    packet = tmp_path / "owner" / "input.json"
+    write_packet(packet, b"{}")
+
+    def popen(*_args, **_kwargs):
+        return subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+
+    monkeypatch.setattr(llm_summarizer, "_terminate_group", lambda *_args, **_kwargs: False)
+    cleanup = []
+    result = invoke_claude(
+        packet,
+        SETTINGS,
+        persist_launch=lambda *_args: False,
+        persist_cleanup=lambda state, _metadata: cleanup.append(state),
+        popen=popen,
+        grace_seconds=0.1,
+    )
+
+    assert result.status == STATUS_CLEANUP_FAILED
+    assert cleanup == [llm_summarizer.CLEANUP_UNCERTAIN_SPAWNED]
+    assert cleanup != ["uncertain"], "reported the state a never-spawned attempt reports"
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux /proc process groups are required")
