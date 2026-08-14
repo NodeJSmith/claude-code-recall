@@ -249,7 +249,7 @@ def _apply_migrations(conn: sqlite3.Connection) -> None:
     """Apply the shared migrations, preserving db.py's vec-aware v1 compatibility."""
     llm_summary_db._apply_migrations(
         conn,
-        pre_v1_prepare=vec_available,
+        prepare=vec_available,
         migrate_to_v1=_migrate_to_v1,
         migrate_to_v2=_migrate_to_v2,
     )

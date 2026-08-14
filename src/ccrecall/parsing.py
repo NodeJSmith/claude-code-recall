@@ -224,7 +224,10 @@ def find_all_branches(all_entries: list[dict]) -> list[dict]:
         return []
     active_uuids: set[str] = set()
     current: str | None = latest["uuid"]
-    while current:
+    # Transcript JSONL is untrusted: a parentUuid cycle (a -> b -> a) from a
+    # partial write, a corrupted sync, or a hand-edited file would walk forever.
+    # The set being built is the visited set, so the guard costs nothing.
+    while current and current not in active_uuids:
         active_uuids.add(current)
         current = uuid_to_parent.get(current)
 

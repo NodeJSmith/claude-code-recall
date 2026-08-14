@@ -106,6 +106,52 @@ class TestClearHandoffWriter:
         assert not hp.exists()
 
 
+class TestClearHandoffAtomicity:
+    """The handoff is written atomically, and creates its directory on a first run."""
+
+    def test_writes_when_the_runtime_directory_does_not_exist_yet(self, tmp_path):
+        """A fresh machine has no ~/.ccrecall yet; the write must create it.
+
+        Without the mkdir this raises into main()'s broad except, which logs and
+        prints an empty object, so the handoff vanishes with no visible failure.
+        """
+        fresh = tmp_path / "not-created-yet"
+        handoff_path, stdout = _run_handoff_main(
+            fresh, {"end_reason": "clear", "session_id": "sid-fresh", "cwd": "/my/project"}
+        )
+
+        assert handoff_path.exists(), "handoff was lost because its directory did not exist"
+        assert json.loads(handoff_path.read_text())["session_id"] == "sid-fresh"
+        assert stdout.strip() == "{}"
+
+    def test_does_not_publish_through_a_shared_temporary_path(self, tmp_path):
+        """Staging must be per-writer, so concurrent clears cannot clobber each other.
+
+        A guard rather than a regression test: the previous implementation wrote
+        the target directly and used no temp file, so this would have passed
+        against it too. It exists because the obvious way to add atomicity is a
+        fixed `.tmp` name beside the target, and two sessions clearing at once
+        then truncate each other's staged bytes — a real bug that was written
+        and shipped on the abandoned recap branch before being caught.
+        """
+        decoy = tmp_path / ".clear-handoff.json.tmp"
+        decoy.write_text("another writer's in-flight payload", encoding="utf-8")
+
+        handoff_path, _ = _run_handoff_main(
+            tmp_path, {"end_reason": "clear", "session_id": "sid-concurrent", "cwd": "/my/project"}
+        )
+
+        assert decoy.read_text(encoding="utf-8") == "another writer's in-flight payload"
+        assert json.loads(handoff_path.read_text())["session_id"] == "sid-concurrent"
+
+    def test_leaves_no_temporary_file_behind(self, tmp_path):
+        handoff_path, _ = _run_handoff_main(
+            tmp_path, {"end_reason": "clear", "session_id": "sid-clean", "cwd": "/my/project"}
+        )
+
+        assert [p.name for p in handoff_path.parent.iterdir()] == ["clear-handoff.json"]
+
+
 class TestClearHandoffStdout:
     """Hook must always print valid JSON to stdout for the harness."""
 

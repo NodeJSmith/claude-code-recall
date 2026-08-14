@@ -1,6 +1,7 @@
 """Tests for ccrecall.parsing — branch detection, JSONL parsing, metadata."""
 
 import sqlite3
+import threading
 from pathlib import Path
 
 from ccrecall.parsing import (
@@ -59,6 +60,27 @@ class TestFindAllBranchesBasics:
     def test_entries_without_uuids(self):
         entries = [{"type": "user", "timestamp": "2025-01-01T00:00:00Z"}]
         assert find_all_branches(entries) == []
+
+    def test_parent_uuid_cycle_terminates(self):
+        """A cycle in untrusted transcript JSONL must not hang the walk.
+
+        Without a visited guard this loops forever rather than failing, so the
+        test runs it on a daemon thread and asserts termination — a regression
+        fails here instead of wedging the whole suite.
+        """
+        entries = [
+            {"uuid": "a", "parentUuid": "b", "type": "user", "timestamp": "2025-01-01T00:00:00Z"},
+            {"uuid": "b", "parentUuid": "a", "type": "assistant", "timestamp": "2025-01-01T00:00:01Z"},
+        ]
+        finished: list[list[dict]] = []
+        worker = threading.Thread(target=lambda: finished.append(find_all_branches(entries)), daemon=True)
+
+        worker.start()
+        worker.join(timeout=10)
+
+        assert not worker.is_alive(), "find_all_branches did not terminate on a parentUuid cycle"
+        assert len(finished[0]) == 1
+        assert finished[0][0]["uuids"] == {"a", "b"}
 
     def test_single_entry(self):
         entries = [{"uuid": "abc", "type": "user", "timestamp": "2025-01-01T00:00:00Z"}]
