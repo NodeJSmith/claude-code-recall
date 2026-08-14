@@ -155,10 +155,10 @@ def run(input_file: Path | None = None) -> None:
 
         # Honor exclude_projects for the live session too — import applies it on the
         # batch path, and without this an excluded project's current session would
-        # still sync on Stop. Match by the current cwd's project name. This uses the
-        # same formula as the import path (extract_project_name(normalize_cwd(...))),
-        # just on the live cwd instead of each session's recorded cwd — identical in
-        # the normal case (they're the same cwd). Fail open when cwd is absent: a
+        # still sync on Stop. Match by the current cwd's project name. The import
+        # path also has a key-suffix fallback (key_could_match_excluded) for the
+        # lossy case where cwd metadata is missing; this path doesn't need it
+        # because the live hook always has cwd. Fail open when cwd is absent: a
         # Stop hook shouldn't block, and cwd is effectively always present.
         exclude_projects = settings["exclude_projects"]
         if exclude_projects and hook_input.cwd:
