@@ -9,6 +9,7 @@ from unittest.mock import patch
 import pytest
 
 import ccrecall.recap_input as recap_input
+from ccrecall import llm_summarizer
 from ccrecall.hooks import backfill_llm_summaries, drain_session_recaps, session_end, sync_current
 from ccrecall.hooks.durability import journal_lock
 from ccrecall.llm_summarizer import (
@@ -83,16 +84,17 @@ def _queue_eligible_job(settings):
 
 
 @pytest.mark.parametrize(
-    ("status", "attempt_state", "job_state", "reason", "active_attempt"),
+    ("status", "attempt_state", "job_state", "reason", "active_attempt", "keeps_draining"),
     [
-        (STATUS_TIMEOUT, "timeout", "pending", "timeout_retry", False),
-        (STATUS_BUDGET_EXCEEDED, "budget_exceeded", "blocked", "budget_exceeded", False),
-        (STATUS_INVALID_OUTPUT, "unusable_output", "blocked", "unusable_output", False),
-        (STATUS_CLEANUP_FAILED, "cleanup_failed", "blocked", "cleanup_failed", True),
+        (STATUS_TIMEOUT, "timeout", "pending", "timeout_retry", False, True),
+        (STATUS_BUDGET_EXCEEDED, "budget_exceeded", "blocked", "budget_exceeded", False, True),
+        (STATUS_INVALID_OUTPUT, "unusable_output", "blocked", "unusable_output", False, True),
+        # An unproven process group must not be followed by another spawn.
+        (STATUS_CLEANUP_FAILED, "cleanup_failed", "blocked", "cleanup_failed", True, False),
     ],
 )
 def test_drainer_terminalizes_content_free_provider_outcomes(
-    tmp_path, monkeypatch, status, attempt_state, job_state, reason, active_attempt
+    tmp_path, monkeypatch, status, attempt_state, job_state, reason, active_attempt, keeps_draining
 ):
     settings = _settings(tmp_path)
     _queue_eligible_job(settings)
@@ -107,7 +109,7 @@ def test_drainer_terminalizes_content_free_provider_outcomes(
         lambda *_args, **_kwargs: InvocationResult(status, diagnostic="private provider response"),
     )
 
-    assert drain_session_recaps._process_job(settings, 1, 1)
+    assert drain_session_recaps._process_job(settings, 1, 1) is keeps_draining
 
     with get_connection(settings) as conn:
         assert conn.execute("SELECT state, diagnostic FROM session_recap_attempts").fetchone() == (
@@ -896,6 +898,27 @@ def test_backfill_snapshots_a_hash_the_branch_never_stored(tmp_path, monkeypatch
     with get_connection(settings) as conn:
         assert conn.execute("SELECT input_hash FROM session_recap_run_candidates").fetchone() == (expected,)
         assert conn.execute("SELECT requested_input_hash FROM session_recap_jobs").fetchone() == (expected,)
+
+
+def test_spawn_is_refused_when_its_marker_cannot_be_committed(tmp_path, monkeypatch):
+    """Spawning without the marker recreates the orphan the marker exists to prevent."""
+    spawned = []
+    cleanups = []
+
+    result = llm_summarizer.invoke_claude(
+        tmp_path / "packet.json",
+        {"llm_summary_model": "sonnet", "llm_summary_effort": "medium", "llm_summary_max_budget_usd": 1.0},
+        persist_launch=lambda *_a: True,
+        persist_cleanup=lambda state, _meta: cleanups.append(state),
+        persist_spawn_intent=lambda: False,
+        admit_launch=lambda: True,
+        popen=lambda *_a, **_k: spawned.append(True),
+        platform_supported=True,
+    )
+
+    assert spawned == []
+    assert result.status == STATUS_CLEANUP_FAILED
+    assert cleanups == ["verified_removed"]
 
 
 def test_one_job_that_raises_does_not_stall_every_other_session(tmp_path, monkeypatch):

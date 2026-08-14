@@ -299,8 +299,18 @@ def invoke_claude(
     # Durable before the spawn, because the spawn itself cannot be undone and
     # the identity that would let recovery find the process is only persisted
     # after it. Dying in between otherwise looks exactly like never spawning.
-    if persist_spawn_intent is not None:
-        persist_spawn_intent()
+    # The write must land: an import can fence the claim between admission and
+    # here, and spawning without the marker recreates the very orphan this
+    # exists to prevent — recovery would read it as never launched and requeue
+    # while the group is alive.
+    if persist_spawn_intent is not None and not persist_spawn_intent():
+        deleted = remove_packet(packet_path)
+        _persist_cleanup(
+            persist_cleanup,
+            "verified_removed" if deleted else "uncertain",
+            _packet_cleanup_metadata(packet_path, packet_nonce),
+        )
+        return InvocationResult(STATUS_CLEANUP_FAILED, diagnostic=STATUS_CLEANUP_FAILED)
     try:
         process = popen(
             build_claude_argv(packet_path, settings),

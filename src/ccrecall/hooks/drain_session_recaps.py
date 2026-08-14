@@ -547,17 +547,13 @@ def _process_job(
         packet_nonce=nonce,
     ):
         # Cancelling before launch returns the job to immediately eligible
-        # pending. If quarantine is what refused the launch, that condition is
-        # global and unchanged, so continuing would reselect this same job at
-        # once and spin, writing a cancelled_before_launch row every pass. Stop
-        # the drain instead and let recovery reduce quarantine first.
-        with get_connection(settings) as conn:
-            admitted, _count, _bytes, _oldest = quarantine_admission(
-                conn,
-                max_count=settings["recap_quarantine_max_count"],
-                max_bytes=settings["recap_quarantine_max_bytes"],
-            )
-        return admitted
+        # pending, so continuing would reselect this same job at once and spin,
+        # writing a cancelled_before_launch row every pass while holding the
+        # drainer guard. Every reason this fails is a standing condition — a
+        # full quarantine, an unusable packet directory, a full disk — so none
+        # of them is fixed by trying the next job. Stop and let the next run,
+        # after recovery, find a changed world.
+        return False
     result = invoke_claude(
         packet_path,
         effective_settings,
@@ -627,7 +623,11 @@ def _process_job(
                 diagnostic=outcomes.get(result.status, "cleanup_failed"),
                 retry_delay_seconds=settings["recap_timeout_retry_seconds"],
             )
-    return True
+    # An unproven process group is the one outcome that must not be followed by
+    # another provider call: complete_attempt has already released admission and
+    # a single quarantine row sits under the ceiling, so the next job would
+    # start a second Claude beside a group that may still be alive.
+    return result.status != STATUS_CLEANUP_FAILED
 
 
 def run(*, recover_only: bool = False) -> int:
