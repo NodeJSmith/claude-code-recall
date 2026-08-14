@@ -695,6 +695,183 @@ def _seed_v1_db_with_orphan_messages(db_path) -> None:
     conn.close()
 
 
+def _seed_genuine_db(db_path, target_version: int) -> None:
+    """Build a DB with the genuine historical schema at target_version, seeded with data.
+
+    For v0/v1, delegates to the purpose-built seed functions that reproduce exact
+    pre-migration table shapes. For v2-v6, constructs the schema as it genuinely
+    existed at that version — without columns/tables added by later migrations —
+    so the migration ladder exercises its actual ADD COLUMN / CREATE TABLE paths
+    instead of only hitting idempotent duplicate-column handlers.
+
+    Schema differences from current SCHEMA_CORE by version:
+      v2: branches lacks summary_enrichment_*/summary_source_hash (v7 adds them),
+          import_log lacks file_size/file_mtime (v3), messages lacks tool_content (v4),
+          no ingestion_check_cache table (v5)
+      v3: import_log has file_size/file_mtime; rest same as v2
+      v4: messages has tool_content; rest same as v3
+      v5: ingestion_check_cache exists WITHOUT db_coverage_fingerprint (v6 adds it)
+      v6: ingestion_check_cache has db_coverage_fingerprint; branches still lacks v7 cols
+
+    Note: SCHEMA_CORE runs before _apply_migrations in _open_connection, using
+    CREATE TABLE IF NOT EXISTS — so tables that already exist keep their genuine
+    (column-limited) shape, while tables absent from a genuine schema (e.g.
+    ingestion_check_cache at v2) get created by SCHEMA_CORE with full current
+    columns, making the later migration a no-op for that table. This matches the
+    real production upgrade path.
+    """
+    if target_version == 0:
+        _seed_v0_db_with_dead_branches(db_path)
+        return
+    if target_version == 1:
+        _seed_v1_db_with_orphan_messages(db_path)
+        return
+    if target_version > 6:
+        raise AssertionError(
+            f"_seed_genuine_db has no genuine schema for v{target_version}; add it when SCHEMA_VERSION increases"
+        )
+
+    conn = sqlite3.connect(db_path)
+    conn.execute("PRAGMA foreign_keys = ON")
+
+    # Static tables (unchanged across v2-v6)
+    conn.execute(
+        "CREATE TABLE projects ("
+        "id INTEGER PRIMARY KEY, path TEXT UNIQUE NOT NULL, key TEXT UNIQUE NOT NULL, "
+        "name TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)"
+    )
+    conn.execute("CREATE INDEX idx_projects_key ON projects(key)")
+
+    conn.execute(
+        "CREATE TABLE sessions ("
+        "id INTEGER PRIMARY KEY, uuid TEXT UNIQUE NOT NULL, "
+        "project_id INTEGER REFERENCES projects(id), "
+        "parent_session_id INTEGER REFERENCES sessions(id), "
+        "git_branch TEXT, cwd TEXT, imported_at DATETIME DEFAULT CURRENT_TIMESTAMP)"
+    )
+    conn.execute("CREATE INDEX idx_sessions_project ON sessions(project_id)")
+
+    # branches: v2+ has no fork_point_uuid; v2-v6 lack v7's summary_enrichment columns
+    conn.execute(
+        "CREATE TABLE branches ("
+        "id INTEGER PRIMARY KEY, "
+        "session_id INTEGER NOT NULL REFERENCES sessions(id), "
+        "leaf_uuid TEXT NOT NULL, "
+        "is_active INTEGER DEFAULT 1, "
+        "started_at DATETIME, ended_at DATETIME, "
+        "exchange_count INTEGER DEFAULT 0, "
+        "files_modified TEXT, commits TEXT, tool_counts TEXT, "
+        "aggregated_content TEXT, context_summary TEXT, context_summary_json TEXT, "
+        "summary_version INTEGER DEFAULT 0, "
+        "embedding_version INTEGER DEFAULT 0, embedding_model TEXT, "
+        "summary_version_at_embed INTEGER, "
+        "UNIQUE(session_id))"
+    )
+    conn.execute("CREATE INDEX idx_branches_session ON branches(session_id)")
+    conn.execute("CREATE INDEX idx_branches_active ON branches(is_active)")
+    conn.execute("CREATE INDEX idx_branches_summary_version ON branches(summary_version)")
+    conn.execute("CREATE INDEX idx_branches_embedding_version ON branches(embedding_version)")
+
+    # import_log: v2 lacks file_size/file_mtime (v3 adds them)
+    if target_version < 3:
+        conn.execute(
+            "CREATE TABLE import_log ("
+            "id INTEGER PRIMARY KEY, file_path TEXT UNIQUE NOT NULL, file_hash TEXT, "
+            "imported_at DATETIME DEFAULT CURRENT_TIMESTAMP, messages_imported INTEGER DEFAULT 0)"
+        )
+    else:
+        conn.execute(
+            "CREATE TABLE import_log ("
+            "id INTEGER PRIMARY KEY, file_path TEXT UNIQUE NOT NULL, file_hash TEXT, "
+            "imported_at DATETIME DEFAULT CURRENT_TIMESTAMP, messages_imported INTEGER DEFAULT 0, "
+            "file_size INTEGER, file_mtime REAL)"
+        )
+
+    # messages: v2-v3 lack tool_content (v4 adds it)
+    msg_cols = (
+        "id INTEGER PRIMARY KEY, "
+        "session_id INTEGER NOT NULL REFERENCES sessions(id), "
+        "uuid TEXT, parent_uuid TEXT, timestamp DATETIME, "
+        "role TEXT CHECK(role IN ('user', 'assistant')), "
+        "content TEXT NOT NULL, tool_summary TEXT, "
+        "has_tool_use INTEGER DEFAULT 0, has_thinking INTEGER DEFAULT 0, "
+        "is_notification INTEGER DEFAULT 0, origin TEXT"
+    )
+    if target_version >= 4:
+        conn.execute(f"CREATE TABLE messages ({msg_cols}, tool_content TEXT, UNIQUE(session_id, uuid))")
+        conn.execute("CREATE INDEX idx_messages_tool_content_null ON messages(session_id) WHERE tool_content IS NULL")
+    else:
+        conn.execute(f"CREATE TABLE messages ({msg_cols}, UNIQUE(session_id, uuid))")
+    conn.execute("CREATE INDEX idx_messages_session ON messages(session_id)")
+    conn.execute("CREATE INDEX idx_messages_timestamp ON messages(timestamp)")
+    conn.execute("CREATE INDEX idx_messages_session_uuid ON messages(session_id, uuid)")
+
+    # branch_messages (unchanged)
+    conn.execute(
+        "CREATE TABLE branch_messages ("
+        "branch_id INTEGER NOT NULL REFERENCES branches(id), "
+        "message_id INTEGER NOT NULL REFERENCES messages(id), "
+        "PRIMARY KEY (branch_id, message_id))"
+    )
+    conn.execute("CREATE INDEX idx_branch_messages_message ON branch_messages(message_id)")
+
+    # chunks (unchanged)
+    conn.execute(
+        "CREATE TABLE chunks ("
+        "id INTEGER PRIMARY KEY, "
+        "branch_id INTEGER NOT NULL REFERENCES branches(id), "
+        "exchange_index INTEGER NOT NULL, content_hash TEXT NOT NULL, "
+        "first_message_uuid TEXT, timestamp TEXT, "
+        "user_text TEXT, assistant_text TEXT, "
+        "was_capped INTEGER NOT NULL DEFAULT 0, "
+        "embedding_version INTEGER NOT NULL DEFAULT 0, embedding_model TEXT, "
+        "UNIQUE(branch_id, exchange_index))"
+    )
+    conn.execute("CREATE INDEX idx_chunks_branch ON chunks(branch_id)")
+    conn.execute("CREATE INDEX idx_chunks_version ON chunks(embedding_version)")
+
+    # ingestion_check_cache: absent before v5; v5 lacks db_coverage_fingerprint (v6 adds it)
+    if target_version == 5:
+        conn.execute(
+            "CREATE TABLE ingestion_check_cache ("
+            "session_uuid TEXT PRIMARY KEY, source_fingerprint TEXT NOT NULL, "
+            "checked_at DATETIME DEFAULT CURRENT_TIMESTAMP)"
+        )
+    elif target_version >= 6:
+        conn.execute(
+            "CREATE TABLE ingestion_check_cache ("
+            "session_uuid TEXT PRIMARY KEY, source_fingerprint TEXT NOT NULL, "
+            "db_coverage_fingerprint TEXT NOT NULL DEFAULT '', "
+            "checked_at DATETIME DEFAULT CURRENT_TIMESTAMP)"
+        )
+
+    # FTS (branches only; messages_fts was dropped by v1)
+    conn.executescript(SCHEMA_FTS5)
+
+    conn.execute(f"PRAGMA user_version = {target_version}")
+    conn.commit()
+
+    # Seed representative data
+    conn.execute("INSERT INTO projects (path, key, name) VALUES ('/test/proj', '-test-proj', 'test-proj')")
+    conn.execute("INSERT INTO sessions (uuid, project_id) VALUES ('sess-genuine', 1)")
+    conn.execute(
+        "INSERT INTO branches ("
+        "session_id, leaf_uuid, is_active, context_summary, context_summary_json, summary_version"
+        ") VALUES (1, 'leaf-genuine', 1, 'genuine test summary', '{\"topic\":\"genuine\"}', 4)"
+    )
+    conn.execute("INSERT INTO messages (session_id, uuid, role, content) VALUES (1, 'msg-1', 'user', 'hello world')")
+    conn.execute("INSERT INTO messages (session_id, uuid, role, content) VALUES (1, 'msg-2', 'assistant', 'hi there')")
+    conn.execute("INSERT INTO branch_messages (branch_id, message_id) VALUES (1, 1)")
+    conn.execute("INSERT INTO branch_messages (branch_id, message_id) VALUES (1, 2)")
+    conn.execute(
+        "INSERT INTO chunks (branch_id, exchange_index, content_hash, user_text, assistant_text) "
+        "VALUES (1, 0, 'hash-genuine', 'hello world', 'hi there')"
+    )
+    conn.execute("INSERT INTO import_log (file_path, file_hash) VALUES ('/fake/session.jsonl', 'fakehash')")
+    conn.commit()
+    conn.close()
+
+
 class TestSchemaVersioning:
     """PRAGMA user_version schema versioning and the v1 dead-branch migration."""
 
@@ -1214,30 +1391,55 @@ class TestMigrationVersionMatrix:
     """Version matrix: every starting version migrates to current SCHEMA_VERSION.
 
     Regression guard for #121. Parametrized across every user_version from 0 to
-    SCHEMA_VERSION-1 to ensure the migration ladder has no gaps. The vec0 variant
-    covers the case where a DB carries vec0 objects from prior embedding runs —
-    a table rebuild reparses the schema and crashes with "no such module: vec0"
-    if the extension isn't loaded.
+    SCHEMA_VERSION-1, using genuine per-version schema fixtures (not stamp-down)
+    so migrations exercise their actual ADD COLUMN / CREATE TABLE paths.
+
+    The vec0 variant covers the case where a DB carries vec0 objects from prior
+    embedding runs — a table rebuild reparses the schema and crashes with
+    "no such module: vec0" if the extension isn't loaded.
     """
+
+    # Expected row counts after migrating from each version to current.
+    # v0: v1 deletes inactive branch + cascade (chunks, branch_messages)
+    # v1: v2 deletes orphan messages
+    # v2-v6: v3-v7 only ADD columns/tables, no data modification
+    EXPECTED_COUNTS: ClassVar[dict[int, dict[str, int]]] = {
+        0: {
+            "projects": 1,
+            "sessions": 1,
+            "branches": 1,
+            "messages": 1,
+            "branch_messages": 1,
+            "chunks": 1,
+            "import_log": 0,
+        },
+        1: {
+            "projects": 1,
+            "sessions": 1,
+            "branches": 1,
+            "messages": 1,
+            "branch_messages": 1,
+            "chunks": 0,
+            "import_log": 0,
+        },
+        **{
+            v: {
+                "projects": 1,
+                "sessions": 1,
+                "branches": 1,
+                "messages": 2,
+                "branch_messages": 2,
+                "chunks": 1,
+                "import_log": 1,
+            }
+            for v in range(2, SCHEMA_VERSION)
+        },
+    }
 
     @staticmethod
     def _build_db_at_version(db_path, target_version: int) -> None:
-        """Build a DB at current schema, then stamp user_version down to target.
-
-        For v0 and v1, uses the purpose-built seed functions that reproduce the
-        exact pre-migration table shapes (messages_fts, fork_point_uuid). For
-        v2+, a fresh get_connection produces a current-schema DB; stamping it
-        down simulates an install frozen at that version.
-        """
-        if target_version == 0:
-            _seed_v0_db_with_dead_branches(db_path)
-            return
-        if target_version == 1:
-            _seed_v1_db_with_orphan_messages(db_path)
-            return
-
-        with get_connection(settings={"db_path": str(db_path)}) as conn:
-            conn.execute(f"PRAGMA user_version = {target_version}")
+        """Build a DB with the genuine historical schema at target_version."""
+        _seed_genuine_db(db_path, target_version)
 
     @staticmethod
     def _add_vec0_objects(db_path) -> None:
@@ -1258,14 +1460,47 @@ class TestMigrationVersionMatrix:
         conn.commit()
         conn.close()
 
+    def _assert_post_migration(self, conn: sqlite3.Connection, start_version: int) -> None:
+        """Shared post-migration assertions: version, integrity, FK, row counts, columns."""
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+
+        assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+
+        expected = self.EXPECTED_COUNTS[start_version]
+        for table, count in expected.items():
+            actual = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            assert actual == count, f"{table}: expected {count}, got {actual} (from v{start_version})"
+
+        branch_cols = {row[1] for row in conn.execute("PRAGMA table_info(branches)").fetchall()}
+        assert "fork_point_uuid" not in branch_cols
+        assert "summary_enrichment_json" in branch_cols
+        assert "summary_source_hash" in branch_cols
+
+        msg_cols = {row[1] for row in conn.execute("PRAGMA table_info(messages)").fetchall()}
+        assert "tool_content" in msg_cols
+        indexes = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'index'").fetchall()}
+        assert "idx_messages_tool_content_null" in indexes
+
+        il_cols = {row[1] for row in conn.execute("PRAGMA table_info(import_log)").fetchall()}
+        assert "file_size" in il_cols
+        assert "file_mtime" in il_cols
+
+        icc_cols = {row[1] for row in conn.execute("PRAGMA table_info(ingestion_check_cache)").fetchall()}
+        assert "db_coverage_fingerprint" in icc_cols
+
+        summary = conn.execute("SELECT context_summary FROM branches WHERE is_active = 1").fetchone()
+        assert summary is not None
+        assert summary[0] is not None
+
     @pytest.mark.parametrize("start_version", range(SCHEMA_VERSION))
     def test_migration_from_any_version_reaches_current(self, tmp_path, start_version):
-        """Every starting version migrates to SCHEMA_VERSION without error."""
+        """Every starting version migrates to SCHEMA_VERSION with data preserved."""
         db_path = tmp_path / f"v{start_version}.db"
         self._build_db_at_version(db_path, start_version)
 
         with get_connection(settings={"db_path": str(db_path)}) as conn:
-            assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+            self._assert_post_migration(conn, start_version)
 
     @VEC_SKIP
     @pytest.mark.parametrize("start_version", range(SCHEMA_VERSION))
@@ -1276,7 +1511,7 @@ class TestMigrationVersionMatrix:
         self._add_vec0_objects(db_path)
 
         with get_connection(settings={"db_path": str(db_path)}) as conn:
-            assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+            self._assert_post_migration(conn, start_version)
             surviving = conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE name = 'chunk_vec'").fetchone()[0]
             assert surviving == 1, "chunk_vec must survive the migration"
 
