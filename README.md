@@ -12,6 +12,8 @@ Every time a Claude Code session ends, the conversation is synced to `~/.ccrecal
 
 ## Install
 
+**Supported platforms:** Linux (including WSL2) and macOS. Windows is not supported.
+
 ccrecall has two parts: a **Python package** (the `ccrecall` CLI plus the hook binaries) and a **Claude Code plugin** (the `/ccr-*` skills and the hook wiring). Install both.
 
 **1. Install the package** — puts `ccrecall` and the hook commands on your PATH:
