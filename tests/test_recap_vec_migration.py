@@ -69,8 +69,12 @@ def test_lightweight_connection_declines_instead_of_crashing_on_vec_objects(tmp_
         assert llm_summary_db.recap_schema_capability(conn) != "ready"
 
 
-def test_declining_leaves_the_embedding_objects_intact(tmp_path):
-    """A declined migration must not be a partial one."""
+def test_declining_does_not_poison_a_later_successful_migration(tmp_path):
+    """Declining must leave nothing half-applied behind it.
+
+    The lightweight open goes first and declines; the vec-aware open then has to
+    find a database it can still migrate, with its embedding objects untouched.
+    """
     path = tmp_path / "legacy.db"
     _legacy_vec_db(path)
 

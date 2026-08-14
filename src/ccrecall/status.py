@@ -141,9 +141,13 @@ def _recap_status(conn: sqlite3.Connection, settings: dict) -> dict:
             "session": session_uuid,
             "command": f"ccrecall backfill llm-summaries --session {session_uuid} --retry-failures",
         }
+        # internal_error belongs in this list: the drainer's per-job exception
+        # boundary writes it, those jobs never self-requeue, and --retry-failures
+        # selects on state rather than reason, so retrying is exactly the way out.
         for (session_uuid,) in conn.execute(
             "SELECT s.uuid FROM session_recap_jobs j JOIN sessions s ON s.id = j.session_id "
-            "WHERE j.state = 'blocked' AND j.reason IN ('budget_exceeded', 'unusable_output', 'timeout_exhausted') "
+            "WHERE j.state = 'blocked' "
+            "AND j.reason IN ('budget_exceeded', 'unusable_output', 'timeout_exhausted', 'internal_error') "
             "ORDER BY s.uuid"
         )
     ]

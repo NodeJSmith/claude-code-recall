@@ -663,6 +663,16 @@ def _migrate_to_v9(conn: sqlite3.Connection) -> None:
         raise sqlite3.OperationalError("recap v9 migration postconditions failed")
 
 
+def _has_vec_objects(conn: sqlite3.Connection) -> bool:
+    """Return True if this database carries vec0 virtual tables.
+
+    Reads sqlite_master as text, which needs no extension — the point is to find
+    out whether a reshape would need one before attempting the reshape.
+    """
+    query = "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND sql LIKE '%USING vec0%'"
+    return conn.execute(query).fetchone()[0] > 0
+
+
 def _apply_migrations(
     conn: sqlite3.Connection,
     *,
@@ -681,6 +691,18 @@ def _apply_migrations(
     conn.commit()
 
     if current >= SCHEMA_VERSION and _recap_schema_complete(conn):
+        return
+    if prepare is None and _has_vec_objects(conn):
+        # This sits below v3-v7 on purpose: those only add columns, which never
+        # makes SQLite reparse a vec0 table definition. The v8/v9 reshapes do.
+        #
+        # Every reshape below reparses the schema, and that parse needs the vec0
+        # module registered on this connection. This boundary deliberately imports
+        # none of the vec stack (see the transitive-import tests), so it cannot
+        # supply it. Leave the schema exactly as it is and report an unmigrated
+        # database — recap_schema_capability() already tells every caller here to
+        # stand down. Attempting the reshape instead raised on every single open,
+        # which is what took the drainer down on each run.
         return
     conn.execute("PRAGMA foreign_keys = OFF")
     try:

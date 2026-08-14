@@ -7,6 +7,7 @@ boundary.  It operates exclusively on imported SQLite state after startup.
 import argparse
 import contextlib
 import json
+import logging
 import os
 import re
 import signal
@@ -17,6 +18,12 @@ from pathlib import Path
 from whenever import Instant
 
 from ccrecall.config import get_db_path, load_settings, remove_pid_file, setup_logging, try_acquire_pid_file
+
+# The vec-aware boundary, not the lightweight one. This process already loads the
+# whole embedding stack through sync_current, so it costs nothing here — and it is
+# the only thing on the recap path that can migrate a database carrying chunk_vec.
+# Opening through llm_summary_db instead leaves those users permanently unmigrated.
+from ccrecall.db import get_connection
 from ccrecall.hooks.durability import fsync_directory, journal_lock
 from ccrecall.hooks.session_end import JOURNAL_PREFIX, JOURNAL_VERSION, journal_path
 from ccrecall.hooks.sync_current import EXCLUDED_PROJECT, sync_session_for_finalization
@@ -36,7 +43,8 @@ from ccrecall.llm_summarizer import (
     remove_packet,
     write_packet,
 )
-from ccrecall.llm_summary_db import get_connection, recap_schema_capability
+from ccrecall.llm_summary_db import recap_schema_capability
+from ccrecall.models import LOGGER_NAME
 from ccrecall.process_cleanup import process_group_absent, process_start_identity
 from ccrecall.recap_contract import ELIGIBILITY_POLICY_VERSION, RECAP_INPUT_CONTRACT_VERSION
 from ccrecall.recap_eligibility import evaluate_branch
@@ -70,6 +78,8 @@ from ccrecall.recap_state import (
     verify_cleanup_removed,
 )
 from ccrecall.summary_enrichment import build_stored_enrichment_envelope, valid_current_enrichment
+
+log = logging.getLogger(LOGGER_NAME)
 
 PID_KEY = "ccrecall-drain-session-recaps"
 JOURNAL_BATCH_SIZE = 32
@@ -380,8 +390,35 @@ def _process_job(
         row = conn.execute("SELECT uuid FROM sessions WHERE id = ?", (session_id,)).fetchone()
     # This intentionally happens after the fenced job claim and before every
     # recap input/eligibility read. It has no hook stdout and closes DB first.
-    if row is not None:
-        sync_session_for_finalization(settings, row[0])
+    if row is not None and sync_session_for_finalization(settings, row[0]) == EXCLUDED_PROJECT:
+        # The project was added to exclude_projects after these sessions were
+        # imported, so the branch is still sitting in the database. Journal replay
+        # already treats this sentinel as void intent; the claimed path must too,
+        # or the contents of a project the user asked us to leave alone get read
+        # and shipped to the provider. Stop before materializing anything.
+        with get_connection(settings) as exclusion_conn:
+            lineage_row = exclusion_conn.execute(
+                "SELECT retry_lineage FROM session_recap_jobs WHERE session_id = ?", (session_id,)
+            ).fetchone()
+            branch_row = exclusion_conn.execute(
+                "SELECT recap_input_hash FROM branches WHERE session_id = ? AND is_active = 1", (session_id,)
+            ).fetchone()
+            # This branch skips the refresh_recap_input reconciliation the normal
+            # path runs, so its fence can miss on a job whose requested hash never
+            # matched the stored one. A missed fence leaves the job claimed until
+            # its lease expires and re-claimed every pass after that — silent
+            # livelock. Nothing else observes this path, so say so out loud.
+            if not mark_excluded(
+                exclusion_conn,
+                session_id,
+                token,
+                branch_row[0] if branch_row else None,
+                lineage_row[0] if lineage_row else 0,
+                "excluded_project",
+                now,
+            ):
+                log.warning("Could not mark session %s excluded; its claim will expire and be retried", session_id)
+        return True
     with get_connection(settings) as conn:
         # The capture snapshot reads the branch identity and writes it back, so it
         # takes the write lock up front the way record_intent does. Without that,
