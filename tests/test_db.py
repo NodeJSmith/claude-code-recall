@@ -745,6 +745,44 @@ class TestSchemaVersioning:
             assert "summary_enrichment_json" in columns
             assert "summary_source_hash" in columns
 
+    @VEC_SKIP
+    def test_migration_past_v1_still_loads_vec_before_reshaping_a_table(self, tmp_path):
+        """A database that has embeddings and is already past v1 must still migrate.
+
+        Every migration after v1 rebuilds a table, and a rebuild reparses the
+        whole schema — which needs the vec0 module registered on the connection
+        for any database carrying vec0 objects. Loading the extension only when
+        `current < 1` means it never runs again once a user is past v1, so the
+        next reshaping migration makes their database unopenable. Every current
+        user is past v1, so this is the shape that matters.
+        """
+        db_path = tmp_path / "v1_with_embeddings.db"
+        _seed_v1_db_with_orphan_messages(db_path)
+
+        seed = sqlite3.connect(db_path)
+        seed.enable_load_extension(True)
+        sqlite_vec.load(seed)
+        seed.enable_load_extension(False)
+        # The vtab alone is not enough to force the failure: it is the trigger
+        # body referencing chunk_vec that SQLite must reparse, and cannot without
+        # the module. This is the exact pair _ensure_vec_schema leaves behind.
+        seed.execute(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS chunk_vec"
+            f" USING vec0(chunk_id INTEGER PRIMARY KEY, embedding float[{EMBEDDING_DIM}])"
+        )
+        seed.execute(
+            f"CREATE TRIGGER IF NOT EXISTS {db_module.TRIGGER_CHUNKS_VEC_AD}"
+            " AFTER DELETE ON chunks"
+            " BEGIN DELETE FROM chunk_vec WHERE chunk_id = OLD.id; END"
+        )
+        seed.commit()
+        seed.close()
+
+        with get_connection(settings={"db_path": str(db_path)}) as conn:
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+            surviving = conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE name = 'chunk_vec'").fetchone()[0]
+            assert surviving == 1, "the migration dropped the embedding table it was supposed to preserve"
+
     def test_migration_from_v1_drops_fork_point_uuid_and_purges_orphans(self, tmp_path):
         """A v1 DB with fork_point_uuid and an orphan message is migrated to v2 on first connection."""
         db_path = tmp_path / "v1_to_v2.db"
