@@ -6,7 +6,13 @@ import sys
 from pydantic import ValidationError
 from whenever import Instant
 
-from ccrecall.config import CLEAR_HANDOFF_FILENAME, get_db_path, load_settings, log_hook_exception
+from ccrecall.config import (
+    CLEAR_HANDOFF_FILENAME,
+    atomic_write_json,
+    get_db_path,
+    load_settings,
+    log_hook_exception,
+)
 from ccrecall.models import HookInput
 
 
@@ -29,15 +35,19 @@ def main():
         settings = load_settings()
         db_path = get_db_path(settings)
         handoff_path = db_path.parent / CLEAR_HANDOFF_FILENAME
-        handoff_path.write_text(
-            json.dumps(
-                {
-                    "session_id": session_id,
-                    "cwd": cwd,
-                    "timestamp": Instant.now().format_iso(),
-                }
-            ),
-            encoding="utf-8",
+        # write_text truncates before it writes, so a SessionStart reading
+        # concurrently can see half a document, and two sessions clearing at once
+        # can interleave. atomic_write_json stages through a per-writer temp file
+        # in the same directory and renames, and creates the runtime dir — which
+        # matters on a first run, where the missing directory would otherwise
+        # raise into the broad except below and lose the handoff silently.
+        atomic_write_json(
+            handoff_path,
+            {
+                "session_id": session_id,
+                "cwd": cwd,
+                "timestamp": Instant.now().format_iso(),
+            },
         )
     except Exception:
         log_hook_exception("clear-handoff")
