@@ -105,7 +105,7 @@ def sync_session(
         project_id = _project_id
     else:
         project_key = normalize_project_key(project_dir.name)
-        project_id = upsert_project(cursor, project_key, cwd=meta.get("cwd"))
+        project_id, _ = upsert_project(cursor, project_key, cwd=meta.get("cwd"))
 
     session_id = upsert_session(cursor, session_uuid, project_id, meta)
 

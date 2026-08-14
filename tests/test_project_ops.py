@@ -16,11 +16,12 @@ class TestUpsertProjectWithCwd:
         """upsert_project should create a project using the provided cwd path."""
 
         cursor = memory_db.cursor()
-        project_id = upsert_project(cursor, "-home-user-myrepo", cwd="/home/user/myrepo")
+        project_id, used_lossy = upsert_project(cursor, "-home-user-myrepo", cwd="/home/user/myrepo")
         memory_db.commit()
 
         assert project_id is not None
         assert isinstance(project_id, int)
+        assert not used_lossy
 
         cursor.execute("SELECT path, name FROM projects WHERE id = ?", (project_id,))
         row = cursor.fetchone()
@@ -32,9 +33,9 @@ class TestUpsertProjectWithCwd:
         """Calling upsert_project twice with same key returns same project_id."""
 
         cursor = memory_db.cursor()
-        id1 = upsert_project(cursor, "-home-user-myrepo", cwd="/home/user/myrepo")
+        id1, _ = upsert_project(cursor, "-home-user-myrepo", cwd="/home/user/myrepo")
         memory_db.commit()
-        id2 = upsert_project(cursor, "-home-user-myrepo", cwd="/home/user/myrepo")
+        id2, _ = upsert_project(cursor, "-home-user-myrepo", cwd="/home/user/myrepo")
         memory_db.commit()
 
         assert id1 == id2, "Idempotent call should return same project_id"
@@ -54,7 +55,7 @@ class TestUpsertProjectWithCwd:
         memory_db.commit()
 
         # Upsert with real cwd (same key but different path from cwd metadata)
-        project_id = upsert_project(cursor, "-home-user-my-repo", cwd="/home/user/my-repo")
+        project_id, _ = upsert_project(cursor, "-home-user-my-repo", cwd="/home/user/my-repo")
         memory_db.commit()
 
         assert project_id is not None
@@ -67,7 +68,7 @@ class TestUpsertProjectWithCwd:
         """Worktree cwd suffix should be normalized away."""
 
         cursor = memory_db.cursor()
-        project_id = upsert_project(
+        project_id, _ = upsert_project(
             cursor,
             "-home-user-myrepo",
             cwd="/home/user/myrepo/.claude/worktrees/my-feature",
@@ -97,10 +98,11 @@ class TestUpsertProjectProbesJsonl:
             cursor = memory_db.cursor()
             # Use the encoded directory name as project_key, no cwd
             project_key = "-home-user-node-banana"
-            project_id = upsert_project(cursor, project_key, project_dir=project_dir)
+            project_id, used_lossy = upsert_project(cursor, project_key, project_dir=project_dir)
             memory_db.commit()
 
         assert project_id is not None
+        assert not used_lossy
 
         cursor.execute("SELECT path, name FROM projects WHERE id = ?", (project_id,))
         row = cursor.fetchone()
@@ -123,10 +125,11 @@ class TestUpsertProjectProbesJsonl:
             shutil.copy(FIXTURE_DIR / "linear_3_exchange.jsonl", subagents_dir / "sess.jsonl")
 
             cursor = memory_db.cursor()
-            project_id = upsert_project(cursor, "-home-user-node-banana", project_dir=project_dir)
+            project_id, used_lossy = upsert_project(cursor, "-home-user-node-banana", project_dir=project_dir)
             memory_db.commit()
 
         assert project_id is not None
+        assert not used_lossy
 
         cursor.execute("SELECT path, name FROM projects WHERE id = ?", (project_id,))
         row = cursor.fetchone()
@@ -142,10 +145,11 @@ class TestUpsertProjectProbesJsonl:
             project_dir.mkdir()
 
             cursor = memory_db.cursor()
-            project_id = upsert_project(cursor, "-home-user-myproject", project_dir=project_dir)
+            project_id, used_lossy = upsert_project(cursor, "-home-user-myproject", project_dir=project_dir)
             memory_db.commit()
 
         assert project_id is not None
+        assert used_lossy
 
         cursor.execute("SELECT path, name FROM projects WHERE id = ?", (project_id,))
         row = cursor.fetchone()
@@ -161,9 +165,10 @@ class TestUpsertProjectProbesJsonl:
             project_dir.mkdir()
 
             cursor = memory_db.cursor()
-            project_id = upsert_project(cursor, "-home-user-src-secret-client", project_dir=project_dir)
+            project_id, used_lossy = upsert_project(cursor, "-home-user-src-secret-client", project_dir=project_dir)
             memory_db.commit()
 
+        assert used_lossy
         cursor.execute("SELECT name FROM projects WHERE id = ?", (project_id,))
         row = cursor.fetchone()
         # Lossy reconstruction turns secret-client into secret/client → name="client"
@@ -180,7 +185,7 @@ class TestUpsertProjectProbesJsonl:
             symlink_project_dir.symlink_to(real_project_dir, target_is_directory=True)
 
             cursor = memory_db.cursor()
-            project_id = upsert_project(cursor, "-home-user-node-banana", project_dir=symlink_project_dir)
+            project_id, _ = upsert_project(cursor, "-home-user-node-banana", project_dir=symlink_project_dir)
             memory_db.commit()
 
         cursor.execute("SELECT path FROM projects WHERE id = ?", (project_id,))
@@ -220,36 +225,50 @@ class TestKeyCouldMatchExcluded:
         assert key_could_match_excluded("-secret-client", ["secret-client"])
 
 
-class TestImportProjectExcludesHyphenatedNames:
-    """Integration test: import_project should exclude hyphenated names on the fallback path."""
+class TestLossyFallbackExclusionChain:
+    """Verify the full chain: lossy upsert + key-suffix match catches hyphenated names."""
 
-    def test_import_excludes_hyphenated_project_on_fallback(self, memory_db):
-        """When probe fails and key is ambiguous, exclude if key could match.
-
-        The upsert derives name='client' from key '-home-u-src-secret-client'
-        (lossy reconstruction), so 'secret-client' doesn't match by exact name.
-        The key-suffix check should catch it.
+    def test_lossy_fallback_reports_used_and_suffix_matches(self, memory_db):
+        """When probe fails, upsert reports lossy fallback, and the key-suffix check
+        catches what the exact-name match missed.
         """
 
         with tempfile.TemporaryDirectory() as tmpdir:
             project_dir = Path(tmpdir) / "-home-u-src-secret-client"
             project_dir.mkdir()
 
-            # Seed the project with a recognizable name from the lossy fallback
             cursor = memory_db.cursor()
-            upsert_project(cursor, "-home-u-src-secret-client", project_dir=project_dir)
+            _, used_lossy = upsert_project(cursor, "-home-u-src-secret-client", project_dir=project_dir)
             memory_db.commit()
 
-            # Verify the lossy name is wrong
-            cursor.execute(
-                "SELECT name FROM projects WHERE key = ?",
-                ("-home-u-src-secret-client",),
-            )
-            assert cursor.fetchone()[0] == "client"  # lossy — not "secret-client"
+            assert used_lossy
 
-            # Now test that key_could_match_excluded catches what exact-name missed
-            from ccrecall.formatting import normalize_project_key
+            cursor.execute("SELECT name FROM projects WHERE key = ?", ("-home-u-src-secret-client",))
+            project_name = cursor.fetchone()[0]
+            assert project_name == "client"  # lossy — not "secret-client"
 
-            key = normalize_project_key("-home-u-src-secret-client")
-            assert "client" not in ["secret-client"]  # exact match fails (the bug)
-            assert key_could_match_excluded(key, ["secret-client"])  # suffix match catches it
+            # Exact-name check misses it, but key-suffix catches it
+            assert project_name not in ["secret-client"]
+            assert key_could_match_excluded("-home-u-src-secret-client", ["secret-client"])
+
+    def test_accurate_probe_does_not_trigger_suffix_check(self, memory_db):
+        """When cwd is accurate, used_lossy_fallback is False — the suffix check
+        should not fire, preventing false-positive exclusion of e.g. 'team-app'
+        when only 'app' is excluded.
+        """
+
+        cursor = memory_db.cursor()
+        project_id, used_lossy = upsert_project(cursor, "-home-user-repos-team-app", cwd="/home/user/repos/team-app")
+        memory_db.commit()
+
+        assert not used_lossy
+
+        cursor.execute("SELECT name FROM projects WHERE id = ?", (project_id,))
+        project_name = cursor.fetchone()[0]
+        assert project_name == "team-app"
+
+        # Exact-name check correctly does not match
+        assert project_name not in ["app"]
+        # The suffix check would match (false positive), but it must not fire
+        # because used_lossy_fallback is False
+        assert key_could_match_excluded("-home-user-repos-team-app", ["app"])

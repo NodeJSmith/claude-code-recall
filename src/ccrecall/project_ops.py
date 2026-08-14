@@ -15,6 +15,7 @@ from pathlib import Path
 
 from ccrecall.formatting import (
     extract_project_name,
+    get_project_key,
     normalize_cwd,
     normalize_project_key,
     parse_project_key,
@@ -28,8 +29,8 @@ def upsert_project(
     project_key: str,
     cwd: str | None = None,
     project_dir: Path | None = None,
-) -> int:
-    """Upsert a project row and return its ``projects.id``.
+) -> tuple[int, bool]:
+    """Upsert a project row and return ``(projects.id, used_lossy_fallback)``.
 
     ``project_key`` is the encoded project directory name (e.g. ``-home-user-repo``);
     worktree suffixes are stripped automatically. The project path is derived by one
@@ -37,6 +38,10 @@ def upsert_project(
     after normalization; otherwise a provided ``project_dir`` (import path) is probed
     for cwd metadata in its first JSONL; if neither yields a path, fall back to lossy
     hyphen reconstruction from the key.
+
+    The second return value indicates whether the lossy fallback was used (True) or
+    an accurate path was available from cwd/probe (False). Callers need this to decide
+    whether conservative key-suffix exclusion matching is appropriate.
     """
     normalized_key = normalize_project_key(project_key)
 
@@ -46,8 +51,8 @@ def upsert_project(
     elif project_dir is not None:
         raw_path = _probe_project_dir(project_dir)
 
+    used_lossy_fallback = not raw_path
     if not raw_path:
-        # Final fallback: lossy hyphen reconstruction from key
         raw_path = parse_project_key(normalized_key)
 
     project_path = normalize_cwd(raw_path)
@@ -58,7 +63,6 @@ def upsert_project(
 
     if existing:
         project_id = existing[0]
-        # Update path/name if we now have better data
         if project_path != existing[1]:
             cursor.execute(
                 "UPDATE projects SET path = ?, name = ? WHERE id = ?",
@@ -76,7 +80,7 @@ def upsert_project(
         cursor.execute("SELECT id FROM projects WHERE key = ?", (normalized_key,))
         project_id = cursor.fetchone()[0]
 
-    return project_id
+    return project_id, used_lossy_fallback
 
 
 def key_could_match_excluded(key: str, exclude_projects: list[str]) -> bool:
@@ -92,7 +96,7 @@ def key_could_match_excluded(key: str, exclude_projects: list[str]) -> bool:
     ``-<encoded_name>`` for each excluded name.
     """
     for name in exclude_projects:
-        encoded = name.replace("/", "-").replace(":", "-").replace(".", "-")
+        encoded = get_project_key(name)
         if key == encoded or key.endswith("-" + encoded):
             return True
     return False

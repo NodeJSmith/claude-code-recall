@@ -220,7 +220,7 @@ def import_project(
     project_key = normalize_project_key(project_dir.name)
 
     # Upsert project using the JSONL-probe strategy for accurate path derivation
-    project_id = upsert_project(cursor, project_key, project_dir=project_dir)
+    project_id, used_lossy_fallback = upsert_project(cursor, project_key, project_dir=project_dir)
 
     # Check exclusion after we know the real project name
     cursor.execute("SELECT name FROM projects WHERE id = ?", (project_id,))
@@ -228,7 +228,8 @@ def import_project(
     project_name = project_row[0] if project_row else extract_project_name(str(project_dir))
 
     if exclude_projects and (
-        project_name in exclude_projects or key_could_match_excluded(project_key, exclude_projects)
+        project_name in exclude_projects
+        or (used_lossy_fallback and key_could_match_excluded(project_key, exclude_projects))
     ):
         return 0, 0, 0
 
