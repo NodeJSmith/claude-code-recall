@@ -86,7 +86,10 @@ CREATE TABLE IF NOT EXISTS messages (
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
 CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);
 CREATE INDEX IF NOT EXISTS idx_messages_session_uuid ON messages(session_id, uuid);
-CREATE INDEX IF NOT EXISTS idx_messages_tool_content_null ON messages(session_id) WHERE tool_content IS NULL;
+-- idx_messages_tool_content_null is created by _migrate_to_v4, not here:
+-- on a pre-v4 upgrade the messages table already exists WITHOUT tool_content,
+-- so a CREATE INDEX referencing that column in SCHEMA_CORE would crash before
+-- the migration gets a chance to ADD COLUMN.
 
 -- Branch-messages mapping (many-to-many)
 CREATE TABLE IF NOT EXISTS branch_messages (
