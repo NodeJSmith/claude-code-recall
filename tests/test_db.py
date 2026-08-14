@@ -1210,6 +1210,77 @@ class TestSchemaVersioning:
             assert db_module.chunk_vec_queryable(conn), "chunk_vec must be re-created by the self-heal, not migration"
 
 
+class TestMigrationVersionMatrix:
+    """Version matrix: every starting version migrates to current SCHEMA_VERSION.
+
+    Regression guard for #121. Parametrized across every user_version from 0 to
+    SCHEMA_VERSION-1 to ensure the migration ladder has no gaps. The vec0 variant
+    covers the case where a DB carries vec0 objects from prior embedding runs —
+    a table rebuild reparses the schema and crashes with "no such module: vec0"
+    if the extension isn't loaded.
+    """
+
+    @staticmethod
+    def _build_db_at_version(db_path, target_version: int) -> None:
+        """Build a DB at current schema, then stamp user_version down to target.
+
+        For v0 and v1, uses the purpose-built seed functions that reproduce the
+        exact pre-migration table shapes (messages_fts, fork_point_uuid). For
+        v2+, a fresh get_connection produces a current-schema DB; stamping it
+        down simulates an install frozen at that version.
+        """
+        if target_version == 0:
+            _seed_v0_db_with_dead_branches(db_path)
+            return
+        if target_version == 1:
+            _seed_v1_db_with_orphan_messages(db_path)
+            return
+
+        with get_connection(settings={"db_path": str(db_path)}) as conn:
+            conn.execute(f"PRAGMA user_version = {target_version}")
+
+    @staticmethod
+    def _add_vec0_objects(db_path) -> None:
+        """Add a real vec0 virtual table and cascade trigger to an existing DB."""
+        conn = sqlite3.connect(db_path)
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+        conn.execute(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS chunk_vec"
+            f" USING vec0(chunk_id INTEGER PRIMARY KEY, embedding float[{EMBEDDING_DIM}])"
+        )
+        conn.execute(
+            f"CREATE TRIGGER IF NOT EXISTS {db_module.TRIGGER_CHUNKS_VEC_AD}"
+            " AFTER DELETE ON chunks"
+            " BEGIN DELETE FROM chunk_vec WHERE chunk_id = OLD.id; END"
+        )
+        conn.commit()
+        conn.close()
+
+    @pytest.mark.parametrize("start_version", range(SCHEMA_VERSION))
+    def test_migration_from_any_version_reaches_current(self, tmp_path, start_version):
+        """Every starting version migrates to SCHEMA_VERSION without error."""
+        db_path = tmp_path / f"v{start_version}.db"
+        self._build_db_at_version(db_path, start_version)
+
+        with get_connection(settings={"db_path": str(db_path)}) as conn:
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+
+    @VEC_SKIP
+    @pytest.mark.parametrize("start_version", range(SCHEMA_VERSION))
+    def test_migration_with_vec0_objects_from_any_version(self, tmp_path, start_version):
+        """A DB carrying vec0 objects migrates from any version without crashing."""
+        db_path = tmp_path / f"v{start_version}_vec.db"
+        self._build_db_at_version(db_path, start_version)
+        self._add_vec0_objects(db_path)
+
+        with get_connection(settings={"db_path": str(db_path)}) as conn:
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+            surviving = conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE name = 'chunk_vec'").fetchone()[0]
+            assert surviving == 1, "chunk_vec must survive the migration"
+
+
 class TestSchemaEquivalencePin:
     """Characterization pin — guards the migrations squash to v6 baseline.
 
