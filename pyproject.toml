@@ -71,7 +71,6 @@ ccrecall-sync            = "ccrecall.hooks.memory_sync:main"
 ccrecall-context         = "ccrecall.hooks.memory_context:main"
 ccrecall-clear-handoff   = "ccrecall.hooks.clear_handoff:main"
 ccrecall-warm-model      = "ccrecall.hooks.warm_model:main"
-ccrecall-llm-summaries   = "ccrecall.hooks.backfill_llm_summaries:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

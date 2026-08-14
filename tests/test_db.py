@@ -112,12 +112,6 @@ class TestLoadSettings:
         assert DEFAULT_SETTINGS["log_level"] == "INFO"
         assert isinstance(DEFAULT_SETTINGS["exclude_projects"], list)
         assert DEFAULT_SETTINGS["alert_snooze_hours"] == 24
-        assert DEFAULT_SETTINGS["llm_summaries_enabled"] is False
-        assert DEFAULT_SETTINGS["llm_summary_model"] == "sonnet"
-        assert DEFAULT_SETTINGS["llm_summary_effort"] == "medium"
-        assert DEFAULT_SETTINGS["llm_summary_timeout_seconds"] == 180
-        assert DEFAULT_SETTINGS["llm_summary_max_budget_usd"] == 1.00
-        assert DEFAULT_SETTINGS["llm_summary_min_exchanges"] == 9
 
 
 class TestLoadConfig:
@@ -269,31 +263,6 @@ class TestLoadSettingsWithConfig:
         result = load_settings()
         assert result["logging_enabled"] is False
         assert result["exclude_projects"] == ["work-secret"]
-
-    def test_llm_settings_overrides_honored(self, tmp_path, monkeypatch):
-        """The LLM summary settings are user-overridable via config.json."""
-        cfg = tmp_path / "config.json"
-        cfg.write_text(
-            json.dumps(
-                {
-                    "llm_summaries_enabled": True,
-                    "llm_summary_model": "haiku",
-                    "llm_summary_effort": "low",
-                    "llm_summary_timeout_seconds": 45,
-                    "llm_summary_max_budget_usd": 2.5,
-                    "llm_summary_min_exchanges": 3,
-                }
-            )
-        )
-        monkeypatch.setattr("ccrecall.config.CONFIG_PATH", cfg)
-
-        result = load_settings()
-        assert result["llm_summaries_enabled"] is True
-        assert result["llm_summary_model"] == "haiku"
-        assert result["llm_summary_effort"] == "low"
-        assert result["llm_summary_timeout_seconds"] == 45
-        assert result["llm_summary_max_budget_usd"] == 2.5
-        assert result["llm_summary_min_exchanges"] == 3
 
     def test_missing_config_returns_defaults(self, tmp_path, monkeypatch):
         """load_settings() returns DEFAULT_SETTINGS when config.json does not exist."""
@@ -1038,7 +1007,7 @@ class TestSchemaVersioning:
 
         statements: list[str] = []
         conn.set_trace_callback(statements.append)
-        db_module.llm_summary_db._migrate_to_v7(conn)
+        db_module.db_base._migrate_to_v7(conn)
         conn.set_trace_callback(None)
 
         assert not [statement for statement in statements if "ALTER TABLE branches ADD COLUMN" in statement]
@@ -1050,10 +1019,10 @@ class TestSchemaVersioning:
             "CREATE TABLE branches (id INTEGER PRIMARY KEY, summary_enrichment_json TEXT, summary_enrichment_version INTEGER DEFAULT 0)"
         )
 
-        db_module.llm_summary_db._migrate_to_v7(conn)
+        db_module.db_base._migrate_to_v7(conn)
 
         columns = {row[1] for row in conn.execute("PRAGMA table_info(branches)").fetchall()}
-        assert columns == {"id"} | set(db_module.llm_summary_db.V7_BRANCH_COLUMNS)
+        assert columns == {"id"} | set(db_module.db_base.V7_BRANCH_COLUMNS)
         conn.close()
 
     def test_migration_from_v4_creates_ingestion_check_cache_table(self, tmp_path):
@@ -1864,11 +1833,11 @@ class TestTransitiveImportIsolation:
         backfill) — it must have zero imports beyond stdlib."""
         self._assert_no_heavy_imports("ccrecall.hooks.tool_content_eligibility")
 
-    def test_llm_summary_db_opens_without_db_or_heavy_deps(self, tmp_path):
-        """llm_summary_db must open a migrated connection without importing db.py or heavy deps."""
+    def test_db_base_opens_without_db_or_heavy_deps(self, tmp_path):
+        """db_base must open a migrated connection without importing db.py or heavy deps."""
         db_path = tmp_path / "llm-summary.db"
         code = (
-            "from ccrecall.llm_summary_db import get_connection\n"
+            "from ccrecall.db_base import get_connection\n"
             "import sys\n"
             f"heavy = {self.HEAVY_MODULES}\n"
             f"db_path = {str(db_path)!r}\n"
@@ -1878,21 +1847,6 @@ class TestTransitiveImportIsolation:
             "found = heavy & loaded\n"
             "assert not found, f'Heavy modules loaded: {found}'\n"
             "assert 'ccrecall.db' not in loaded, 'ccrecall.db should not be imported'\n"
-        )
-        result = _run_subprocess_probe(code)
-        assert result.returncode == 0, result.stderr
-
-    def test_backfill_llm_summaries_entrypoint_imports_no_cli_graph_or_heavy_modules(self):
-        code = (
-            "import ccrecall.hooks.backfill_llm_summaries\n"
-            "import sys\n"
-            f"heavy = {self.HEAVY_MODULES}\n"
-            "loaded = set(sys.modules)\n"
-            "found = heavy & loaded\n"
-            "assert not found, f'Heavy modules loaded: {found}'\n"
-            "assert 'ccrecall.cli' not in loaded\n"
-            "assert 'ccrecall.cli.commands' not in loaded\n"
-            "assert 'ccrecall.db' not in loaded\n"
         )
         result = _run_subprocess_probe(code)
         assert result.returncode == 0, result.stderr

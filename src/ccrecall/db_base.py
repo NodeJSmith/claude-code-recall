@@ -1,8 +1,11 @@
-"""Embedding-free DB connection and migration helpers for LLM summary workers.
+"""Embedding-free DB connection and migration helpers — the base layer under db.py.
 
-This module intentionally avoids sqlite-vec, fastembed, onnxruntime, and
-ccrecall.db so detached LLM-summary workers can open and migrate the
-conversation DB without pulling in embedding dependencies.
+Owns SCHEMA_VERSION, the version-gated migration ladder, the base pragmas, and
+a connection that opens and migrates the conversation DB without sqlite-vec,
+fastembed, onnxruntime, or ccrecall.db. db.py layers the vec-aware surface on
+top; keeping that split is what lets a caller migrate the DB without paying the
+~1800ms embedding-stack import cost. A test asserts this module imports none of
+those, so keep new heavy dependencies out of it.
 """
 
 import contextlib

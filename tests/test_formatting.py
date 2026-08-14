@@ -505,19 +505,12 @@ class TestFormatCardJson:
             "started_at",
             "ended_at",
             "topic",
-            "display_title",
-            "summary_preview",
             "exchange_count",
             "files_modified",
             "commits",
             "tool_counts",
         }
         assert required.issubset(obj.keys())
-
-    def test_additive_enrichment_fields_default_to_none(self):
-        obj = format_card_json(_make_card())
-        assert obj["display_title"] is None
-        assert obj["summary_preview"] is None
 
     def test_no_extra_fields_beyond_contract(self):
         """JSON object must not carry fields outside the contract shape."""

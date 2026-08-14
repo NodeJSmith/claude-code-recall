@@ -2,7 +2,7 @@
 
 **Conversation history and semantic search for Claude Code.**
 
-ccrecall stores your Claude Code sessions in a local SQLite database so you can recall past conversations, search across them by keyword and meaning, and get automatic context on session start. By default, storage, sync, deterministic summaries, and semantic search all run on your machine. Optional LLM summary enrichment is separate: if you explicitly opt in and pass its capability check, ccrecall sends a branch-scoped packet through your installed Claude CLI using your Claude auth.
+ccrecall stores your Claude Code sessions in a local SQLite database so you can recall past conversations, search across them by keyword and meaning, and get automatic context on session start. Storage, sync, summaries, and semantic search all run entirely on your machine — no data leaves it.
 
 > ccrecall is an independent, community project for [Claude Code](https://docs.anthropic.com/en/docs/claude-code). It is not affiliated with, endorsed by, or sponsored by Anthropic.
 
@@ -44,61 +44,6 @@ No manual setup is needed. ccrecall uses built-in defaults unless you create `~/
 Search results are fused from two signals: keyword full-text search (FTS5 → FTS4 → LIKE fallback) and vector similarity from a locally-running embedding model. The two ranked lists are merged with Reciprocal Rank Fusion (RRF), so results that rank well in both signals appear first.
 
 The embedding model is [jina-embeddings-v2-small-en](https://huggingface.co/jinaai/jina-embeddings-v2-small-en) (512-dim), running entirely on your machine via [fastembed](https://github.com/qdrant/fastembed). No data leaves your machine on this path.
-
-## Optional LLM summary enrichment
-
-LLM enrichment adds a **Branch Resume Brief** above the deterministic summary when a branch has a valid cached enrichment. It is off by default and never replaces the deterministic baseline.
-
-When you enable it, ccrecall sends only the selected branch packet through your installed `claude` CLI using your Claude Code auth:
-
-- selected branch-scoped transcript content
-- branch/session metadata
-- source-path provenance
-
-ccrecall does **not** enable this automatically. You must opt in, and the `claude` CLI must first pass a `--no-session-persistence` capability check so the enrichment call does not create importable Claude transcripts of its own.
-
-### Capability check and manual backfill
-
-Run the capability check first:
-
-```bash
-ccrecall backfill llm-summaries --check-capability
-```
-
-Expected outcome: a pass/fail result that updates ccrecall's local capability sidecar without reading your real conversation transcripts.
-
-Then run the canonical manual backfill command:
-
-```bash
-ccrecall backfill llm-summaries
-```
-
-Common selectors:
-
-```bash
-ccrecall backfill llm-summaries --days 14
-ccrecall backfill llm-summaries --limit 50
-ccrecall backfill llm-summaries --session <session-uuid>
-ccrecall backfill llm-summaries --force
-```
-
-Use `--force` only when you want to rerun the selected branches even after an earlier enrichment attempt or when you intentionally want a manual run to bypass the `llm_summary_min_exchanges` filter.
-
-Expected outcome: progress/completion output only. ccrecall does not print transcript text, raw prompts, or raw model responses.
-
-### Automatic current-session enrichment
-
-`llm_summaries_enabled` controls only the automatic post-sync worker. When it is `true`, `ccrecall sync-current` may spawn a detached enrichment worker after a successful Stop-hook sync when:
-
-- the current session produced new messages
-
-The worker checks the capability sidecar and branch eligibility itself. If the capability check is missing or invalid, it exits without calling Claude. If the branch does not meet the minimum-exchange threshold, it remains eligible for a later manual backfill.
-
-If any of those gates fail, or if Claude is unavailable, unauthenticated, rate-limited, over budget, times out, or returns invalid output, ccrecall keeps the deterministic summary and injected context exactly as before.
-
-### Budget behavior
-
-`llm_summary_max_budget_usd` defaults to `$1.00`. ccrecall passes that value through to the Claude CLI unchanged as an upstream **stop threshold**. It is useful spend control, but it is **not a guaranteed maximum charge**: Claude can cross the threshold before stopping.
 
 ## Embedding coverage and backfill
 
@@ -183,7 +128,6 @@ These are wired by the plugin's `hooks/hooks.json` and fire on their respective 
 | `ccrecall sync-current` | Syncs a single session file to the DB. Called by `ccrecall-sync` with the session ID from stdin |
 | `ccrecall import` | Full import of all JSONL files in `~/.claude/projects/`. Skips files that haven't changed since last import (file hash check). Run on first install and whenever new sessions need backfilling |
 | `ccrecall backfill summaries` | Generates context summaries for any DB branches that don't have one yet. Runs in the background after `ccrecall-setup` |
-| `ccrecall-llm-summaries` | Internal detached worker that builds branch packets and asks the installed Claude CLI for opt-in Branch Resume Briefs. Spawned after sync when `llm_summaries_enabled` is true; it exits without calling Claude when the capability gate is not valid. |
 
 ### Skill CLIs (called from skill files — can also be used directly)
 
@@ -195,7 +139,6 @@ These are the `ccrecall` subcommands the `/ccr-*` skills invoke. You can run the
 | `ccrecall search` | Searches sessions by keyword fused with vector similarity (FTS5 → FTS4 → LIKE fallback, RRF-fused with jina embeddings when available). Used by `/ccr-recall` |
 | `ccrecall tail` | Reads the tail of a prior session's transcript to recover the last instruction and any unanswered question. Used by `/ccr-resume` |
 | `ccrecall backfill embeddings` | Opt-in seeding of embeddings for historical active-leaf branches (jina-v2-small-en via fastembed). Not auto-spawned. Supports `--days N` / `--limit N` / `--threads N`; throttled via `nice` + a single inference thread by default. Resumable |
-| `ccrecall backfill llm-summaries` | Opt-in Branch Resume Brief backfill through your installed Claude CLI. Run `--check-capability` first. Supports `--days N` / `--limit N` / `--session UUID` / `--force`. Manual runs work even when automatic enrichment is disabled. |
 | `ccrecall backfill tool-content` | Opt-in re-parse of already-synced sessions' JSONL files to populate `messages.tool_content` for rows synced before tool-content extraction existed. Not auto-spawned. Supports `--days N` / `--limit N` / `--status`; resets `embedding_version` on touched branches so `backfill embeddings` re-embeds them. Resumable |
 
 ## Data flow
@@ -206,8 +149,6 @@ Session ends
        └─ ccrecall sync-current (background)
              └─ writes to ~/.ccrecall/conversations.db
              └─ embeds the active leaf via jina if model available (drops silently on failure)
-             └─ optionally spawns ccrecall-llm-summaries after sync
-                  (only when explicitly enabled; worker checks the capability gate)
 
 /clear (SessionEnd)
   └─ ccrecall-clear-handoff
@@ -221,7 +162,7 @@ Session starts
   │    └─ ccrecall backfill summaries (background, if summaries missing)
   │    └─ (embedding backfill is NOT auto-spawned — opt-in via ccrecall backfill embeddings)
   └─ ccrecall-context (SessionStart, startup + clear)
-       └─ injects deterministic context, plus a Branch Resume Brief above it when a current valid enrichment exists
+       └─ injects deterministic context
 ```
 
 ## Config file
@@ -236,27 +177,18 @@ Session starts
 | `logging_enabled` | bool | `true` | Write hook diagnostics (including swallowed hook exceptions) to per-process files such as `~/.ccrecall/ccrecall-sync.log`. Set to `false` to suppress logging. |
 | `log_level` | str | `"INFO"` | Logging verbosity when `logging_enabled` is true. Accepts standard Python level names: `DEBUG`, `INFO`, `WARNING`, `ERROR`. |
 | `alert_snooze_hours` | int | `24` | After surfacing an alert (unwritable DB, embedding failure), suppress the same alert for this many hours. |
-| `llm_summaries_enabled` | bool | `false` | Enable automatic post-sync LLM enrichment for eligible current sessions. Manual `ccrecall backfill llm-summaries` runs still work when this is `false`. |
-| `llm_summary_model` | str | `"sonnet"` | Claude model name to pass through unchanged for enrichment. `sonnet` is the default because this is a factual summarization/resume task; you can choose a cheaper model such as `haiku` yourself. |
-| `llm_summary_effort` | str | `"medium"` | Claude effort setting for enrichment requests. |
-| `llm_summary_timeout_seconds` | int | `180` | Per-branch timeout for the Claude enrichment subprocess. |
-| `llm_summary_max_budget_usd` | float | `1.00` | Claude budget stop threshold to pass through unchanged. This is upstream spend control, not a guaranteed maximum charge. |
-| `llm_summary_min_exchanges` | int | `9` | Minimum exchange count for automatic enrichment and ordinary manual backfill selection. `ccrecall backfill llm-summaries --force` bypasses this filter. |
 
 Example config:
 
 ```json
 {
-  "llm_summaries_enabled": true,
-  "llm_summary_model": "sonnet",
-  "llm_summary_effort": "medium",
-  "llm_summary_timeout_seconds": 180,
-  "llm_summary_max_budget_usd": 1.0,
-  "llm_summary_min_exchanges": 9
+  "auto_inject_context": true,
+  "max_context_sessions": 2,
+  "exclude_projects": ["work-secret"]
 }
 ```
 
-> The deterministic baseline remains local-only. Opt-in LLM enrichment is the only path in this release that sends selected transcript-derived data through Claude Code auth.
+> ccrecall is local-only. Nothing it stores or derives is sent anywhere.
 
 ## Database
 

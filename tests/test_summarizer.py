@@ -7,10 +7,8 @@ import sqlite3
 
 import pytest
 
-import ccrecall.embed_ops as embed_ops
 from ccrecall.branch_ops import sync_branch
 from ccrecall.db import CONTENT_ERROR_VERSION
-from ccrecall.embed_ops import write_branch_summary
 from ccrecall.hooks import backfill_summaries, memory_setup
 from ccrecall.schema import SCHEMA
 from ccrecall.summarizer import (
@@ -23,7 +21,6 @@ from ccrecall.summarizer import (
     render_context_summary,
     truncate_mid,
 )
-from ccrecall.summary_enrichment import compute_summary_source_hash
 
 
 class TestTruncateMid:
@@ -748,153 +745,8 @@ class TestBackfillErrorHandling:
         assert self._version(db) == self.STARTING_VERSION  # unchanged — still eligible
 
 
-class TestSummarySourceHashMaintenance:
-    def _make_conn_with_branch(
-        self,
-        *,
-        summary_version: int = 0,
-        summary_source_hash: str | None = "stale-hash",
-    ) -> tuple[sqlite3.Connection, int]:
-        conn = sqlite3.connect(":memory:")
-        conn.executescript(SCHEMA)
-        conn.commit()
-        cursor = conn.cursor()
-        cursor.execute(
-            "INSERT INTO projects (path, key, name) VALUES (?, ?, ?)",
-            ("/test/proj", "-test-proj", "proj"),
-        )
-        cursor.execute(
-            "INSERT INTO sessions (uuid, project_id, git_branch) VALUES (?, ?, ?)",
-            ("sess-1", 1, "main"),
-        )
-        cursor.execute(
-            """
-            INSERT INTO branches (
-                session_id,
-                leaf_uuid,
-                is_active,
-                started_at,
-                ended_at,
-                exchange_count,
-                files_modified,
-                commits,
-                tool_counts,
-                aggregated_content,
-                summary_version,
-                summary_source_hash
-            )
-            VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                1,
-                "a1",
-                "2026-01-01T10:00:00Z",
-                "2026-01-01T10:01:00Z",
-                1,
-                json.dumps(["src/main.py"]),
-                json.dumps(["fix: bug"]),
-                json.dumps({"Read": 1}),
-                "hello\nworld",
-                summary_version,
-                summary_source_hash,
-            ),
-        )
-        branch_id = cursor.lastrowid
-        assert branch_id is not None
-        cursor.execute(
-            """
-            INSERT INTO messages (session_id, uuid, role, content, timestamp, tool_content)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (1, "u1", "user", "hello", "2026-01-01T10:00:00Z", ""),
-        )
-        user_id = cursor.lastrowid
-        cursor.execute(
-            """
-            INSERT INTO messages (session_id, uuid, role, content, timestamp, tool_content)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (1, "a1", "assistant", "world", "2026-01-01T10:01:00Z", ""),
-        )
-        assistant_id = cursor.lastrowid
-        cursor.executemany(
-            "INSERT INTO branch_messages (branch_id, message_id) VALUES (?, ?)",
-            [(branch_id, user_id), (branch_id, assistant_id)],
-        )
-        conn.commit()
-        return conn, branch_id
-
-    def test_write_branch_summary_sets_summary_source_hash_after_success(self):
-        conn, branch_id = self._make_conn_with_branch()
-        cursor = conn.cursor()
-
-        write_branch_summary(cursor, branch_id)
-
-        row = cursor.execute(
-            """
-            SELECT b.leaf_uuid, b.summary_version, b.context_summary_json, b.aggregated_content,
-                   b.exchange_count, b.started_at, b.ended_at, b.files_modified,
-                   b.tool_counts, b.commits, s.git_branch, b.summary_source_hash
-            FROM branches b
-            JOIN sessions s ON b.session_id = s.id
-            WHERE b.id = ?
-            """,
-            (branch_id,),
-        ).fetchone()
-        assert row is not None
-        expected_hash = compute_summary_source_hash(
-            {
-                "leaf_uuid": row[0],
-                "summary_version": row[1],
-                "context_summary_json": row[2],
-                "aggregated_content": row[3],
-                "exchange_count": row[4],
-                "started_at": row[5],
-                "ended_at": row[6],
-                "files_modified": row[7],
-                "tool_counts": row[8],
-                "commits": row[9],
-                "git_branch": row[10],
-            }
-        )
-        assert row[1] == SUMMARY_VERSION
-        assert row[11] == expected_hash
-
-    def test_write_branch_summary_clears_summary_source_hash_on_failure(self, monkeypatch):
-        conn, branch_id = self._make_conn_with_branch()
-        cursor = conn.cursor()
-
-        def boom(_cursor, _branch_id):
-            raise ValueError("malformed summary")
-
-        monkeypatch.setattr("ccrecall.embed_ops.compute_context_summary", boom)
-
-        assert write_branch_summary(cursor, branch_id) is None
-
-        row = cursor.execute(
-            "SELECT summary_source_hash, summary_version FROM branches WHERE id = ?",
-            (branch_id,),
-        ).fetchone()
-        assert row == (None, 0)
-
-    def test_write_branch_summary_hash_persistence_failure_keeps_branch_backfillable(self, monkeypatch):
-        conn, branch_id = self._make_conn_with_branch(summary_version=None, summary_source_hash=None)
-        cursor = conn.cursor()
-
-        def boom(_cursor, _branch_id):
-            raise sqlite3.OperationalError("database is locked")
-
-        monkeypatch.setattr(embed_ops, "compute_branch_summary_source_hash", boom)
-
-        assert write_branch_summary(cursor, branch_id) is None
-
-        row = cursor.execute(
-            "SELECT summary_version, summary_source_hash, context_summary_json FROM branches WHERE id = ?",
-            (branch_id,),
-        ).fetchone()
-        assert row == (None, None, None)
-
-    def test_backfill_summaries_writes_hash_and_clears_it_on_content_error(self, tmp_path, monkeypatch):
+class TestSummaryMaintenance:
+    def test_backfill_summaries_marks_content_error_version(self, tmp_path, monkeypatch):
         db = tmp_path / "summary-source-hash.db"
         conn = sqlite3.connect(str(db))
         conn.executescript(SCHEMA)
@@ -906,8 +758,8 @@ class TestSummarySourceHashMaintenance:
             """
             INSERT INTO branches (
                 session_id, leaf_uuid, is_active, started_at, ended_at, exchange_count,
-                files_modified, commits, tool_counts, aggregated_content, summary_version, summary_source_hash
-            ) VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                files_modified, commits, tool_counts, aggregated_content, summary_version
+            ) VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 1,
@@ -920,7 +772,6 @@ class TestSummarySourceHashMaintenance:
                 json.dumps({"Read": 1}),
                 "hello\nworld",
                 SUMMARY_VERSION - 1,
-                "stale-hash",
             ),
         )
         branch_id = cursor.lastrowid
@@ -949,40 +800,14 @@ class TestSummarySourceHashMaintenance:
         backfill_summaries._main()
 
         conn = sqlite3.connect(str(db))
-        row = conn.execute(
-            """
-            SELECT b.leaf_uuid, b.summary_version, b.context_summary_json, b.aggregated_content,
-                   b.exchange_count, b.started_at, b.ended_at, b.files_modified,
-                   b.tool_counts, b.commits, s.git_branch, b.summary_source_hash
-            FROM branches b
-            JOIN sessions s ON b.session_id = s.id
-            WHERE b.id = ?
-            """,
-            (branch_id,),
-        ).fetchone()
-        assert row is not None
-        assert row[1] == SUMMARY_VERSION
-        assert row[11] == compute_summary_source_hash(
-            {
-                "leaf_uuid": row[0],
-                "summary_version": row[1],
-                "context_summary_json": row[2],
-                "aggregated_content": row[3],
-                "exchange_count": row[4],
-                "started_at": row[5],
-                "ended_at": row[6],
-                "files_modified": row[7],
-                "tool_counts": row[8],
-                "commits": row[9],
-                "git_branch": row[10],
-            }
-        )
+        version = conn.execute("SELECT summary_version FROM branches WHERE id = ?", (branch_id,)).fetchone()[0]
+        assert version == SUMMARY_VERSION
         conn.close()
 
         conn = sqlite3.connect(str(db))
         conn.execute(
-            "UPDATE branches SET summary_version = ?, summary_source_hash = ? WHERE id = ?",
-            (SUMMARY_VERSION - 1, "stale-hash", branch_id),
+            "UPDATE branches SET summary_version = ? WHERE id = ?",
+            (SUMMARY_VERSION - 1, branch_id),
         )
         conn.commit()
         conn.close()
@@ -996,51 +821,11 @@ class TestSummarySourceHashMaintenance:
 
         conn = sqlite3.connect(str(db))
         row = conn.execute(
-            "SELECT summary_version, summary_source_hash FROM branches WHERE id = ?",
+            "SELECT summary_version FROM branches WHERE id = ?",
             (branch_id,),
         ).fetchone()
         conn.close()
-        assert row == (CONTENT_ERROR_VERSION, None)
-
-    def test_sync_branch_writes_new_hash_after_success(self, monkeypatch):
-        conn, branch_id, session_id, uuid_to_msg_id, messages, branch = self._make_conn_for_sync_branch()
-        cursor = conn.cursor()
-
-        monkeypatch.setattr("ccrecall.branch_ops.embed_branch_chunks", lambda *_args, **_kwargs: None)
-
-        sync_branch(cursor, branch, messages, uuid_to_msg_id, session_id, vec_writable=False)
-
-        row = cursor.execute(
-            """
-            SELECT b.aggregated_content, b.summary_version, b.summary_source_hash,
-                   b.context_summary_json, b.leaf_uuid, b.exchange_count,
-                   b.started_at, b.ended_at, b.files_modified, b.tool_counts,
-                   b.commits, s.git_branch
-            FROM branches b
-            JOIN sessions s ON b.session_id = s.id
-            WHERE b.id = ?
-            """,
-            (branch_id,),
-        ).fetchone()
-        assert row is not None
-        assert row[0] == "updated request\nupdated response"
-        assert row[1] == SUMMARY_VERSION
-        assert row[2] == compute_summary_source_hash(
-            {
-                "aggregated_content": row[0],
-                "summary_version": row[1],
-                "context_summary_json": row[3],
-                "leaf_uuid": row[4],
-                "exchange_count": row[5],
-                "started_at": row[6],
-                "ended_at": row[7],
-                "files_modified": row[8],
-                "tool_counts": row[9],
-                "commits": row[10],
-                "git_branch": row[11],
-            }
-        )
-        conn.close()
+        assert row == (CONTENT_ERROR_VERSION,)
 
     def test_sync_branch_leaves_branch_non_current_when_summary_recompute_fails(self, monkeypatch):
         conn, branch_id, session_id, uuid_to_msg_id, messages, branch = self._make_conn_for_sync_branch()
@@ -1056,10 +841,10 @@ class TestSummarySourceHashMaintenance:
         sync_branch(cursor, branch, messages, uuid_to_msg_id, session_id, vec_writable=False)
 
         row = cursor.execute(
-            "SELECT aggregated_content, summary_version, summary_source_hash FROM branches WHERE id = ?",
+            "SELECT aggregated_content, summary_version FROM branches WHERE id = ?",
             (branch_id,),
         ).fetchone()
-        assert row == ("updated request\nupdated response", None, None)
+        assert row == ("updated request\nupdated response", None)
         conn.close()
 
     def _make_conn_for_sync_branch(
@@ -1091,10 +876,9 @@ class TestSummarySourceHashMaintenance:
                 aggregated_content,
                 context_summary,
                 context_summary_json,
-                summary_version,
-                summary_source_hash
+                summary_version
             )
-            VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 session_id,
@@ -1106,7 +890,6 @@ class TestSummarySourceHashMaintenance:
                 "old summary",
                 '{"version": 2, "topic": "old"}',
                 SUMMARY_VERSION,
-                "stale-hash",
             ),
         )
         branch_id = cursor.lastrowid

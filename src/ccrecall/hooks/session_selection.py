@@ -48,11 +48,6 @@ def _row_to_entry(row) -> dict:
         git_branch,
         branch_db_id,
         context_summary,
-        summary_enrichment_json,
-        summary_enrichment_version,
-        summary_enrichment_source_hash,
-        summary_enrichment_status,
-        summary_source_hash,
     ) = row
     return {
         "uuid": uuid,
@@ -64,20 +59,13 @@ def _row_to_entry(row) -> dict:
         "git_branch": git_branch,
         "branch_db_id": branch_db_id,
         "context_summary": context_summary,
-        "summary_enrichment": decode_json_column(summary_enrichment_json, None),
-        "summary_enrichment_version": summary_enrichment_version,
-        "summary_enrichment_source_hash": summary_enrichment_source_hash,
-        "summary_enrichment_status": summary_enrichment_status,
-        "summary_source_hash": summary_source_hash,
     }
 
 
 _CANDIDATE_BASE = """
     SELECT s.id, s.uuid, b.started_at, b.ended_at, b.exchange_count,
            b.files_modified, b.commits, s.git_branch, b.id as branch_db_id,
-           b.context_summary, b.summary_enrichment_json,
-           b.summary_enrichment_version, b.summary_enrichment_source_hash,
-           b.summary_enrichment_status, b.summary_source_hash
+           b.context_summary
     FROM sessions s
     JOIN branches b ON b.session_id = s.id AND b.is_active = 1
     WHERE s.project_id = ?
@@ -93,9 +81,7 @@ _CANDIDATE_CWD_QUERY = (
 _SESSION_BY_UUID_QUERY = """
     SELECT s.id, s.uuid, b.started_at, b.ended_at, b.exchange_count,
            b.files_modified, b.commits, s.git_branch, b.id as branch_db_id,
-           b.context_summary, b.summary_enrichment_json,
-           b.summary_enrichment_version, b.summary_enrichment_source_hash,
-           b.summary_enrichment_status, b.summary_source_hash
+           b.context_summary
     FROM sessions s
     JOIN branches b ON b.session_id = s.id AND b.is_active = 1
     WHERE s.project_id = ?
