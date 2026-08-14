@@ -1851,21 +1851,6 @@ class TestTransitiveImportIsolation:
         result = _run_subprocess_probe(code)
         assert result.returncode == 0, result.stderr
 
-    def test_backfill_llm_summaries_entrypoint_imports_no_cli_graph_or_heavy_modules(self):
-        code = (
-            "import ccrecall.hooks.backfill_llm_summaries\n"
-            "import sys\n"
-            f"heavy = {self.HEAVY_MODULES}\n"
-            "loaded = set(sys.modules)\n"
-            "found = heavy & loaded\n"
-            "assert not found, f'Heavy modules loaded: {found}'\n"
-            "assert 'ccrecall.cli' not in loaded\n"
-            "assert 'ccrecall.cli.commands' not in loaded\n"
-            "assert 'ccrecall.db' not in loaded\n"
-        )
-        result = _run_subprocess_probe(code)
-        assert result.returncode == 0, result.stderr
-
 
 class TestClaudeConfigDir:
     """DEFAULT_PROJECTS_DIR must respect the CLAUDE_CONFIG_DIR env var."""

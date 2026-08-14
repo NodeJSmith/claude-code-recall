@@ -119,8 +119,6 @@ def hydrate_cards(
         tool_counts: dict = decode_json_column(tool_counts_json, {}) if has_tool_counts else {}
 
         topic: str | None = None
-        display_title: str | None = None
-        summary_preview: str | None = None
         summary = decode_json_column(summary_json, {})
         if summary:
             topic = summary.get("topic") or None
@@ -151,8 +149,6 @@ def hydrate_cards(
                 "started_at": started_at,
                 "ended_at": ended_at,
                 "topic": topic,
-                "display_title": display_title,
-                "summary_preview": summary_preview,
                 "exchange_count": exchange_count or 0,
                 "files_modified": files_modified,
                 "commits": commits,

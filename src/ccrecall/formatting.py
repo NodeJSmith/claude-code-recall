@@ -237,8 +237,6 @@ def format_card_markdown(card: dict, verbose: bool = False) -> str:
         heading = f"## {project} · {git_branch} · {ended_date}"
 
     topic = card.get("topic") or _TOPIC_FALLBACK
-    display_title = card.get("display_title") or topic
-    summary_preview = card.get("summary_preview")
 
     files_modified: list = card.get("files_modified") or []
     commits: list = card.get("commits") or []
@@ -254,13 +252,10 @@ def format_card_markdown(card: dict, verbose: bool = False) -> str:
 
     lines = [
         heading,
-        f"Topic:  {display_title}",
+        f"Topic:  {topic}",
         counts,
         f"Handle: {handle}   → ccrecall tail {handle}",
     ]
-
-    if summary_preview:
-        lines.insert(2, f"Latest: {summary_preview}")
 
     if verbose:
         if files_modified:
@@ -297,8 +292,6 @@ def format_card_json(card: dict) -> dict:
         "started_at": card.get("started_at"),
         "ended_at": card.get("ended_at"),
         "topic": card.get("topic"),
-        "display_title": card.get("display_title"),
-        "summary_preview": card.get("summary_preview"),
         "exchange_count": card.get("exchange_count") or 0,
         "files_modified": list(card.get("files_modified") or []),
         "commits": list(card.get("commits") or []),

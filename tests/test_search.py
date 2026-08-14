@@ -1347,8 +1347,6 @@ class TestSearchSessionsFusionScopeRetry:
             "started_at",
             "ended_at",
             "topic",
-            "display_title",
-            "summary_preview",
             "exchange_count",
             "files_modified",
             "commits",
@@ -1357,8 +1355,6 @@ class TestSearchSessionsFusionScopeRetry:
         }
         assert results[0]["project"] == "alpha"
         assert results[0]["handle"] == "sess-fus"
-        assert results[0]["display_title"] is None
-        assert results[0]["summary_preview"] is None
         assert results[0]["score_raw"] is not None
         conn.close()
 
