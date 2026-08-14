@@ -726,6 +726,10 @@ def _seed_genuine_db(db_path, target_version: int) -> None:
     if target_version == 1:
         _seed_v1_db_with_orphan_messages(db_path)
         return
+    if target_version > 6:
+        raise AssertionError(
+            f"_seed_genuine_db has no genuine schema for v{target_version}; add it when SCHEMA_VERSION increases"
+        )
 
     conn = sqlite3.connect(db_path)
     conn.execute("PRAGMA foreign_keys = ON")
@@ -1475,6 +1479,8 @@ class TestMigrationVersionMatrix:
 
         msg_cols = {row[1] for row in conn.execute("PRAGMA table_info(messages)").fetchall()}
         assert "tool_content" in msg_cols
+        indexes = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'index'").fetchall()}
+        assert "idx_messages_tool_content_null" in indexes
 
         il_cols = {row[1] for row in conn.execute("PRAGMA table_info(import_log)").fetchall()}
         assert "file_size" in il_cols
