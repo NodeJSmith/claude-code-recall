@@ -10,8 +10,6 @@ import contextlib
 import json
 import logging
 import re
-import shutil
-import subprocess
 import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -32,7 +30,6 @@ from ccrecall.db import DEFAULT_PROJECTS_DIR, chunk_vec_queryable, get_connectio
 from ccrecall.embeddings import is_model_cached_on_disk
 from ccrecall.formatting import extract_project_name, normalize_cwd
 from ccrecall.health import REASON_VEC_UNAVAILABLE, clear_embedding_failure, record_embedding_failure
-from ccrecall.hooks.subprocess_utils import detached_popen_kwargs
 from ccrecall.models import HookInput
 from ccrecall.session_ops import sync_session
 from ccrecall.transcript_sources import discover_session_transcript_files
@@ -110,22 +107,6 @@ def _project_root_for_session_file(session_file: Path, projects_dir: Path) -> Pa
     if not relative.parts:
         return session_file.parent
     return projects_dir / relative.parts[0]
-
-
-def _spawn_llm_summary_worker(session_id: str, logger: logging.Logger) -> None:
-    """Best-effort detached spawn of the lightweight LLM summary worker."""
-    worker_path = shutil.which("ccrecall-llm-summaries")
-    if worker_path is None:
-        logger.warning("LLM summary worker spawn failed for session %s: executable not found", session_id[:8])
-        return
-
-    try:
-        subprocess.Popen(  # noqa: S603 — trusted internal console script
-            [worker_path, "--session", session_id, "--limit", "1", "--current-session"],
-            **detached_popen_kwargs(),
-        )
-    except OSError as exc:
-        logger.warning("LLM summary worker spawn failed for session %s: %s", session_id[:8], exc)
 
 
 def run(input_file: Path | None = None) -> None:
@@ -230,9 +211,6 @@ def run(input_file: Path | None = None) -> None:
             if vec_ok:
                 with contextlib.suppress(Exception):  # best-effort; must not affect hook behavior
                     clear_embedding_failure()
-
-            if new_messages > 0 and settings.get("llm_summaries_enabled", False):
-                _spawn_llm_summary_worker(session_id, logger)
 
             # Output for hook (continue = True means don't block)
             output = {"continue": True}

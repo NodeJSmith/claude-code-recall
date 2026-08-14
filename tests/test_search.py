@@ -15,7 +15,7 @@ from ccrecall.db import (
     write_chunk_embedding,
 )
 from ccrecall.embeddings import EMBEDDING_DIM, EMBEDDING_MODEL, EMBEDDING_VERSION
-from ccrecall.formatting import apply_scores, format_card_json, format_snippet_json, format_snippet_markdown
+from ccrecall.formatting import apply_scores, format_snippet_json, format_snippet_markdown
 from ccrecall.fusion import rrf_scored
 from ccrecall.recent_chats import get_recent_sessions
 from ccrecall.schema import SCHEMA, SCHEMA_CORE, detect_fts_support
@@ -23,12 +23,6 @@ from ccrecall.search_cli import format_markdown, print_status, run, run_messages
 from ccrecall.search_conversations import OVERFETCH_FLOOR, compute_caveat, search_messages, search_sessions
 from ccrecall.search_hydrate import dedup_by_session, hydrate_cards
 from ccrecall.search_vector import execute_chunk_knn, get_vec_chunk_ids
-from ccrecall.summary_enrichment import (
-    STATUS_ERROR,
-    STATUS_OK,
-    SUMMARY_ENRICHMENT_VERSION,
-    build_stored_enrichment_envelope,
-)
 
 
 @pytest.fixture
@@ -563,30 +557,6 @@ def _seed_branch(
     cursor.execute("INSERT INTO branch_messages VALUES (?, ?)", (branch_id, msg_id))
     conn.commit()
     return sess_id, branch_id
-
-
-def _valid_search_enrichment() -> dict:
-    source_uuids = ["11111111-1111-4111-8111-111111111111"]
-    return build_stored_enrichment_envelope(
-        {
-            "title": {"text": "Resume fixture debugging", "source_uuids": source_uuids},
-            "where_we_left_off": {
-                "text": "We narrowed the regression to search-card hydration and still need to wire the display fields.",
-                "source_uuids": source_uuids,
-            },
-            "how_we_got_here": {"text": "We started with deterministic topic cards.", "source_uuids": source_uuids},
-            "key_decisions": [],
-            "attempted_paths": [],
-            "open_questions": [],
-            "files_and_reasons": [],
-            "continuation_hints": [],
-            "confidence": "high",
-        },
-        model="sonnet",
-        generated_at="2026-08-07T12:34:56Z",
-        active_branch_uuids=set(source_uuids),
-        valid_file_paths=set(),
-    )
 
 
 # degrade to keyword when model/extension unavailable
@@ -1750,135 +1720,6 @@ class TestCardFields:
         # Graceful degrade: topic from first user message
         assert card["topic"] is not None
         assert "deadline" in card["topic"].lower()
-        conn.close()
-
-    def test_card_hydrates_display_fields_from_current_enrichment_without_overwriting_topic(self):
-        conn = sqlite3.connect(":memory:")
-        conn.executescript(SCHEMA)
-        conn.commit()
-        branch_id = self._seed_with_summary(conn)
-        conn.execute(
-            """
-            UPDATE branches
-            SET summary_source_hash = ?,
-                summary_enrichment_json = ?,
-                summary_enrichment_version = ?,
-                summary_enrichment_source_hash = ?,
-                summary_enrichment_status = ?
-            WHERE id = ?
-            """,
-            (
-                "hash-1",
-                json.dumps(_valid_search_enrichment()),
-                SUMMARY_ENRICHMENT_VERSION,
-                "hash-1",
-                STATUS_OK,
-                branch_id,
-            ),
-        )
-        conn.commit()
-
-        cards = hydrate_cards(conn.cursor(), [branch_id])
-
-        assert len(cards) == 1
-        card = cards[0]
-        assert card["topic"] == "Debugging a pytest fixture"
-        assert card["display_title"] == "Resume fixture debugging"
-        assert card["summary_preview"] == (
-            "We narrowed the regression to search-card hydration and still need to wire the display fields."
-        )
-
-        md = format_markdown(cards, "pytest", ranked=True)
-        assert "Topic:  Resume fixture debugging" in md
-        assert "Latest: We narrowed the regression to search-card hydration" in md
-
-        payload = format_card_json(card)
-        assert payload["topic"] == "Debugging a pytest fixture"
-        assert payload["display_title"] == "Resume fixture debugging"
-        assert payload["summary_preview"] == (
-            "We narrowed the regression to search-card hydration and still need to wire the display fields."
-        )
-        conn.close()
-
-    @pytest.mark.parametrize(
-        (
-            "summary_enrichment_json",
-            "summary_enrichment_version",
-            "summary_enrichment_source_hash",
-            "summary_enrichment_status",
-        ),
-        [
-            (
-                json.dumps({"where_we_left_off": {"text": "broken"}}),
-                SUMMARY_ENRICHMENT_VERSION,
-                "hash-current",
-                STATUS_OK,
-            ),
-            (
-                json.dumps(_valid_search_enrichment()),
-                SUMMARY_ENRICHMENT_VERSION,
-                "hash-current",
-                STATUS_ERROR,
-            ),
-            (
-                json.dumps(_valid_search_enrichment()),
-                SUMMARY_ENRICHMENT_VERSION - 1,
-                "hash-current",
-                STATUS_OK,
-            ),
-            (
-                json.dumps(_valid_search_enrichment()),
-                SUMMARY_ENRICHMENT_VERSION,
-                "hash-stale",
-                STATUS_OK,
-            ),
-        ],
-        ids=["invalid-envelope", "failed-status", "version-stale", "source-hash-stale"],
-    )
-    def test_card_falls_back_when_enrichment_is_invalid_failed_or_version_stale(
-        self,
-        summary_enrichment_json,
-        summary_enrichment_version,
-        summary_enrichment_source_hash,
-        summary_enrichment_status,
-    ):
-        conn = sqlite3.connect(":memory:")
-        conn.executescript(SCHEMA)
-        conn.commit()
-        branch_id = self._seed_with_summary(conn)
-        conn.execute(
-            """
-            UPDATE branches
-            SET summary_source_hash = ?,
-                summary_enrichment_json = ?,
-                summary_enrichment_version = ?,
-                summary_enrichment_source_hash = ?,
-                summary_enrichment_status = ?
-            WHERE id = ?
-            """,
-            (
-                "hash-current",
-                summary_enrichment_json,
-                summary_enrichment_version,
-                summary_enrichment_source_hash,
-                summary_enrichment_status,
-                branch_id,
-            ),
-        )
-        conn.commit()
-
-        cards = hydrate_cards(conn.cursor(), [branch_id])
-
-        assert len(cards) == 1
-        card = cards[0]
-        assert card["topic"] == "Debugging a pytest fixture"
-        assert card["display_title"] is None
-        assert card["summary_preview"] is None
-
-        payload = format_card_json(card)
-        assert payload["topic"] == "Debugging a pytest fixture"
-        assert payload["display_title"] is None
-        assert payload["summary_preview"] is None
         conn.close()
 
     def test_keyword_only_flag_ranked_by_rung(self, search_db):

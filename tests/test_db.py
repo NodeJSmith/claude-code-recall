@@ -112,12 +112,6 @@ class TestLoadSettings:
         assert DEFAULT_SETTINGS["log_level"] == "INFO"
         assert isinstance(DEFAULT_SETTINGS["exclude_projects"], list)
         assert DEFAULT_SETTINGS["alert_snooze_hours"] == 24
-        assert DEFAULT_SETTINGS["llm_summaries_enabled"] is False
-        assert DEFAULT_SETTINGS["llm_summary_model"] == "sonnet"
-        assert DEFAULT_SETTINGS["llm_summary_effort"] == "medium"
-        assert DEFAULT_SETTINGS["llm_summary_timeout_seconds"] == 180
-        assert DEFAULT_SETTINGS["llm_summary_max_budget_usd"] == 1.00
-        assert DEFAULT_SETTINGS["llm_summary_min_exchanges"] == 9
 
 
 class TestLoadConfig:
@@ -269,31 +263,6 @@ class TestLoadSettingsWithConfig:
         result = load_settings()
         assert result["logging_enabled"] is False
         assert result["exclude_projects"] == ["work-secret"]
-
-    def test_llm_settings_overrides_honored(self, tmp_path, monkeypatch):
-        """The LLM summary settings are user-overridable via config.json."""
-        cfg = tmp_path / "config.json"
-        cfg.write_text(
-            json.dumps(
-                {
-                    "llm_summaries_enabled": True,
-                    "llm_summary_model": "haiku",
-                    "llm_summary_effort": "low",
-                    "llm_summary_timeout_seconds": 45,
-                    "llm_summary_max_budget_usd": 2.5,
-                    "llm_summary_min_exchanges": 3,
-                }
-            )
-        )
-        monkeypatch.setattr("ccrecall.config.CONFIG_PATH", cfg)
-
-        result = load_settings()
-        assert result["llm_summaries_enabled"] is True
-        assert result["llm_summary_model"] == "haiku"
-        assert result["llm_summary_effort"] == "low"
-        assert result["llm_summary_timeout_seconds"] == 45
-        assert result["llm_summary_max_budget_usd"] == 2.5
-        assert result["llm_summary_min_exchanges"] == 3
 
     def test_missing_config_returns_defaults(self, tmp_path, monkeypatch):
         """load_settings() returns DEFAULT_SETTINGS when config.json does not exist."""
