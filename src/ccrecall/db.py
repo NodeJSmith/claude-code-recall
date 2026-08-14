@@ -11,14 +11,14 @@ from pathlib import Path
 
 import sqlite_vec
 
-from ccrecall import llm_summary_db
+from ccrecall import db_base
 from ccrecall.config import DEFAULT_DB_PATH
 from ccrecall.config import DEFAULT_PROJECTS_DIR as DEFAULT_PROJECTS_DIR
 from ccrecall.embeddings import EMBEDDING_DIM, EMBEDDING_MODEL, EMBEDDING_VERSION
 
 # Current schema version. Re-exported from the embedding-free connection layer so
 # both DB boundaries apply the same migrations.
-SCHEMA_VERSION = llm_summary_db.SCHEMA_VERSION
+SCHEMA_VERSION = db_base.SCHEMA_VERSION
 
 # Shared SQL predicate for "branches that are candidates to embed": active
 # leaves (the query path only returns is_active=1) with a usable summary. This
@@ -54,7 +54,7 @@ def apply_base_pragmas(conn: sqlite3.Connection) -> None:
     waits instead of failing on a writer-writer collision; foreign_keys=ON prevents
     orphaned rows.
     """
-    llm_summary_db.apply_base_pragmas(conn)
+    db_base.apply_base_pragmas(conn)
 
 
 def escape_like(value: str) -> str:
@@ -236,18 +236,18 @@ def _ensure_vec_schema(conn: sqlite3.Connection) -> None:
     )
 
 
-_migrate_to_v1 = llm_summary_db._migrate_to_v1
-_migrate_to_v2 = llm_summary_db._migrate_to_v2
-_migrate_to_v3 = llm_summary_db._migrate_to_v3
-_migrate_to_v4 = llm_summary_db._migrate_to_v4
-_migrate_to_v5 = llm_summary_db._migrate_to_v5
-_migrate_to_v6 = llm_summary_db._migrate_to_v6
-_migrate_to_v7 = llm_summary_db._migrate_to_v7
+_migrate_to_v1 = db_base._migrate_to_v1
+_migrate_to_v2 = db_base._migrate_to_v2
+_migrate_to_v3 = db_base._migrate_to_v3
+_migrate_to_v4 = db_base._migrate_to_v4
+_migrate_to_v5 = db_base._migrate_to_v5
+_migrate_to_v6 = db_base._migrate_to_v6
+_migrate_to_v7 = db_base._migrate_to_v7
 
 
 def _apply_migrations(conn: sqlite3.Connection) -> None:
     """Apply the shared migrations, preserving db.py's vec-aware v1 compatibility."""
-    llm_summary_db._apply_migrations(
+    db_base._apply_migrations(
         conn,
         prepare=vec_available,
         migrate_to_v1=_migrate_to_v1,
@@ -269,7 +269,7 @@ def _open_connection(settings: dict | None = None, load_vec: bool = False) -> sq
     context-manager wrapper) instead, which guarantees the connection is
     committed on success, rolled back on exception, and always closed.
     """
-    conn = llm_summary_db._open_connection(settings, apply_migrations_callback=_apply_migrations)
+    conn = db_base._open_connection(settings, apply_migrations_callback=_apply_migrations)
 
     if load_vec and vec_available(conn):
         # First and only place the vec extension is loaded for this connection.

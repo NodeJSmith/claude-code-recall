@@ -1007,7 +1007,7 @@ class TestSchemaVersioning:
 
         statements: list[str] = []
         conn.set_trace_callback(statements.append)
-        db_module.llm_summary_db._migrate_to_v7(conn)
+        db_module.db_base._migrate_to_v7(conn)
         conn.set_trace_callback(None)
 
         assert not [statement for statement in statements if "ALTER TABLE branches ADD COLUMN" in statement]
@@ -1019,10 +1019,10 @@ class TestSchemaVersioning:
             "CREATE TABLE branches (id INTEGER PRIMARY KEY, summary_enrichment_json TEXT, summary_enrichment_version INTEGER DEFAULT 0)"
         )
 
-        db_module.llm_summary_db._migrate_to_v7(conn)
+        db_module.db_base._migrate_to_v7(conn)
 
         columns = {row[1] for row in conn.execute("PRAGMA table_info(branches)").fetchall()}
-        assert columns == {"id"} | set(db_module.llm_summary_db.V7_BRANCH_COLUMNS)
+        assert columns == {"id"} | set(db_module.db_base.V7_BRANCH_COLUMNS)
         conn.close()
 
     def test_migration_from_v4_creates_ingestion_check_cache_table(self, tmp_path):
@@ -1833,11 +1833,11 @@ class TestTransitiveImportIsolation:
         backfill) — it must have zero imports beyond stdlib."""
         self._assert_no_heavy_imports("ccrecall.hooks.tool_content_eligibility")
 
-    def test_llm_summary_db_opens_without_db_or_heavy_deps(self, tmp_path):
-        """llm_summary_db must open a migrated connection without importing db.py or heavy deps."""
+    def test_db_base_opens_without_db_or_heavy_deps(self, tmp_path):
+        """db_base must open a migrated connection without importing db.py or heavy deps."""
         db_path = tmp_path / "llm-summary.db"
         code = (
-            "from ccrecall.llm_summary_db import get_connection\n"
+            "from ccrecall.db_base import get_connection\n"
             "import sys\n"
             f"heavy = {self.HEAVY_MODULES}\n"
             f"db_path = {str(db_path)!r}\n"
