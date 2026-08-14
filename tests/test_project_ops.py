@@ -4,7 +4,7 @@ import shutil
 import tempfile
 from pathlib import Path
 
-from ccrecall.project_ops import upsert_project
+from ccrecall.project_ops import key_could_match_excluded, upsert_project
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures"
 
@@ -153,6 +153,22 @@ class TestUpsertProjectProbesJsonl:
         # Falls back to parse_project_key (lossy) when no JSONL available
         assert "myproject" in row[0], "Fallback path should contain project name from key reconstruction"
 
+    def test_upsert_project_falls_back_to_key_with_hyphenated_name(self, memory_db):
+        """Fallback path mangles hyphenated project names (lossy reconstruction)."""
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project_dir = Path(tmpdir) / "-home-user-src-secret-client"
+            project_dir.mkdir()
+
+            cursor = memory_db.cursor()
+            project_id = upsert_project(cursor, "-home-user-src-secret-client", project_dir=project_dir)
+            memory_db.commit()
+
+        cursor.execute("SELECT name FROM projects WHERE id = ?", (project_id,))
+        row = cursor.fetchone()
+        # Lossy reconstruction turns secret-client into secret/client → name="client"
+        assert row[0] == "client"
+
     def test_upsert_project_does_not_probe_top_level_symlink_project_dir(self, memory_db):
         """Symlink project dirs are rejected before JSONL probing."""
 
@@ -171,3 +187,69 @@ class TestUpsertProjectProbesJsonl:
         row = cursor.fetchone()
         assert row is not None
         assert row[0] == "/home/user/node/banana"
+
+
+class TestKeyCouldMatchExcluded:
+    """Test the conservative key-suffix matcher for exclude_projects on the fallback path."""
+
+    def test_hyphenated_name_matches_key_suffix(self):
+        assert key_could_match_excluded("-home-u-src-secret-client", ["secret-client"])
+
+    def test_unhyphenated_name_matches_key_suffix(self):
+        assert key_could_match_excluded("-home-user-myproject", ["myproject"])
+
+    def test_no_match_when_name_not_in_key(self):
+        assert not key_could_match_excluded("-home-user-myproject", ["other-project"])
+
+    def test_empty_exclude_list(self):
+        assert not key_could_match_excluded("-home-user-myproject", [])
+
+    def test_multiple_excludes_any_match(self):
+        assert key_could_match_excluded("-home-u-src-secret-client", ["unrelated", "secret-client"])
+
+    def test_partial_overlap_does_not_match(self):
+        # "client" appears in the key but the full entry "not-secret-client" does not
+        assert not key_could_match_excluded("-home-u-src-secret-client", ["not-secret-client"])
+
+    def test_name_with_dots_matches(self):
+        # A project named "my.project" encodes dots as hyphens in the key
+        assert key_could_match_excluded("-home-user-my-project", ["my.project"])
+
+    def test_exact_key_is_excluded_name(self):
+        # Edge case: key is just the encoded project name with no parent dirs
+        assert key_could_match_excluded("-secret-client", ["secret-client"])
+
+
+class TestImportProjectExcludesHyphenatedNames:
+    """Integration test: import_project should exclude hyphenated names on the fallback path."""
+
+    def test_import_excludes_hyphenated_project_on_fallback(self, memory_db):
+        """When probe fails and key is ambiguous, exclude if key could match.
+
+        The upsert derives name='client' from key '-home-u-src-secret-client'
+        (lossy reconstruction), so 'secret-client' doesn't match by exact name.
+        The key-suffix check should catch it.
+        """
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project_dir = Path(tmpdir) / "-home-u-src-secret-client"
+            project_dir.mkdir()
+
+            # Seed the project with a recognizable name from the lossy fallback
+            cursor = memory_db.cursor()
+            upsert_project(cursor, "-home-u-src-secret-client", project_dir=project_dir)
+            memory_db.commit()
+
+            # Verify the lossy name is wrong
+            cursor.execute(
+                "SELECT name FROM projects WHERE key = ?",
+                ("-home-u-src-secret-client",),
+            )
+            assert cursor.fetchone()[0] == "client"  # lossy — not "secret-client"
+
+            # Now test that key_could_match_excluded catches what exact-name missed
+            from ccrecall.formatting import normalize_project_key
+
+            key = normalize_project_key("-home-u-src-secret-client")
+            assert "client" not in ["secret-client"]  # exact match fails (the bug)
+            assert key_could_match_excluded(key, ["secret-client"])  # suffix match catches it

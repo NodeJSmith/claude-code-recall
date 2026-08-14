@@ -79,6 +79,16 @@ def upsert_project(
     return project_id
 
 
+def key_could_match_excluded(key: str, exclude_projects: list[str]) -> bool:  # noqa: ARG001
+    """Check whether a normalized project key could encode any excluded project name.
+
+    On the lossy fallback path (no cwd metadata), hyphens in directory names are
+    indistinguishable from path separators. This checks conservatively: if the key's
+    suffix could represent any excluded name, return True.
+    """
+    return False
+
+
 def _probe_project_dir(project_dir: Path) -> str | None:
     """Probe the first JSONL file in project_dir for cwd metadata.
 
