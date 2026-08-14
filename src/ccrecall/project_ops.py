@@ -79,13 +79,22 @@ def upsert_project(
     return project_id
 
 
-def key_could_match_excluded(key: str, exclude_projects: list[str]) -> bool:  # noqa: ARG001
+def key_could_match_excluded(key: str, exclude_projects: list[str]) -> bool:
     """Check whether a normalized project key could encode any excluded project name.
 
     On the lossy fallback path (no cwd metadata), hyphens in directory names are
     indistinguishable from path separators. This checks conservatively: if the key's
     suffix could represent any excluded name, return True.
+
+    The encoding (get_project_key) replaces ``/``, ``:``, ``.`` with ``-``. So a
+    project named ``secret-client`` at ``/home/u/src/secret-client`` produces key
+    ``-home-u-src-secret-client``. We check whether the key ends with
+    ``-<encoded_name>`` for each excluded name.
     """
+    for name in exclude_projects:
+        encoded = name.replace("/", "-").replace(":", "-").replace(".", "-")
+        if key == encoded or key.endswith("-" + encoded):
+            return True
     return False
 
 
