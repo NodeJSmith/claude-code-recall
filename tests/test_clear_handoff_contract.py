@@ -27,6 +27,7 @@ import ccrecall.hooks.handoff as _handoff
 import ccrecall.hooks.session_end as _session_end
 import ccrecall.hooks.session_selection as _session_selection
 from ccrecall.hooks.session_selection import HANDOFF_STALE_SECONDS
+from ccrecall.models import HookInput
 
 _find_cleared_from_session_uuid = _session_selection._find_cleared_from_session_uuid
 
@@ -261,3 +262,40 @@ class TestFindClearedFromSessionUuid:
         result = _find_cleared_from_session_uuid(db_path, "/my/project")
         assert result is None
         assert not handoff_path.exists(), "Corrupt handoff file should be deleted immediately"
+
+
+class TestConcurrentStaging:
+    """Two SessionEnd hooks can clear at the same moment; neither may lose its handoff."""
+
+    def test_staging_does_not_pass_through_a_shared_temporary_path(self, tmp_path):
+        """A fixed .tmp name lets one writer truncate another's staged payload.
+
+        write_fallback_journal already stages through a unique name. This writer
+        did not, so the loser of the race either published the winner's bytes or
+        raised FileNotFoundError into SessionEnd's broad except, silently dropping
+        both the handoff and the recap intent behind it.
+        """
+        fake_db = tmp_path / "conversations.db"
+        decoy = tmp_path / ".clear-handoff.json.tmp"
+        decoy.write_text("another writer's in-flight payload", encoding="utf-8")
+
+        hook_input = HookInput(
+            session_id="sid-concurrent",
+            cwd="/my/project",
+            end_reason="clear",
+        )
+        _handoff.write_clear_handoff(hook_input, {"db_path": str(fake_db)})
+
+        assert decoy.read_text(encoding="utf-8") == "another writer's in-flight payload", (
+            "staged through the shared temporary path and clobbered a concurrent writer"
+        )
+        published = json.loads((tmp_path / "clear-handoff.json").read_text(encoding="utf-8"))
+        assert published["session_id"] == "sid-concurrent"
+
+    def test_staging_leaves_no_temporary_file_behind(self, tmp_path):
+        fake_db = tmp_path / "conversations.db"
+        hook_input = HookInput(session_id="sid-clean", cwd="/my/project", end_reason="clear")
+
+        _handoff.write_clear_handoff(hook_input, {"db_path": str(fake_db)})
+
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["clear-handoff.json"]

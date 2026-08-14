@@ -340,7 +340,11 @@ def test_recap_status_lists_safe_recovery_commands_for_blocked_work_and_quaranti
     db_path = tmp_path / "status.db"
     retryable_uuid = "12345678-1234-1234-1234-123456789abc"
     with get_connection({"db_path": str(db_path)}, load_vec=False) as conn:
-        for session_uuid, reason in ((retryable_uuid, "timeout_exhausted"), ("cleanup", "cleanup_failed")):
+        for session_uuid, reason in (
+            (retryable_uuid, "timeout_exhausted"),
+            ("cleanup", "cleanup_failed"),
+            ("internal", "internal_error"),
+        ):
             session_id = conn.execute("INSERT INTO sessions(uuid) VALUES (?) RETURNING id", (session_uuid,)).fetchone()[
                 0
             ]
@@ -366,11 +370,17 @@ def test_recap_status_lists_safe_recovery_commands_for_blocked_work_and_quaranti
         lambda: settings,
     )
     status = collect_status(db=db_path)
+    # internal_error jobs never self-requeue and --retry-failures matches on state,
+    # not reason — so they are retryable and must be named, not buried in a count.
     assert status["recap"]["guidance"]["retry"] == [
         {
             "session": retryable_uuid,
             "command": f"ccrecall backfill llm-summaries --session {retryable_uuid} --retry-failures",
-        }
+        },
+        {
+            "session": "internal",
+            "command": "ccrecall backfill llm-summaries --session internal --retry-failures",
+        },
     ]
     assert status["recap"]["guidance"]["cleanup"] == [{"session": "cleanup", "command": "ccrecall recap recover"}]
     # maintain cannot reduce this quarantine — it skips cleanup-failed attempts

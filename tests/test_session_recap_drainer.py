@@ -367,6 +367,40 @@ def test_journal_replay_drops_a_marker_for_an_excluded_project(tmp_path, monkeyp
         assert conn.execute("SELECT COUNT(*) FROM session_recap_jobs").fetchone() == (0,)
 
 
+def test_claimed_job_stops_when_final_sync_reports_an_excluded_project(tmp_path, monkeypatch):
+    """Exclusion decided after import must still keep the content away from the provider.
+
+    Journal replay already honours this sentinel. The claimed-job path ignored it,
+    so adding a project to exclude_projects after its sessions were imported did
+    not stop their contents from reaching Claude.
+    """
+    settings = _settings(tmp_path)
+    _queue_eligible_job(settings)
+    monkeypatch.setattr(
+        drain_session_recaps, "sync_session_for_finalization", lambda *_a: drain_session_recaps.EXCLUDED_PROJECT
+    )
+    monkeypatch.setattr(
+        drain_session_recaps, "evaluate_branch", lambda *_args: type("Decision", (), {"eligible": True})()
+    )
+    monkeypatch.setattr(drain_session_recaps, "posix_process_groups_supported", lambda: True)
+    invoked = []
+    monkeypatch.setattr(
+        drain_session_recaps,
+        "invoke_claude",
+        lambda *args, **kwargs: invoked.append(args) or InvocationResult(STATUS_TIMEOUT),
+    )
+
+    assert drain_session_recaps._process_job(settings, 1, 1) is True
+
+    assert invoked == [], "an excluded project's content was sent to the provider"
+    with get_connection(settings) as conn:
+        assert conn.execute("SELECT state, reason FROM session_recap_jobs").fetchone() == (
+            "excluded",
+            "excluded_project",
+        )
+        assert conn.execute("SELECT COUNT(*) FROM session_recap_attempts").fetchone() == (0,)
+
+
 def test_journal_replay_scans_past_markers_it_cannot_resolve(tmp_path):
     settings = _settings(tmp_path)
     resolvable = "ffffffff-ffff-ffff-ffff-ffffffffffff"
