@@ -300,8 +300,9 @@ def _apply_migrations(
                 if current < 2:
                     migrate_to_v2(conn)
                 conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
-                log.debug("migrated schema from v%d to v%d", current, SCHEMA_VERSION)
             conn.execute("COMMIT")
+            if current < SCHEMA_VERSION:
+                log.debug("migrated schema from v%d to v%d", current, SCHEMA_VERSION)
         except Exception:
             conn.execute("ROLLBACK")
             raise
