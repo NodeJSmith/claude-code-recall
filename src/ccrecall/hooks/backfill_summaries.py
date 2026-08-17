@@ -19,7 +19,7 @@ BATCH_SIZE = 50
 PID_KEY = "ccrecall-backfill-summaries"
 
 
-def run(*, verbose: bool = False, db: Path = DEFAULT_DB_PATH):
+def run(*, verbose: bool = False, db: Path = DEFAULT_DB_PATH) -> None:
     """Backfill context summaries for branches that lack a current one.
 
     Wraps the ``_main()`` work in PID-file cleanup. ``_main()`` is kept separate
@@ -32,7 +32,7 @@ def run(*, verbose: bool = False, db: Path = DEFAULT_DB_PATH):
         remove_pid_file(PID_KEY)
 
 
-def _main(*, verbose: bool = False, db: Path = DEFAULT_DB_PATH):
+def _main(*, verbose: bool = False, db: Path = DEFAULT_DB_PATH) -> None:
     settings = load_settings_for_db(db)
     logger = setup_logging(settings, process_name="backfill-summary", verbose=verbose)
 
