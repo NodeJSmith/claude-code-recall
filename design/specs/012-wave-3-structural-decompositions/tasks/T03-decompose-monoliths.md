@@ -1,7 +1,7 @@
 ---
 task_id: "T03"
 title: "Decompose embed_branch_chunks into named steps"
-status: "planned"
+status: "done"
 depends_on: ["T01"]
 implements: ["FR#5", "FR#7"]
 ---
