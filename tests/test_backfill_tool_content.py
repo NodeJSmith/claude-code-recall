@@ -224,20 +224,21 @@ class TestBackfillCore:
             leaf_uuid="a1",
         )
         conn.execute(
-            "UPDATE branches SET summary_version = ? WHERE id = ?",
-            (7, branch_id),
+            "UPDATE branches SET summary_version = ?, summary_source_hash = ? WHERE id = ?",
+            (7, "source-hash", branch_id),
         )
         conn.commit()
 
         assert backfill_session(conn.cursor(), session_id, [filepath], logging.getLogger("test")) is True
 
         branch_row = conn.execute(
-            "SELECT aggregated_content, summary_version FROM branches WHERE id = ?",
+            "SELECT aggregated_content, summary_version, summary_source_hash FROM branches WHERE id = ?",
             (branch_id,),
         ).fetchone()
         assert branch_row is not None
         assert "[Bash: tail -f /var/log/app.log]" in branch_row[0]
         assert branch_row[1] is None
+        assert branch_row[2] == "source-hash"
 
 
 class TestBackfillMetaExclusion:
