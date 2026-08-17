@@ -1,97 +1,46 @@
 """Recover a prior session's tail for fast resume.
 
-Powers two things:
-  - the ``ccrecall tail`` CLI (invoked by the ccr-resume skill), and
-  - the SessionStart context injection's "unresolved decision" warning
-    (``context_rendering.py``).
-
-The one thing on-disk artifacts can never tell you is whether the prior session
-stopped on a decision the user never made — an AskUserQuestion that was rejected,
-interrupted, or simply left open. Reading git/task state and assuming "done" is
-how a session ships work the user was still deciding about. This module reads the
-raw transcript JSONL to recover exactly that signal.
-
-Why a raw-cwd slug instead of ``get_project_key``: Claude Code writes each
-session's transcript into ``~/.claude/projects/<slug>/`` where the slug is the
-RAW cwd (``/`` ``.`` ``:`` → ``-``), INCLUDING any ``/.claude/worktrees/<name>``
-segment. ``get_project_key`` deliberately normalizes that suffix away so worktree
-sessions share a DB project key with the base repo — correct for the DB, wrong
-for locating files. So we encode the raw cwd here.
+Powers the ``ccrecall tail`` CLI and the SessionStart "unresolved decision"
+warning (``context_rendering.py``). Path resolution lives in
+``tail_resolve.py``; pending-question detection in ``tail_pending.py``. This
+module owns tail rendering and the CLI orchestrator.
 """
 
-import json
-import logging
-import sys
 from collections import deque
 from pathlib import Path
 
-from whenever import Instant
-
-from ccrecall.content import (
-    extract_text_content,
-    is_task_notification,
-    is_teammate_message,
-    is_tool_result,
-)
-from ccrecall.db import DEFAULT_PROJECTS_DIR
+from ccrecall.content import extract_text_content
 from ccrecall.errors import emit_error_return
-from ccrecall.formatting import split_worktree_path
-from ccrecall.models import LOGGER_NAME
 from ccrecall.parsing import (
     extract_session_metadata,
     extract_session_uuid,
     parse_all_with_uuids,
     parse_lines_with_uuids,
 )
+from ccrecall.tail_pending import _is_main_chain, clip, find_pending_question, format_pending_block, typed_instruction
 
-log = logging.getLogger(LOGGER_NAME)
+# Explicit re-export ("as" with the same name): these are private (leading
+# underscore) helpers defined in tail_resolve.py with no in-module caller
+# there — they're only called from this file's run() or re-exported for
+# tests that import path-resolution helpers from session_tail rather than
+# tail_resolve directly. The "as X" form tells both ruff (F401) and pyright
+# (reportUnusedFunction) this cross-module use is intentional.
+from ccrecall.tail_resolve import _build_search_dirs as _build_search_dirs
+from ccrecall.tail_resolve import _extract_branch as _extract_branch
+from ccrecall.tail_resolve import _last_event_timestamp as _last_event_timestamp
+from ccrecall.tail_resolve import _pick_branch_match as _pick_branch_match
+from ccrecall.tail_resolve import _resolve_across_dirs as _resolve_across_dirs
+from ccrecall.tail_resolve import list_transcripts, resolve_target_global
+from ccrecall.tail_resolve import resolve_target as resolve_target
+from ccrecall.tail_resolve import transcript_dir as transcript_dir
 
-# Lines of transcript tail scanned for the latest event timestamp when ordering
-# sessions — enough to find a timestamp even if the trailing lines are a
-# no-timestamp tool-result burst, without reading a multi-MB file in full.
-_TIMESTAMP_TAIL_LINES = 20
-_BRANCH_HEAD_LINES = 20
-
-# Harness-injected user content that isn't a typed instruction. command/channel
-# wrappers, task-notifications, and <local-command-caveat> blocks are already
-# handled by extract_text_content / is_task_notification / the "<local-command-"
-# prefix below; these are the remainder.
-_NOISE_PREFIXES = (
-    "<system-reminder>",
-    "<local-command-",
-    "base directory for this skill:",
-)
-_TEXT_CLIP = 600
 # Lines of transcript tail the SessionStart hook parses — enough to catch the
 # trailing AskUserQuestion + its result without reading a multi-MB file in full.
 _HOOK_TAIL_LINES = 400
 DEFAULT_TAIL_EVENTS = 8  # CLI -n default
 
-# Clip lengths for pending-question option descriptions and the session preview.
-_INJECTION_OPTION_CLIP = 160
-_CLI_OPTION_CLIP = 140
 _PREVIEW_CLIP = 90
 _TOOL_CLIP = 80
-
-
-def transcript_dir(cwd: str, projects_dir: Path = DEFAULT_PROJECTS_DIR) -> Path:
-    """Directory holding this cwd's transcripts (raw slug — see module docstring)."""
-    slug = cwd.replace("\\", "/").replace("/", "-").replace(":", "-").replace(".", "-")
-    return projects_dir / slug
-
-
-def transcript_for_uuid(uuid: str, cwd: str | None = None, projects_dir: Path = DEFAULT_PROJECTS_DIR) -> Path | None:
-    """Locate a session's transcript file by its session id (filename stem).
-
-    Tries the cwd's project dir first (the common case), then falls back to a
-    global glob since session ids are unique.
-    """
-    if cwd:
-        direct = transcript_dir(cwd, projects_dir) / f"{uuid}.jsonl"
-        if direct.is_file():
-            return direct
-    matches = sorted(projects_dir.glob(f"*/{uuid}.jsonl"))
-    return matches[0] if matches else None
 
 
 def load_entries(path: Path) -> list[dict]:
@@ -109,89 +58,6 @@ def load_tail_entries(path: Path, tail_lines: int = _HOOK_TAIL_LINES) -> list[di
     with open(path, encoding="utf-8", errors="replace") as fh:
         lines = deque(fh, maxlen=tail_lines)
     return list(parse_lines_with_uuids(lines))
-
-
-def clip(text: str, limit: int = _TEXT_CLIP) -> str:
-    """Collapse whitespace to one line and truncate — for compact tail display;
-    this deliberately flattens code blocks and lists."""
-    text = " ".join(text.split())
-    return text if len(text) <= limit else text[:limit] + " […]"
-
-
-def _is_main_chain(entry: dict) -> bool:
-    return not entry.get("isSidechain", False)
-
-
-def typed_instruction(entry: dict) -> str | None:
-    """Return the user's typed text, or None if this 'user' entry isn't a real instruction.
-
-    Filters tool-result echoes, task-notifications, teammate messages, and
-    harness-injected noise (interrupt markers, system reminders, skill bodies)
-    so the recovered "last instruction" is what the user actually typed.
-    """
-    if entry.get("type") != "user":
-        return None
-    content = entry.get("message", {}).get("content")
-    if is_tool_result(content) or is_task_notification(content) or is_teammate_message(content):
-        return None
-    text, _, _, _, _ = extract_text_content(content)
-    if not text:
-        return None
-    low = text.lstrip().lower()
-    if "request interrupted" in low or low.startswith(_NOISE_PREFIXES):
-        return None
-    return text
-
-
-def find_pending_question(entries: list[dict]) -> dict | None:
-    """The last main-chain AskUserQuestion with no genuine answer, or None.
-
-    Returns the tool_use ``input`` payload (``{"questions": [...]}``) when the
-    prior session ended on a decision the user never resolved.
-    """
-    # Map every tool_use_id to the is_error flag on its tool_result block.
-    # Answered: tool_result with no is_error key. Rejected: is_error=true.
-    # No tool_result at all: the session ended before the harness delivered one.
-    # We scan all entries (sidechain included) — a tool_result resolves its id
-    # wherever it lives — but only main-chain questions are considered below.
-    result_is_error: dict[str, bool] = {}
-    for entry in entries:
-        if entry.get("type") != "user":
-            continue
-        content = entry.get("message", {}).get("content")
-        if not isinstance(content, list):
-            continue
-        for block in content:
-            if isinstance(block, dict) and block.get("type") == "tool_result":
-                tool_use_id = block.get("tool_use_id")
-                if isinstance(tool_use_id, str):
-                    result_is_error[tool_use_id] = bool(block.get("is_error"))
-
-    last = None
-    last_entry_idx = -1
-    for i, entry in enumerate(entries):
-        if not _is_main_chain(entry) or entry.get("type") != "assistant":
-            continue
-        content = entry.get("message", {}).get("content")
-        if not isinstance(content, list):
-            continue
-        for block in content:
-            if isinstance(block, dict) and block.get("type") == "tool_use" and block.get("name") == "AskUserQuestion":
-                last = (block.get("id"), block.get("input", {}))
-                last_entry_idx = i
-
-    if not last:
-        return None
-    tool_id, payload = last
-    if not isinstance(tool_id, str):
-        return payload
-    if result_is_error.get(tool_id) is False:
-        return None
-    # No result or is_error=true — only pending if the user didn't move on.
-    tail = entries[last_entry_idx + 1 :]
-    if any(typed_instruction(e) for e in tail if _is_main_chain(e)):
-        return None
-    return payload
 
 
 def last_typed_instruction(entries: list[dict]) -> str | None:
@@ -278,113 +144,6 @@ def build_tail(entries: list[dict], k: int) -> list[tuple[str, str]]:
     return events[-k:]
 
 
-def format_pending_block(payload: dict, *, for_injection: bool = False) -> str:
-    """Render a pending-question payload for the CLI (plain) or the hook (markdown)."""
-    lines: list[str] = []
-    if for_injection:
-        lines.append("## ⚠ Unresolved Decision From Prior Session")
-        lines.append(
-            "The previous session stopped at an AskUserQuestion the user never answered "
-            "(rejected, interrupted, or left open — not resolved). Surface it and let the "
-            "user decide; do not act on the work it gates or answer it yourself."
-        )
-        for q in payload.get("questions", []):
-            lines.append(f"- **Q:** {q.get('question', '')}")
-            lines.extend(
-                f"  - {opt.get('label', '')}: {clip(opt.get('description', ''), _INJECTION_OPTION_CLIP)}"
-                for opt in q.get("options", [])
-            )
-    else:
-        lines.append("⚠ PENDING QUESTION — prior session stopped at an UNANSWERED AskUserQuestion.")
-        lines.append("  Surface this to the user. Do NOT answer it or act on it yourself.")
-        for q in payload.get("questions", []):
-            lines.append(f"  Q: {q.get('question', '')}")
-            for i, opt in enumerate(q.get("options", []), 1):
-                desc = clip(opt.get("description", ""), _CLI_OPTION_CLIP)
-                lines.append(f"     {i}. {opt.get('label', '')} — {desc}")
-    return "\n".join(lines)
-
-
-def _last_event_timestamp(path: Path) -> str:
-    """Latest ``timestamp`` value among a transcript's last lines, ISO 8601 string.
-
-    ISO 8601 strings sort correctly by plain string comparison, so callers can
-    order transcripts with a plain key function. Falls back to the file's mtime
-    (also rendered as an ISO string) when no line in the tail window parses as
-    JSON with a usable timestamp — e.g. a truncated or corrupt transcript.
-    """
-    latest: str | None = None
-    with open(path, encoding="utf-8", errors="replace") as fh:
-        tail_lines = deque(fh, maxlen=_TIMESTAMP_TAIL_LINES)
-    for line in tail_lines:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            entry = json.loads(line)
-        except json.JSONDecodeError:
-            log.debug("failed to parse transcript tail line: %s", path, exc_info=True)
-            continue
-        ts = entry.get("timestamp")
-        if ts and (latest is None or ts > latest):
-            latest = ts
-    if latest is not None:
-        return latest
-    return Instant.from_timestamp(path.stat().st_mtime).format_iso(unit="millisecond")
-
-
-def list_transcripts(pdir: Path) -> list[Path]:
-    if not pdir.is_dir():
-        return []
-    files = [p for p in pdir.glob("*.jsonl") if p.is_file()]
-    files.sort(key=_last_event_timestamp, reverse=True)
-    return files
-
-
-def resolve_target(pdir: Path, selector: str | None) -> Path | None:
-    """Pick the transcript to show.
-
-    With a selector, match by session-id substring. Without one, assume this runs
-    inside the live session (as the ccr-resume skill does): the newest file by
-    last-event timestamp is the current session, so the prior session is the
-    second-newest. Invoked outside an active session this is off by one — pass
-    a selector there.
-    """
-    sessions = list_transcripts(pdir)
-    if not sessions:
-        return None
-    if selector:
-        for p in sessions:
-            if selector in p.stem:
-                return p
-        return None
-    return sessions[1] if len(sessions) >= 2 else None
-
-
-def resolve_target_global(selector: str, projects_dir: Path = DEFAULT_PROJECTS_DIR) -> Path | None:
-    """Search all project dirs for a transcript matching *selector* by substring.
-
-    Called as a fallback when resolve_target finds no match in the local project.
-    Returns the newest match (by last-event timestamp) when multiple projects
-    contain a matching session id.
-    """
-    if not projects_dir.is_dir():
-        return None
-    matches: list[Path] = [
-        p
-        for project_dir in projects_dir.iterdir()
-        if project_dir.is_dir()
-        for p in project_dir.glob("*.jsonl")
-        if p.is_file() and selector in p.stem
-    ]
-    if not matches:
-        return None
-    if len(matches) == 1:
-        return matches[0]
-    matches.sort(key=_last_event_timestamp, reverse=True)
-    return matches[0]
-
-
 def first_typed_preview(path: Path) -> str:
     for entry in load_entries(path):
         text = typed_instruction(entry)
@@ -461,121 +220,6 @@ def _emit_full(entries: list[dict], pending: dict | None) -> int:
             print("LAST ASSISTANT MESSAGE:")
             print(last)
     return 0
-
-
-def _build_search_dirs(provided_cwd: str, *, real_cwd: str | None = None) -> tuple[list[Path], str | None]:
-    """Build ordered list of transcript dirs to search (worktree-specific first).
-
-    Returns ``(dirs, branch_hint)`` where *branch_hint* is the resolved worktree
-    name (used as a branch filter for fallback dirs), or None when not in a worktree.
-
-    When the process is running inside a worktree but --cwd was passed pointing at
-    the repo root, the worktree dir is still searched first and a warning is emitted.
-    Only activates worktree logic when provided_cwd relates to the same repo.
-
-    When --cwd explicitly names a *different* worktree of the same repo, that
-    worktree is searched first (the user asked for it), not the process's own.
-    """
-    real_cwd_normalized = (real_cwd or str(Path.cwd())).replace("\\", "/")
-    real_parts = split_worktree_path(real_cwd_normalized)
-    if not real_parts:
-        return [transcript_dir(provided_cwd)], None
-
-    repo_root, worktree_cwd = real_parts
-
-    provided_parts = split_worktree_path(provided_cwd)
-    provided_base = provided_parts[0] if provided_parts else provided_cwd.replace("\\", "/")
-
-    if provided_base.rstrip("/") != repo_root.rstrip("/"):
-        return [transcript_dir(provided_cwd)], None
-
-    if provided_parts and provided_parts[1].rstrip("/") != worktree_cwd.rstrip("/"):
-        primary = provided_parts[1]
-    elif provided_base.rstrip("/") == repo_root.rstrip("/") and provided_cwd.replace("\\", "/").rstrip(
-        "/"
-    ) != worktree_cwd.rstrip("/"):
-        print(
-            f"note: running in worktree — checking {worktree_cwd} before repo root",
-            file=sys.stderr,
-        )
-        primary = worktree_cwd
-    else:
-        primary = worktree_cwd
-
-    dirs = [transcript_dir(primary)]
-    root_dir = transcript_dir(repo_root)
-    if root_dir not in dirs:
-        dirs.append(root_dir)
-
-    # Worktree dir name == branch for `claude --worktree <branch>`;
-    # won't match slash-containing branches — falls back to newest.
-    branch_hint = Path(primary).name
-    return dirs, branch_hint
-
-
-def _extract_branch(path: Path) -> str | None:
-    """Read the first ~20 lines of a transcript to find its git branch.
-
-    Cheap head-read used to filter fallback candidates by branch — avoids
-    parsing the full file.
-    """
-    try:
-        with open(path, encoding="utf-8", errors="replace") as fh:
-            for i, line in enumerate(fh):
-                if i >= _BRANCH_HEAD_LINES:
-                    break
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    entry = json.loads(line)
-                except json.JSONDecodeError:
-                    log.debug("failed to parse branch extraction line: %s", path, exc_info=True)
-                    continue
-                branch = entry.get("gitBranch")
-                if branch:
-                    return branch
-    except OSError:
-        log.warning("failed to read transcript for branch extraction: %s", path, exc_info=True)
-        return None
-    return None
-
-
-def _pick_branch_match(sessions: list[Path], branch_hint: str | None) -> Path | None:
-    """From a recency-sorted list, prefer the newest session matching *branch_hint*.
-
-    Falls back to the overall newest if no branch match is found (or no hint).
-    """
-    if not sessions:
-        return None
-    if not branch_hint:
-        return sessions[0]
-    for path in sessions:
-        if _extract_branch(path) == branch_hint:
-            return path
-    return sessions[0]
-
-
-def _resolve_across_dirs(dirs: list[Path], selector: str | None, *, branch_hint: str | None = None) -> Path | None:
-    """Search multiple transcript dirs for a target session.
-
-    The first dir is the primary (contains the current live session when no
-    selector is given), so resolve_target skips the newest file there.
-    Fallback dirs don't contain the current session, so their newest is fair
-    game — but when a *branch_hint* is provided, the fallback prefers a
-    session on the same branch over the globally newest.
-    """
-    for i, pdir in enumerate(dirs):
-        if selector:
-            target = resolve_target(pdir, selector)
-        elif i == 0:
-            target = resolve_target(pdir, None)
-        else:
-            sessions = list_transcripts(pdir)
-            target = _pick_branch_match(sessions, branch_hint)
-        if target is not None:
-            return target
-    return None
 
 
 def run(

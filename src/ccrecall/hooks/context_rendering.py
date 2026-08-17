@@ -9,16 +9,13 @@ import logging
 
 from ccrecall.formatting import format_time_full
 from ccrecall.models import LOGGER_NAME
-from ccrecall.session_tail import (
-    find_pending_question,
-    format_pending_block,
-    load_tail_entries,
-    transcript_for_uuid,
-)
+from ccrecall.session_tail import load_tail_entries
 from ccrecall.summarizer import (
     build_context_summary_json,
     render_context_summary,
 )
+from ccrecall.tail_pending import find_pending_question, format_pending_block
+from ccrecall.tail_resolve import transcript_for_uuid
 
 # Uncached topic fallback truncates the first user message to this many chars.
 TOPIC_PREVIEW_MAX_CHARS = 120

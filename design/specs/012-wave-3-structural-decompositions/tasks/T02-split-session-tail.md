@@ -1,7 +1,7 @@
 ---
 task_id: "T02"
 title: "Split session_tail.py into three modules by concern"
-status: "planned"
+status: "done"
 depends_on: ["T01"]
 implements: ["FR#4", "FR#6", "FR#7"]
 ---
