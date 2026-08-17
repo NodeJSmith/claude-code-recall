@@ -1,7 +1,7 @@
 # Design: Wave 3 Structural Decompositions
 
 **Date:** 2026-08-17
-**Status:** draft
+**Status:** archived
 **Mode:** sketch
 
 ## Problem
@@ -126,6 +126,8 @@ Extract two modules from `session_tail.py`:
 
 ## Changed Files
 
+- modify: `CLAUDE.md` — corrected the "config.py / db.py split" description after the db_vec.py extraction (T01 fixer loop)
+- modify: `tests/test_context_injection.py` — corrected a stale docstring claim about db.py importing fastembed (T01 fixer loop)
 - modify: `src/ccrecall/db.py` — remove vec functions, remove embeddings import, keep get_connection + constants
 - create: `src/ccrecall/db_vec.py` — vec-dependent functions moved from db.py
 - modify: `src/ccrecall/branch_ops.py` — update import from db to db_vec

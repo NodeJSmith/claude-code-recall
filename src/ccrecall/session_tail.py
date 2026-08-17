@@ -19,12 +19,15 @@ from ccrecall.parsing import (
 )
 from ccrecall.tail_pending import _is_main_chain, clip, find_pending_question, format_pending_block, typed_instruction
 
-# Explicit re-export ("as" with the same name): these are private (leading
-# underscore) helpers defined in tail_resolve.py with no in-module caller
-# there — they're only called from this file's run() or re-exported for
-# tests that import path-resolution helpers from session_tail rather than
-# tail_resolve directly. The "as X" form tells both ruff (F401) and pyright
-# (reportUnusedFunction) this cross-module use is intentional.
+# Explicit re-export ("as" with the same name) of private (leading-underscore)
+# helpers from tail_resolve.py. _build_search_dirs and _resolve_across_dirs
+# have no in-module caller in tail_resolve.py — they're called only from this
+# file's run(). _extract_branch, _last_event_timestamp, and _pick_branch_match
+# do have in-module callers in tail_resolve.py but are re-exported here solely
+# because test_session_tail.py imports them from ccrecall.session_tail rather
+# than ccrecall.tail_resolve — not used directly in this file. Either way, the
+# "as X" form tells ruff (F401) and pyright (reportUnusedFunction) the
+# cross-module use is intentional.
 from ccrecall.tail_resolve import _build_search_dirs as _build_search_dirs
 from ccrecall.tail_resolve import _extract_branch as _extract_branch
 from ccrecall.tail_resolve import _last_event_timestamp as _last_event_timestamp
