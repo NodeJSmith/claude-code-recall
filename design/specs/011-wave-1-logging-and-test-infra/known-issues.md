@@ -1,13 +1,13 @@
 # Known Issues
 
-Durable issues discovered during orchestration that were intentionally not fixed in this run.
+Durable issues discovered during orchestration; entries marked "resolved" below were fixed during this run and are retained for traceability.
 
 ## KI-001: db.py's chunk_vec_queryable() has the same silent-except pattern as vec_available()
 
 Status: resolved — fixed during known issues walkthrough
 Run: 96
 Source: impl-review
-Reason not fixed now: out-of-scope (superseded — see Resolution below)
+Historical reason for deferral: out-of-scope; superseded by the resolution below
 Observed in: T01 (commit 133e796)
 Affected files:
 - src/ccrecall/db.py
@@ -18,8 +18,7 @@ Issue:
 Why deferred:
 Design.md's Non-Goals explicitly exclude "Rolling out logging to all 25 zero-logging modules (that's wave 4 / #145 remainder)." Fixing this now would expand beyond the approved T01-T03 scope.
 
-Recommended follow-up:
-Include `chunk_vec_queryable()` in the wave-4 logging rollout (#145 remainder).
+Follow-up: None; resolved in this run.
 
 Acceptance criteria:
 - `chunk_vec_queryable()`'s except block logs at an appropriate level before its silent-failure return.
