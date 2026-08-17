@@ -3,8 +3,13 @@
 
 The house rule is that all imports live at the top of the file. Lazy imports
 obscure dependencies, break ``patch("module.lib")`` mocking, and hide import
-errors until runtime. The only legitimate use is breaking a circular import,
-and those sites must say so out loud.
+errors until runtime. There are two legitimate uses, and those sites must say
+so out loud:
+
+    1. Breaking a circular import.
+    2. Deferring a heavy transitive dependency (e.g. numpy/fastembed/
+       onnxruntime) that must not load on a fast hot path — see
+       ``ccrecall/db.py``'s vec-boundary imports and CLAUDE.md invariant #3.
 
 Detection is AST-based. An import is flagged when its nearest enclosing scope
 is a function or method — ``ast.Import`` / ``ast.ImportFrom`` reached while
@@ -24,6 +29,7 @@ accepted:
         between) — for long imports that cannot carry a trailing comment.
 
 Canonical annotation form: ``# lazy-import: break circular import with <module>``
+or ``# lazy-import: <module> imports <heavy dep> transitively``
 
 Usage:
     python tools/check_lazy_imports.py

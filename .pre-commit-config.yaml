@@ -94,7 +94,7 @@ repos:
         stages: [pre-push]
 
       - id: check-lazy-imports
-        name: Ban lazy imports (use '# lazy-import:' to defend circular-import cases)
+        name: Ban lazy imports (use '# lazy-import:' to defend circular-import or heavy-hot-path cases)
         language: system
         entry: ./tools/check_lazy_imports.py
         pass_filenames: false
