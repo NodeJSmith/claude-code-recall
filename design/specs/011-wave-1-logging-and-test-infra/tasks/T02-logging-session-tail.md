@@ -1,7 +1,7 @@
 ---
 task_id: "T02"
 title: "Add logging to session_tail.py"
-status: "planned"
+status: "done"
 depends_on: []
 implements: ["FR#5", "FR#6"]
 ---

@@ -20,6 +20,7 @@ for locating files. So we encode the raw cwd here.
 """
 
 import json
+import logging
 import sys
 from collections import deque
 from pathlib import Path
@@ -35,12 +36,15 @@ from ccrecall.content import (
 from ccrecall.db import DEFAULT_PROJECTS_DIR
 from ccrecall.errors import emit_error_return
 from ccrecall.formatting import split_worktree_path
+from ccrecall.models import LOGGER_NAME
 from ccrecall.parsing import (
     extract_session_metadata,
     extract_session_uuid,
     parse_all_with_uuids,
     parse_lines_with_uuids,
 )
+
+log = logging.getLogger(LOGGER_NAME)
 
 # Lines of transcript tail scanned for the latest event timestamp when ordering
 # sessions — enough to find a timestamp even if the trailing lines are a
@@ -319,6 +323,7 @@ def _last_event_timestamp(path: Path) -> str:
         try:
             entry = json.loads(line)
         except json.JSONDecodeError:
+            log.debug("skipping unparseable line in transcript tail", exc_info=True)
             continue
         ts = entry.get("timestamp")
         if ts and (latest is None or ts > latest):
@@ -525,11 +530,13 @@ def _extract_branch(path: Path) -> str | None:
                 try:
                     entry = json.loads(line)
                 except json.JSONDecodeError:
+                    log.debug("skipping unparseable line in branch extraction", exc_info=True)
                     continue
                 branch = entry.get("gitBranch")
                 if branch:
                     return branch
     except OSError:
+        log.warning("failed to read transcript for branch extraction: %s", path, exc_info=True)
         return None
     return None
 
