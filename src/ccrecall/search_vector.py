@@ -1,11 +1,15 @@
 """Chunk-vector KNN execution and snippet hydration for conversation search."""
 
+import logging
 import sqlite3
 
 import sqlite_vec
 
 from ccrecall.embeddings import EMBEDDING_MODEL, EMBEDDING_VERSION
+from ccrecall.models import LOGGER_NAME
 from ccrecall.search_query import scope_filter_clause
+
+log = logging.getLogger(LOGGER_NAME)
 
 KNN_RETRY_MULTIPLIER = 4
 MAX_SQL_BOUND_PARAMS = 900
@@ -135,6 +139,7 @@ def execute_chunk_knn(
     try:
         serialized = sqlite_vec.serialize_float32(query_vec)
     except sqlite3.Error:
+        log.exception("vec serialize failed")
         return []
 
     total_candidates: int | None = None
@@ -145,6 +150,7 @@ def execute_chunk_knn(
         try:
             knn_rows = _run_chunk_knn(cursor, serialized, current_k)
         except sqlite3.Error:
+            log.exception("chunk KNN query failed")
             return []
 
         if not knn_rows:
@@ -161,6 +167,7 @@ def execute_chunk_knn(
                 after=after,
             )
         except sqlite3.Error:
+            log.exception("chunk KNN filter failed")
             return []
 
         if len(filtered_rows) >= requested_results:
@@ -177,6 +184,7 @@ def execute_chunk_knn(
                     after=after,
                 )
             except sqlite3.Error:
+                log.exception("eligible chunk count query failed")
                 return []
 
         if eligible_candidates == 0:
@@ -194,6 +202,7 @@ def execute_chunk_knn(
             try:
                 total_candidates = _count_total_vec_candidates(cursor)
             except sqlite3.Error:
+                log.exception("total vec candidate count query failed")
                 return []
 
         reached_global_corpus_ceiling = total_candidates == 0 or current_k >= total_candidates
