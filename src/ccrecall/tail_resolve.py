@@ -28,7 +28,12 @@ _BRANCH_HEAD_LINES = 20
 
 
 def transcript_dir(cwd: str, projects_dir: Path = DEFAULT_PROJECTS_DIR) -> Path:
-    """Directory holding this cwd's transcripts (raw slug — see module docstring)."""
+    """Directory holding this cwd's transcripts.
+
+    The slug is the raw cwd with ``\\``, ``/``, ``:`` and ``.`` each replaced by
+    ``-`` — the same unnormalized transform Claude Code itself applies, so the
+    result must not be "cleaned up" (no collapsing of repeated dashes).
+    """
     slug = cwd.replace("\\", "/").replace("/", "-").replace(":", "-").replace(".", "-")
     return projects_dir / slug
 
@@ -56,14 +61,18 @@ def _last_event_timestamp(path: Path) -> str:
     JSON with a usable timestamp — e.g. a truncated or corrupt transcript.
     """
     latest: str | None = None
-    with open(path, encoding="utf-8", errors="replace") as fh:
-        tail_lines = deque(fh, maxlen=_TIMESTAMP_TAIL_LINES)
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            tail_lines = deque(fh, maxlen=_TIMESTAMP_TAIL_LINES)
+    except OSError:
+        log.warning("failed to read transcript for timestamp ordering: %s", path, exc_info=True)
+        return ""
     for line in tail_lines:
-        line = line.strip()
-        if not line:
+        stripped = line.strip()
+        if not stripped:
             continue
         try:
-            entry = json.loads(line)
+            entry = json.loads(stripped)
         except json.JSONDecodeError:
             log.debug("failed to parse transcript tail line: %s", path, exc_info=True)
             continue
@@ -72,7 +81,12 @@ def _last_event_timestamp(path: Path) -> str:
             latest = ts
     if latest is not None:
         return latest
-    return Instant.from_timestamp(path.stat().st_mtime).format_iso(unit="millisecond")
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        log.warning("failed to stat transcript for timestamp ordering: %s", path, exc_info=True)
+        return ""
+    return Instant.from_timestamp(mtime).format_iso(unit="millisecond")
 
 
 def list_transcripts(pdir: Path) -> list[Path]:
