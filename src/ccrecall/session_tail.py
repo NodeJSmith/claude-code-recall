@@ -323,7 +323,7 @@ def _last_event_timestamp(path: Path) -> str:
         try:
             entry = json.loads(line)
         except json.JSONDecodeError:
-            log.debug("skipping unparseable line in transcript tail", exc_info=True)
+            log.debug("failed to parse transcript tail line: %s", path, exc_info=True)
             continue
         ts = entry.get("timestamp")
         if ts and (latest is None or ts > latest):
@@ -530,7 +530,7 @@ def _extract_branch(path: Path) -> str | None:
                 try:
                     entry = json.loads(line)
                 except json.JSONDecodeError:
-                    log.debug("skipping unparseable line in branch extraction", exc_info=True)
+                    log.debug("failed to parse branch extraction line: %s", path, exc_info=True)
                     continue
                 branch = entry.get("gitBranch")
                 if branch:

@@ -121,6 +121,7 @@ def chunk_vec_queryable(conn: sqlite3.Connection) -> bool:
         conn.execute("SELECT 1 FROM chunk_vec LIMIT 1")
         return True
     except sqlite3.Error:
+        log.debug("chunk_vec table not queryable", exc_info=True)
         return False
 
 
