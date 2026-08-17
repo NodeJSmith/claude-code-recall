@@ -5,8 +5,11 @@ refactor has a safety net. Comments flag behavior that looks surprising but
 is confirmed intentional/observed, not assumed.
 """
 
+import sys
 from pathlib import Path
 from unittest.mock import patch
+
+import pytest
 
 from ccrecall.transcript_sources import (
     _candidate_subagent_dirs,
@@ -171,16 +174,27 @@ class TestResolvedPath:
 
         assert _resolved_path(target) == target.resolve()
 
-    def test_self_referential_symlink_does_not_raise(self, tmp_path):
-        # On this Python version, Path.resolve() no longer raises on a
-        # self-referential symlink loop (older versions raised RuntimeError,
-        # which this function is built to suppress) — it just returns the
-        # path unresolved past the loop point. Pin that it doesn't propagate
-        # an exception either way.
+    @pytest.mark.skipif(sys.version_info < (3, 13), reason="Path.resolve() no longer raises on symlink loops from 3.13")
+    def test_self_referential_symlink_resolves_without_raising(self, tmp_path):
+        # On Python 3.13+, Path.resolve() no longer raises on a
+        # self-referential symlink loop — it returns the path unresolved
+        # past the loop point.
         loop = tmp_path / "loop"
         loop.symlink_to(loop)
 
         assert _resolved_path(loop) is not None
+
+    @pytest.mark.skipif(
+        sys.version_info >= (3, 13), reason="Path.resolve() no longer raises on symlink loops from 3.13"
+    )
+    def test_self_referential_symlink_returns_none_pre_313(self, tmp_path):
+        # On 3.11/3.12, Path.resolve() raises RuntimeError for a
+        # self-referential symlink loop, which this function is built to
+        # suppress, returning None.
+        loop = tmp_path / "loop"
+        loop.symlink_to(loop)
+
+        assert _resolved_path(loop) is None
 
     def test_returns_none_when_resolve_raises_oserror(self, tmp_path):
         target = tmp_path / "sub"
@@ -401,10 +415,14 @@ class TestDiscoverSessionTranscriptFiles:
         assert result.had_unsafe_path is False
         assert result.had_matching_unsafe_path is False
 
+    @pytest.mark.skipif(
+        sys.version_info < (3, 13), reason="pathlib.glob() rejects '**' embedded in a component before 3.13"
+    )
     def test_glob_metacharacters_in_session_uuid_over_match(self, tmp_path):
         # session_uuid is interpolated into glob patterns (f"*{session_uuid}*.jsonl")
-        # without escaping. A uuid of "*" matches every .jsonl in subagent dirs.
-        # Pinning the current over-match behavior so it's visible, not hidden.
+        # without escaping. A uuid of "*" produces the pattern "***.jsonl", which
+        # pathlib's glob() treats as an ordinary wildcard on 3.13+, over-matching
+        # every .jsonl in subagent dirs. Pinning that gap so it's visible, not hidden.
         projects_dir = tmp_path / "projects"
         project_dir = projects_dir / "proj1"
         subagents = project_dir / "subagents"
@@ -415,6 +433,24 @@ class TestDiscoverSessionTranscriptFiles:
         result = discover_session_transcript_files(projects_dir, "*")
 
         assert len(result.files) == 2
+
+    @pytest.mark.skipif(
+        sys.version_info >= (3, 13), reason="pathlib.glob() rejects '**' embedded in a component before 3.13"
+    )
+    def test_glob_metacharacters_in_session_uuid_raises_pre_313(self, tmp_path):
+        # Same "*" session_uuid as the sibling test above, but on 3.11/3.12
+        # pathlib rejects the resulting "***.jsonl" pattern outright instead of
+        # over-matching, and discover_session_transcript_files does not catch
+        # it, so the ValueError propagates. Pinning the pre-3.13 behavior.
+        projects_dir = tmp_path / "projects"
+        project_dir = projects_dir / "proj1"
+        subagents = project_dir / "subagents"
+        subagents.mkdir(parents=True)
+        (subagents / "session-aaa.jsonl").write_text("{}")
+        (subagents / "session-bbb.jsonl").write_text("{}")
+
+        with pytest.raises(ValueError, match="can only be an entire path component"):
+            discover_session_transcript_files(projects_dir, "*")
 
     def test_path_traversal_in_session_uuid_is_rejected(self, tmp_path):
         # A session_uuid containing "../" doesn't escape the projects_dir boundary
