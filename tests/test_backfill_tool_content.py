@@ -203,7 +203,7 @@ class TestBackfillCore:
         ).fetchone()
         assert row[0] == ""
 
-    def test_backfill_invalidates_summary_source_hash_when_aggregate_changes(self, tmp_path):
+    def test_backfill_invalidates_summary_version_when_aggregate_changes(self, tmp_path):
         filepath = tmp_path / "sess-hash.jsonl"
         _write_jsonl(
             filepath,
@@ -233,21 +233,20 @@ class TestBackfillCore:
             leaf_uuid="a1",
         )
         conn.execute(
-            "UPDATE branches SET summary_version = ?, summary_source_hash = ? WHERE id = ?",
-            (7, "current-hash", branch_id),
+            "UPDATE branches SET summary_version = ? WHERE id = ?",
+            (7, branch_id),
         )
         conn.commit()
 
         assert backfill_session(conn.cursor(), session_id, [filepath]) is True
 
         branch_row = conn.execute(
-            "SELECT aggregated_content, summary_version, summary_source_hash FROM branches WHERE id = ?",
+            "SELECT aggregated_content, summary_version FROM branches WHERE id = ?",
             (branch_id,),
         ).fetchone()
         assert branch_row is not None
         assert "[Bash: tail -f /var/log/app.log]" in branch_row[0]
         assert branch_row[1] is None
-        assert branch_row[2] is None
 
 
 class TestBackfillMetaExclusion:

@@ -489,7 +489,7 @@ def backfill_session(cursor: sqlite3.Cursor, session_id: int, filepaths: list[Pa
     cursor.execute(
         """
         UPDATE branches
-        SET aggregated_content = ?, embedding_version = NULL, summary_version = NULL, summary_source_hash = NULL
+        SET aggregated_content = ?, embedding_version = NULL, summary_version = NULL
         WHERE id = ?
         """,
         (agg_content, branch_db_id),

@@ -8,7 +8,6 @@ top; keeping that split is what lets a caller migrate the DB without paying the
 those, so keep new heavy dependencies out of it.
 """
 
-import contextlib
 import sqlite3
 from collections.abc import Callable
 
@@ -327,17 +326,3 @@ def _open_connection(
 
     (apply_migrations_callback or _apply_migrations)(conn)
     return conn
-
-
-@contextlib.contextmanager
-def get_connection(settings: dict | None = None):
-    """Get a lightweight DB connection: commit-on-success, rollback-on-exception, always-close."""
-    conn = _open_connection(settings)
-    try:
-        yield conn
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
