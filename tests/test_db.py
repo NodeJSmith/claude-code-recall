@@ -16,6 +16,7 @@ from conftest import VEC_SKIP, make_vec_conn
 
 import ccrecall.config as config_module
 import ccrecall.db as db_module
+import ccrecall.db_vec as db_vec_module
 from ccrecall.config import (
     DEFAULT_SETTINGS,
     atomic_write_json,
@@ -23,12 +24,8 @@ from ccrecall.config import (
     load_settings,
     log_hook_exception,
 )
-from ccrecall.db import (
-    SCHEMA_VERSION,
-    fetch_branch_messages,
-    get_connection,
-    vec_available,
-)
+from ccrecall.db import SCHEMA_VERSION, get_connection
+from ccrecall.db_vec import fetch_branch_messages, vec_available
 from ccrecall.embeddings import EMBEDDING_DIM, EMBEDDING_MODEL, EMBEDDING_VERSION
 from ccrecall.schema import SCHEMA, SCHEMA_CORE, SCHEMA_FTS5, detect_fts_support
 
@@ -301,7 +298,7 @@ class TestVecAvailable:
 
     def test_never_raises_on_operational_error(self):
         """When sqlite_vec.load raises OperationalError, vec_available returns False."""
-        with patch("ccrecall.db.sqlite_vec") as mock_vec:
+        with patch("ccrecall.db_vec.sqlite_vec") as mock_vec:
             mock_vec.load.side_effect = sqlite3.OperationalError("cannot load extension")
 
             class _FakeConn:
@@ -400,7 +397,7 @@ class TestVecSchema:
         )
 
         # Run _ensure_vec_schema — must tear down branch_vec and reset watermarks
-        db_module._ensure_vec_schema(conn)
+        db_vec_module._ensure_vec_schema(conn)
         conn.commit()
 
         tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
@@ -439,7 +436,7 @@ class TestVecSchema:
         conn.commit()
 
         # Second run — must be a no-op for chunk_vec and watermarks
-        db_module._ensure_vec_schema(conn)
+        db_vec_module._ensure_vec_schema(conn)
         conn.commit()
 
         wm = conn.execute("SELECT embedding_version FROM branches WHERE leaf_uuid='lf-idem'").fetchone()[0]
@@ -917,7 +914,7 @@ class TestSchemaVersioning:
             f" USING vec0(chunk_id INTEGER PRIMARY KEY, embedding float[{EMBEDDING_DIM}])"
         )
         seed.execute(
-            f"CREATE TRIGGER IF NOT EXISTS {db_module.TRIGGER_CHUNKS_VEC_AD}"
+            f"CREATE TRIGGER IF NOT EXISTS {db_vec_module.TRIGGER_CHUNKS_VEC_AD}"
             " AFTER DELETE ON chunks"
             " BEGIN DELETE FROM chunk_vec WHERE chunk_id = OLD.id; END"
         )
@@ -1372,7 +1369,7 @@ class TestSchemaVersioning:
         db_path = tmp_path / "selfheal.db"
         with get_connection(settings={"db_path": str(db_path)}, load_vec=True) as conn:
             assert conn.execute("PRAGMA user_version").fetchone()[0] == db_module.SCHEMA_VERSION
-            assert db_module.chunk_vec_queryable(conn)
+            assert db_vec_module.chunk_vec_queryable(conn)
 
         raw = sqlite3.connect(db_path)
         raw.enable_load_extension(True)
@@ -1384,7 +1381,9 @@ class TestSchemaVersioning:
 
         with get_connection(settings={"db_path": str(db_path)}, load_vec=True) as conn:
             assert conn.execute("PRAGMA user_version").fetchone()[0] == db_module.SCHEMA_VERSION
-            assert db_module.chunk_vec_queryable(conn), "chunk_vec must be re-created by the self-heal, not migration"
+            assert db_vec_module.chunk_vec_queryable(conn), (
+                "chunk_vec must be re-created by the self-heal, not migration"
+            )
 
 
 class TestMigrationVersionMatrix:
@@ -1453,7 +1452,7 @@ class TestMigrationVersionMatrix:
             f" USING vec0(chunk_id INTEGER PRIMARY KEY, embedding float[{EMBEDDING_DIM}])"
         )
         conn.execute(
-            f"CREATE TRIGGER IF NOT EXISTS {db_module.TRIGGER_CHUNKS_VEC_AD}"
+            f"CREATE TRIGGER IF NOT EXISTS {db_vec_module.TRIGGER_CHUNKS_VEC_AD}"
             " AFTER DELETE ON chunks"
             " BEGIN DELETE FROM chunk_vec WHERE chunk_id = OLD.id; END"
         )
@@ -1923,7 +1922,7 @@ class TestChunkSchema:
         )
         conn.commit()
 
-        db_module._ensure_vec_schema(conn)
+        db_vec_module._ensure_vec_schema(conn)
         conn.commit()
 
         sql = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='chunk_vec'").fetchone()[0]
@@ -1953,7 +1952,7 @@ class TestChunkSchema:
         chunk_id = cursor.lastrowid
         conn.commit()
 
-        db_module.write_chunk_embedding(cursor, chunk_id, [0.4] * EMBEDDING_DIM, EMBEDDING_VERSION, EMBEDDING_MODEL)
+        db_vec_module.write_chunk_embedding(cursor, chunk_id, [0.4] * EMBEDDING_DIM, EMBEDDING_VERSION, EMBEDDING_MODEL)
         conn.commit()
 
         # Vector written.
@@ -1986,11 +1985,11 @@ class TestChunkSchema:
         conn.commit()
 
         embedding = [0.5] * EMBEDDING_DIM
-        db_module.upsert_chunk_vec(cursor, chunk_id, embedding)
+        db_vec_module.upsert_chunk_vec(cursor, chunk_id, embedding)
         conn.commit()
 
         # Second call — must not raise on repeat
-        db_module.upsert_chunk_vec(cursor, chunk_id, embedding)
+        db_vec_module.upsert_chunk_vec(cursor, chunk_id, embedding)
         conn.commit()
 
         count = conn.execute("SELECT COUNT(*) FROM chunk_vec WHERE chunk_id = ?", (chunk_id,)).fetchone()[0]
@@ -2006,14 +2005,14 @@ class TestChunkVecQueryable:
         conn = sqlite3.connect(":memory:")
         conn.executescript(SCHEMA)
         conn.commit()
-        assert db_module.chunk_vec_queryable(conn) is False
+        assert db_vec_module.chunk_vec_queryable(conn) is False
         conn.close()
 
     @VEC_SKIP
     def test_returns_true_with_vec_loaded(self):
         """chunk_vec_queryable returns True when chunk_vec exists and is queryable."""
         conn = make_vec_conn()
-        assert db_module.chunk_vec_queryable(conn) is True
+        assert db_vec_module.chunk_vec_queryable(conn) is True
         conn.close()
 
 
@@ -2138,6 +2137,12 @@ assert not found, f'Heavy modules loaded: {{found}}'
         by both context_alerts.py (hot path) and backfill_tool_content.py (opt-in
         backfill) — it must have zero imports beyond stdlib."""
         self._assert_no_heavy_imports("ccrecall.hooks.tool_content_eligibility")
+
+    def test_db_does_not_import_heavy_deps(self):
+        """db.py must not transitively import the heavy vec/embedding stack —
+        that lives in ccrecall.db_vec, imported by db.py only via deferred
+        (in-function) imports."""
+        self._assert_no_heavy_imports("ccrecall.db")
 
     def test_db_base_opens_without_db_or_heavy_deps(self, tmp_path):
         """db_base must open a migrated connection without importing db.py or heavy deps."""

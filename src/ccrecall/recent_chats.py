@@ -9,13 +9,8 @@ from pathlib import Path
 
 from ccrecall.config import DEFAULT_DB_PATH
 from ccrecall.dates import validate_or_exit
-from ccrecall.db import (
-    escape_like,
-    fetch_branch_messages,
-    get_connection,
-    parse_project_filter,
-    resolve_db_settings,
-)
+from ccrecall.db import escape_like, get_connection, parse_project_filter, resolve_db_settings
+from ccrecall.db_vec import fetch_branch_messages
 from ccrecall.errors import emit_error
 from ccrecall.formatting import format_json_sessions, format_markdown_session
 from ccrecall.serialization import decode_json_column

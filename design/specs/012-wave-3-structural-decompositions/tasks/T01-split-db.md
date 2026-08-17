@@ -1,7 +1,7 @@
 ---
 task_id: "T01"
 title: "Split db.py: extract vec-dependent code into db_vec.py"
-status: "planned"
+status: "done"
 depends_on: []
 implements: ["FR#1", "FR#2", "FR#3", "FR#7"]
 ---

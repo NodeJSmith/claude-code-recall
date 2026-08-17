@@ -18,12 +18,8 @@ from collections.abc import Callable
 from pathlib import Path
 
 from ccrecall.config import DEFAULT_DB_PATH, get_db_path, load_settings, remove_pid_file, setup_logging
-from ccrecall.db import (
-    DEFAULT_PROJECTS_DIR,
-    TRIGGER_CHUNKS_VEC_AD,
-    get_connection,
-    vec_available,
-)
+from ccrecall.db import DEFAULT_PROJECTS_DIR, get_connection
+from ccrecall.db_vec import TRIGGER_CHUNKS_VEC_AD, vec_available
 from ccrecall.file_hashing import transcript_file_hash
 from ccrecall.formatting import extract_project_name, normalize_project_key
 from ccrecall.import_log_ops import has_pending_tool_content

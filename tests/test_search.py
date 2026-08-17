@@ -9,7 +9,7 @@ import sqlite_vec
 from conftest import make_vec_conn
 
 from ccrecall import search_vector
-from ccrecall.db import (
+from ccrecall.db_vec import (
     upsert_chunk_vec,
     vec_available,
     write_chunk_embedding,

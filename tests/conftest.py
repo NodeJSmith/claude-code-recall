@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 import sqlite_vec
 
-from ccrecall.db import _ensure_vec_schema
+from ccrecall.db_vec import _ensure_vec_schema
 from ccrecall.health import clear_embedding_failure, record_embedding_failure
 from ccrecall.schema import SCHEMA
 

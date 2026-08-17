@@ -60,7 +60,8 @@ from pathlib import Path
 
 from ccrecall.config import load_settings, setup_logging
 from ccrecall.content import extract_text_content
-from ccrecall.db import VEC_BUSY_TIMEOUT_MS, get_connection
+from ccrecall.db import get_connection
+from ccrecall.db_vec import VEC_BUSY_TIMEOUT_MS
 from ccrecall.hooks.backfill_query import (
     BACKFILL_BATCH_DELAY_SECONDS,
     BACKFILL_NICE_LEVEL,

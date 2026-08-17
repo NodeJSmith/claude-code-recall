@@ -32,7 +32,8 @@ import time
 from collections import deque
 
 from ccrecall.config import load_settings, setup_logging
-from ccrecall.db import CONTENT_ERROR_VERSION, chunk_vec_queryable, fetch_branch_messages, get_connection
+from ccrecall.db import CONTENT_ERROR_VERSION, get_connection
+from ccrecall.db_vec import chunk_vec_queryable, fetch_branch_messages
 from ccrecall.embed_ops import embed_branch_chunks
 from ccrecall.embeddings import DEFAULT_EMBED_THREADS, EMBEDDING_MODEL, EMBEDDING_VERSION, model_available
 from ccrecall.health import (

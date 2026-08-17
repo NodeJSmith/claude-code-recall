@@ -11,13 +11,8 @@ from pathlib import Path
 
 from ccrecall.config import DEFAULT_DB_PATH
 from ccrecall.dates import validate_or_exit
-from ccrecall.db import (
-    branch_embedding_coverage,
-    chunk_vec_queryable,
-    get_connection,
-    parse_project_filter,
-    resolve_db_settings,
-)
+from ccrecall.db import get_connection, parse_project_filter, resolve_db_settings
+from ccrecall.db_vec import branch_embedding_coverage, chunk_vec_queryable
 from ccrecall.embeddings import DEPS_AVAILABLE, EMBEDDING_MODEL, EMBEDDING_VERSION
 from ccrecall.errors import emit_error
 from ccrecall.formatting import (

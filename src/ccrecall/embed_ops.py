@@ -9,7 +9,7 @@ import hashlib
 import logging
 import sqlite3
 
-from ccrecall.db import write_chunk_embedding
+from ccrecall.db_vec import write_chunk_embedding
 from ccrecall.embeddings import EMBEDDING_MODEL, EMBEDDING_VERSION, cap_for_embedding, embed_batch
 from ccrecall.models import LOGGER_NAME
 from ccrecall.summarizer import SUMMARY_VERSION, build_exchange_pairs, compute_context_summary
