@@ -68,7 +68,7 @@ class TestCmdBackfillSummaries:
     def test_calls_run_with_verbose(self):
         with patch("ccrecall.cli.commands.backfill_summaries_mod.run") as mock_run:
             cmd_backfill_summaries(ctx=DEFAULT_CLI_CONTEXT)
-        mock_run.assert_called_once_with(verbose=False)
+        mock_run.assert_called_once_with(verbose=False, db=DEFAULT_DB_PATH)
 
 
 class TestCmdBackfillToolContent:
@@ -92,6 +92,7 @@ class TestCmdBackfillToolContent:
             limit=None,
             progress_every=backfill_query_mod.DEFAULT_PROGRESS_EVERY,
             verbose=False,
+            db=DEFAULT_DB_PATH,
         )
 
 
@@ -99,7 +100,7 @@ class TestCmdRecent:
     def test_calls_run_with_parsed_arguments(self):
         with patch("ccrecall.cli.commands.recent_chats_mod.run") as mock_run:
             cmd_recent(
-                n=3,
+                limit=3,
                 sort_order="desc",
                 before=None,
                 after=None,
@@ -172,6 +173,7 @@ class TestCmdSearchMessages:
                 path=None,
                 before=None,
                 after=None,
+                verbose=False,
                 include_notifications=False,
                 db=DEFAULT_DB_PATH,
                 ctx=DEFAULT_CLI_CONTEXT,
@@ -185,6 +187,7 @@ class TestCmdSearchMessages:
             before=None,
             after=None,
             output_format="markdown",
+            verbose=False,
             include_notifications=False,
             db=DEFAULT_DB_PATH,
         )

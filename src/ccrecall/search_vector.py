@@ -7,7 +7,7 @@ import sqlite_vec
 
 from ccrecall.embeddings import EMBEDDING_MODEL, EMBEDDING_VERSION
 from ccrecall.models import LOGGER_NAME
-from ccrecall.search_query import scope_filter_clause
+from ccrecall.search_query import EMPTY_SCOPE, ScopeFilter, scope_filter_clause
 
 log = logging.getLogger(LOGGER_NAME)
 
@@ -23,14 +23,7 @@ def _run_chunk_knn(cursor: sqlite3.Cursor, serialized: bytes, k: int) -> list[tu
     ).fetchall()
 
 
-def _scoped_current_chunk_filters(
-    *,
-    projects: list[str] | None,
-    session_id: str | None,
-    path: str | None,
-    before: str | None,
-    after: str | None,
-) -> tuple[str, str, list]:
+def _scoped_current_chunk_filters(scope: ScopeFilter) -> tuple[str, str, list]:
     joins_sql = """
         JOIN branches b ON ch.branch_id = b.id
         JOIN sessions s ON b.session_id = s.id
@@ -42,9 +35,7 @@ def _scoped_current_chunk_filters(
         AND b.is_active = 1
     """
     params: list = [EMBEDDING_VERSION, EMBEDDING_MODEL]
-    scope_sql, scope_filter_params = scope_filter_clause(
-        projects=projects, session_id=session_id, path=path, before=before, after=after
-    )
+    scope_sql, scope_filter_params = scope_filter_clause(scope)
     where_sql += scope_sql
     params.extend(scope_filter_params)
     return joins_sql, where_sql, params
@@ -53,21 +44,14 @@ def _scoped_current_chunk_filters(
 def _filter_chunk_knn_rows(
     cursor: sqlite3.Cursor,
     knn_rows: list[tuple[int, float]],
-    *,
-    projects: list[str] | None,
-    session_id: str | None,
-    path: str | None,
-    before: str | None,
-    after: str | None,
+    scope: ScopeFilter,
 ) -> list[tuple[int, int, float]]:
     if not knn_rows:
         return []
 
     chunk_ids = [row[0] for row in knn_rows]
     chunk_to_dist: dict[int, float] = {row[0]: row[1] for row in knn_rows}
-    joins_sql, where_sql, filter_tail_params = _scoped_current_chunk_filters(
-        projects=projects, session_id=session_id, path=path, before=before, after=after
-    )
+    joins_sql, where_sql, filter_tail_params = _scoped_current_chunk_filters(scope)
 
     chunk_to_branch: dict[int, int] = {}
     param_budget = MAX_SQL_BOUND_PARAMS - len(filter_tail_params)
@@ -96,16 +80,9 @@ def _count_total_vec_candidates(cursor: sqlite3.Cursor) -> int:
 
 def _count_eligible_scoped_current_chunks(
     cursor: sqlite3.Cursor,
-    *,
-    projects: list[str] | None,
-    session_id: str | None,
-    path: str | None,
-    before: str | None,
-    after: str | None,
+    scope: ScopeFilter,
 ) -> int:
-    joins_sql, where_sql, params = _scoped_current_chunk_filters(
-        projects=projects, session_id=session_id, path=path, before=before, after=after
-    )
+    joins_sql, where_sql, params = _scoped_current_chunk_filters(scope)
     sql = f"SELECT COUNT(*) FROM chunks ch JOIN chunk_vec cv ON cv.chunk_id = ch.id {joins_sql} WHERE 1=1 {where_sql}"
     row = cursor.execute(sql, params).fetchone()
     return row[0] if row is not None else 0
@@ -115,11 +92,7 @@ def execute_chunk_knn(
     cursor: sqlite3.Cursor,
     query_vec: list[float],
     top_k: int,
-    projects: list[str] | None = None,
-    session_id: str | None = None,
-    path: str | None = None,
-    before: str | None = None,
-    after: str | None = None,
+    scope: ScopeFilter = EMPTY_SCOPE,
     target_results: int | None = None,
 ) -> list[tuple[int, int, float]]:
     """Shared chunk-KNN core: adaptively retry vec MATCH until filtered results fill the target.
@@ -157,15 +130,7 @@ def execute_chunk_knn(
             return []
 
         try:
-            filtered_rows = _filter_chunk_knn_rows(
-                cursor,
-                knn_rows,
-                projects=projects,
-                session_id=session_id,
-                path=path,
-                before=before,
-                after=after,
-            )
+            filtered_rows = _filter_chunk_knn_rows(cursor, knn_rows, scope)
         except sqlite3.Error:
             log.exception("chunk KNN filter failed")
             return []
@@ -175,14 +140,7 @@ def execute_chunk_knn(
 
         if eligible_candidates is None:
             try:
-                eligible_candidates = _count_eligible_scoped_current_chunks(
-                    cursor,
-                    projects=projects,
-                    session_id=session_id,
-                    path=path,
-                    before=before,
-                    after=after,
-                )
+                eligible_candidates = _count_eligible_scoped_current_chunks(cursor, scope)
             except sqlite3.Error:
                 log.exception("eligible chunk count query failed")
                 return []
@@ -220,11 +178,7 @@ def get_vec_chunk_ids(
     cursor: sqlite3.Cursor,
     query_vec: list[float],
     top_k: int,
-    projects: list[str] | None = None,
-    session_id: str | None = None,
-    path: str | None = None,
-    before: str | None = None,
-    after: str | None = None,
+    scope: ScopeFilter = EMPTY_SCOPE,
 ) -> list[tuple[int, float, int]]:
     """Return ordered (branch_id, distance, chunk_id) from chunk-vec KNN (Entrypoint A).
 
@@ -232,9 +186,7 @@ def get_vec_chunk_ids(
     the first (closest) chunk per branch in KNN order. Returns empty list on DB
     error so the caller degrades to keyword search; non-DB bugs propagate.
     """
-    raw = execute_chunk_knn(
-        cursor, query_vec, top_k, projects=projects, session_id=session_id, path=path, before=before, after=after
-    )
+    raw = execute_chunk_knn(cursor, query_vec, top_k, scope=scope)
     if not raw:
         return []
 

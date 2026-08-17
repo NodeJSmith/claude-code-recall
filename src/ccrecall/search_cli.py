@@ -26,6 +26,7 @@ from ccrecall.formatting import (
 )
 from ccrecall.schema import detect_fts_support
 from ccrecall.search_conversations import compute_caveat, search_messages, search_sessions
+from ccrecall.search_query import ScopeFilter
 
 # Upper bound on --max-results, single-sourced here and referenced by the CLI
 # validator (cli/commands.py) so the clamp and the validator can't drift apart.
@@ -66,6 +67,7 @@ def run_messages(
     before: str | None = None,
     after: str | None = None,
     output_format: str = "markdown",
+    verbose: bool = False,  # noqa: ARG001 — accepted for CLI symmetry; B has no session-level metadata to expand
     include_notifications: bool = False,  # noqa: ARG001 — accepted for surface symmetry; moot on B (no fetch)
     db: Path = DEFAULT_DB_PATH,
 ) -> None:
@@ -91,19 +93,12 @@ def run_messages(
             remediation="Run ccrecall import or start a session with the ccrecall plugin installed.",
         )
 
+    scope = ScopeFilter(projects=projects, session_id=session, path=path, before=before, after=after)
+
     try:
         settings = resolve_db_settings(db)
         with get_connection(settings, load_vec=True) as conn:
-            snippets, ranked = search_messages(
-                conn,
-                query=query,
-                max_results=max_results,
-                projects=projects,
-                session_id=session,
-                path=path,
-                before=before,
-                after=after,
-            )
+            snippets, ranked = search_messages(conn, query=query, max_results=max_results, scope=scope)
 
         if output_format == "json":
             json_snippets = [format_snippet_json(s) for s in snippets]
@@ -217,6 +212,8 @@ def run(
             remediation="Run ccrecall import or start a session with the ccrecall plugin installed.",
         )
 
+    scope = ScopeFilter(projects=projects, session_id=session, path=path, before=before, after=after)
+
     try:
         settings = resolve_db_settings(db)
 
@@ -236,12 +233,8 @@ def run(
                 query=query,
                 fts_level=fts_level,
                 max_results=max_results,
-                projects=projects,
-                session_id=session,
-                path=path,
+                scope=scope,
                 keyword_only=keyword_only,
-                before=before,
-                after=after,
             )
             caveat = compute_caveat(conn)
 

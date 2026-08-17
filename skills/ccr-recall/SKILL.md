@@ -20,7 +20,7 @@ Semantic recall is active: `ccrecall search` fuses keyword ranking with chunk-ve
 
 **recent_chats.py** — retrieve recent sessions with full transcript:
 ```bash
-ccrecall recent --n 3
+ccrecall recent --limit 3
 ```
 
 **search_conversations.py / Entrypoint A** — search sessions, returns **ranked session cards** (compact, no transcript):
@@ -58,7 +58,7 @@ ccrecall tail <handle>
    Load `references/lenses.md` for per-lens parameters, core questions, and supplementary search patterns.
 
 2. **Gather context** using lens-appropriate tools:
-   - For recent context: `ccrecall recent --n N`
+   - For recent context: `ccrecall recent --limit N`
    - For session discovery: `ccrecall search --query "keywords"` — returns scored cards; triage by `score` and `topic` before tailing
    - For a specific exchange: `ccrecall search-messages --query "phrase"` — returns bounded snippets with locators
    - To open a full session: `ccrecall tail <handle>` (drill-in after A or B)
@@ -66,7 +66,7 @@ ccrecall tail <handle>
 3. **Apply lens questions** to analyze the retrieved conversations.
 
 4. **Deepen the search** if initial results are insufficient:
-   - Retrieve more sessions: `--n 20` on `recent`, or `--max-results 10` on `search`
+   - Retrieve more sessions: `--limit 20` on `recent`, or `--max-results 10` on `search`
    - Search for specific terms that surfaced
    - Filter by project: `--project projectname`
    - Filter by session: `--session <uuid-prefix>` (when a specific session ID is known)

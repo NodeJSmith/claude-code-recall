@@ -16,15 +16,9 @@ from ccrecall.db_vec import branch_embedding_coverage, chunk_vec_queryable, vec_
 from ccrecall.hooks.backfill_status import count_status as count_embedding_status
 from ccrecall.import_log_ops import import_log_source_index
 from ccrecall.ingestion_status import summarize_ingestion
-from ccrecall.tool_content_status import (
-    count_eligible as count_tool_content_pending,
-)
-from ccrecall.tool_content_status import (
-    count_pending_missing_jsonl,
-)
-from ccrecall.tool_content_status import (
-    count_total_sessions as count_tool_content_total,
-)
+from ccrecall.tool_content_status import count_eligible as count_tool_content_pending
+from ccrecall.tool_content_status import count_pending_missing_jsonl
+from ccrecall.tool_content_status import count_total_sessions as count_tool_content_total
 
 
 def _settings_for_db(db: Path) -> dict:

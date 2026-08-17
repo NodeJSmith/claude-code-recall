@@ -58,7 +58,7 @@ import sys
 import time
 from pathlib import Path
 
-from ccrecall.config import load_settings, setup_logging
+from ccrecall.config import DEFAULT_DB_PATH, load_settings, setup_logging
 from ccrecall.content import extract_text_content
 from ccrecall.db import get_connection
 from ccrecall.db_vec import VEC_BUSY_TIMEOUT_MS
@@ -151,6 +151,7 @@ def run(
     limit: int | None = None,
     progress_every: int = DEFAULT_PROGRESS_EVERY,
     verbose: bool = False,
+    db: Path = DEFAULT_DB_PATH,
 ) -> int:
     """Backfill tool_content for existing synced sessions (opt-in; not auto-spawned)."""
     if days is not None and days < 1:
@@ -159,6 +160,8 @@ def run(
         raise ValueError("limit must be >= 1")
 
     settings = load_settings()
+    if db != DEFAULT_DB_PATH:
+        settings["db_path"] = str(db)
     logger = setup_logging(settings, process_name="backfill-tool-content", verbose=verbose)
 
     if status:

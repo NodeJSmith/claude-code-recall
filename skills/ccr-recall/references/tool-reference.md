@@ -5,12 +5,12 @@
 Retrieve recent conversation sessions with all messages.
 
 ```bash
-ccrecall recent --n 3
+ccrecall recent --limit 3
 ```
 
 | Option                    | Effect                                                 |
 | ------------------------- | ------------------------------------------------------ |
-| `--n N`                   | Number of sessions (1-20, default 3)                   |
+| `--limit N` / `-n N`      | Number of sessions (1-20, default 3)                   |
 | `--sort-order`            | 'desc' (newest first, default) or 'asc'                |
 | `--before DATE`           | Sessions before this datetime (ISO)                    |
 | `--after DATE`            | Sessions after this datetime (ISO)                     |
@@ -129,7 +129,7 @@ ccrecall search-messages --query "keyword"
 | `--json` | Global flag (any position): emit JSON instead of markdown |
 | `--include-notifications` | Include task notification messages (hidden by default) |
 
-No `--verbose` flag: snippet text is pre-bounded per message with no collapsible metadata lists.
+`--verbose` is accepted for CLI symmetry but has no effect: snippet text is pre-bounded per message with no collapsible metadata lists.
 
 ### Output — Track B: matched exchange snippet
 

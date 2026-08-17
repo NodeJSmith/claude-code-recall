@@ -2,6 +2,7 @@
 
 import sqlite3
 
+from ccrecall.db import has_tool_counts
 from ccrecall.serialization import decode_json_column
 
 # Fallback topic truncation for a recall card when no precomputed topic exists.
@@ -55,11 +56,8 @@ def hydrate_cards(
     if not branch_ids:
         return []
 
-    # Guard tool_counts column — absent on DBs created before it was added
-    cursor.execute("PRAGMA table_info(branches)")
-    branch_col_names = {row[1] for row in cursor.fetchall()}
-    has_tool_counts = "tool_counts" in branch_col_names
-    tool_counts_col = ", b.tool_counts" if has_tool_counts else ""
+    has_tc = has_tool_counts(cursor)
+    tool_counts_col = ", b.tool_counts" if has_tc else ""
 
     placeholders = ",".join("?" * len(branch_ids))
     rows = cursor.execute(
@@ -84,7 +82,7 @@ def hydrate_cards(
         if row is None:
             continue
 
-        if has_tool_counts:
+        if has_tc:
             (
                 _branch_db_id,
                 session_uuid,
@@ -116,7 +114,7 @@ def hydrate_cards(
         # Prefer join columns for list metadata; parse summary for topic
         files_modified: list = decode_json_column(files_json, [])
         commits: list = decode_json_column(commits_json, [])
-        tool_counts: dict = decode_json_column(tool_counts_json, {}) if has_tool_counts else {}
+        tool_counts: dict = decode_json_column(tool_counts_json, {}) if has_tc else {}
 
         topic: str | None = None
         summary = decode_json_column(summary_json, {})
