@@ -41,8 +41,7 @@ def update_branch_row(
             exchange_count = ?,
             files_modified = ?,
             commits = ?,
-            tool_counts = ?,
-            summary_source_hash = NULL
+            tool_counts = ?
         WHERE id = ?
         """,
         (
@@ -226,7 +225,7 @@ def sync_branch(
     # Includes: message text + deduplicated full file paths + commit text
     agg_content = build_aggregated_content(cursor, branch_db_id, files, commits)
     cursor.execute(
-        "UPDATE branches SET aggregated_content = ?, summary_version = NULL, summary_source_hash = NULL WHERE id = ?",
+        "UPDATE branches SET aggregated_content = ?, summary_version = NULL WHERE id = ?",
         (agg_content, branch_db_id),
     )
 

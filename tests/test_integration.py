@@ -7,7 +7,7 @@ import sqlite3
 from pathlib import Path
 from unittest.mock import patch
 
-from conftest import VEC_SKIP, NoCloseConn, make_vec_conn
+from conftest import FIXTURE_DIR, VEC_SKIP, NoCloseConn, make_vec_conn
 from conftest import make_jsonl_entry as _entry
 from conftest import write_jsonl as _write_jsonl
 
@@ -30,7 +30,6 @@ from ccrecall.schema import SCHEMA
 from ccrecall.search_conversations import search_messages
 from ccrecall.session_ops import sync_session
 
-FIXTURE_DIR = Path(__file__).parent / "fixtures"
 NOTIF_FIXTURE = FIXTURE_DIR / "with_notifications.jsonl"
 
 

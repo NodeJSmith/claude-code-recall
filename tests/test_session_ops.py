@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from conftest import FIXTURE_DIR
 
 from ccrecall.db import _ensure_vec_schema, vec_available
 from ccrecall.embed_ops import MAX_WRITE_PATH_EMBEDS_PER_SYNC, embed_branch_chunks
@@ -19,8 +20,6 @@ from ccrecall.parsing import extract_session_uuid
 from ccrecall.schema import SCHEMA
 from ccrecall.session_ops import sync_session
 from ccrecall.summarizer import SUMMARY_VERSION
-
-FIXTURE_DIR = Path(__file__).parent / "fixtures"
 
 
 class TestSyncSessionCreatesBranches:

@@ -6,6 +6,7 @@ own use (get_db_path, ensure_parent_dir, DEFAULT_DB_PATH, ...).
 """
 
 import contextlib
+import logging
 import sqlite3
 from pathlib import Path
 
@@ -15,6 +16,9 @@ from ccrecall import db_base
 from ccrecall.config import DEFAULT_DB_PATH
 from ccrecall.config import DEFAULT_PROJECTS_DIR as DEFAULT_PROJECTS_DIR
 from ccrecall.embeddings import EMBEDDING_DIM, EMBEDDING_MODEL, EMBEDDING_VERSION
+from ccrecall.models import LOGGER_NAME
+
+log = logging.getLogger(LOGGER_NAME)
 
 # Current schema version. Re-exported from the embedding-free connection layer so
 # both DB boundaries apply the same migrations.
@@ -95,6 +99,7 @@ def vec_available(conn: sqlite3.Connection) -> bool:
         conn.enable_load_extension(False)
         return True
     except Exception:
+        log.warning("sqlite-vec extension failed to load", exc_info=True)
         # Re-disable on the failure path too, so a partially-enabled connection
         # doesn't leave the load_extension() SQL surface callable. Suppressed
         # because enable_load_extension itself may be what raised (e.g. builds
@@ -116,6 +121,7 @@ def chunk_vec_queryable(conn: sqlite3.Connection) -> bool:
         conn.execute("SELECT 1 FROM chunk_vec LIMIT 1")
         return True
     except sqlite3.Error:
+        log.debug("chunk_vec table not queryable", exc_info=True)
         return False
 
 
@@ -269,7 +275,7 @@ def _open_connection(settings: dict | None = None, load_vec: bool = False) -> sq
     context-manager wrapper) instead, which guarantees the connection is
     committed on success, rolled back on exception, and always closed.
     """
-    conn = db_base._open_connection(settings, apply_migrations_callback=_apply_migrations)
+    conn = db_base.open_connection(settings, apply_migrations_callback=_apply_migrations)
 
     if load_vec and vec_available(conn):
         # First and only place the vec extension is loaded for this connection.

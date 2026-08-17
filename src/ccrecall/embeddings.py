@@ -4,11 +4,16 @@ Both the write path and the query path must import from here. No second
 embedding code path may exist.
 """
 
+import logging
 import os
 import tempfile
 from pathlib import Path
 
 import numpy as np
+
+from ccrecall.models import LOGGER_NAME
+
+log = logging.getLogger(LOGGER_NAME)
 
 # fastembed is a hard dep, but guard the import so model_available() can degrade
 # on a machine where the wheel won't import (ABI mismatch, missing native lib)
@@ -151,6 +156,7 @@ def is_model_cached_on_disk() -> bool:
         cache_root = Path(os.environ.get("FASTEMBED_CACHE_PATH", default_cache))
         return (cache_root / EMBEDDING_MODEL_CACHE_SUBDIR).exists()
     except Exception:
+        log.debug("embedding cache check failed", exc_info=True)
         return False
 
 
@@ -168,6 +174,7 @@ def model_available(threads: int | None = None) -> bool:
         get_model(threads)
         return True
     except Exception:
+        log.warning("embedding model failed to load", exc_info=True)
         return False
 
 

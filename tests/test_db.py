@@ -713,7 +713,7 @@ def _seed_genuine_db(db_path, target_version: int) -> None:
       v5: ingestion_check_cache exists WITHOUT db_coverage_fingerprint (v6 adds it)
       v6: ingestion_check_cache has db_coverage_fingerprint; branches still lacks v7 cols
 
-    Note: SCHEMA_CORE runs before _apply_migrations in _open_connection, using
+    Note: SCHEMA_CORE runs before _apply_migrations in open_connection, using
     CREATE TABLE IF NOT EXISTS — so tables that already exist keep their genuine
     (column-limited) shape, while tables absent from a genuine schema (e.g.
     ingestion_check_cache at v2) get created by SCHEMA_CORE with full current
@@ -2088,13 +2088,13 @@ class TestTransitiveImportIsolation:
     HEAVY_MODULES: ClassVar[str] = "{'fastembed', 'onnxruntime', 'sqlite_vec'}"
 
     def _assert_no_heavy_imports(self, module_name: str) -> None:
-        code = (
-            f"import {module_name}\n"
-            "import sys\n"
-            f"heavy = {self.HEAVY_MODULES}\n"
-            "found = heavy & set(sys.modules)\n"
-            "assert not found, f'Heavy modules loaded: {found}'\n"
-        )
+        code = f"""\
+import {module_name}
+import sys
+heavy = {self.HEAVY_MODULES}
+found = heavy & set(sys.modules)
+assert not found, f'Heavy modules loaded: {{found}}'
+"""
         result = _run_subprocess_probe(code)
         assert result.returncode == 0, result.stderr
 
@@ -2142,18 +2142,21 @@ class TestTransitiveImportIsolation:
     def test_db_base_opens_without_db_or_heavy_deps(self, tmp_path):
         """db_base must open a migrated connection without importing db.py or heavy deps."""
         db_path = tmp_path / "llm-summary.db"
-        code = (
-            "from ccrecall.db_base import get_connection\n"
-            "import sys\n"
-            f"heavy = {self.HEAVY_MODULES}\n"
-            f"db_path = {str(db_path)!r}\n"
-            "with get_connection({'db_path': db_path}) as conn:\n"
-            "    assert conn.execute('PRAGMA user_version').fetchone()[0] > 0\n"
-            "loaded = set(sys.modules)\n"
-            "found = heavy & loaded\n"
-            "assert not found, f'Heavy modules loaded: {found}'\n"
-            "assert 'ccrecall.db' not in loaded, 'ccrecall.db should not be imported'\n"
-        )
+        code = f"""\
+from ccrecall.db_base import open_connection
+import sys
+heavy = {self.HEAVY_MODULES}
+db_path = {str(db_path)!r}
+conn = open_connection({{'db_path': db_path}})
+try:
+    assert conn.execute('PRAGMA user_version').fetchone()[0] > 0
+finally:
+    conn.close()
+loaded = set(sys.modules)
+found = heavy & loaded
+assert not found, f'Heavy modules loaded: {{found}}'
+assert 'ccrecall.db' not in loaded, 'ccrecall.db should not be imported'
+"""
         result = _run_subprocess_probe(code)
         assert result.returncode == 0, result.stderr
 

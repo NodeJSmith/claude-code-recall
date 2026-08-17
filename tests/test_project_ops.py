@@ -4,9 +4,9 @@ import shutil
 import tempfile
 from pathlib import Path
 
-from ccrecall.project_ops import key_could_match_excluded, upsert_project
+from conftest import FIXTURE_DIR
 
-FIXTURE_DIR = Path(__file__).parent / "fixtures"
+from ccrecall.project_ops import key_could_match_excluded, upsert_project
 
 
 class TestUpsertProjectWithCwd:

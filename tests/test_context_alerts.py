@@ -14,17 +14,8 @@ from ccrecall.hooks.context_alerts import (
     has_backfillable_tool_content,
     proactive_alert_block,
 )
-from ccrecall.schema import SCHEMA
 
 pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
-
-
-def _make_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(":memory:")
-    conn.execute("PRAGMA foreign_keys = ON")
-    conn.executescript(SCHEMA)
-    conn.commit()
-    return conn
 
 
 def _seed_session(
@@ -65,36 +56,36 @@ def _seed_session(
 
 
 class TestHasBackfillableToolContent:
-    def test_no_pending_sessions_returns_false(self, tmp_path):
+    def test_no_pending_sessions_returns_false(self, tmp_path, memory_db):
         """All sessions already have tool_content → no alert."""
-        conn = _make_conn()
+        conn = memory_db
         filepath = tmp_path / "sess-a.jsonl"
         filepath.touch()
         _seed_session(conn, session_uuid="sess-a", filepath=filepath, tool_content="[Bash: ls]")
 
         assert has_backfillable_tool_content(conn) is False
 
-    def test_pending_with_existing_jsonl_returns_true(self, tmp_path):
+    def test_pending_with_existing_jsonl_returns_true(self, tmp_path, memory_db):
         """A session with NULL tool_content whose JSONL exists → alert fires."""
-        conn = _make_conn()
+        conn = memory_db
         filepath = tmp_path / "sess-b.jsonl"
         filepath.touch()
         _seed_session(conn, session_uuid="sess-b", filepath=filepath, tool_content=None)
 
         assert has_backfillable_tool_content(conn) is True
 
-    def test_pending_with_missing_jsonl_returns_false(self, tmp_path):
+    def test_pending_with_missing_jsonl_returns_false(self, tmp_path, memory_db):
         """A session with NULL tool_content whose JSONL is gone → no alert."""
-        conn = _make_conn()
+        conn = memory_db
         filepath = tmp_path / "sess-c.jsonl"
         # Don't create the file — it's missing on disk
         _seed_session(conn, session_uuid="sess-c", filepath=filepath, tool_content=None)
 
         assert has_backfillable_tool_content(conn) is False
 
-    def test_mixed_pending_some_exist_returns_true(self, tmp_path):
+    def test_mixed_pending_some_exist_returns_true(self, tmp_path, memory_db):
         """Multiple pending: some with missing JSONL, one with existing → alert fires."""
-        conn = _make_conn()
+        conn = memory_db
         missing = tmp_path / "sess-gone.jsonl"
         _seed_session(conn, session_uuid="sess-gone", filepath=missing, tool_content=None)
 
@@ -104,21 +95,21 @@ class TestHasBackfillableToolContent:
 
         assert has_backfillable_tool_content(conn) is True
 
-    def test_agent_prefixed_file_detected(self, tmp_path):
+    def test_agent_prefixed_file_detected(self, tmp_path, memory_db):
         """A session whose import_log entry is agent-{uuid}.jsonl is still found."""
-        conn = _make_conn()
+        conn = memory_db
         filepath = tmp_path / "agent-sess-d.jsonl"
         filepath.touch()
         _seed_session(conn, session_uuid="sess-d", filepath=filepath, tool_content=None)
 
         assert has_backfillable_tool_content(conn) is True
 
-    def test_empty_database_returns_false(self):
+    def test_empty_database_returns_false(self, memory_db):
         """Fresh install with no sessions → no alert."""
-        conn = _make_conn()
+        conn = memory_db
         assert has_backfillable_tool_content(conn) is False
 
-    def test_sample_cap_misses_later_existing_jsonl(self, tmp_path):
+    def test_sample_cap_misses_later_existing_jsonl(self, tmp_path, memory_db):
         """Documents the intentional sampling-cap tradeoff, not a bug.
 
         has_backfillable_tool_content only samples the first
@@ -131,7 +122,7 @@ class TestHasBackfillableToolContent:
         "fixed" by accident, and so anyone surprised by it in production can
         find the test that explains it.
         """
-        conn = _make_conn()
+        conn = memory_db
         for i in range(_TOOL_CONTENT_SAMPLE_SIZE + 1):
             session_uuid = f"sess-{i}"
             filepath = tmp_path / f"{session_uuid}.jsonl"
@@ -146,9 +137,9 @@ class TestHasBackfillableToolContent:
 
 
 class TestToolContentAlertWiring:
-    def test_alert_fires_in_proactive_block(self, tmp_path):
+    def test_alert_fires_in_proactive_block(self, tmp_path, memory_db):
         """The tool-content alert appears in the proactive block when backfillable."""
-        conn = _make_conn()
+        conn = memory_db
         filepath = tmp_path / "sess-e.jsonl"
         filepath.touch()
         _seed_session(conn, session_uuid="sess-e", filepath=filepath, tool_content=None)
@@ -166,9 +157,9 @@ class TestToolContentAlertWiring:
         )
         assert "ccrecall backfill tool-content" in block
 
-    def test_alert_suppressed_when_no_backfillable(self, tmp_path):
+    def test_alert_suppressed_when_no_backfillable(self, tmp_path, memory_db):
         """No pending sessions → no tool-content mention in the block."""
-        conn = _make_conn()
+        conn = memory_db
         filepath = tmp_path / "sess-f.jsonl"
         filepath.touch()
         _seed_session(conn, session_uuid="sess-f", filepath=filepath, tool_content="done")
@@ -186,9 +177,9 @@ class TestToolContentAlertWiring:
         )
         assert block == ""
 
-    def test_snooze_suppresses_repeat_firing(self, tmp_path):
+    def test_snooze_suppresses_repeat_firing(self, tmp_path, memory_db):
         """After firing once, the alert is snoozed and doesn't fire again."""
-        conn = _make_conn()
+        conn = memory_db
         filepath = tmp_path / "sess-g.jsonl"
         filepath.touch()
         _seed_session(conn, session_uuid="sess-g", filepath=filepath, tool_content=None)

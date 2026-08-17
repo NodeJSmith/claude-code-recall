@@ -73,7 +73,6 @@ from ccrecall.hooks.backfill_status import format_duration
 from ccrecall.hooks.tool_content_eligibility import ELIGIBILITY_FROM, MAX_SQL_PARAMS, eligibility_clause
 from ccrecall.import_log_ops import import_log_source_index
 from ccrecall.message_ops import insert_new_messages
-from ccrecall.models import LOGGER_NAME
 from ccrecall.parsing import (
     build_aggregated_content,
     find_all_branches,
@@ -125,7 +124,7 @@ def backfill_with_retry(
     for attempt in range(_LOCK_RETRIES):
         try:
             with savepoint(cursor):
-                return backfill_session(cursor, session_id, filepaths)
+                return backfill_session(cursor, session_id, filepaths, logger)
         except sqlite3.OperationalError as exc:  # noqa: PERF203 — retry loop; the try/except IS the mechanism, not incidental control flow
             msg = str(exc).lower()
             if "locked" not in msg and "busy" not in msg:
@@ -380,7 +379,7 @@ def select_batch(cursor: sqlite3.Cursor, exclude_ids: set[int], days: int | None
     return cursor.execute(query, params).fetchall()
 
 
-def backfill_session(cursor: sqlite3.Cursor, session_id: int, filepaths: list[Path]) -> bool:
+def backfill_session(cursor: sqlite3.Cursor, session_id: int, filepaths: list[Path], logger: logging.Logger) -> bool:
     """Re-parse one session's JSONL file(s) and backfill tool_content.
 
     A session may be backed by multiple files (parent + subagent transcripts);
@@ -489,7 +488,7 @@ def backfill_session(cursor: sqlite3.Cursor, session_id: int, filepaths: list[Pa
     cursor.execute(
         """
         UPDATE branches
-        SET aggregated_content = ?, embedding_version = NULL, summary_version = NULL, summary_source_hash = NULL
+        SET aggregated_content = ?, embedding_version = NULL, summary_version = NULL
         WHERE id = ?
         """,
         (agg_content, branch_db_id),
@@ -510,7 +509,7 @@ def backfill_session(cursor: sqlite3.Cursor, session_id: int, filepaths: list[Pa
         (session_id,),
     )
     if cursor.rowcount > 0:
-        logging.getLogger(LOGGER_NAME).warning(
+        logger.warning(
             "%s: session id=%s had %s row(s) with uuids absent from the surviving JSONL; "
             "marked tool_content='' (unrecoverable)",
             _LOG_PREFIX,
