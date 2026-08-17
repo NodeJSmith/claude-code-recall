@@ -15,6 +15,7 @@ import builtins
 import json
 import os
 import sqlite3
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -755,6 +756,19 @@ def _run_status(conn: sqlite3.Connection, capsys, *, json_mode=False, days=None)
         code = run(status=True, json_mode=json_mode, days=days)
     assert code == 0
     return capsys.readouterr().out
+
+
+def test_run_forwards_custom_db_path_to_load_settings():
+    """A custom db= argument reaches load_settings_for_db unchanged — regression
+    guard against silently routing work to the default database."""
+    conn = make_vec_conn()
+    custom_path = Path("/tmp/custom-embed.db")
+    with (
+        patch("ccrecall.hooks.backfill_status.get_connection", return_value=_NoCloseConn(conn)),
+        patch("ccrecall.hooks.backfill_embeddings.load_settings_for_db", return_value={}) as mock_load,
+    ):
+        run(status=True, json_mode=True, db=custom_path)
+    mock_load.assert_called_once_with(custom_path)
 
 
 @_VEC_SKIP

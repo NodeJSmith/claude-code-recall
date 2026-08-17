@@ -85,6 +85,18 @@ def _run_backfill(conn: sqlite3.Connection, *, days=None, limit=None, status=Fal
         return run(status=status, json_mode=json_mode, days=days, limit=limit)
 
 
+def test_run_forwards_custom_db_path_to_load_settings(memory_db, capsys):
+    """A custom db= argument reaches load_settings_for_db unchanged — regression
+    guard against silently routing work to the default database."""
+    custom_path = Path("/tmp/custom-tool-content.db")
+    with (
+        patch("ccrecall.hooks.backfill_tool_content.get_connection", return_value=NoCloseConn(memory_db)),
+        patch("ccrecall.hooks.backfill_tool_content.load_settings_for_db", return_value={}) as mock_load,
+    ):
+        run(status=True, json_mode=True, db=custom_path)
+    mock_load.assert_called_once_with(custom_path)
+
+
 # UPDATE path + INSERT path + aggregated_content + embedding_version reset
 
 

@@ -711,14 +711,18 @@ class TestBackfillErrorHandling:
         conn.close()
 
     def _run_with_raise(self, path, monkeypatch, exc):
-        monkeypatch.setattr(backfill_summaries, "load_settings_for_db", lambda db: {"db_path": str(path)})
+        def load_settings_for_db(db):
+            assert db == path, "db argument must be forwarded to load_settings_for_db unchanged"
+            return {"db_path": str(path)}
+
+        monkeypatch.setattr(backfill_summaries, "load_settings_for_db", load_settings_for_db)
         monkeypatch.setattr(backfill_summaries, "setup_logging", lambda s, **kwargs: logging.getLogger("test-backfill"))
 
         def boom(cursor, branch_id):
             raise exc
 
         monkeypatch.setattr(backfill_summaries, "compute_context_summary", boom)
-        backfill_summaries._main()
+        backfill_summaries._main(db=path)
 
     def _version(self, path):
         conn = sqlite3.connect(str(path))
@@ -794,10 +798,14 @@ class TestSummaryMaintenance:
         conn.commit()
         conn.close()
 
-        monkeypatch.setattr(backfill_summaries, "load_settings_for_db", lambda db_arg: {"db_path": str(db)})
+        def load_settings_for_db(db_arg):
+            assert db_arg == db, "db argument must be forwarded to load_settings_for_db unchanged"
+            return {"db_path": str(db)}
+
+        monkeypatch.setattr(backfill_summaries, "load_settings_for_db", load_settings_for_db)
         monkeypatch.setattr(backfill_summaries, "setup_logging", lambda s, **kwargs: logging.getLogger("test-backfill"))
 
-        backfill_summaries._main()
+        backfill_summaries._main(db=db)
 
         conn = sqlite3.connect(str(db))
         version = conn.execute("SELECT summary_version FROM branches WHERE id = ?", (branch_id,)).fetchone()[0]
@@ -817,7 +825,7 @@ class TestSummaryMaintenance:
             "compute_context_summary",
             lambda _cursor, _branch_id: (_ for _ in ()).throw(ValueError("bad")),
         )
-        backfill_summaries._main()
+        backfill_summaries._main(db=db)
 
         conn = sqlite3.connect(str(db))
         row = conn.execute(
