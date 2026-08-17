@@ -229,7 +229,7 @@ class TestBackfillCore:
         )
         conn.commit()
 
-        assert backfill_session(conn.cursor(), session_id, [filepath]) is True
+        assert backfill_session(conn.cursor(), session_id, [filepath], logging.getLogger("test")) is True
 
         branch_row = conn.execute(
             "SELECT aggregated_content, summary_version FROM branches WHERE id = ?",
@@ -751,12 +751,12 @@ class TestTransientDbLock:
         real_backfill = backfill_session
         call_count = 0
 
-        def _bombing_backfill(cursor, session_id, filepaths):
+        def _bombing_backfill(cursor, session_id, filepaths, logger):
             nonlocal call_count
             if session_id == bad_sid:
                 call_count += 1
                 raise sqlite3.OperationalError("database is locked")
-            return real_backfill(cursor, session_id, filepaths)
+            return real_backfill(cursor, session_id, filepaths, logger)
 
         with (
             patch("ccrecall.hooks.backfill_tool_content.get_connection", return_value=NoCloseConn(conn)),
@@ -803,12 +803,12 @@ class TestTransientDbLock:
 
         attempt_count = 0
 
-        def _flaky_backfill(cursor, session_id, filepaths):
+        def _flaky_backfill(cursor, session_id, filepaths, logger):
             nonlocal attempt_count
             attempt_count += 1
             if attempt_count == 1:
                 raise sqlite3.OperationalError("database is locked")
-            return backfill_session(cursor, session_id, filepaths)
+            return backfill_session(cursor, session_id, filepaths, logger)
 
         with (
             patch("ccrecall.hooks.backfill_tool_content.get_connection", return_value=NoCloseConn(conn)),
@@ -857,12 +857,12 @@ class TestStuckSessionExclusion:
                 return [(stuck_sid, stuck_path.stem)]
             return select_batch(cursor, exclude_ids, days)
 
-        def _noop_backfill(cursor, session_id, filepaths):
+        def _noop_backfill(cursor, session_id, filepaths, logger):
             if session_id == stuck_sid:
                 # Reports success without leaving eligibility, so the identical
                 # batch comes back and the re-selection guard fires.
                 return True
-            return backfill_session(cursor, session_id, filepaths)
+            return backfill_session(cursor, session_id, filepaths, logger)
 
         with (
             patch("ccrecall.hooks.backfill_tool_content.get_connection", return_value=NoCloseConn(conn)),
@@ -902,7 +902,7 @@ class TestStuckSessionExclusion:
                 return [(stuck_sid, stuck_path.stem)]
             return []
 
-        def _fake_backfill(cursor, session_id, filepaths):
+        def _fake_backfill(cursor, session_id, filepaths, logger):
             # Reports success without clearing the NULL row -- the exact bug
             # Fix 1 closes off in the real backfill_session.
             return True
@@ -1007,7 +1007,7 @@ class TestNonLockOperationalErrorFailsFast:
 
         call_count = 0
 
-        def _raise_schema_error(cursor, session_id, filepaths):
+        def _raise_schema_error(cursor, session_id, filepaths, logger):
             nonlocal call_count
             call_count += 1
             raise sqlite3.OperationalError("no such column: nope")

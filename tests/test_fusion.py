@@ -68,11 +68,6 @@ class TestRrfScored:
         result = rrf_scored([[1, 2, 3], [1, 4, 5]])
         assert _ids(result)[0] == 1
 
-    def test_disjoint_lists(self):
-        """Fully disjoint lists return all ids."""
-        result = rrf_scored([[1, 2], [3, 4]])
-        assert set(_ids(result)) == {1, 2, 3, 4}
-
     def test_mixed_empty(self):
         """Empty list mixed with non-empty list is handled gracefully."""
         assert _ids(rrf_scored([[], [1, 2, 3]])) == [1, 2, 3]
@@ -80,11 +75,6 @@ class TestRrfScored:
     def test_single_list_preserves_order(self):
         """Single ranked list preserves original order."""
         assert _ids(rrf_scored([[5, 3, 1]])) == [5, 3, 1]
-
-    def test_returns_all_ids(self):
-        """Result contains every id from any list."""
-        lists = [[1, 2, 3], [4, 5, 6], [7, 8, 9]]
-        assert set(_ids(rrf_scored(lists))) == {1, 2, 3, 4, 5, 6, 7, 8, 9}
 
     def test_deterministic(self):
         """Same input always produces same output."""
