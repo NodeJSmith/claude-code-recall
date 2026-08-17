@@ -2,6 +2,7 @@
 
 import json
 import os
+from pathlib import Path
 
 from ccrecall.session_tail import (
     _brief_path,
@@ -447,6 +448,39 @@ class TestLastEventTimestampFallback:
         result = _last_event_timestamp(f)
 
         assert result.startswith("2023-")
+
+    def test_unreadable_transcript_returns_empty_string_without_crashing(self, tmp_path):
+        # A path that raises OSError on open (e.g. deleted or permission-denied
+        # between glob and sort) must not propagate — list_transcripts sorts by
+        # this key, and an uncaught exception there would crash `ccrecall tail
+        # --list` entirely. A directory reliably raises IsADirectoryError (an
+        # OSError subclass) on open, giving a deterministic repro.
+        not_a_file = tmp_path / "not-a-file.jsonl"
+        not_a_file.mkdir()
+
+        result = _last_event_timestamp(not_a_file)
+
+        assert result == ""
+
+    def test_stat_failure_returns_empty_string_without_crashing(self, tmp_path, monkeypatch):
+        # No parseable timestamp in the tail forces the mtime fallback; if
+        # stat() also fails (file removed between open and stat), that must
+        # not propagate either.
+        f = tmp_path / "no-ts.jsonl"
+        f.write_text(json.dumps({"type": "something"}) + "\n")
+
+        real_stat = Path.stat
+
+        def failing_stat(self, *args, **kwargs):
+            if self == f:
+                raise OSError("stat failed")
+            return real_stat(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "stat", failing_stat)
+
+        result = _last_event_timestamp(f)
+
+        assert result == ""
 
 
 class TestLoadTailEntries:

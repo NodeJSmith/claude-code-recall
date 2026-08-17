@@ -11,7 +11,8 @@ import sys
 from pathlib import Path
 
 from ccrecall.config import DEFAULT_DB_PATH, get_db_path, load_settings
-from ccrecall.db import branch_embedding_coverage, chunk_vec_queryable, get_connection, vec_available
+from ccrecall.db import get_connection
+from ccrecall.db_vec import branch_embedding_coverage, chunk_vec_queryable, vec_available
 from ccrecall.hooks.backfill_status import count_status as count_embedding_status
 from ccrecall.import_log_ops import import_log_source_index
 from ccrecall.ingestion_status import summarize_ingestion

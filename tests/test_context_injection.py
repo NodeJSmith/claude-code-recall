@@ -910,10 +910,10 @@ class TestProactiveAlerts:
         health.py must never import the vector/embedding stack — doing so would violate
         the ~440ms hot-path invariant. Verified via AST inspection of health.py source.
 
-        Note: db.py transitively imports fastembed (via embeddings.py, guarded try/except)
-        for the embedding dimension constant — that is pre-existing behavior unrelated to
-        the proactive alert path. This test specifically guards health.py, which is the
-        new module wired into the SessionStart hook path for alert evaluation.
+        Note: prior to the db_vec.py split, db.py transitively imported fastembed for the
+        embedding dimension constant; that dependency now lives in ccrecall.db_vec, and
+        db.py itself is numpy/fastembed-free. This test specifically guards health.py,
+        which is the new module wired into the SessionStart hook path for alert evaluation.
         """
         spec = importlib.util.find_spec("ccrecall.health")
         assert spec is not None, "ccrecall.health not found"

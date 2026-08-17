@@ -9,7 +9,7 @@ import contextlib
 import json
 import sqlite3
 
-from ccrecall.db import fetch_branch_messages
+from ccrecall.db_vec import fetch_branch_messages
 from ccrecall.embed_ops import embed_branch_chunks, write_branch_summary
 from ccrecall.parsing import build_aggregated_content, compute_branch_metadata, extract_session_metadata
 

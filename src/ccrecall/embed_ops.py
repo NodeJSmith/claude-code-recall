@@ -9,7 +9,7 @@ import hashlib
 import logging
 import sqlite3
 
-from ccrecall.db import write_chunk_embedding
+from ccrecall.db_vec import write_chunk_embedding
 from ccrecall.embeddings import EMBEDDING_MODEL, EMBEDDING_VERSION, cap_for_embedding, embed_batch
 from ccrecall.models import LOGGER_NAME
 from ccrecall.summarizer import SUMMARY_VERSION, build_exchange_pairs, compute_context_summary
@@ -69,58 +69,12 @@ def _stamp_branch_watermark(cursor: sqlite3.Cursor, branch_db_id: int) -> None:
     )
 
 
-def embed_branch_chunks(
-    cursor: sqlite3.Cursor,
-    branch_db_id: int,
-    branch_msgs: list[dict],
-    is_active: bool,
-    vec_writable: bool,
-    max_embeds: int | None = MAX_WRITE_PATH_EMBEDS_PER_SYNC,
-) -> int:
-    """Embed per-exchange chunks for an active-leaf branch (incremental write path).
+def _prepare_exchange_data(exchanges: list[dict]) -> list[dict]:
+    """Step 3 — compute embedded text, content hash, and bounded display text per exchange.
 
-    Implements the clear-first/set-last watermark protocol:
-    - If any exchanges need embedding (new or content-changed), the branch
-      watermark is cleared to 0 BEFORE the embed loop (step 5a), then set to
-      EMBEDDING_VERSION only after every exchange has a current-version chunk
-      (step 8).
-    - Version-stale chunks are deliberately left to the background backfill;
-      this path embeds only new or content-changed exchanges.
-
-    ``max_embeds`` bounds how many exchanges this call embeds. It defaults to
-    MAX_WRITE_PATH_EMBEDS_PER_SYNC so the detached Stop-sync write path stays
-    bounded even right after an EMBEDDING_VERSION bump. The off-hot-path backfill
-    passes ``max_embeds=None`` (no cap) so a single call fully embeds a branch of
-    any length — otherwise a branch with more exchanges than the cap would stay
-    eligible and trip the backfill's no-progress guard.
-
-    Returns the number of exchanges embedded by this call (the inference count) —
-    the backfill uses it for accurate progress/ETA without recomputing exchanges.
-
-    Raises on failure — callers (sync_branch) must wrap in
-    contextlib.suppress(Exception). Does not commit; the single commit at
-    sync_current.py:239 owns the transaction.
+    Display columns use the same head+tail cap per turn so the shown excerpt aligns
+    with the embedded region (design.md challenge M14).
     """
-    if not (is_active and vec_writable):
-        return 0
-
-    exchanges = build_exchange_pairs(branch_msgs)
-    if not exchanges:
-        # Active, writable branch with no embeddable exchange — e.g. a sub-agent /
-        # sidechain branch whose messages are all assistant-role, or one left with
-        # only notifications after the notification filter. There is nothing to
-        # embed, but the branch is still eligible for the backfill, so stamp the
-        # watermark to current: with zero exchanges the "all exchanges embedded"
-        # invariant holds trivially. This drops the branch out of the eligible
-        # set so the backfill doesn't re-select it forever and abort via the
-        # no-progress guard. Self-correcting: if a user turn later lands, the
-        # content diff re-clears the watermark and the new exchange is embedded.
-        _stamp_branch_watermark(cursor, branch_db_id)
-        return 0
-
-    # Step 3 — compute embedded text, content hash, and bounded display text per exchange.
-    # Display columns use the same head+tail cap per turn so the shown excerpt aligns
-    # with the embedded region (design.md challenge M14).
     exchange_data = []
     for ex in exchanges:
         user = ex.get("user") or ""
@@ -142,73 +96,32 @@ def embed_branch_chunks(
                 "assistant_text": assistant_text,
             }
         )
+    return exchange_data
 
-    # Load existing chunk rows for this branch.
-    cursor.execute(
-        "SELECT exchange_index, content_hash, embedding_version, embedding_model FROM chunks WHERE branch_id = ?",
-        (branch_db_id,),
-    )
-    existing_chunks: dict[int, dict] = {
-        row[0]: {"content_hash": row[1], "embedding_version": row[2], "embedding_model": row[3]}
-        for row in cursor.fetchall()
-    }
 
-    # Step 5 — diff: eligible = no chunk row OR content_hash changed.
-    # Version-stale (embedding_version < EMBEDDING_VERSION) but content-unchanged
-    # chunks are deliberately excluded — those are backfill's job (design H6).
+def _diff_exchanges(exchange_data: list[dict], existing_chunks: dict[int, dict]) -> tuple[list[dict], set[int]]:
+    """Step 5 — diff: eligible = no chunk row OR content_hash changed.
+
+    Version-stale (embedding_version < EMBEDDING_VERSION) but content-unchanged
+    chunks are deliberately excluded — those are backfill's job (design H6).
+    """
     current_indices = {ed["index"] for ed in exchange_data}
-    needing_embed_full = [
+    needing_embed = [
         ed
         for ed in exchange_data
         if ed["index"] not in existing_chunks or existing_chunks[ed["index"]]["content_hash"] != ed["content_hash"]
     ]
     indices_to_prune = set(existing_chunks) - current_indices
+    return needing_embed, indices_to_prune
 
-    # Early return: nothing to embed and nothing to prune
-    if not needing_embed_full and not indices_to_prune:
-        # Idempotent watermark repair: set to EMBEDDING_VERSION iff every existing
-        # chunk is already version-current (repairs a prior failed step 8).
-        if exchange_data and all(
-            existing_chunks.get(ed["index"], {}).get("embedding_version") == EMBEDDING_VERSION for ed in exchange_data
-        ):
-            _stamp_branch_watermark(cursor, branch_db_id)
-        return 0
 
-    # Step 5a — clear-first: if any exchange needs embedding, clear the watermark
-    # BEFORE the loop so a mid-loop exception leaves the branch stale, never
-    # stale-but-true (single commit — sync_current.py:239 — persists this state).
-    if needing_embed_full:
-        cursor.execute("UPDATE branches SET embedding_version = 0 WHERE id = ?", (branch_db_id,))
+def _write_embedded_chunks(cursor: sqlite3.Cursor, branch_db_id: int, needing_embed: list[dict], vecs: list) -> None:
+    """Step 6b — per chunk: upsert the chunk row, then write its vector.
 
-    # Cap the embed loop to bound per-sync inference cost (write path); the
-    # backfill passes max_embeds=None to embed the whole branch in one call.
-    needing_embed = needing_embed_full if max_embeds is None else needing_embed_full[:max_embeds]
-
-    # Step 6 — embed first, then write: batch-embed all texts BEFORE any DB
-    # write, then upsert each chunk row and its vector together. This shrinks
-    # the vector-loss window from "the whole branch" to "nothing": under the
-    # old upsert-then-embed order, a failed embed_batch call landed after the
-    # DELETE+INSERT had already cascaded away every previously-good chunk_vec
-    # row for this branch, so one failed batch destroyed all prior vectors.
-    # With embed_batch called first and no DB writes yet, a failure here
-    # leaves every existing chunk row and vector untouched. The per-chunk
-    # vector-FIRST/bookkeeping-LAST invariant inside write_chunk_embedding is
-    # unchanged: a mid-loop exception still leaves that chunk eligible for
-    # backfill rather than marked done-without-vector.
-
-    # 6a — batch embed: single model.embed() call for all texts.
-    # Trade-off: a content error in any text fails the whole batch (the
-    # per-exchange loop can't catch mid-batch). cap_for_embedding already
-    # bounds text length, so content errors should be rare; a failed batch
-    # leaves all chunks eligible for backfill per the clear-first protocol —
-    # and now leaves prior chunk rows/vectors intact too (nothing deleted yet).
-    texts = [ed["text"] for ed in needing_embed]
-    vecs = embed_batch(texts)
-
-    # 6b — per chunk: upsert the chunk row, then write its vector (order
-    # invariant: vector FIRST, bookkeeping LAST — so a mid-loop exception
-    # leaves that chunk eligible for backfill rather than marked
-    # done-without-vector).
+    Order invariant: vector FIRST, bookkeeping LAST — so a mid-loop exception
+    leaves that chunk eligible for backfill rather than marked
+    done-without-vector.
+    """
     for ed, vec in zip(needing_embed, vecs, strict=True):
         cursor.execute(
             "DELETE FROM chunks WHERE branch_id = ? AND exchange_index = ?",
@@ -237,21 +150,29 @@ def embed_branch_chunks(
         assert chunk_id is not None  # noqa: S101 — lastrowid is non-None after a successful INSERT
         write_chunk_embedding(cursor, chunk_id, vec, EMBEDDING_VERSION, EMBEDDING_MODEL)
 
-    # Step 7 — prune: delete chunks whose exchange_index no longer exists.
-    # The chunks_vec_ad cascade trigger removes their chunk_vec rows automatically.
-    if indices_to_prune:
-        placeholders = ",".join("?" * len(indices_to_prune))
-        cursor.execute(
-            f"DELETE FROM chunks WHERE branch_id = ? AND exchange_index IN ({placeholders})",
-            (branch_db_id, *indices_to_prune),
-        )
 
-    # Step 8 — set watermark iff every exchange now has a current-version chunk
-    # with the correct content_hash. Checks both version AND content_hash so that
-    # content-changed exchanges beyond the cap (left for backfill) don't falsely
-    # satisfy the predicate.
-    embedded_indices = {ed["index"] for ed in needing_embed}
-    all_current = True
+def _prune_stale_chunks(cursor: sqlite3.Cursor, branch_db_id: int, indices_to_prune: set[int]) -> None:
+    """Step 7 — prune: delete chunks whose exchange_index no longer exists.
+
+    The chunks_vec_ad cascade trigger removes their chunk_vec rows automatically.
+    """
+    if not indices_to_prune:
+        return
+    placeholders = ",".join("?" * len(indices_to_prune))
+    cursor.execute(
+        f"DELETE FROM chunks WHERE branch_id = ? AND exchange_index IN ({placeholders})",
+        (branch_db_id, *indices_to_prune),
+    )
+
+
+def _should_stamp_watermark(
+    exchange_data: list[dict], embedded_indices: set[int], existing_chunks: dict[int, dict]
+) -> bool:
+    """Step 8 — every exchange now has a current-version chunk with the correct content_hash?
+
+    Checks both version AND content_hash so that content-changed exchanges
+    beyond the cap (left for backfill) don't falsely satisfy the predicate.
+    """
     for ed in exchange_data:
         idx = ed["index"]
         if idx in embedded_indices:
@@ -262,9 +183,81 @@ def embed_branch_chunks(
             or existing["embedding_version"] != EMBEDDING_VERSION
             or existing["content_hash"] != ed["content_hash"]
         ):
-            all_current = False
-            break
-    if all_current:
+            return False
+    return True
+
+
+def embed_branch_chunks(
+    cursor: sqlite3.Cursor,
+    branch_db_id: int,
+    branch_msgs: list[dict],
+    is_active: bool,
+    vec_writable: bool,
+    max_embeds: int | None = MAX_WRITE_PATH_EMBEDS_PER_SYNC,
+) -> int:
+    """Embed per-exchange chunks for an active-leaf branch (incremental write path).
+
+    Implements the clear-first/set-last watermark protocol: watermark clears to 0
+    before the embed loop (step 5a) when exchanges need embedding, then sets to
+    EMBEDDING_VERSION only once every exchange has a current-version chunk (step 8).
+    Version-stale chunks are left to the background backfill.
+
+    ``max_embeds`` bounds per-call inference cost (defaults to
+    MAX_WRITE_PATH_EMBEDS_PER_SYNC for the write path; backfill passes None so a
+    single call fully embeds a branch, avoiding backfill's no-progress guard).
+
+    Returns the inference count (exchanges embedded). Raises on failure — callers
+    (sync_branch) must wrap in contextlib.suppress(Exception). Does not commit; the
+    single commit at sync_current.py:239 owns the transaction.
+    """
+    if not (is_active and vec_writable):
+        return 0
+
+    exchanges = build_exchange_pairs(branch_msgs)
+    if not exchanges:
+        # No embeddable exchange (e.g. an all-assistant sub-agent branch). Stamp
+        # the watermark trivially-true so backfill doesn't re-select it forever;
+        # self-correcting if a user turn later lands (content diff re-clears it).
+        _stamp_branch_watermark(cursor, branch_db_id)
+        return 0
+
+    exchange_data = _prepare_exchange_data(exchanges)
+
+    cursor.execute(
+        "SELECT exchange_index, content_hash, embedding_version, embedding_model FROM chunks WHERE branch_id = ?",
+        (branch_db_id,),
+    )
+    existing_chunks: dict[int, dict] = {
+        row[0]: {"content_hash": row[1], "embedding_version": row[2], "embedding_model": row[3]}
+        for row in cursor.fetchall()
+    }
+
+    needing_embed_full, indices_to_prune = _diff_exchanges(exchange_data, existing_chunks)
+
+    if not needing_embed_full and not indices_to_prune:
+        # Idempotent watermark repair: repairs a prior failed step 8.
+        if exchange_data and _should_stamp_watermark(exchange_data, set(), existing_chunks):
+            _stamp_branch_watermark(cursor, branch_db_id)
+        return 0
+
+    # Clear-first (step 5a): clear the watermark BEFORE the embed loop so a
+    # mid-loop exception leaves the branch stale, never stale-but-true.
+    if needing_embed_full:
+        cursor.execute("UPDATE branches SET embedding_version = 0 WHERE id = ?", (branch_db_id,))
+
+    # max_embeds bounds per-sync inference cost; backfill passes None (no cap).
+    needing_embed = needing_embed_full if max_embeds is None else needing_embed_full[:max_embeds]
+
+    # Embed-before-write (step 6): batch-embed all texts BEFORE any DB write,
+    # so a failed embed_batch call leaves every existing chunk row/vector intact.
+    texts = [ed["text"] for ed in needing_embed]
+    vecs = embed_batch(texts)
+
+    _write_embedded_chunks(cursor, branch_db_id, needing_embed, vecs)
+    _prune_stale_chunks(cursor, branch_db_id, indices_to_prune)
+
+    embedded_indices = {ed["index"] for ed in needing_embed}
+    if _should_stamp_watermark(exchange_data, embedded_indices, existing_chunks):
         _stamp_branch_watermark(cursor, branch_db_id)
 
     return len(needing_embed)

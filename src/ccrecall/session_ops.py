@@ -26,7 +26,7 @@ import sqlite3
 from pathlib import Path
 
 from ccrecall.branch_ops import sync_branch
-from ccrecall.db import chunk_vec_queryable
+from ccrecall.db_vec import chunk_vec_queryable
 from ccrecall.formatting import normalize_project_key
 from ccrecall.import_log_ops import import_log_skip_check, upsert_import_log
 from ccrecall.message_ops import insert_new_messages, update_missing_tool_content, upsert_session

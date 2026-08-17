@@ -9,7 +9,8 @@ import logging
 import sqlite3
 import sys
 
-from ccrecall.db import CHUNK_EMBEDDABLE_BRANCH_FILTER, CONTENT_ERROR_VERSION, chunk_vec_queryable, get_connection
+from ccrecall.db import CHUNK_EMBEDDABLE_BRANCH_FILTER, CONTENT_ERROR_VERSION, get_connection
+from ccrecall.db_vec import chunk_vec_queryable
 from ccrecall.embeddings import EMBEDDING_MODEL, EMBEDDING_VERSION
 from ccrecall.hooks.backfill_query import EXIT_ABORT, EXIT_OK, build_selection, days_modifier
 

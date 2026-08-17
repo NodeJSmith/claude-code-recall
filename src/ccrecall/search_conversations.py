@@ -7,7 +7,7 @@ exchange-level) for the CLI layer (search_cli.py) to format and print.
 import logging
 import sqlite3
 
-from ccrecall.db import branch_embedding_coverage, chunk_vec_queryable
+from ccrecall.db_vec import branch_embedding_coverage, chunk_vec_queryable
 from ccrecall.embeddings import embed_text, model_available
 from ccrecall.fusion import rrf_scored
 from ccrecall.health import RECALL_CAVEAT_COVERAGE_THRESHOLD

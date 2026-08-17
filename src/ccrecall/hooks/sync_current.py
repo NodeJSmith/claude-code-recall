@@ -26,7 +26,8 @@ from ccrecall.config import (
     setup_logging,
     try_acquire_pid_file,
 )
-from ccrecall.db import DEFAULT_PROJECTS_DIR, chunk_vec_queryable, get_connection
+from ccrecall.db import DEFAULT_PROJECTS_DIR, get_connection
+from ccrecall.db_vec import chunk_vec_queryable
 from ccrecall.embeddings import is_model_cached_on_disk
 from ccrecall.formatting import extract_project_name, normalize_cwd
 from ccrecall.health import REASON_VEC_UNAVAILABLE, clear_embedding_failure, record_embedding_failure

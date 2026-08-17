@@ -11,7 +11,7 @@ from unittest.mock import patch
 import pytest
 from conftest import FIXTURE_DIR
 
-from ccrecall.db import _ensure_vec_schema, vec_available
+from ccrecall.db_vec import _ensure_vec_schema, vec_available
 from ccrecall.embed_ops import MAX_WRITE_PATH_EMBEDS_PER_SYNC, embed_branch_chunks
 from ccrecall.embeddings import EMBEDDING_DIM, EMBEDDING_MODEL, EMBEDDING_VERSION
 from ccrecall.hooks.import_conversations import get_file_hash
@@ -936,7 +936,7 @@ class TestEmbedOnWriteOrderingInvariant:
         # raises — simulating a vec-write failure after a successful embed.
         with (
             patch("ccrecall.embed_ops.embed_batch", side_effect=lambda texts: [fake_vec] * len(texts)),
-            patch("ccrecall.db.upsert_chunk_vec", side_effect=RuntimeError("vec write failed")),
+            patch("ccrecall.db_vec.upsert_chunk_vec", side_effect=RuntimeError("vec write failed")),
             contextlib.suppress(Exception),
         ):
             embed_branch_chunks(cursor, branch_id, msgs, is_active=True, vec_writable=True)
