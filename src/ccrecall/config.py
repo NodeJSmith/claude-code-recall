@@ -191,6 +191,17 @@ def load_settings() -> dict:
     return settings
 
 
+def load_settings_for_db(db: Path) -> dict:
+    """Load settings, overriding db_path when a non-default --db was passed.
+
+    Shared by the status and backfill CLI paths so the override merge can't drift.
+    """
+    settings = load_settings()
+    if db != DEFAULT_DB_PATH:
+        settings["db_path"] = str(db)
+    return settings
+
+
 def get_db_path(settings: dict | None = None) -> Path:
     """Get database path from settings or default."""
     if settings and "db_path" in settings:

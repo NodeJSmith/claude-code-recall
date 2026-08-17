@@ -10,7 +10,7 @@ import sqlite3
 import sys
 from pathlib import Path
 
-from ccrecall.config import DEFAULT_DB_PATH, get_db_path, load_settings
+from ccrecall.config import DEFAULT_DB_PATH, get_db_path, load_settings_for_db
 from ccrecall.db import get_connection
 from ccrecall.db_vec import branch_embedding_coverage, chunk_vec_queryable, vec_available
 from ccrecall.hooks.backfill_status import count_status as count_embedding_status
@@ -19,13 +19,6 @@ from ccrecall.ingestion_status import summarize_ingestion
 from ccrecall.tool_content_status import count_eligible as count_tool_content_pending
 from ccrecall.tool_content_status import count_pending_missing_jsonl
 from ccrecall.tool_content_status import count_total_sessions as count_tool_content_total
-
-
-def _settings_for_db(db: Path) -> dict:
-    settings = load_settings()
-    if db != DEFAULT_DB_PATH:
-        settings["db_path"] = str(db)
-    return settings
 
 
 @contextlib.contextmanager
@@ -76,7 +69,7 @@ def count_branch_invariant_violations(conn: sqlite3.Connection) -> int:
 
 def collect_status(*, db: Path = DEFAULT_DB_PATH, days: int | None = None, check_ingestion: bool = False) -> dict:
     """Collect status across DB, ingestion, tool content, and embeddings."""
-    settings = _settings_for_db(db)
+    settings = load_settings_for_db(db)
     db_path = get_db_path(settings)
     ingestion = None
 

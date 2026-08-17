@@ -30,7 +30,7 @@ import time
 from collections import deque
 from pathlib import Path
 
-from ccrecall.config import DEFAULT_DB_PATH, load_settings, setup_logging
+from ccrecall.config import DEFAULT_DB_PATH, load_settings_for_db, setup_logging
 from ccrecall.db import CONTENT_ERROR_VERSION, get_connection
 from ccrecall.db_vec import chunk_vec_queryable, fetch_branch_messages
 from ccrecall.embed_ops import embed_branch_chunks
@@ -81,9 +81,7 @@ def run(
     if limit is not None and limit < 1:
         raise ValueError("limit must be >= 1")
 
-    settings = load_settings()
-    if db != DEFAULT_DB_PATH:
-        settings["db_path"] = str(db)
+    settings = load_settings_for_db(db)
     logger = setup_logging(settings, process_name="backfill-embed", verbose=verbose)
 
     if status:

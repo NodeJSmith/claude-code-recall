@@ -58,7 +58,7 @@ import sys
 import time
 from pathlib import Path
 
-from ccrecall.config import DEFAULT_DB_PATH, load_settings, setup_logging
+from ccrecall.config import DEFAULT_DB_PATH, load_settings_for_db, setup_logging
 from ccrecall.content import extract_text_content
 from ccrecall.db import get_connection
 from ccrecall.db_vec import VEC_BUSY_TIMEOUT_MS
@@ -159,9 +159,7 @@ def run(
     if limit is not None and limit < 1:
         raise ValueError("limit must be >= 1")
 
-    settings = load_settings()
-    if db != DEFAULT_DB_PATH:
-        settings["db_path"] = str(db)
+    settings = load_settings_for_db(db)
     logger = setup_logging(settings, process_name="backfill-tool-content", verbose=verbose)
 
     if status:

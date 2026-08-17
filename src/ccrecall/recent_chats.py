@@ -4,7 +4,6 @@ Returns markdown by default (token-efficient), or JSON when output_format="json"
 (the CLI maps the global --json flag onto that argument).
 """
 
-import logging
 import sqlite3
 from pathlib import Path
 
@@ -14,11 +13,8 @@ from ccrecall.db import get_connection, has_tool_counts, parse_project_filter, r
 from ccrecall.db_vec import fetch_branch_messages
 from ccrecall.errors import emit_error
 from ccrecall.formatting import format_json_sessions, format_markdown_session
-from ccrecall.models import LOGGER_NAME
 from ccrecall.search_query import EMPTY_SCOPE, ScopeFilter, scope_filter_clause
 from ccrecall.serialization import decode_json_column
-
-log = logging.getLogger(LOGGER_NAME)
 
 # Upper bound on --n, single-sourced here and referenced by the CLI validator
 # (cli/commands.py) so the clamp and the validator can't drift apart.

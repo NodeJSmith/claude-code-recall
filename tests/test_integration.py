@@ -352,7 +352,7 @@ class TestFTSIncludesToolContent:
 def _run_backfill(conn: sqlite3.Connection, **kwargs):
     with (
         patch("ccrecall.hooks.backfill_tool_content.get_connection", return_value=NoCloseConn(conn)),
-        patch("ccrecall.hooks.backfill_tool_content.load_settings", return_value={}),
+        patch("ccrecall.hooks.backfill_tool_content.load_settings_for_db", return_value={}),
         patch("ccrecall.hooks.backfill_tool_content.time.sleep"),
     ):
         return run_backfill_tool_content(**kwargs)

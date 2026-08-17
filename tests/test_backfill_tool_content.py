@@ -79,7 +79,7 @@ def _seed_session(
 def _run_backfill(conn: sqlite3.Connection, *, days=None, limit=None, status=False, json_mode=False):
     with (
         patch("ccrecall.hooks.backfill_tool_content.get_connection", return_value=NoCloseConn(conn)),
-        patch("ccrecall.hooks.backfill_tool_content.load_settings", return_value={}),
+        patch("ccrecall.hooks.backfill_tool_content.load_settings_for_db", return_value={}),
         patch("ccrecall.hooks.backfill_tool_content.time.sleep"),
     ):
         return run(status=status, json_mode=json_mode, days=days, limit=limit)
@@ -380,7 +380,7 @@ class TestBackfillEmptyEntries:
 
         with (
             patch("ccrecall.hooks.backfill_tool_content.get_connection", return_value=NoCloseConn(conn)),
-            patch("ccrecall.hooks.backfill_tool_content.load_settings", return_value={}),
+            patch("ccrecall.hooks.backfill_tool_content.load_settings_for_db", return_value={}),
         ):
             run(status=True, json_mode=True)
         status = json.loads(capsys.readouterr().out)
@@ -471,7 +471,7 @@ class TestBackfillStatus:
 
         with (
             patch("ccrecall.hooks.backfill_tool_content.get_connection", return_value=NoCloseConn(conn)),
-            patch("ccrecall.hooks.backfill_tool_content.load_settings", return_value={}),
+            patch("ccrecall.hooks.backfill_tool_content.load_settings_for_db", return_value={}),
         ):
             code = run(status=True, json_mode=True)
         assert code == EXIT_OK
@@ -494,7 +494,7 @@ class TestBackfillStatus:
 
         with (
             patch("ccrecall.hooks.backfill_tool_content.get_connection", return_value=NoCloseConn(conn)),
-            patch("ccrecall.hooks.backfill_tool_content.load_settings", return_value={}),
+            patch("ccrecall.hooks.backfill_tool_content.load_settings_for_db", return_value={}),
         ):
             code = run(status=True, json_mode=True)
         assert code == EXIT_OK
@@ -514,7 +514,7 @@ class TestBackfillStatus:
 
         with (
             patch("ccrecall.hooks.backfill_tool_content.get_connection", return_value=NoCloseConn(conn)),
-            patch("ccrecall.hooks.backfill_tool_content.load_settings", return_value={}),
+            patch("ccrecall.hooks.backfill_tool_content.load_settings_for_db", return_value={}),
         ):
             run(status=True, json_mode=True)
 
@@ -531,7 +531,7 @@ class TestBackfillStatus:
 
         with (
             patch("ccrecall.hooks.backfill_tool_content.get_connection", return_value=NoCloseConn(conn)),
-            patch("ccrecall.hooks.backfill_tool_content.load_settings", return_value={}),
+            patch("ccrecall.hooks.backfill_tool_content.load_settings_for_db", return_value={}),
         ):
             run(status=True, json_mode=True)
 
@@ -761,7 +761,7 @@ class TestTransientDbLock:
 
         with (
             patch("ccrecall.hooks.backfill_tool_content.get_connection", return_value=NoCloseConn(conn)),
-            patch("ccrecall.hooks.backfill_tool_content.load_settings", return_value={}),
+            patch("ccrecall.hooks.backfill_tool_content.load_settings_for_db", return_value={}),
             patch("ccrecall.hooks.backfill_tool_content.time.sleep"),
             patch("ccrecall.hooks.backfill_tool_content.backfill_session", side_effect=_bombing_backfill),
         ):
@@ -813,7 +813,7 @@ class TestTransientDbLock:
 
         with (
             patch("ccrecall.hooks.backfill_tool_content.get_connection", return_value=NoCloseConn(conn)),
-            patch("ccrecall.hooks.backfill_tool_content.load_settings", return_value={}),
+            patch("ccrecall.hooks.backfill_tool_content.load_settings_for_db", return_value={}),
             patch("ccrecall.hooks.backfill_tool_content.time.sleep"),
             patch("ccrecall.hooks.backfill_tool_content.backfill_session", side_effect=_flaky_backfill),
         ):
@@ -867,7 +867,7 @@ class TestStuckSessionExclusion:
 
         with (
             patch("ccrecall.hooks.backfill_tool_content.get_connection", return_value=NoCloseConn(conn)),
-            patch("ccrecall.hooks.backfill_tool_content.load_settings", return_value={}),
+            patch("ccrecall.hooks.backfill_tool_content.load_settings_for_db", return_value={}),
             patch("ccrecall.hooks.backfill_tool_content.time.sleep"),
             patch("ccrecall.hooks.backfill_tool_content.select_batch", side_effect=_rigged_select),
             patch("ccrecall.hooks.backfill_tool_content.backfill_session", side_effect=_noop_backfill),
@@ -910,7 +910,7 @@ class TestStuckSessionExclusion:
 
         with (
             patch("ccrecall.hooks.backfill_tool_content.get_connection", return_value=NoCloseConn(conn)),
-            patch("ccrecall.hooks.backfill_tool_content.load_settings", return_value={}),
+            patch("ccrecall.hooks.backfill_tool_content.load_settings_for_db", return_value={}),
             patch("ccrecall.hooks.backfill_tool_content.time.sleep"),
             patch("ccrecall.hooks.backfill_tool_content.select_batch", side_effect=_rigged_select),
             patch("ccrecall.hooks.backfill_tool_content.backfill_session", side_effect=_fake_backfill),
@@ -988,7 +988,7 @@ class TestOrphanedUuidQuiescence:
 
         with (
             patch("ccrecall.hooks.backfill_tool_content.get_connection", return_value=NoCloseConn(conn)),
-            patch("ccrecall.hooks.backfill_tool_content.load_settings", return_value={}),
+            patch("ccrecall.hooks.backfill_tool_content.load_settings_for_db", return_value={}),
         ):
             run(status=True, json_mode=True)
         status = json.loads(capsys.readouterr().out)
@@ -1015,7 +1015,7 @@ class TestNonLockOperationalErrorFailsFast:
 
         with (
             patch("ccrecall.hooks.backfill_tool_content.get_connection", return_value=NoCloseConn(conn)),
-            patch("ccrecall.hooks.backfill_tool_content.load_settings", return_value={}),
+            patch("ccrecall.hooks.backfill_tool_content.load_settings_for_db", return_value={}),
             patch("ccrecall.hooks.backfill_tool_content.time.sleep"),
             patch("ccrecall.hooks.backfill_tool_content.backfill_session", side_effect=_raise_schema_error),
         ):

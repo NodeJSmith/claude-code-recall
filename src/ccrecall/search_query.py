@@ -4,15 +4,11 @@ Owns the scope filter clause shared by every search rung (FTS, LIKE, chunk-KNN)
 and the keyword branch-id lookup that ranks or recency-orders on it.
 """
 
-import logging
 import re
 import sqlite3
 from dataclasses import dataclass
 
 from ccrecall.db import escape_like
-from ccrecall.models import LOGGER_NAME
-
-log = logging.getLogger(LOGGER_NAME)
 
 
 @dataclass(frozen=True)

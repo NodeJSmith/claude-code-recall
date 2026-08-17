@@ -11,11 +11,12 @@ from ccrecall.db_vec import branch_embedding_coverage, chunk_vec_queryable
 from ccrecall.embeddings import embed_text, model_available
 from ccrecall.fusion import rrf_scored
 from ccrecall.health import RECALL_CAVEAT_COVERAGE_THRESHOLD
+from ccrecall.models import LOGGER_NAME
 from ccrecall.search_hydrate import dedup_by_session, hydrate_cards
 from ccrecall.search_query import EMPTY_SCOPE, ScopeFilter, get_fts_branch_ids
 from ccrecall.search_vector import execute_chunk_knn, get_vec_chunk_ids, hydrate_snippets
 
-_logger = logging.getLogger("ccrecall")
+log = logging.getLogger(LOGGER_NAME)
 
 # Each ranker (FTS, vector KNN) is over-fetched before fusion + per-session dedup,
 # so the post-filter top-N still has enough candidates: top_k = max(N * mult, floor).
@@ -96,7 +97,7 @@ def search_sessions(
                 pre_rollup = len(chunk_results)
                 post_rollup = len(ordered_ids)
                 ratio = pre_rollup / max(post_rollup, 1)
-                _logger.info(
+                log.info(
                     "search under-fill: %d chunks → %d sessions (collapse ratio %.1f); "
                     "consider retrieval tuning if this persists",
                     pre_rollup,
@@ -111,7 +112,7 @@ def search_sessions(
                 ordered_ids,
                 branch_scores={bid: branch_rrf_scores[bid] for bid in ordered_ids},
             )
-            _logger.info("Session search for %r returned %d result(s) (vector search on)", query, len(cards))
+            log.info("Session search for %r returned %d result(s) (vector search on)", query, len(cards))
             return cards, True
         except sqlite3.Error:
             # DB-level failure in the fusion path: degrade to keyword search
@@ -130,7 +131,7 @@ def search_sessions(
     deduped_ids = dedup_by_session(cursor, [bid for bid, _score in fts_rows])
     ordered_ids = deduped_ids[:max_results]
     cards = hydrate_cards(cursor, ordered_ids, branch_scores=branch_scores)
-    _logger.info("Session search for %r returned %d result(s) (vector search off)", query, len(cards))
+    log.info("Session search for %r returned %d result(s) (vector search off)", query, len(cards))
     return cards, ranked
 
 
@@ -176,7 +177,7 @@ def search_messages(
 
     ordered = raw[:max_results]
     snippets = hydrate_snippets(cursor, ordered)
-    _logger.info("Message search for %r returned %d snippet(s)", query, len(snippets))
+    log.info("Message search for %r returned %d snippet(s)", query, len(snippets))
     return snippets, True
 
 
@@ -198,5 +199,5 @@ def compute_caveat(conn: sqlite3.Connection) -> str | None:
             return f"{pct}% of history embedded; results may be partial"
         return None
     except Exception:
-        _logger.exception("caveat computation failed")
+        log.exception("caveat computation failed")
         return None
