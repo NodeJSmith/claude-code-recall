@@ -6,6 +6,7 @@ and the keyword branch-id lookup that ranks or recency-orders on it.
 
 import re
 import sqlite3
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from ccrecall.db import escape_like
@@ -13,13 +14,22 @@ from ccrecall.db import escape_like
 
 @dataclass(frozen=True)
 class ScopeFilter:
-    """Immutable bag of scope-narrowing parameters shared across search/recent paths."""
+    """Immutable bag of scope-narrowing parameters shared across search/recent paths.
 
-    projects: list[str] | None = None
+    ``projects`` accepts any sequence at construction (callers commonly pass a
+    ``list[str]``) but is normalized to a tuple in ``__post_init__`` — frozen=True
+    only blocks reassigning the field, not mutating a list stored in it.
+    """
+
+    projects: Sequence[str] | None = None
     session_id: str | None = None
     path: str | None = None
     before: str | None = None
     after: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.projects is not None:
+            object.__setattr__(self, "projects", tuple(self.projects))
 
 
 EMPTY_SCOPE = ScopeFilter()
