@@ -13,7 +13,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-from conftest import patched_clear, patched_record
+from conftest import FIXTURE_DIR, patched_clear, patched_record
 
 from ccrecall.health import REASON_VEC_UNAVAILABLE
 from ccrecall.hooks import memory_setup, memory_sync, sync_current
@@ -22,8 +22,6 @@ from ccrecall.recent_chats import run as recent_chats_run
 from ccrecall.schema import SCHEMA
 from ccrecall.search_cli import run as search_conversations_run
 from ccrecall.summarizer import SUMMARY_VERSION
-
-FIXTURE_DIR = Path(__file__).parent / "fixtures"
 
 # Canonical valid session UUID for hook-input fixtures (passes validate_session_id).
 VALID_SYNC_UUID = "12345678-1234-1234-1234-123456789abc"

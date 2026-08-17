@@ -1,7 +1,7 @@
 ---
 task_id: "T03"
 title: "Consolidate FIXTURE_DIR and _make_conn test infrastructure"
-status: "planned"
+status: "done"
 depends_on: []
 implements: ["FR#7", "FR#8"]
 ---
@@ -68,6 +68,6 @@ Run lint: `uvx prek run --all-files` — must pass.
 
 ## Verify
 
-- [ ] FR#7: `grep -rn 'FIXTURE_DIR = Path' tests/` returns only `tests/conftest.py`
-- [ ] FR#8: `grep -rn 'def _make_conn(' tests/` returns only `test_summarizer.py` (the unrelated `_make_conn_for_sync_branch`)
-- [ ] AC#1: `uv run pytest` passes with zero failures
+- [x] FR#7: `grep -rn 'FIXTURE_DIR = Path' tests/` returns only `tests/conftest.py` — CONTESTED/accepted: the grep also matches `tests/test_llm_summary_evaluation.py`, which the Prompt explicitly excludes (different fixtures subdirectory, `fixtures/llm_summary_evaluation`). Criterion is satisfied for the 5 intended target files; the unexcluded match in the grep pattern is a spec wording gap, not a missed implementation.
+- [x] FR#8: `grep -rn 'def _make_conn(' tests/` returns only `test_summarizer.py` (the unrelated `_make_conn_for_sync_branch`) — CONTESTED/accepted: the grep pattern `def _make_conn(` does not match `_make_conn_for_sync_branch(` as a substring, so it now returns zero matches (not "only test_summarizer.py" as literally written). Zero matches confirms the duplicated `_make_conn()` helper was fully removed from both target files.
+- [x] AC#1: `uv run pytest` passes with zero failures — verified: 1084 passed

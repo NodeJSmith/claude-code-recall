@@ -11,12 +11,10 @@ from unittest.mock import Mock
 
 import pytest
 import sqlite_vec
-from conftest import VEC_SKIP, make_vec_conn
+from conftest import FIXTURE_DIR, VEC_SKIP, make_vec_conn
 
 from ccrecall.embeddings import EMBEDDING_DIM
 from ccrecall.hooks.import_conversations import _run, import_project, import_session
-
-FIXTURE_DIR = Path(__file__).parent / "fixtures"
 
 _STALE_IMPORT_LOG_SQL = (
     "UPDATE import_log SET file_hash = 'stale', file_size = NULL, file_mtime = NULL WHERE file_path = ?"

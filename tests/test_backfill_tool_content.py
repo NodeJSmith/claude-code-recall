@@ -20,17 +20,8 @@ from conftest import write_jsonl as _write_jsonl
 
 from ccrecall.hooks.backfill_query import BATCH_SIZE, EXIT_ABORT, EXIT_OK
 from ccrecall.hooks.backfill_tool_content import backfill_session, run, select_batch
-from ccrecall.schema import SCHEMA
 
 pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
-
-
-def _make_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(":memory:")
-    conn.execute("PRAGMA foreign_keys = ON")
-    conn.executescript(SCHEMA)
-    conn.commit()
-    return conn
 
 
 def _seed_session(
@@ -98,7 +89,7 @@ def _run_backfill(conn: sqlite3.Connection, *, days=None, limit=None, status=Fal
 
 
 class TestBackfillCore:
-    def test_update_existing_row_and_insert_tool_only_row(self, tmp_path):
+    def test_update_existing_row_and_insert_tool_only_row(self, tmp_path, memory_db):
         """A session with one text+tool assistant row (pre-existing, tool_content
         NULL) and one tool-only assistant row (never inserted, forward-sync
         skipped it) is fully backfilled in one pass."""
@@ -127,7 +118,7 @@ class TestBackfillCore:
             ],
         )
 
-        conn = _make_conn()
+        conn = memory_db
         session_id, branch_id = _seed_session(
             conn,
             filepath=filepath,
@@ -175,7 +166,7 @@ class TestBackfillCore:
         assert "[Read: /tmp/app.log]" in agg[0]
         assert agg[1] is None, "embedding_version must be reset to NULL so backfill embeddings re-selects this branch"
 
-    def test_pure_text_message_gets_empty_tool_content_not_marker(self, tmp_path):
+    def test_pure_text_message_gets_empty_tool_content_not_marker(self, tmp_path, memory_db):
         """An existing row with no tool_use blocks gets tool_content = '' (not
         left NULL), so it drops out of the eligible set."""
         filepath = tmp_path / "sess-b.jsonl"
@@ -186,7 +177,7 @@ class TestBackfillCore:
                 _entry("a1", "u1", "2026-01-01T10:00:05Z", "assistant", [{"type": "text", "text": "hi there"}]),
             ],
         )
-        conn = _make_conn()
+        conn = memory_db
         session_id, _ = _seed_session(
             conn,
             filepath=filepath,
@@ -203,7 +194,7 @@ class TestBackfillCore:
         ).fetchone()
         assert row[0] == ""
 
-    def test_backfill_invalidates_summary_version_when_aggregate_changes(self, tmp_path):
+    def test_backfill_invalidates_summary_version_when_aggregate_changes(self, tmp_path, memory_db):
         filepath = tmp_path / "sess-hash.jsonl"
         _write_jsonl(
             filepath,
@@ -222,7 +213,7 @@ class TestBackfillCore:
             ],
         )
 
-        conn = _make_conn()
+        conn = memory_db
         session_id, branch_id = _seed_session(
             conn,
             filepath=filepath,
@@ -250,7 +241,7 @@ class TestBackfillCore:
 
 
 class TestBackfillMetaExclusion:
-    def test_untagged_meta_entry_does_not_become_a_messages_row(self, tmp_path):
+    def test_untagged_meta_entry_does_not_become_a_messages_row(self, tmp_path, memory_db):
         """An isMeta entry with no origin (untagged notification) must not be
         inserted as a new messages row by the backfill's INSERT pass -- the
         same exclusion parse_jsonl_file applies on the live sync path."""
@@ -277,7 +268,7 @@ class TestBackfillMetaExclusion:
             ],
         )
 
-        conn = _make_conn()
+        conn = memory_db
         session_id, _ = _seed_session(
             conn,
             filepath=filepath,
@@ -304,7 +295,7 @@ class TestBackfillMetaExclusion:
 
 
 class TestBackfillMissingFile:
-    def test_missing_file_skipped_other_session_still_processed(self, tmp_path):
+    def test_missing_file_skipped_other_session_still_processed(self, tmp_path, memory_db):
         """A session whose JSONL was deleted is skipped; a second, healthy
         session in the same run is still fully backfilled."""
         missing_path = tmp_path / "sess-missing.jsonl"
@@ -325,7 +316,7 @@ class TestBackfillMissingFile:
             ],
         )
 
-        conn = _make_conn()
+        conn = memory_db
         _seed_session(
             conn,
             filepath=missing_path,
@@ -359,7 +350,7 @@ class TestBackfillMissingFile:
 
 
 class TestBackfillEmptyEntries:
-    def test_no_usable_entries_not_counted_as_backfilled(self, tmp_path, capsys):
+    def test_no_usable_entries_not_counted_as_backfilled(self, tmp_path, capsys, memory_db):
         """A JSONL file that exists on disk but parses to no uuid-bearing
         entries (e.g. truncated/corrupted) is a no-op: it must not increment
         `backfilled`, must be tracked separately as `skipped_empty`, and must
@@ -367,7 +358,7 @@ class TestBackfillEmptyEntries:
         filepath = tmp_path / "sess-empty.jsonl"
         filepath.write_text("\n")
 
-        conn = _make_conn()
+        conn = memory_db
         session_id, _ = _seed_session(
             conn,
             filepath=filepath,
@@ -400,8 +391,8 @@ class TestBackfillEmptyEntries:
 
 
 class TestBackfillLimit:
-    def test_limit_caps_sessions_processed(self, tmp_path):
-        conn = _make_conn()
+    def test_limit_caps_sessions_processed(self, tmp_path, memory_db):
+        conn = memory_db
         session_ids = []
         for i in range(3):
             filepath = tmp_path / f"sess-{i}.jsonl"
@@ -433,8 +424,8 @@ class TestBackfillLimit:
 
 
 class TestBackfillDays:
-    def test_days_excludes_old_sessions(self, tmp_path):
-        conn = _make_conn()
+    def test_days_excludes_old_sessions(self, tmp_path, memory_db):
+        conn = memory_db
 
         recent_path = tmp_path / "sess-recent.jsonl"
         _write_jsonl(recent_path, [_entry("ur", None, "2026-01-01T10:00:00Z", "user", "hi")])
@@ -471,8 +462,8 @@ class TestBackfillDays:
 
 
 class TestBackfillStatus:
-    def test_json_counts(self, tmp_path, capsys):
-        conn = _make_conn()
+    def test_json_counts(self, tmp_path, capsys, memory_db):
+        conn = memory_db
         filepath = tmp_path / "sess.jsonl"
         _write_jsonl(filepath, [_entry("u1", None, "2026-01-01T10:00:00Z", "user", "hi")])
         _seed_session(conn, filepath=filepath, existing_messages=[("u1", "user", "hi", "2026-01-01T10:00:00Z")])
@@ -491,8 +482,8 @@ class TestBackfillStatus:
         assert data["pending_missing_jsonl_sessions"] == 0
         assert data["done_sessions"] == 0
 
-    def test_status_splits_pending_missing_jsonl(self, tmp_path, capsys):
-        conn = _make_conn()
+    def test_status_splits_pending_missing_jsonl(self, tmp_path, capsys, memory_db):
+        conn = memory_db
         missing_path = tmp_path / "sess-missing.jsonl"
         _seed_session(
             conn,
@@ -513,9 +504,9 @@ class TestBackfillStatus:
         assert data["pending_missing_jsonl_sessions"] == 1
         assert data["done_sessions"] == 0
 
-    def test_status_does_not_write(self, tmp_path):
+    def test_status_does_not_write(self, tmp_path, memory_db):
         """--status is read-only: it must not backfill anything."""
-        conn = _make_conn()
+        conn = memory_db
         filepath = tmp_path / "sess.jsonl"
         _write_jsonl(filepath, [_entry("u1", None, "2026-01-01T10:00:00Z", "user", "hi")])
         _seed_session(conn, filepath=filepath, existing_messages=[("u1", "user", "hi", "2026-01-01T10:00:00Z")])
@@ -529,8 +520,8 @@ class TestBackfillStatus:
         row = conn.execute("SELECT tool_content FROM messages WHERE uuid = 'u1'").fetchone()
         assert row[0] is None
 
-    def test_status_reflects_completed_backfill(self, tmp_path, capsys):
-        conn = _make_conn()
+    def test_status_reflects_completed_backfill(self, tmp_path, capsys, memory_db):
+        conn = memory_db
         filepath = tmp_path / "sess.jsonl"
         _write_jsonl(filepath, [_entry("u1", None, "2026-01-01T10:00:00Z", "user", "hi")])
         _seed_session(conn, filepath=filepath, existing_messages=[("u1", "user", "hi", "2026-01-01T10:00:00Z")])
@@ -552,8 +543,8 @@ class TestBackfillStatus:
 
 
 class TestBackfillResume:
-    def test_second_run_is_a_no_op_for_already_backfilled_session(self, tmp_path):
-        conn = _make_conn()
+    def test_second_run_is_a_no_op_for_already_backfilled_session(self, tmp_path, memory_db):
+        conn = memory_db
         filepath = tmp_path / "sess.jsonl"
         _write_jsonl(
             filepath,
@@ -582,10 +573,10 @@ class TestBackfillResume:
         second_code = _run_backfill(conn)
         assert second_code == EXIT_OK
 
-    def test_no_progress_guard_does_not_fire_on_normal_multi_batch_run(self, tmp_path):
+    def test_no_progress_guard_does_not_fire_on_normal_multi_batch_run(self, tmp_path, memory_db):
         """A run spanning more sessions than BATCH_SIZE still completes (guards
         against the exclude-set bookkeeping breaking the progress guard)."""
-        conn = _make_conn()
+        conn = memory_db
         count = BATCH_SIZE + 3
         for i in range(count):
             filepath = tmp_path / f"sess-{i}.jsonl"
@@ -600,7 +591,7 @@ class TestBackfillResume:
 
 
 class TestBackfillMultiFile:
-    def test_multi_file_session_merges_entries_from_parent_and_agent(self, tmp_path):
+    def test_multi_file_session_merges_entries_from_parent_and_agent(self, tmp_path, memory_db):
         """A session backed by a parent + agent-*.jsonl merges entries from
         both files, so tool_content is populated for messages from either."""
         parent = tmp_path / "abc123.jsonl"
@@ -639,7 +630,7 @@ class TestBackfillMultiFile:
             ],
         )
 
-        conn = _make_conn()
+        conn = memory_db
         session_uuid = "abc123"
         conn.execute("INSERT INTO sessions (uuid) VALUES (?)", (session_uuid,))
         session_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
@@ -679,7 +670,7 @@ class TestBackfillMultiFile:
         ).fetchone()[0]
         assert "[Read: /etc/config]" in a2_tc
 
-    def test_multi_file_with_mismatched_db_leaf_still_inserts(self, tmp_path):
+    def test_multi_file_with_mismatched_db_leaf_still_inserts(self, tmp_path, memory_db):
         """When the DB's leaf_uuid differs from the merged leaf (common for
         multi-file sessions where forward sync stored whichever file's leaf
         synced last), both UPDATE and INSERT passes still run correctly."""
@@ -708,7 +699,7 @@ class TestBackfillMultiFile:
             ],
         )
 
-        conn = _make_conn()
+        conn = memory_db
         session_id, _ = _seed_session(
             conn,
             filepath=filepath,
@@ -737,7 +728,7 @@ class TestBackfillMultiFile:
 class TestTransientDbLock:
     """#81: transient sqlite3.OperationalError no longer aborts the entire run."""
 
-    def test_operational_error_retries_and_skips_session(self, tmp_path):
+    def test_operational_error_retries_and_skips_session(self, tmp_path, memory_db):
         """A transient DB lock on one session retries, then skips that session
         and continues processing the rest of the batch."""
         good_path = tmp_path / "sess-good.jsonl"
@@ -745,7 +736,7 @@ class TestTransientDbLock:
         _write_jsonl(good_path, [_entry("u1", None, "2026-01-01T10:00:00Z", "user", "hello")])
         _write_jsonl(bad_path, [_entry("u2", None, "2026-01-01T10:00:00Z", "user", "world")])
 
-        conn = _make_conn()
+        conn = memory_db
         bad_sid, _ = _seed_session(
             conn,
             filepath=bad_path,
@@ -782,7 +773,7 @@ class TestTransientDbLock:
         good_tc = conn.execute("SELECT tool_content FROM messages WHERE uuid = 'u1'").fetchone()[0]
         assert good_tc is not None
 
-    def test_operational_error_succeeds_on_retry(self, tmp_path):
+    def test_operational_error_succeeds_on_retry(self, tmp_path, memory_db):
         """A transient lock that clears on the second attempt succeeds without skipping."""
         filepath = tmp_path / "sess-retry.jsonl"
         _write_jsonl(
@@ -799,7 +790,7 @@ class TestTransientDbLock:
             ],
         )
 
-        conn = _make_conn()
+        conn = memory_db
         _seed_session(
             conn,
             filepath=filepath,
@@ -837,7 +828,7 @@ class TestTransientDbLock:
 class TestStuckSessionExclusion:
     """#81: a stuck session no longer aborts the run via the no-progress guard."""
 
-    def test_same_batch_reselected_excludes_and_continues(self, tmp_path):
+    def test_same_batch_reselected_excludes_and_continues(self, tmp_path, memory_db):
         """When the same batch is re-selected (stuck session), the IDs are
         excluded and the run continues rather than aborting."""
         stuck_path = tmp_path / "sess-stuck.jsonl"
@@ -845,7 +836,7 @@ class TestStuckSessionExclusion:
         _write_jsonl(stuck_path, [_entry("u1", None, "2026-01-01T10:00:00Z", "user", "stuck")])
         _write_jsonl(good_path, [_entry("u2", None, "2026-01-01T10:00:00Z", "user", "fine")])
 
-        conn = _make_conn()
+        conn = memory_db
         stuck_sid, _ = _seed_session(
             conn,
             filepath=stuck_path,
@@ -885,7 +876,7 @@ class TestStuckSessionExclusion:
         # Must NOT abort — continues past the stuck session
         assert code == EXIT_OK
 
-    def test_json_payload_reports_stuck_count(self, tmp_path, capsys):
+    def test_json_payload_reports_stuck_count(self, tmp_path, capsys, memory_db):
         """The same-batch-reselected path must count its excluded ids toward
         skipped_stuck in the JSON summary, not drop them from every counter.
 
@@ -895,7 +886,7 @@ class TestStuckSessionExclusion:
         stuck_path = tmp_path / "sess-stuck.jsonl"
         _write_jsonl(stuck_path, [_entry("u1", None, "2026-01-01T10:00:00Z", "user", "stuck")])
 
-        conn = _make_conn()
+        conn = memory_db
         stuck_sid, _ = _seed_session(
             conn,
             filepath=stuck_path,
@@ -934,7 +925,7 @@ class TestOrphanedUuidQuiescence:
     """#81 Fix 1: backfill_session must guarantee a session leaves the eligible
     set, even when a messages row's uuid is absent from the surviving JSONL."""
 
-    def test_orphaned_uuid_stamped_empty_and_session_leaves_eligible_set(self, tmp_path, capsys, caplog):
+    def test_orphaned_uuid_stamped_empty_and_session_leaves_eligible_set(self, tmp_path, capsys, caplog, memory_db):
         """A session with one row whose uuid IS in the JSONL (gets real
         tool_content) and one row whose uuid is NOT in the JSONL (unrecoverable
         -- transcripts are append-only) must have the orphan stamped to '' (not
@@ -953,7 +944,7 @@ class TestOrphanedUuidQuiescence:
             ],
         )
 
-        conn = _make_conn()
+        conn = memory_db
         session_id, _ = _seed_session(
             conn,
             filepath=filepath,
@@ -1007,11 +998,11 @@ class TestNonLockOperationalErrorFailsFast:
     """#81 Fix 2: only genuine lock/busy errors get retried; schema errors abort
     immediately instead of being retried 3x and misreported as a DB-lock skip."""
 
-    def test_schema_error_aborts_without_retry(self, tmp_path):
+    def test_schema_error_aborts_without_retry(self, tmp_path, memory_db):
         filepath = tmp_path / "sess.jsonl"
         _write_jsonl(filepath, [_entry("u1", None, "2026-01-01T10:00:00Z", "user", "hi")])
 
-        conn = _make_conn()
+        conn = memory_db
         _seed_session(conn, filepath=filepath, existing_messages=[("u1", "user", "hi", "2026-01-01T10:00:00Z")])
 
         call_count = 0
