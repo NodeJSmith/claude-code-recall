@@ -305,7 +305,7 @@ def _apply_migrations(
         conn.execute("PRAGMA foreign_keys = ON")
 
 
-def _open_connection(
+def open_connection(
     settings: dict | None = None,
     *,
     apply_migrations_callback: Callable[[sqlite3.Connection], None] | None = None,

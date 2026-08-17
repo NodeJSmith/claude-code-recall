@@ -713,7 +713,7 @@ def _seed_genuine_db(db_path, target_version: int) -> None:
       v5: ingestion_check_cache exists WITHOUT db_coverage_fingerprint (v6 adds it)
       v6: ingestion_check_cache has db_coverage_fingerprint; branches still lacks v7 cols
 
-    Note: SCHEMA_CORE runs before _apply_migrations in _open_connection, using
+    Note: SCHEMA_CORE runs before _apply_migrations in open_connection, using
     CREATE TABLE IF NOT EXISTS — so tables that already exist keep their genuine
     (column-limited) shape, while tables absent from a genuine schema (e.g.
     ingestion_check_cache at v2) get created by SCHEMA_CORE with full current
@@ -2143,11 +2143,11 @@ assert not found, f'Heavy modules loaded: {{found}}'
         """db_base must open a migrated connection without importing db.py or heavy deps."""
         db_path = tmp_path / "llm-summary.db"
         code = f"""\
-from ccrecall.db_base import _open_connection
+from ccrecall.db_base import open_connection
 import sys
 heavy = {self.HEAVY_MODULES}
 db_path = {str(db_path)!r}
-conn = _open_connection({{'db_path': db_path}})
+conn = open_connection({{'db_path': db_path}})
 try:
     assert conn.execute('PRAGMA user_version').fetchone()[0] > 0
 finally:

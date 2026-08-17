@@ -275,7 +275,7 @@ def _open_connection(settings: dict | None = None, load_vec: bool = False) -> sq
     context-manager wrapper) instead, which guarantees the connection is
     committed on success, rolled back on exception, and always closed.
     """
-    conn = db_base._open_connection(settings, apply_migrations_callback=_apply_migrations)
+    conn = db_base.open_connection(settings, apply_migrations_callback=_apply_migrations)
 
     if load_vec and vec_available(conn):
         # First and only place the vec extension is loaded for this connection.
