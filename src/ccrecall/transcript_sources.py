@@ -46,7 +46,7 @@ def _walk_subagents_dirs(
     non_subagents_policy: Callable[[Path], _ChildAction],
     dedupe_by_resolved_path: bool,
 ) -> bool:
-    """BFS the `state/` subtree, dispatching to caller-supplied policy.
+    """Walk the `state/` subtree (stack-based, LIFO order), dispatching to caller-supplied policy.
 
     For every child directory literally named "subagents" (at any depth),
     calls `on_subagents_dir(child)`. If it returns True, the whole walk stops

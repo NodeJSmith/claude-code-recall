@@ -1,6 +1,8 @@
 # Known Issues
 
-Durable issues discovered during orchestration that were intentionally not fixed in this run.
+Durable issues discovered during orchestration. Entries record the reasoning at the time they
+were deferred (`Reason not fixed now`); a later run may resolve one without removing the entry —
+check `Status` and `Resolution` for the current state.
 
 ## KI-001: process_batch closures push per-item loop nesting to 6-7 levels
 
