@@ -474,7 +474,9 @@ class TestBackfillNoProgressGuard:
             patch("ccrecall.hooks.backfill_embeddings.load_settings_for_db", return_value={}),
             patch("ccrecall.hooks.backfill_embeddings.time.sleep"),
         ):
-            run()  # must return, not hang
+            exit_code = run()  # must return, not hang
+
+        assert exit_code == EXIT_ABORT
 
         # Row was never stamped (embed was a no-op), confirming exit via the guard.
         ev = _branch_embedding_version(conn, bid)

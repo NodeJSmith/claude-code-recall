@@ -7,11 +7,53 @@ from pathlib import Path
 import pytest
 import sqlite_vec
 
+import ccrecall.config as config
+import ccrecall.health as health
+import ccrecall.hooks.sync_current as sync_current
 from ccrecall.db_vec import _ensure_vec_schema
 from ccrecall.health import clear_embedding_failure, record_embedding_failure
 from ccrecall.schema import SCHEMA
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures"
+
+
+@pytest.fixture(autouse=True)
+def _isolated_runtime_dir(tmp_path, monkeypatch) -> None:
+    """Redirect the known ccrecall runtime-dir write sites to this test's tmp_path.
+
+    Closes #151: RUNTIME_DIR-derived paths are computed once, at import time
+    (module-level constants in config.py/health.py, some also bound as
+    def-time default-argument values). Patching config.RUNTIME_DIR alone
+    doesn't reach any of those already-computed copies, so a test that
+    forgets to pass an explicit path/db could silently write into the real,
+    live ~/.ccrecall — which is exactly how a prior pytest run polluted real
+    log files and, via #152, a real alert-snooze ledger entry.
+
+    Patches the constants that production code actually re-reads at call
+    time (health.py's sidecar functions now resolve their `path`/`marker_path`
+    /`snooze_path` defaults dynamically — see health.py — so this monkeypatch
+    reaches them even when a caller omits the argument) plus the two other
+    concrete known real-file-write sites: config.py's own RUNTIME_DIR-reading
+    functions (setup_logging, pid_file_path) and sync_current.py's
+    by-value-imported DEFAULT_LOG_PATH (_warn_cold_model's cold-start log).
+
+    Deliberately NOT covered: DEFAULT_DB_PATH is imported by value into ~9
+    other modules (db.py, status.py, search_cli.py, the backfill/import
+    hooks, cli/commands.py, ...) as a CLI default-argument value — patching
+    config.DEFAULT_DB_PATH here wouldn't reach any of those copies either,
+    and every existing DB test already passes an explicit db/memory_db, so
+    there's no observed pollution vector to close. A future test that both
+    omits --db AND exercises a real code path would still hit the real DB;
+    if that ever happens, it's a #151-shaped follow-up, not silently covered
+    by this fixture.
+    """
+    isolated = tmp_path / "ccrecall-runtime"
+    monkeypatch.setattr(config, "RUNTIME_DIR", isolated)
+    monkeypatch.setattr(config, "CONFIG_PATH", isolated / "config.json")
+    monkeypatch.setattr(health, "EMBEDDING_STATUS_PATH", isolated / "embedding-status.json")
+    monkeypatch.setattr(health, "ALERT_SNOOZE_PATH", isolated / "alert-snooze.json")
+    monkeypatch.setattr(health, "_PROBE_MARKER_PATH", isolated / ".write-probe")
+    monkeypatch.setattr(sync_current, "DEFAULT_LOG_PATH", isolated / "ccrecall.log")
 
 
 def patched_record(sidecar: Path):

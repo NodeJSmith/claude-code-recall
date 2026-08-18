@@ -32,9 +32,9 @@ def proactive_alert_block(
     conn: sqlite3.Connection | None,
     db_available: bool,
     *,
-    _marker_path: Path | None = None,
-    _snooze_path: Path | None = None,
-    _status_path: Path | None = None,
+    marker_path: Path | None = None,
+    snooze_path: Path | None = None,
+    status_path: Path | None = None,
 ) -> str:
     """Build the proactive health-alert block for SessionStart injection.
 
@@ -52,15 +52,15 @@ def proactive_alert_block(
     exception degrades to "" so the hook is never broken and context injection is
     unaffected.
 
-    _marker_path / _snooze_path / _status_path: test injection points for sidecar
+    marker_path / snooze_path / status_path: test injection points for sidecar
     paths; None means use the health.py function defaults (production paths).
     """
     try:
         # 1. Filesystem probe — no DB needed, unconditional.
-        fs_result = probe_filesystem() if _marker_path is None else probe_filesystem(_marker_path)
+        fs_result = probe_filesystem(marker_path)
 
         # 2. Embedding-status sidecar — plain file read only, no vec/fastembed load.
-        embedding_status = read_embedding_status() if _status_path is None else read_embedding_status(_status_path)
+        embedding_status = read_embedding_status(status_path)
 
         # 3. DB probe — only when the DB file exists; a missing DB is not a fault
         # (fresh install). conn=None here means the connection failed (dir/WAL
@@ -95,11 +95,7 @@ def proactive_alert_block(
         # load_settings() always carries alert_snooze_hours from DEFAULT_SETTINGS;
         # fall back to the canonical default only for sparse (test) settings dicts.
         snooze_hours = float(settings.get("alert_snooze_hours", DEFAULT_SETTINGS["alert_snooze_hours"]))
-        keys_to_fire = (
-            evaluate_alerts(active_keys, snooze_hours)
-            if _snooze_path is None
-            else evaluate_alerts(active_keys, snooze_hours, _snooze_path)
-        )
+        keys_to_fire = evaluate_alerts(active_keys, snooze_hours, snooze_path)
 
         # 6. Build one combined block.
         return build_alert_block(

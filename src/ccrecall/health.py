@@ -25,8 +25,19 @@ from ccrecall.models import LOGGER_NAME
 
 # ── Sidecar paths ──────────────────────────────────────────────────────────────
 # Module-level so they are the single canonical location for each sidecar. Callers
-# don't import these directly — they go through the functions below, which default
-# their `path` argument to these constants (tests override `path` to a tmp dir).
+# don't import these directly — they go through the functions below.
+#
+# Every function below that takes a path argument (probe_filesystem, read/record/
+# clear_embedding_failure, evaluate_alerts) resolves it as `param: Path | None =
+# None` followed by `if param is None: param = THIS_CONSTANT` INSIDE the function
+# body — never as `param: Path = THIS_CONSTANT` in the signature. A Python default
+# argument value is evaluated exactly once, when `def` runs, and that one object is
+# reused on every call forever; a signature default would silently freeze in the
+# real path at import time, so `monkeypatch.setattr(health, "EMBEDDING_STATUS_PATH",
+# tmp)` (see tests/conftest.py's `_isolated_runtime_dir` fixture) would have no
+# effect on a caller that omits the argument. Resolving inside the body instead does
+# a fresh global lookup on every call, so the monkeypatch is seen (#151). Do not
+# "simplify" any of these back to a signature default — that reintroduces the bug.
 EMBEDDING_STATUS_PATH = RUNTIME_DIR / "embedding-status.json"
 ALERT_SNOOZE_PATH = RUNTIME_DIR / "alert-snooze.json"
 
@@ -38,6 +49,8 @@ _PROBE_MARKER_PATH = RUNTIME_DIR / ".write-probe"
 # Reactive-caveat threshold consumed by the recall path. Coverage at or above this
 # fraction suppresses the recall caveat.
 RECALL_CAVEAT_COVERAGE_THRESHOLD = 0.95
+
+SECONDS_PER_HOUR = 3600
 
 # Alert key constants — one per proactive alert class.
 ALERT_CANT_PERSIST = "cant_persist"
@@ -74,13 +87,18 @@ class ProbeResult:
 # ── Writability probes ─────────────────────────────────────────────────────────
 
 
-def probe_filesystem(marker_path: Path = _PROBE_MARKER_PATH) -> ProbeResult:
+def probe_filesystem(marker_path: Path | None = None) -> ProbeResult:
     """Active filesystem writability probe.
 
     Uses O_CREAT|O_TRUNC (deliberately NOT O_EXCL) so the probe is idempotent
     and survives a stale marker left by a crash between write and unlink.  Any
     OSError → fault with the error message as reason.
+
+    ``marker_path`` resolves to ``_PROBE_MARKER_PATH`` at call time — see the
+    "Sidecar paths" comment above for why this isn't a signature default.
     """
+    if marker_path is None:
+        marker_path = _PROBE_MARKER_PATH
     try:
         fd = os.open(str(marker_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, PID_FILE_MODE)
         try:
@@ -123,12 +141,17 @@ def probe_db(conn: sqlite3.Connection | None) -> ProbeResult:
 # ── Embedding-status sidecar ───────────────────────────────────────────────────
 
 
-def read_embedding_status(path: Path = EMBEDDING_STATUS_PATH) -> dict | None:
+def read_embedding_status(path: Path | None = None) -> dict | None:
     """Read the embedding-capability-failure sidecar.
 
     Returns the parsed dict on success, None if missing or malformed.
     Tolerates all read/parse errors so the SessionStart hook path is never broken.
+
+    ``path`` resolves to ``EMBEDDING_STATUS_PATH`` at call time — see the
+    "Sidecar paths" comment above for why this isn't a signature default.
     """
+    if path is None:
+        path = EMBEDDING_STATUS_PATH
     if not path.exists():
         return None
     try:
@@ -138,21 +161,44 @@ def read_embedding_status(path: Path = EMBEDDING_STATUS_PATH) -> dict | None:
         return None
 
 
-def record_embedding_failure(reason: str, path: Path = EMBEDDING_STATUS_PATH) -> None:
+def record_embedding_failure(reason: str, path: Path | None = None) -> None:
     """Write an embedding-capability-failure record to the sidecar.
 
     Written by the detached embedding process on structural failure.
     Uses an atomic write to avoid partial reads by the SessionStart hook.
+
+    ``path`` resolves to ``EMBEDDING_STATUS_PATH`` at call time — see the
+    "Sidecar paths" comment above for why this isn't a signature default.
     """
+    if path is None:
+        path = EMBEDDING_STATUS_PATH
     atomic_write_json(path, {"reason": reason, "since": Instant.now().format_iso()})
 
 
-def clear_embedding_failure(path: Path = EMBEDDING_STATUS_PATH) -> None:
+def clear_embedding_failure(path: Path | None = None) -> None:
     """Remove the embedding-capability-failure sidecar.
 
-    Called by the embedding process on a successful embed run.
-    No-op if the file is already absent.
+    Called by the embedding process on a successful embed run. No-op if the
+    sidecar is already absent.
+
+    Deliberately does NOT touch the snooze ledger — the ledger is written only
+    by SessionStart hooks (design/specs/002-ccrecall-surfacing-model/design.md
+    § Edge Cases, "Two sidecar concerns, two writer classes"), to keep this
+    file's read-modify-write single-writer. A second writer here previously
+    raced with evaluate_alerts()'s own read-modify-write and could clobber an
+    unrelated alert key's snooze timestamp (#153 review). The ledger catches up
+    on its own within one hook cycle regardless: evaluate_alerts()'s auto-clear
+    drops any key no longer in active_keys, and active_keys for
+    ALERT_EMBEDDINGS_FAILING is recomputed from this sidecar's live existence
+    on every call — so the brief disagreement this reopens (ledger still lists
+    ALERT_EMBEDDINGS_FAILING until the next SessionStart hook runs) is
+    self-healing, not a stuck state.
+
+    ``path`` resolves to ``EMBEDDING_STATUS_PATH`` at call time — see the
+    "Sidecar paths" comment above for why this isn't a signature default.
     """
+    if path is None:
+        path = EMBEDDING_STATUS_PATH
     path.unlink(missing_ok=True)
 
 
@@ -182,7 +228,7 @@ def _write_snooze_ledger(path: Path, ledger: dict) -> None:
 def evaluate_alerts(
     active_keys: set[str],
     snooze_hours: float,
-    snooze_path: Path = ALERT_SNOOZE_PATH,
+    snooze_path: Path | None = None,
 ) -> list[str]:
     """Return the alert keys that should fire now, and update the snooze ledger.
 
@@ -196,8 +242,13 @@ def evaluate_alerts(
     If the ledger write fails (runtime dir unwritable), the fire list is
     still returned — degrading to re-tell every session is preferable to swallowing
     the most severe alert class.
+
+    ``snooze_path`` resolves to ``ALERT_SNOOZE_PATH`` at call time — see the
+    "Sidecar paths" comment above for why this isn't a signature default.
     """
-    snooze_seconds = snooze_hours * 3600
+    if snooze_path is None:
+        snooze_path = ALERT_SNOOZE_PATH
+    snooze_seconds = snooze_hours * SECONDS_PER_HOUR
     now = Instant.now()
 
     ledger = _read_snooze_ledger(snooze_path)

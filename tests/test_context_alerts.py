@@ -151,9 +151,9 @@ class TestToolContentAlertWiring:
             {"alert_snooze_hours": 0},
             conn,
             db_available=True,
-            _marker_path=marker,
-            _snooze_path=snooze,
-            _status_path=status,
+            marker_path=marker,
+            snooze_path=snooze,
+            status_path=status,
         )
         assert "ccrecall backfill tool-content" in block
 
@@ -171,9 +171,9 @@ class TestToolContentAlertWiring:
             {"alert_snooze_hours": 0},
             conn,
             db_available=True,
-            _marker_path=marker,
-            _snooze_path=snooze,
-            _status_path=status,
+            marker_path=marker,
+            snooze_path=snooze,
+            status_path=status,
         )
         assert block == ""
 
@@ -193,9 +193,9 @@ class TestToolContentAlertWiring:
             settings,
             conn,
             db_available=True,
-            _marker_path=marker,
-            _snooze_path=snooze,
-            _status_path=status,
+            marker_path=marker,
+            snooze_path=snooze,
+            status_path=status,
         )
         assert "ccrecall backfill tool-content" in block1
 
@@ -203,8 +203,8 @@ class TestToolContentAlertWiring:
             settings,
             conn,
             db_available=True,
-            _marker_path=marker,
-            _snooze_path=snooze,
-            _status_path=status,
+            marker_path=marker,
+            snooze_path=snooze,
+            status_path=status,
         )
         assert block2 == ""

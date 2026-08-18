@@ -47,15 +47,23 @@ concept for a re-parse backfill, and the universe is sessions, not chunks).
 Only ``format_duration`` — the one grain-agnostic piece — is shared from
 ``backfill_status``; the counting and report shape are re-derived here from
 ``tool_content_eligibility``.
+
+The outer batch-loop scaffolding (select → limit cutoff → stuck-batch
+detection → dispatch → trailer), which this module *does* share with
+``backfill_embeddings.run()``, lives in ``backfill_runner.py``. ``run()``
+here keeps its own no-progress recovery (exclude the stuck ids and continue,
+rather than aborting) and progress reporting; the per-session exception
+taxonomy and SAVEPOINT handling live in ``_backfill_one_session``, called
+once per row from ``process_batch``'s per-item loop.
 """
 
 import contextlib
 import json
 import logging
-import os
 import sqlite3
 import sys
 import time
+from enum import Enum, auto
 from pathlib import Path
 
 from ccrecall.config import DEFAULT_DB_PATH, load_settings_for_db, setup_logging
@@ -70,6 +78,7 @@ from ccrecall.hooks.backfill_query import (
     EXIT_ABORT,
     EXIT_OK,
 )
+from ccrecall.hooks.backfill_runner import limit_reached, lower_scheduling_priority, run_batch_loop
 from ccrecall.hooks.backfill_status import format_duration
 from ccrecall.hooks.tool_content_eligibility import ELIGIBILITY_FROM, MAX_SQL_PARAMS, eligibility_clause
 from ccrecall.import_log_ops import import_log_source_index
@@ -87,6 +96,18 @@ _LOG_PREFIX = "Backfill tool-content"
 _SAVEPOINT_NAME = "session"
 _LOCK_RETRIES = 3
 _LOCK_BACKOFF_SECONDS = 2.0
+
+
+class _SessionOutcome(Enum):
+    """Result of attempting to backfill one session — process_batch dispatches
+    its per-item counter/exclude_ids bookkeeping on this instead of catching
+    exceptions itself, keeping its for-loop body flat."""
+
+    BACKFILLED = auto()
+    MISSING = auto()
+    EMPTY = auto()
+    CONTENT_ERROR = auto()
+    DB_LOCK = auto()
 
 
 @contextlib.contextmanager
@@ -163,12 +184,11 @@ def run(
     logger = setup_logging(settings, process_name="backfill-tool-content", verbose=verbose)
 
     if status:
-        return run_status(days=days, json_mode=json_mode, settings=settings, logger=logger)
+        return run_tool_content_status(days=days, json_mode=json_mode, settings=settings, logger=logger)
 
     # Background I/O-bound job: lower scheduling priority so interactive work
-    # wins (machines.md thrash risk). Best-effort — os.nice is POSIX-only.
-    with contextlib.suppress(AttributeError, OSError):
-        os.nice(BACKFILL_NICE_LEVEL)
+    # wins (machines.md thrash risk).
+    lower_scheduling_priority(BACKFILL_NICE_LEVEL)
 
     total_updated = 0
     skipped_missing = 0
@@ -177,7 +197,6 @@ def run(
     skipped_db_lock = 0
     skipped_stuck = 0
     last_progress = 0
-    last_batch_ids: list[int] | None = None
     exclude_ids: set[int] = set()
     started = time.monotonic()
 
@@ -198,114 +217,95 @@ def run(
             logger.info("%s: starting, %s sessions pending", _LOG_PREFIX, total_eligible)
             print(f"{_PRINT_PREFIX}: starting, {total_eligible} pending", file=sys.stderr)
 
-            while True:
-                if limit is not None and total_updated >= limit:
-                    break
+            def select_batch_cb() -> list[tuple[int, str]]:
+                return select_batch(cursor, exclude_ids, days)
 
-                rows = select_batch(cursor, exclude_ids, days)
-                if not rows:
-                    break
+            def is_limit_reached() -> bool:
+                return limit_reached(limit, total_updated)
 
-                current_ids = [r[0] for r in rows]
-                if current_ids == last_batch_ids:
-                    # Defense-in-depth: with Fix 1 (backfill_session unconditionally
-                    # stamping remaining NULL rows to '' before returning True), a
-                    # session should always leave the eligible set on its first
-                    # attempt, making this path nearly unreachable. Kept as a guard
-                    # against any future regression that reintroduces a re-selectable
-                    # no-op session.
-                    logger.warning(
-                        "%s: same batch re-selected (session ids: %s); excluding and continuing",
-                        _LOG_PREFIX,
-                        current_ids,
-                    )
-                    exclude_ids.update(current_ids)
-                    skipped_stuck += len(current_ids)
-                    continue
-                last_batch_ids = current_ids
+            def on_stuck(current_ids: list[int]) -> bool:
+                nonlocal skipped_stuck
+                # Defense-in-depth: with Fix 1 (backfill_session unconditionally
+                # stamping remaining NULL rows to '' before returning True), a
+                # session should always leave the eligible set on its first
+                # attempt, making this path nearly unreachable. Kept as a guard
+                # against any future regression that reintroduces a re-selectable
+                # no-op session.
+                logger.warning(
+                    "%s: same batch re-selected (session ids: %s); excluding and continuing",
+                    _LOG_PREFIX,
+                    current_ids,
+                )
+                exclude_ids.update(current_ids)
+                skipped_stuck += len(current_ids)
+                return False
 
+            def process_batch(rows: list[tuple[int, str]]) -> bool:
+                nonlocal total_updated, skipped_missing, skipped_empty, skipped_content_error, skipped_db_lock
+                nonlocal last_progress
                 try:
                     for session_id, session_uuid in rows:
-                        if limit is not None and total_updated >= limit:
+                        if is_limit_reached():
                             break
 
-                        filepaths = filepath_by_uuid.get(session_uuid)
-                        if filepaths is None:
-                            logger.warning("%s: session %s has no on-disk JSONL, skipping", _LOG_PREFIX, session_uuid)
-                            skipped_missing += 1
+                        outcome = _backfill_one_session(cursor, session_id, session_uuid, filepath_by_uuid, logger)
+                        if outcome is not _SessionOutcome.BACKFILLED:
+                            # A skipped session stays eligible forever (the
+                            # eligibility WHERE clause alone won't exclude it),
+                            # so exclude it for the rest of this run. Only
+                            # BACKFILLED means backfill_session guaranteed
+                            # (#81 Fix 1) that this session already left the
+                            # eligibility predicate's NULL set on its own.
                             exclude_ids.add(session_id)
+                            if outcome is _SessionOutcome.MISSING:
+                                skipped_missing += 1
+                            elif outcome is _SessionOutcome.EMPTY:
+                                skipped_empty += 1
+                            elif outcome is _SessionOutcome.CONTENT_ERROR:
+                                skipped_content_error += 1
+                            elif outcome is _SessionOutcome.DB_LOCK:
+                                skipped_db_lock += 1
+                            else:
+                                raise AssertionError(f"unhandled session outcome: {outcome!r}")
                             continue
 
-                        try:
-                            made_change = backfill_with_retry(cursor, session_id, session_uuid, filepaths, logger)
-                        except LockExhaustedError:
-                            logger.warning(
-                                "%s: session %s (id=%s) DB lock persisted after %s retries, skipping",
-                                _LOG_PREFIX,
-                                session_uuid,
-                                session_id,
-                                _LOCK_RETRIES,
-                            )
-                            skipped_db_lock += 1
-                            exclude_ids.add(session_id)
-                            continue
-                        except OSError:
-                            logger.warning("%s: session %s JSONL vanished mid-run, skipping", _LOG_PREFIX, session_uuid)
-                            skipped_missing += 1
-                            exclude_ids.add(session_id)
-                            continue
-                        except (json.JSONDecodeError, ValueError, TypeError, KeyError):
-                            logger.exception(
-                                "%s: session %s (id=%s) content error, skipping",
-                                _LOG_PREFIX,
-                                session_uuid,
-                                session_id,
-                            )
-                            skipped_content_error += 1
-                            exclude_ids.add(session_id)
-                            continue
-                        if not made_change:
-                            # Entries/branch/branch-row absent: tool_content stays
-                            # NULL, so the eligibility WHERE clause alone would keep
-                            # re-selecting this session forever — exclude it for the
-                            # rest of this run, same as the missing-file case.
-                            logger.warning(
-                                "%s: session %s parsed to no usable branch, skipping", _LOG_PREFIX, session_uuid
-                            )
-                            skipped_empty += 1
-                            exclude_ids.add(session_id)
-                            continue
                         total_updated += 1
-                        # No exclude_ids entry needed: backfill_session guarantees
-                        # (#81 Fix 1) that a True return means every messages row for
-                        # this session has left the eligibility predicate's NULL
-                        # set — either backfilled with real content or stamped '' for
-                        # a uuid absent from the surviving JSONL — so the session
-                        # cannot be re-selected in a later batch.
-
                         if total_updated - last_progress >= progress_every:
-                            elapsed = time.monotonic() - started
-                            remaining = max(0, total_eligible - total_updated)
-                            rate = total_updated / elapsed if elapsed > 0 else 0.0
-                            eta = format_duration(remaining / rate) if rate > 0 else "?"
-                            msg = (
-                                f"{total_updated}/{total_eligible} sessions backfilled, "
-                                f"{remaining} remaining, {format_duration(elapsed)} elapsed, ETA {eta}"
+                            msg = _format_tool_content_progress(
+                                total_updated=total_updated,
+                                total_eligible=total_eligible,
+                                elapsed=time.monotonic() - started,
                             )
                             logger.info("%s: %s", _LOG_PREFIX, msg)
                             print(f"{_PRINT_PREFIX}: {msg}", file=sys.stderr)
                             last_progress = total_updated
+                except AssertionError:
+                    # An unhandled _SessionOutcome member is a programming bug, not a
+                    # per-session failure — let it propagate instead of being reported
+                    # as one.
+                    raise
                 except Exception:
                     logger.exception(
                         "%s: session failure (batch session ids: %s), aborting",
                         _LOG_PREFIX,
-                        current_ids,
+                        [r[0] for r in rows],
                     )
                     conn.commit()
-                    return EXIT_ABORT
+                    return False
+                return True
 
+            def after_batch(_rows: list[tuple[int, str]]) -> None:
                 conn.commit()
                 time.sleep(BACKFILL_BATCH_DELAY_SECONDS)
+
+            if not run_batch_loop(
+                select_batch=select_batch_cb,
+                is_limit_reached=is_limit_reached,
+                process_batch=process_batch,
+                on_stuck=on_stuck,
+                after_batch=after_batch,
+            ):
+                return EXIT_ABORT
     except (sqlite3.Error, OSError) as e:
         logger.exception("%s: aborted", _LOG_PREFIX)
         print(f"{_PRINT_PREFIX}: aborted: {e}", file=sys.stderr)
@@ -349,6 +349,71 @@ def run(
             file=sys.stderr,
         )
     return EXIT_OK
+
+
+def _backfill_one_session(
+    cursor: sqlite3.Cursor,
+    session_id: int,
+    session_uuid: str,
+    filepath_by_uuid: dict[str, list[Path]],
+    logger: logging.Logger,
+) -> _SessionOutcome:
+    """Attempt to backfill one session; returns a `_SessionOutcome`.
+
+    Session-level failures (missing JSONL, lock exhaustion, vanished file,
+    content error, no usable branch) are caught and converted to an outcome
+    here so process_batch's per-item loop stays flat. Exceptions outside this
+    taxonomy (infra/session failure) still propagate to process_batch's own
+    `except Exception` batch-abort handler.
+    """
+    filepaths = filepath_by_uuid.get(session_uuid)
+    if filepaths is None:
+        logger.warning("%s: session %s has no on-disk JSONL, skipping", _LOG_PREFIX, session_uuid)
+        return _SessionOutcome.MISSING
+
+    try:
+        made_change = backfill_with_retry(cursor, session_id, session_uuid, filepaths, logger)
+    except LockExhaustedError:
+        logger.warning(
+            "%s: session %s (id=%s) DB lock persisted after %s retries, skipping",
+            _LOG_PREFIX,
+            session_uuid,
+            session_id,
+            _LOCK_RETRIES,
+        )
+        return _SessionOutcome.DB_LOCK
+    except OSError:
+        logger.warning("%s: session %s JSONL vanished mid-run, skipping", _LOG_PREFIX, session_uuid)
+        return _SessionOutcome.MISSING
+    except (json.JSONDecodeError, ValueError, TypeError, KeyError):
+        logger.exception(
+            "%s: session %s (id=%s) content error, skipping",
+            _LOG_PREFIX,
+            session_uuid,
+            session_id,
+        )
+        return _SessionOutcome.CONTENT_ERROR
+
+    if not made_change:
+        # Entries/branch/branch-row absent: tool_content stays NULL, so the
+        # eligibility WHERE clause alone would keep re-selecting this session
+        # forever — exclude it for the rest of this run, same as the
+        # missing-file case.
+        logger.warning("%s: session %s parsed to no usable branch, skipping", _LOG_PREFIX, session_uuid)
+        return _SessionOutcome.EMPTY
+
+    return _SessionOutcome.BACKFILLED
+
+
+def _format_tool_content_progress(*, total_updated: int, total_eligible: int, elapsed: float) -> str:
+    """Render one tool-content-backfill progress line, including ETA."""
+    remaining = max(0, total_eligible - total_updated)
+    rate = total_updated / elapsed if elapsed > 0 else 0.0
+    eta = format_duration(remaining / rate) if rate > 0 else "?"
+    return (
+        f"{total_updated}/{total_eligible} sessions backfilled, "
+        f"{remaining} remaining, {format_duration(elapsed)} elapsed, ETA {eta}"
+    )
 
 
 def build_filepath_index(cursor: sqlite3.Cursor, logger: logging.Logger) -> dict[str, list[Path]]:
@@ -521,7 +586,7 @@ def backfill_session(cursor: sqlite3.Cursor, session_id: int, filepaths: list[Pa
     return True
 
 
-def run_status(
+def run_tool_content_status(
     *,
     days: int | None,
     json_mode: bool,
