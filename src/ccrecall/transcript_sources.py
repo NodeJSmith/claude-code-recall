@@ -4,6 +4,9 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from pathlib import Path
 
+_SUBAGENTS_DIRNAME = "subagents"
+_STATE_DIRNAME = "state"
+
 
 @dataclass(frozen=True)
 class SessionTranscriptDiscovery:
@@ -76,7 +79,7 @@ def _walk_subagents_dirs(
             visited.add(current)
         with contextlib.suppress(OSError):
             for child in sorted(current.iterdir()):
-                if child.name == "subagents":
+                if child.name == _SUBAGENTS_DIRNAME:
                     if on_subagents_dir(child):
                         return True
                 elif child.is_dir():
@@ -93,13 +96,13 @@ def _symlinked_project_contains_session_candidate(project_dir: Path, session_uui
     if direct.exists() or direct.is_symlink():
         return True
 
-    direct_subagents = project_dir / "subagents"
+    direct_subagents = project_dir / _SUBAGENTS_DIRNAME
     if direct_subagents.exists() or direct_subagents.is_symlink():
         with contextlib.suppress(OSError):
             for _path in direct_subagents.glob(f"*{session_uuid}*.jsonl"):
                 return True
 
-    state_dir = project_dir / "state"
+    state_dir = project_dir / _STATE_DIRNAME
     if not (state_dir.exists() or state_dir.is_symlink()):
         return False
 
@@ -137,7 +140,7 @@ def _dir_contains_matching_session_transcript(path: Path, session_uuid: str) -> 
 
 
 def _unsafe_subagent_dirs_contain_session_candidate(project_dir: Path, projects_dir: Path, session_uuid: str) -> bool:
-    direct_subagents = project_dir / "subagents"
+    direct_subagents = project_dir / _SUBAGENTS_DIRNAME
     if direct_subagents.exists() or direct_subagents.is_symlink():
         if (
             direct_subagents.is_symlink()
@@ -146,7 +149,7 @@ def _unsafe_subagent_dirs_contain_session_candidate(project_dir: Path, projects_
         ) and _dir_contains_matching_session_transcript(direct_subagents, session_uuid):
             return True
 
-    state_dir = project_dir / "state"
+    state_dir = project_dir / _STATE_DIRNAME
     if not (state_dir.exists() or state_dir.is_symlink()):
         return False
     if state_dir.is_symlink() or not state_dir.is_dir() or not _is_under(state_dir, projects_dir):
@@ -231,7 +234,7 @@ def _candidate_subagent_dirs(project_dir: Path, projects_dir: Path) -> tuple[lis
     candidates: list[Path] = []
     had_unsafe_path = False
 
-    direct_subagents = project_dir / "subagents"
+    direct_subagents = project_dir / _SUBAGENTS_DIRNAME
     if direct_subagents.exists() or direct_subagents.is_symlink():
         if (
             direct_subagents.is_symlink()
@@ -242,7 +245,7 @@ def _candidate_subagent_dirs(project_dir: Path, projects_dir: Path) -> tuple[lis
         else:
             candidates.append(direct_subagents)
 
-    state_dir = project_dir / "state"
+    state_dir = project_dir / _STATE_DIRNAME
     if not (state_dir.exists() or state_dir.is_symlink()):
         return candidates, had_unsafe_path
     if state_dir.is_symlink() or not state_dir.is_dir() or not _is_under(state_dir, projects_dir):
