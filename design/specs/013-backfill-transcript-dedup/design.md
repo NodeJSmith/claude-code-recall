@@ -1,7 +1,7 @@
 # Design: Dedupe backfill run() scaffolding and transcript tree-walk logic
 
 **Date:** 2026-08-18
-**Status:** approved
+**Status:** archived
 **Mode:** sketch
 
 ## Problem
