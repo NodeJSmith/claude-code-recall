@@ -279,6 +279,11 @@ def run(
                             logger.info("%s: %s", _LOG_PREFIX, msg)
                             print(f"{_PRINT_PREFIX}: {msg}", file=sys.stderr)
                             last_progress = total_updated
+                except AssertionError:
+                    # An unhandled _SessionOutcome member is a programming bug, not a
+                    # per-session failure — let it propagate instead of being reported
+                    # as one.
+                    raise
                 except Exception:
                     logger.exception(
                         "%s: session failure (batch session ids: %s), aborting",
