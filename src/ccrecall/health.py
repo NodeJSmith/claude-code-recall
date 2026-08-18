@@ -50,6 +50,8 @@ _PROBE_MARKER_PATH = RUNTIME_DIR / ".write-probe"
 # fraction suppresses the recall caveat.
 RECALL_CAVEAT_COVERAGE_THRESHOLD = 0.95
 
+SECONDS_PER_HOUR = 3600
+
 # Alert key constants — one per proactive alert class.
 ALERT_CANT_PERSIST = "cant_persist"
 ALERT_EMBEDDINGS_FAILING = "embeddings_failing"
@@ -257,7 +259,7 @@ def evaluate_alerts(
     """
     if snooze_path is None:
         snooze_path = ALERT_SNOOZE_PATH
-    snooze_seconds = snooze_hours * 3600
+    snooze_seconds = snooze_hours * SECONDS_PER_HOUR
     now = Instant.now()
 
     ledger = _read_snooze_ledger(snooze_path)

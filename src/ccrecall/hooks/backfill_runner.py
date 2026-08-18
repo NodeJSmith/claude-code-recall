@@ -14,8 +14,14 @@ content), no-progress *recovery* (embeddings aborts the whole run;
 tool_content excludes the stuck ids and continues — only the *detection* is
 shared here), and the batch trailer's commit plus any extras
 (`reclaim_memory` for embeddings, none for tool_content).
+
+`limit_reached` and `lower_scheduling_priority` are two more bits of
+identical start-of-run scaffolding both callers needed; they live here too
+rather than being redefined per caller.
 """
 
+import contextlib
+import os
 from collections.abc import Callable
 
 
@@ -65,3 +71,17 @@ def run_batch_loop(
             return False
         after_batch(rows)
     return True
+
+
+def limit_reached(limit: int | None, current: int) -> bool:
+    """Shared `--limit` check: True once `current` has reached `limit` (no limit = never)."""
+    return limit is not None and current >= limit
+
+
+def lower_scheduling_priority(nice_level: int) -> None:
+    """Best-effort nice(2) call so a background backfill yields to interactive work.
+
+    os.nice is POSIX-only and may be denied; either way the run proceeds.
+    """
+    with contextlib.suppress(AttributeError, OSError):
+        os.nice(nice_level)

@@ -29,7 +29,6 @@ taxonomy live in `_embed_one_branch`, called once per row from
 import contextlib
 import json
 import logging
-import os
 import sqlite3
 import sys
 import time
@@ -57,7 +56,7 @@ from ccrecall.hooks.backfill_query import (
     EXIT_OK,
     build_selection,
 )
-from ccrecall.hooks.backfill_runner import run_batch_loop
+from ccrecall.hooks.backfill_runner import limit_reached, lower_scheduling_priority, run_batch_loop
 from ccrecall.hooks.backfill_status import format_duration, run_status
 from ccrecall.hooks.subprocess_utils import reclaim_memory, try_load_libc
 
@@ -96,10 +95,8 @@ def run(
         return run_status(days=days, json_mode=json_mode, settings=settings, logger=logger)
 
     # Background CPU job: lower scheduling priority so the bounded inference
-    # threads yield to interactive work (machines.md thrash risk). Best-effort —
-    # os.nice is POSIX-only and may be denied; either way the run proceeds.
-    with contextlib.suppress(AttributeError, OSError):
-        os.nice(BACKFILL_NICE_LEVEL)
+    # threads yield to interactive work (machines.md thrash risk).
+    lower_scheduling_priority(BACKFILL_NICE_LEVEL)
 
     # ABORT level: check model availability before touching any rows.
     # model_available() warms the singleton session on success — no extra cost.
@@ -171,7 +168,7 @@ def run(
                 file=sys.stderr,
             )
 
-            def select_batch() -> list[tuple]:
+            def select_batch_cb() -> list[tuple]:
                 # ORDER BY id keeps batch order deterministic: the no-progress
                 # guard compares current_ids across calls, which is only
                 # meaningful if re-selection returns rows in a stable order.
@@ -186,7 +183,7 @@ def run(
                 return rows
 
             def is_limit_reached() -> bool:
-                return limit is not None and total_updated >= limit
+                return limit_reached(limit, total_updated)
 
             def on_stuck(_current_ids: list[int]) -> bool:
                 logger.error("%s: no progress — same batch re-selected; aborting to avoid infinite loop", _LOG_PREFIX)
@@ -237,7 +234,7 @@ def run(
                 time.sleep(BACKFILL_BATCH_DELAY_SECONDS)
 
             if not run_batch_loop(
-                select_batch=select_batch,
+                select_batch=select_batch_cb,
                 is_limit_reached=is_limit_reached,
                 process_batch=process_batch,
                 on_stuck=on_stuck,

@@ -945,9 +945,9 @@ class TestProactiveAlerts:
                 self._settings(),
                 conn=None,
                 db_available=False,
-                _marker_path=unwritable / ".probe",
-                _snooze_path=tmp_path / "snooze.json",
-                _status_path=tmp_path / "status.json",
+                marker_path=unwritable / ".probe",
+                snooze_path=tmp_path / "snooze.json",
+                status_path=tmp_path / "status.json",
             )
         finally:
             unwritable.chmod(0o755)
@@ -961,9 +961,9 @@ class TestProactiveAlerts:
             self._settings(),
             conn=None,  # connection failed
             db_available=True,  # but DB file exists → probe is invoked with None
-            _marker_path=tmp_path / ".probe",  # writable → fs probe passes
-            _snooze_path=tmp_path / "snooze.json",
-            _status_path=tmp_path / "status.json",
+            marker_path=tmp_path / ".probe",  # writable → fs probe passes
+            snooze_path=tmp_path / "snooze.json",
+            status_path=tmp_path / "status.json",
         )
 
         assert "## ⚠" in block
@@ -1004,9 +1004,9 @@ class TestProactiveAlerts:
                 self._settings(),
                 conn=conn,
                 db_available=True,  # file exists; connect failed → probe_db(None)
-                _marker_path=tmp_path / ".probe",  # writable (outside sealed dir)
-                _snooze_path=tmp_path / "snooze.json",
-                _status_path=tmp_path / "status.json",
+                marker_path=tmp_path / ".probe",  # writable (outside sealed dir)
+                snooze_path=tmp_path / "snooze.json",
+                status_path=tmp_path / "status.json",
             )
             if conn is not None:
                 conn.close()
@@ -1057,9 +1057,9 @@ class TestProactiveAlerts:
             self._settings(),
             conn=None,
             db_available=False,
-            _marker_path=tmp_path / ".probe",
-            _snooze_path=tmp_path / "snooze.json",
-            _status_path=status_path,
+            marker_path=tmp_path / ".probe",
+            snooze_path=tmp_path / "snooze.json",
+            status_path=status_path,
         )
 
         assert "## ⚠" in block
@@ -1080,9 +1080,9 @@ class TestProactiveAlerts:
             self._settings(),
             conn=None,
             db_available=False,
-            _marker_path=tmp_path / ".probe",
-            _snooze_path=tmp_path / "snooze.json",
-            _status_path=status_path,
+            marker_path=tmp_path / ".probe",
+            snooze_path=tmp_path / "snooze.json",
+            status_path=status_path,
         )
 
         assert "## ⚠" in block
@@ -1102,9 +1102,9 @@ class TestProactiveAlerts:
                 self._settings(),
                 conn=None,
                 db_available=False,
-                _marker_path=unwritable / ".probe",
-                _snooze_path=tmp_path / "snooze.json",
-                _status_path=status_path,
+                marker_path=unwritable / ".probe",
+                snooze_path=tmp_path / "snooze.json",
+                status_path=status_path,
             )
         finally:
             unwritable.chmod(0o755)
@@ -1128,9 +1128,9 @@ class TestProactiveAlerts:
             self._settings(),
             conn=None,
             db_available=False,
-            _marker_path=tmp_path / ".probe",
-            _snooze_path=tmp_path / "snooze.json",
-            _status_path=tmp_path / "status.json",
+            marker_path=tmp_path / ".probe",
+            snooze_path=tmp_path / "snooze.json",
+            status_path=tmp_path / "status.json",
         )
 
         assert block == "", "Defensive wrap must return '' on exception"
@@ -1151,9 +1151,9 @@ class TestProactiveAlerts:
             self._settings(),
             conn=None,
             db_available=False,
-            _marker_path=marker_path,
-            _snooze_path=snooze_path,
-            _status_path=status_path,
+            marker_path=marker_path,
+            snooze_path=snooze_path,
+            status_path=status_path,
         )
         assert "## ⚠" in block1, "Alert should have fired on first session"
         assert snooze_path.exists(), "Snooze ledger should have been written"
@@ -1170,9 +1170,9 @@ class TestProactiveAlerts:
             self._settings(),
             conn=None,
             db_available=False,
-            _marker_path=marker_path,
-            _snooze_path=snooze_path,
-            _status_path=status_path,
+            marker_path=marker_path,
+            snooze_path=snooze_path,
+            status_path=status_path,
         )
         assert block2 == "", "No block should fire after condition is cleared"
 
@@ -1197,9 +1197,9 @@ class TestProactiveAlerts:
             self._settings(),
             conn=None,
             db_available=False,
-            _marker_path=tmp_path / ".probe",
-            _snooze_path=snooze_path,
-            _status_path=status_path,
+            marker_path=tmp_path / ".probe",
+            snooze_path=snooze_path,
+            status_path=status_path,
         )
 
         assert block.startswith("## ⚠"), "Proactive block must start with the alert heading"
@@ -1210,8 +1210,8 @@ class TestProactiveAlerts:
             self._settings(),
             conn=None,
             db_available=False,
-            _marker_path=tmp_path / ".probe",  # writable tmp → fs probe passes
-            _snooze_path=tmp_path / "snooze.json",
-            _status_path=tmp_path / "status.json",  # absent → no embedding failure
+            marker_path=tmp_path / ".probe",  # writable tmp → fs probe passes
+            snooze_path=tmp_path / "snooze.json",
+            status_path=tmp_path / "status.json",  # absent → no embedding failure
         )
         assert block == "", f"Expected empty block on healthy system; got: {block!r}"

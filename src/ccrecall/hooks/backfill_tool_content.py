@@ -60,7 +60,6 @@ once per row from ``process_batch``'s per-item loop.
 import contextlib
 import json
 import logging
-import os
 import sqlite3
 import sys
 import time
@@ -79,7 +78,7 @@ from ccrecall.hooks.backfill_query import (
     EXIT_ABORT,
     EXIT_OK,
 )
-from ccrecall.hooks.backfill_runner import run_batch_loop
+from ccrecall.hooks.backfill_runner import limit_reached, lower_scheduling_priority, run_batch_loop
 from ccrecall.hooks.backfill_status import format_duration
 from ccrecall.hooks.tool_content_eligibility import ELIGIBILITY_FROM, MAX_SQL_PARAMS, eligibility_clause
 from ccrecall.import_log_ops import import_log_source_index
@@ -185,12 +184,11 @@ def run(
     logger = setup_logging(settings, process_name="backfill-tool-content", verbose=verbose)
 
     if status:
-        return run_status(days=days, json_mode=json_mode, settings=settings, logger=logger)
+        return run_tool_content_status(days=days, json_mode=json_mode, settings=settings, logger=logger)
 
     # Background I/O-bound job: lower scheduling priority so interactive work
-    # wins (machines.md thrash risk). Best-effort — os.nice is POSIX-only.
-    with contextlib.suppress(AttributeError, OSError):
-        os.nice(BACKFILL_NICE_LEVEL)
+    # wins (machines.md thrash risk).
+    lower_scheduling_priority(BACKFILL_NICE_LEVEL)
 
     total_updated = 0
     skipped_missing = 0
@@ -223,7 +221,7 @@ def run(
                 return select_batch(cursor, exclude_ids, days)
 
             def is_limit_reached() -> bool:
-                return limit is not None and total_updated >= limit
+                return limit_reached(limit, total_updated)
 
             def on_stuck(current_ids: list[int]) -> bool:
                 nonlocal skipped_stuck
@@ -583,7 +581,7 @@ def backfill_session(cursor: sqlite3.Cursor, session_id: int, filepaths: list[Pa
     return True
 
 
-def run_status(
+def run_tool_content_status(
     *,
     days: int | None,
     json_mode: bool,
