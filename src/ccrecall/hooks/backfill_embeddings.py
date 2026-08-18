@@ -16,9 +16,12 @@ without embedding, progress lines carry elapsed/ETA, and abort paths exit
 non-zero so the scheduler sees the failure.
 
 Query construction/constants live in `backfill_query.py`; status reporting
-lives in `backfill_status.py`. This module keeps the `run()` orchestrator plus
-the shared `reclaim_memory` helper from `subprocess_utils` (gc + malloc_trim
-between batches, the same RSS discipline as import_conversations).
+lives in `backfill_status.py`; the outer batch-loop scaffolding shared with
+`backfill_tool_content.run()` lives in `backfill_runner.py`. This module
+keeps the `run()` orchestrator (its own per-item processing, exception
+taxonomy, and progress reporting wired into `run_batch_loop`'s callbacks)
+plus the shared `reclaim_memory` helper from `subprocess_utils` (gc +
+malloc_trim between batches, the same RSS discipline as import_conversations).
 """
 
 import contextlib
@@ -50,6 +53,7 @@ from ccrecall.hooks.backfill_query import (
     EXIT_OK,
     build_selection,
 )
+from ccrecall.hooks.backfill_runner import run_batch_loop
 from ccrecall.hooks.backfill_status import format_duration, run_status
 from ccrecall.hooks.subprocess_utils import reclaim_memory, try_load_libc
 
@@ -110,7 +114,6 @@ def run(
     total_processed = 0
     total_inferences = 0
     last_progress = 0
-    last_batch_ids: list[int] | None = None
     work_done = 0
     rate_samples: deque[tuple[float, int]] = deque(maxlen=_RATE_WINDOW)
     started = time.monotonic()
@@ -164,38 +167,33 @@ def run(
                 file=sys.stderr,
             )
 
-            while True:
-                if limit is not None and total_updated >= limit:
-                    break
-
-                # ORDER BY id keeps batch order deterministic: the no-progress guard
-                # below compares current_ids to last_batch_ids, which is only
+            def select_batch() -> list[tuple]:
+                # ORDER BY id keeps batch order deterministic: the no-progress
+                # guard compares current_ids across calls, which is only
                 # meaningful if re-selection returns rows in a stable order.
                 cursor.execute(
                     f"SELECT id FROM branches {where} ORDER BY id LIMIT ?",
                     (*params, BATCH_SIZE),
                 )
                 rows = cursor.fetchall()
-
-                if not rows:
-                    break
-
                 # Honor --limit precisely even though batches are BATCH_SIZE-wide.
                 if limit is not None:
                     rows = rows[: limit - total_updated]
+                return rows
 
-                current_ids = [r[0] for r in rows]
-                if current_ids == last_batch_ids:
-                    logger.error(
-                        "%s: no progress — same batch re-selected; aborting to avoid infinite loop", _LOG_PREFIX
-                    )
-                    print(
-                        f"{_PRINT_PREFIX}: no progress — same batch re-selected, aborting",
-                        file=sys.stderr,
-                    )
-                    return EXIT_ABORT
-                last_batch_ids = current_ids
+            def is_limit_reached() -> bool:
+                return limit is not None and total_updated >= limit
 
+            def on_stuck(_current_ids: list[int]) -> bool:
+                logger.error("%s: no progress — same batch re-selected; aborting to avoid infinite loop", _LOG_PREFIX)
+                print(
+                    f"{_PRINT_PREFIX}: no progress — same batch re-selected, aborting",
+                    file=sys.stderr,
+                )
+                return True
+
+            def process_batch(rows: list[tuple]) -> bool:
+                nonlocal total_updated, total_processed, total_inferences, last_progress, work_done
                 try:
                     for (branch_id,) in rows:
                         # Fetch messages BEFORE the SAVEPOINT: a sqlite3.Error here is
@@ -289,12 +287,22 @@ def run(
                     # stale predicate on the next run; affected rows stay eligible.
                     logger.exception("%s: session failure, aborting", _LOG_PREFIX)
                     conn.commit()
-                    return EXIT_ABORT
+                    return False
+                return True
 
+            def after_batch(_rows: list[tuple]) -> None:
                 conn.commit()
                 reclaim_memory(libc)
-
                 time.sleep(BACKFILL_BATCH_DELAY_SECONDS)
+
+            if not run_batch_loop(
+                select_batch=select_batch,
+                is_limit_reached=is_limit_reached,
+                process_batch=process_batch,
+                on_stuck=on_stuck,
+                after_batch=after_batch,
+            ):
+                return EXIT_ABORT
     except (sqlite3.Error, OSError) as e:
         logger.exception("%s: aborted", _LOG_PREFIX)
         print(

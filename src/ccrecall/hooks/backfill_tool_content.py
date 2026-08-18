@@ -47,6 +47,13 @@ concept for a re-parse backfill, and the universe is sessions, not chunks).
 Only ``format_duration`` — the one grain-agnostic piece — is shared from
 ``backfill_status``; the counting and report shape are re-derived here from
 ``tool_content_eligibility``.
+
+The outer batch-loop scaffolding (select → limit cutoff → stuck-batch
+detection → dispatch → trailer), which this module *does* share with
+``backfill_embeddings.run()``, lives in ``backfill_runner.py``. ``run()``
+here keeps its own per-session exception taxonomy, no-progress recovery
+(exclude the stuck ids and continue, rather than aborting), and progress
+reporting.
 """
 
 import contextlib
@@ -70,6 +77,7 @@ from ccrecall.hooks.backfill_query import (
     EXIT_ABORT,
     EXIT_OK,
 )
+from ccrecall.hooks.backfill_runner import run_batch_loop
 from ccrecall.hooks.backfill_status import format_duration
 from ccrecall.hooks.tool_content_eligibility import ELIGIBILITY_FROM, MAX_SQL_PARAMS, eligibility_clause
 from ccrecall.import_log_ops import import_log_source_index
@@ -177,7 +185,6 @@ def run(
     skipped_db_lock = 0
     skipped_stuck = 0
     last_progress = 0
-    last_batch_ids: list[int] | None = None
     exclude_ids: set[int] = set()
     started = time.monotonic()
 
@@ -198,32 +205,32 @@ def run(
             logger.info("%s: starting, %s sessions pending", _LOG_PREFIX, total_eligible)
             print(f"{_PRINT_PREFIX}: starting, {total_eligible} pending", file=sys.stderr)
 
-            while True:
-                if limit is not None and total_updated >= limit:
-                    break
+            def select_batch_cb() -> list[tuple[int, str]]:
+                return select_batch(cursor, exclude_ids, days)
 
-                rows = select_batch(cursor, exclude_ids, days)
-                if not rows:
-                    break
+            def is_limit_reached() -> bool:
+                return limit is not None and total_updated >= limit
 
-                current_ids = [r[0] for r in rows]
-                if current_ids == last_batch_ids:
-                    # Defense-in-depth: with Fix 1 (backfill_session unconditionally
-                    # stamping remaining NULL rows to '' before returning True), a
-                    # session should always leave the eligible set on its first
-                    # attempt, making this path nearly unreachable. Kept as a guard
-                    # against any future regression that reintroduces a re-selectable
-                    # no-op session.
-                    logger.warning(
-                        "%s: same batch re-selected (session ids: %s); excluding and continuing",
-                        _LOG_PREFIX,
-                        current_ids,
-                    )
-                    exclude_ids.update(current_ids)
-                    skipped_stuck += len(current_ids)
-                    continue
-                last_batch_ids = current_ids
+            def on_stuck(current_ids: list[int]) -> bool:
+                nonlocal skipped_stuck
+                # Defense-in-depth: with Fix 1 (backfill_session unconditionally
+                # stamping remaining NULL rows to '' before returning True), a
+                # session should always leave the eligible set on its first
+                # attempt, making this path nearly unreachable. Kept as a guard
+                # against any future regression that reintroduces a re-selectable
+                # no-op session.
+                logger.warning(
+                    "%s: same batch re-selected (session ids: %s); excluding and continuing",
+                    _LOG_PREFIX,
+                    current_ids,
+                )
+                exclude_ids.update(current_ids)
+                skipped_stuck += len(current_ids)
+                return False
 
+            def process_batch(rows: list[tuple[int, str]]) -> bool:
+                nonlocal total_updated, skipped_missing, skipped_empty, skipped_content_error, skipped_db_lock
+                nonlocal last_progress
                 try:
                     for session_id, session_uuid in rows:
                         if limit is not None and total_updated >= limit:
@@ -299,13 +306,24 @@ def run(
                     logger.exception(
                         "%s: session failure (batch session ids: %s), aborting",
                         _LOG_PREFIX,
-                        current_ids,
+                        [r[0] for r in rows],
                     )
                     conn.commit()
-                    return EXIT_ABORT
+                    return False
+                return True
 
+            def after_batch(_rows: list[tuple[int, str]]) -> None:
                 conn.commit()
                 time.sleep(BACKFILL_BATCH_DELAY_SECONDS)
+
+            if not run_batch_loop(
+                select_batch=select_batch_cb,
+                is_limit_reached=is_limit_reached,
+                process_batch=process_batch,
+                on_stuck=on_stuck,
+                after_batch=after_batch,
+            ):
+                return EXIT_ABORT
     except (sqlite3.Error, OSError) as e:
         logger.exception("%s: aborted", _LOG_PREFIX)
         print(f"{_PRINT_PREFIX}: aborted: {e}", file=sys.stderr)
