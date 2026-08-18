@@ -1,5 +1,7 @@
 import contextlib
+from collections.abc import Callable
 from dataclasses import dataclass
+from enum import Enum, auto
 from pathlib import Path
 
 
@@ -8,6 +10,14 @@ class SessionTranscriptDiscovery:
     files: list[Path]
     had_unsafe_path: bool = False
     had_matching_unsafe_path: bool = False
+
+
+class _ChildAction(Enum):
+    """Per-caller policy for a non-`subagents`-named child dir met during the state/ walk."""
+
+    RECURSE = auto()
+    STOP = auto()
+    SKIP = auto()
 
 
 def _dedupe_paths(paths: list[Path]) -> list[Path]:
@@ -26,6 +36,58 @@ def _resolved_path(path: Path) -> Path | None:
     return None
 
 
+def _walk_subagents_dirs(
+    state_dir: Path,
+    *,
+    on_subagents_dir: Callable[[Path], bool],
+    non_subagents_policy: Callable[[Path], _ChildAction],
+    dedupe_by_resolved_path: bool,
+) -> bool:
+    """BFS the `state/` subtree, dispatching to caller-supplied policy.
+
+    For every child directory literally named "subagents" (at any depth),
+    calls `on_subagents_dir(child)`. If it returns True, the whole walk stops
+    and this function returns True. A `subagents`-named child is never itself
+    recursed into, whatever the callback returns.
+
+    For every other child directory, calls `non_subagents_policy(child)` to
+    decide what happens: RECURSE (queue it for further walking), STOP (stop
+    the whole walk, return True — used when a caller performs its own
+    fallback search inside the child and finds a match), or SKIP (drop that
+    branch, no recursion).
+
+    `dedupe_by_resolved_path` selects which of the two existing (and
+    deliberately preserved) visited-path dedup strategies this caller uses —
+    see the transcript_sources.py tree-walk section of
+    design/specs/013-backfill-transcript-dedup/design.md.
+    """
+    pending = [state_dir]
+    visited: set[Path] = set()
+    while pending:
+        current = pending.pop()
+        if dedupe_by_resolved_path:
+            resolved = _resolved_path(current)
+            if resolved is None or resolved in visited:
+                continue
+            visited.add(resolved)
+        else:
+            if current in visited:
+                continue
+            visited.add(current)
+        with contextlib.suppress(OSError):
+            for child in sorted(current.iterdir()):
+                if child.name == "subagents":
+                    if on_subagents_dir(child):
+                        return True
+                elif child.is_dir():
+                    action = non_subagents_policy(child)
+                    if action is _ChildAction.RECURSE:
+                        pending.append(child)
+                    elif action is _ChildAction.STOP:
+                        return True
+    return False
+
+
 def _symlinked_project_contains_session_candidate(project_dir: Path, session_uuid: str) -> bool:
     direct = project_dir / f"{session_uuid}.jsonl"
     if direct.exists() or direct.is_symlink():
@@ -41,23 +103,21 @@ def _symlinked_project_contains_session_candidate(project_dir: Path, session_uui
     if not (state_dir.exists() or state_dir.is_symlink()):
         return False
 
-    pending = [state_dir]
-    visited: set[Path] = set()
-    while pending:
-        current = pending.pop()
-        resolved = _resolved_path(current)
-        if resolved is None or resolved in visited:
-            continue
-        visited.add(resolved)
+    def on_subagents_dir(child: Path) -> bool:
         with contextlib.suppress(OSError):
-            for child in sorted(current.iterdir()):
-                if child.name == "subagents":
-                    with contextlib.suppress(OSError):
-                        for _path in child.glob(f"*{session_uuid}*.jsonl"):
-                            return True
-                elif child.is_dir() and not child.is_symlink():
-                    pending.append(child)
-    return False
+            for _path in child.glob(f"*{session_uuid}*.jsonl"):
+                return True
+        return False
+
+    def non_subagents_policy(child: Path) -> _ChildAction:
+        return _ChildAction.SKIP if child.is_symlink() else _ChildAction.RECURSE
+
+    return _walk_subagents_dirs(
+        state_dir,
+        on_subagents_dir=on_subagents_dir,
+        non_subagents_policy=non_subagents_policy,
+        dedupe_by_resolved_path=True,
+    )
 
 
 def _dir_contains_matching_session_transcript(path: Path, session_uuid: str) -> bool:
@@ -92,27 +152,24 @@ def _unsafe_subagent_dirs_contain_session_candidate(project_dir: Path, projects_
     if state_dir.is_symlink() or not state_dir.is_dir() or not _is_under(state_dir, projects_dir):
         return _dir_contains_matching_session_transcript(state_dir, session_uuid)
 
-    pending = [state_dir]
-    visited: set[Path] = set()
-    while pending:
-        current = pending.pop()
-        if current in visited:
-            continue
-        visited.add(current)
-        with contextlib.suppress(OSError):
-            for child in sorted(current.iterdir()):
-                if child.name == "subagents":
-                    if (
-                        child.is_symlink() or not child.is_dir() or not _is_under(child, projects_dir)
-                    ) and _dir_contains_matching_session_transcript(child, session_uuid):
-                        return True
-                elif child.is_dir():
-                    if child.is_symlink() or not _is_under(child, projects_dir):
-                        if _dir_contains_matching_session_transcript(child, session_uuid):
-                            return True
-                    else:
-                        pending.append(child)
-    return False
+    def on_subagents_dir(child: Path) -> bool:
+        return (
+            child.is_symlink() or not child.is_dir() or not _is_under(child, projects_dir)
+        ) and _dir_contains_matching_session_transcript(child, session_uuid)
+
+    def non_subagents_policy(child: Path) -> _ChildAction:
+        if child.is_symlink() or not _is_under(child, projects_dir):
+            if _dir_contains_matching_session_transcript(child, session_uuid):
+                return _ChildAction.STOP
+            return _ChildAction.SKIP
+        return _ChildAction.RECURSE
+
+    return _walk_subagents_dirs(
+        state_dir,
+        on_subagents_dir=on_subagents_dir,
+        non_subagents_policy=non_subagents_policy,
+        dedupe_by_resolved_path=False,
+    )
 
 
 def _is_under(path: Path, base: Path) -> bool:
@@ -191,26 +248,27 @@ def _candidate_subagent_dirs(project_dir: Path, projects_dir: Path) -> tuple[lis
     if state_dir.is_symlink() or not state_dir.is_dir() or not _is_under(state_dir, projects_dir):
         return candidates, True
 
-    pending = [state_dir]
-    visited: set[Path] = set()
+    def on_subagents_dir(child: Path) -> bool:
+        nonlocal had_unsafe_path
+        if child.is_symlink() or not child.is_dir() or not _is_under(child, projects_dir):
+            had_unsafe_path = True
+        else:
+            candidates.append(child)
+        return False
 
-    while pending:
-        current = pending.pop()
-        if current in visited:
-            continue
-        visited.add(current)
-        with contextlib.suppress(OSError):
-            for child in sorted(current.iterdir()):
-                if child.name == "subagents":
-                    if child.is_symlink() or not child.is_dir() or not _is_under(child, projects_dir):
-                        had_unsafe_path = True
-                        continue
-                    candidates.append(child)
-                elif child.is_dir():
-                    if child.is_symlink() or not _is_under(child, projects_dir):
-                        had_unsafe_path = True
-                    else:
-                        pending.append(child)
+    def non_subagents_policy(child: Path) -> _ChildAction:
+        nonlocal had_unsafe_path
+        if child.is_symlink() or not _is_under(child, projects_dir):
+            had_unsafe_path = True
+            return _ChildAction.SKIP
+        return _ChildAction.RECURSE
+
+    _walk_subagents_dirs(
+        state_dir,
+        on_subagents_dir=on_subagents_dir,
+        non_subagents_policy=non_subagents_policy,
+        dedupe_by_resolved_path=False,
+    )
 
     return _dedupe_paths(candidates), had_unsafe_path
 

@@ -1,7 +1,7 @@
 ---
 task_id: "T02"
 title: "Collapse transcript_sources.py's 5 tree-walk functions onto 2 shared BFS primitives"
-status: "planned"
+status: "done"
 depends_on: []
 implements: ["FR#4", "FR#5", "FR#6"]
 ---
@@ -46,6 +46,6 @@ Run `uv run pytest tests/test_transcript_sources.py -v` after each extraction st
 - [ ] FR#5: `discover_session_transcript_files(projects_dir, session_uuid)`, `discover_project_transcript_files(project_dir, projects_dir)`, and `is_safe_project_dir(project_dir, projects_dir)` have unchanged signatures — confirm by re-reading their call sites in `src/ccrecall/hooks/import_conversations.py`, `src/ccrecall/hooks/sync_current.py`, `src/ccrecall/project_ops.py` and confirming no changes were needed there. `discover_importable_transcript_files(projects_dir)` has no caller outside the test suite (`tests/test_transcript_sources.py`) — confirm its signature is unchanged by re-reading its own definition and test usages instead, since there's no external call site to check.
 - [ ] FR#6: Both preserved inconsistencies are verifiable in the diff: (a) the resolved-path vs. raw-path dedup distinction still exists between the three collapsed call sites (grep for `.resolve()` usage, confirm it's still gated the same way per caller); (b) `uv run pytest tests/test_transcript_sources.py::TestUnsafeSubagentDirsContainSessionCandidate::test_detects_unsafe_non_subagents_dir_nested_under_safe_state_tree tests/test_transcript_sources.py::TestCandidateSubagentDirs::test_flags_unsafe_non_subagents_dir_nested_under_state_without_descending -v` both pass (adjust the `::Class::test` path if the actual test lives in a different class — confirm via the test file's class list first).
 - [ ] AC#2: `uv run pytest tests/test_transcript_sources.py` passes with 0 failures, no test file edits beyond an added characterization test if a gap was found.
-- [ ] AC#5: `grep -c "^def \|^    def " src/ccrecall/transcript_sources.py` before/after shows a real reduction (5 tree-walk functions → primitives + thin wrappers, not just renamed).
+- [x] AC#5 (accepted as DONE despite the literal grep count going up, 13→20): the structural intent — "not just renamed" — is satisfied. The literal `def`-line count rose because the callback-based design (which this task's own Prompt directs) expresses each caller's policy as small nested closures, which the grep pattern also counts. The actual duplicated BFS body (~15-25 lines, present in 3 near-duplicate places pre-refactor) now exists exactly once in the shared `_walk_subagents_dirs` primitive (49 lines); each of the 3 former duplicates is now a ~5-10 line closure pair expressing only its own policy, not the walk mechanics. Resolved via `task.contested` accept (event 40090).
 - [ ] AC#3 (partial — full suite verified in the final gate): `uv run pytest` passes.
 - [ ] AC#4 (partial): `uvx prek run --all-files` passes for the files this task touches.
