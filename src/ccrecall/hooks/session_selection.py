@@ -14,6 +14,7 @@ Selection Algorithm (clear):
 
 import contextlib
 import json
+import logging
 import sqlite3
 from pathlib import Path
 
@@ -21,7 +22,10 @@ from whenever import Instant
 
 from ccrecall.config import CLEAR_HANDOFF_FILENAME
 from ccrecall.formatting import normalize_cwd
+from ccrecall.models import LOGGER_NAME
 from ccrecall.serialization import decode_json_column
+
+log = logging.getLogger(LOGGER_NAME)
 
 # Reject a clear-handoff written more than this many seconds ago (stale guard).
 HANDOFF_STALE_SECONDS = 30
@@ -170,6 +174,7 @@ def _find_cleared_from_session_uuid(db_path: Path, cwd: str) -> str | None:
     try:
         handoff_data = json.loads(handoff_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
+        log.debug("corrupt or unreadable handoff file, deleting: %s", handoff_path)
         with contextlib.suppress(OSError):
             handoff_path.unlink()
         return None

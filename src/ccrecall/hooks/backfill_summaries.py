@@ -6,8 +6,9 @@ with summary_version = -1 to avoid infinite retry.
 """
 
 import sqlite3
+from pathlib import Path
 
-from ccrecall.config import load_settings, remove_pid_file, setup_logging
+from ccrecall.config import DEFAULT_DB_PATH, load_settings_for_db, remove_pid_file, setup_logging
 from ccrecall.db import CONTENT_ERROR_VERSION, get_connection
 from ccrecall.summarizer import SUMMARY_VERSION, compute_context_summary
 
@@ -18,21 +19,21 @@ BATCH_SIZE = 50
 PID_KEY = "ccrecall-backfill-summaries"
 
 
-def run(*, verbose: bool = False):
+def run(*, verbose: bool = False, db: Path = DEFAULT_DB_PATH) -> None:
     """Backfill context summaries for branches that lack a current one.
 
     Wraps the ``_main()`` work in PID-file cleanup. ``_main()`` is kept separate
     so tests can exercise the backfill logic without the PID-file lifecycle.
     """
     try:
-        _main(verbose=verbose)
+        _main(verbose=verbose, db=db)
     finally:
         # Delete PID file so _spawn_background can spawn again next session
         remove_pid_file(PID_KEY)
 
 
-def _main(*, verbose: bool = False):
-    settings = load_settings()
+def _main(*, verbose: bool = False, db: Path = DEFAULT_DB_PATH) -> None:
+    settings = load_settings_for_db(db)
     logger = setup_logging(settings, process_name="backfill-summary", verbose=verbose)
 
     total_updated = 0

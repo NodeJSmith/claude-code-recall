@@ -17,21 +17,20 @@ non-zero so the scheduler sees the failure.
 
 Query construction/constants live in `backfill_query.py`; status reporting
 lives in `backfill_status.py`. This module keeps the `run()` orchestrator plus
-the per-batch `_reclaim_memory` helper (gc + malloc_trim between batches, the
-same RSS discipline as import_conversations).
+the shared `reclaim_memory` helper from `subprocess_utils` (gc + malloc_trim
+between batches, the same RSS discipline as import_conversations).
 """
 
 import contextlib
-import ctypes
-import gc
 import json
 import os
 import sqlite3
 import sys
 import time
 from collections import deque
+from pathlib import Path
 
-from ccrecall.config import load_settings, setup_logging
+from ccrecall.config import DEFAULT_DB_PATH, load_settings_for_db, setup_logging
 from ccrecall.db import CONTENT_ERROR_VERSION, get_connection
 from ccrecall.db_vec import chunk_vec_queryable, fetch_branch_messages
 from ccrecall.embed_ops import embed_branch_chunks
@@ -52,39 +51,13 @@ from ccrecall.hooks.backfill_query import (
     build_selection,
 )
 from ccrecall.hooks.backfill_status import format_duration, run_status
+from ccrecall.hooks.subprocess_utils import reclaim_memory, try_load_libc
 
 _PRINT_PREFIX = "ccrecall backfill embeddings"
 _LOG_PREFIX = "Backfill embeddings"
 _SAVEPOINT_NAME = "row"
 _WARMUP_BRANCHES = 5
 _RATE_WINDOW = 30
-
-
-def _try_load_libc() -> ctypes.CDLL | None:
-    """Load glibc for malloc_trim (Linux only); None anywhere else or on failure."""
-    if sys.platform != "linux":
-        return None
-    with contextlib.suppress(OSError):
-        return ctypes.CDLL("libc.so.6")
-    return None
-
-
-def _reclaim_memory(libc: ctypes.CDLL | None) -> None:
-    """Free Python objects and hand freed glibc arena pages back to the OS.
-
-    Same RSS discipline as import_conversations' reclaim_memory: without
-    malloc_trim, a process embedding thousands of branches keeps every arena it
-    ever grew, so its RSS floor ratchets up to the largest historical batch and
-    stays there. Runs once per batch (beside the commit) so peaks don't
-    accumulate across the run.
-    """
-    gc.collect()
-    if libc is not None:
-        # Best-effort: a ctypes/symbol failure here would escape run()'s
-        # sqlite3.Error/OSError normalization and crash the backfill over a
-        # memory-hygiene nicety.
-        with contextlib.suppress(Exception):
-            libc.malloc_trim(0)
 
 
 def run(
@@ -96,6 +69,7 @@ def run(
     progress_every: int = DEFAULT_PROGRESS_EVERY,
     threads: int = DEFAULT_EMBED_THREADS,
     verbose: bool = False,
+    db: Path = DEFAULT_DB_PATH,
 ) -> int:
     """Embed active-leaf branch exchanges at chunk grain (opt-in; not auto-spawned)."""
     # Backstop for direct callers; the CLI validators reject <1 before reaching
@@ -107,7 +81,7 @@ def run(
     if limit is not None and limit < 1:
         raise ValueError("limit must be >= 1")
 
-    settings = load_settings()
+    settings = load_settings_for_db(db)
     logger = setup_logging(settings, process_name="backfill-embed", verbose=verbose)
 
     if status:
@@ -142,7 +116,7 @@ def run(
     started = time.monotonic()
 
     where, params = build_selection(days)
-    libc = _try_load_libc()
+    libc = try_load_libc()
 
     try:
         with get_connection(settings, load_vec=True) as conn:
@@ -318,7 +292,7 @@ def run(
                     return EXIT_ABORT
 
                 conn.commit()
-                _reclaim_memory(libc)
+                reclaim_memory(libc)
 
                 time.sleep(BACKFILL_BATCH_DELAY_SECONDS)
     except (sqlite3.Error, OSError) as e:

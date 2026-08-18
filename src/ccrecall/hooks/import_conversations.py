@@ -6,13 +6,9 @@ Detects conversation branches (from rewind) and stores each branch separately.
 v3 schema: messages stored once per session, branches as separate index.
 """
 
-import contextlib
-import ctypes
-import gc
 import logging
 import resource
 import sqlite3
-import sys
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -22,6 +18,7 @@ from ccrecall.db import DEFAULT_PROJECTS_DIR, get_connection
 from ccrecall.db_vec import TRIGGER_CHUNKS_VEC_AD, vec_available
 from ccrecall.file_hashing import transcript_file_hash
 from ccrecall.formatting import extract_project_name, normalize_project_key
+from ccrecall.hooks.subprocess_utils import reclaim_memory, try_load_libc
 from ccrecall.import_log_ops import has_pending_tool_content
 from ccrecall.models import LOGGER_NAME
 from ccrecall.parsing import extract_session_uuid, sort_session_files
@@ -205,7 +202,7 @@ def import_project(
     conn: sqlite3.Connection,
     project_dir: Path,
     exclude_projects: list[str] | None = None,
-    reclaim_memory: Callable[[], None] = _noop,
+    on_reclaim: Callable[[], None] = _noop,
 ) -> tuple[int, int, int]:
     """
     Import all sessions from a project directory.
@@ -260,7 +257,7 @@ def import_project(
             else:
                 sessions_imported += branches_count
                 messages_imported += msg_count
-                reclaim_memory()
+                on_reclaim()
 
     if sessions_imported or sessions_skipped:
         log.debug(
@@ -318,22 +315,13 @@ def _run(
         t_conn = time.monotonic()
         logger.debug("connection opened in %.2fs", t_conn - t_start)
 
-        # gc.collect() frees Python objects; malloc_trim() releases freed glibc arena
-        # pages back to the OS (without it, RSS grows monotonically). Runs between
-        # sessions (not just projects) so large projects don't accumulate unbounded.
-        libc: ctypes.CDLL | None = None
-        if sys.platform == "linux":
-            with contextlib.suppress(OSError):
-                libc = ctypes.CDLL("libc.so.6")
-
+        libc = try_load_libc()
         t_gc_total = 0.0
 
-        def reclaim_memory() -> None:
+        def _reclaim() -> None:
             nonlocal t_gc_total
             t0 = time.monotonic()
-            gc.collect()
-            if libc is not None:
-                libc.malloc_trim(0)
+            reclaim_memory(libc)
             t_gc_total += time.monotonic() - t0
 
         if project:
@@ -345,7 +333,7 @@ def _run(
                 print(f"Unsafe project path: {project_dir}")
                 return
 
-            sessions, messages, skipped = import_project(conn, project_dir, exclude_projects, reclaim_memory)
+            sessions, messages, skipped = import_project(conn, project_dir, exclude_projects, _reclaim)
             conn.commit()
             total_sessions += sessions
             total_messages += messages
@@ -362,7 +350,7 @@ def _run(
 
                 project_count += 1
                 t0 = time.monotonic()
-                sessions, messages, skipped = import_project(conn, project_dir, exclude_projects, reclaim_memory)
+                sessions, messages, skipped = import_project(conn, project_dir, exclude_projects, _reclaim)
                 t_import_total += time.monotonic() - t0
 
                 t0 = time.monotonic()

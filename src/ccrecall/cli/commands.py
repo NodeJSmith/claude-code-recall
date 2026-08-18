@@ -123,10 +123,11 @@ def cmd_status(
 @backfill_app.command(name="summaries")
 def cmd_backfill_summaries(
     *,
+    db: _DB = DEFAULT_DB_PATH,
     ctx: CLIContextParam = DEFAULT_CLI_CONTEXT,
 ) -> None:
     """Backfill context summaries for branches that lack a current one."""
-    backfill_summaries_mod.run(verbose=ctx.debug)
+    backfill_summaries_mod.run(verbose=ctx.debug, db=db)
 
 
 @backfill_app.command(name="embeddings")
@@ -149,6 +150,7 @@ def cmd_backfill_embeddings(
         int, Parameter(help="Print a progress line every N newly embedded branches.")
     ] = backfill_query_mod.DEFAULT_PROGRESS_EVERY,
     threads: Annotated[int, Parameter(help="ONNX intra-op threads per inference call.")] = DEFAULT_EMBED_THREADS,
+    db: _DB = DEFAULT_DB_PATH,
     ctx: CLIContextParam = DEFAULT_CLI_CONTEXT,
 ) -> None:
     """Seed historical embeddings for active-leaf branch summaries (opt-in)."""
@@ -172,6 +174,7 @@ def cmd_backfill_embeddings(
             progress_every=progress_every,
             threads=threads,
             verbose=ctx.debug,
+            db=db,
         )
     finally:
         # Status is read-only: never disturb a concurrent backfill's PID marker.
@@ -197,6 +200,7 @@ def cmd_backfill_tool_content(
     progress_every: Annotated[
         int, Parameter(help="Print a progress line every N newly backfilled sessions.")
     ] = backfill_query_mod.DEFAULT_PROGRESS_EVERY,
+    db: _DB = DEFAULT_DB_PATH,
     ctx: CLIContextParam = DEFAULT_CLI_CONTEXT,
 ) -> None:
     """Re-parse existing sessions' JSONL files to populate tool_content (opt-in)."""
@@ -211,6 +215,7 @@ def cmd_backfill_tool_content(
         limit=limit,
         progress_every=progress_every,
         verbose=ctx.debug,
+        db=db,
     )
     raise SystemExit(code)
 
@@ -218,10 +223,10 @@ def cmd_backfill_tool_content(
 @app.command(name="recent")
 def cmd_recent(
     *,
-    n: Annotated[
+    limit: Annotated[
         int,
         Parameter(
-            name=["--n", "-n"],
+            name=["--limit", "-n"],
             validator=Number(gte=1, lte=recent_chats_mod.MAX_RECENT_SESSIONS),
             help=f"Number of sessions (1-{recent_chats_mod.MAX_RECENT_SESSIONS}).",
         ),
@@ -243,7 +248,7 @@ def cmd_recent(
     messages}], total_sessions, total_messages}
     """
     recent_chats_mod.run(
-        n=n,
+        n=limit,
         sort_order=sort_order,
         before=before,
         after=after,
@@ -266,7 +271,7 @@ def cmd_search(
     max_results: Annotated[
         int,
         Parameter(
-            name=["--max-results", "-n", "--n"],
+            name=["--max-results", "-n"],
             validator=Number(gte=1, lte=search_mod.MAX_SEARCH_RESULTS),
             help=f"Max sessions (1-{search_mod.MAX_SEARCH_RESULTS}).",
         ),
@@ -311,7 +316,7 @@ def cmd_search_messages(
     max_results: Annotated[
         int,
         Parameter(
-            name=["--max-results", "-n", "--n"],
+            name=["--max-results", "-n"],
             validator=Number(gte=1, lte=search_mod.MAX_SEARCH_RESULTS),
             help=f"Max matched exchanges (1-{search_mod.MAX_SEARCH_RESULTS}).",
         ),
@@ -321,6 +326,7 @@ def cmd_search_messages(
     path: Annotated[str | None, Parameter(help="Filter by cwd substring (e.g. worktree name).")] = None,
     before: _BEFORE = None,
     after: _AFTER = None,
+    verbose: _VERBOSE = False,
     include_notifications: _NOTIFS = False,
     db: _DB = DEFAULT_DB_PATH,
     ctx: CLIContextParam = DEFAULT_CLI_CONTEXT,
@@ -344,6 +350,7 @@ def cmd_search_messages(
         before=before,
         after=after,
         output_format=ctx.output_format,
+        verbose=verbose,
         include_notifications=include_notifications,
         db=db,
     )
@@ -358,9 +365,7 @@ def cmd_tail(
         bool, _FLAG, Parameter(name=["--full"], help="Print full untruncated last instruction and assistant message.")
     ] = False,
     cwd: Annotated[str | None, Parameter(name=["--cwd"], help="Derive project dir from this path.")] = None,
-    n: Annotated[
-        int, Parameter(name=["-n", "--n", "--lines"], help="Number of tail events to show.")
-    ] = _TAIL_DEFAULT_N,
+    n: Annotated[int, Parameter(name=["--lines", "-n"], help="Number of tail events to show.")] = _TAIL_DEFAULT_N,
 ) -> None:
     """Print the tail of a prior session's transcript for fast resume."""
     raise SystemExit(session_tail_mod.run(selector, list_sessions=list_sessions, cwd=cwd, n=n, full=full))

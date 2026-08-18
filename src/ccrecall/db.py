@@ -53,6 +53,12 @@ def escape_like(value: str) -> str:
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
+def has_tool_counts(cursor: sqlite3.Cursor) -> bool:
+    """Check if the branches table has a tool_counts column (absent on old DBs)."""
+    cursor.execute("PRAGMA table_info(branches)")
+    return "tool_counts" in {row[1] for row in cursor.fetchall()}
+
+
 def parse_project_filter(project: str | None) -> list[str] | None:
     """Split a comma-separated --project value into a stripped list (None if unset).
 

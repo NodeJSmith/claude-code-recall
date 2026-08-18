@@ -4,10 +4,10 @@
 
 | Lens | Tool | Options | Also Gather |
 |------|------|---------|-------------|
-| restore-context | recent_chats | `--n 5 --verbose` | `git status`, `git log -10` |
+| restore-context | recent_chats | `--limit 5 --verbose` | `git status`, `git log -10` |
 | find-gaps | search_conversations | `--query "confused struggling"` | — |
-| review-process | recent_chats | `--n 20 --verbose` | recent git log |
-| run-retro | recent_chats | `--n 20 --project NAME --verbose` | full git history |
+| review-process | recent_chats | `--limit 20 --verbose` | recent git log |
+| run-retro | recent_chats | `--limit 20 --project NAME --verbose` | full git history |
 | extract-decisions | search_conversations | `--query "decided chose trade-off"` | — |
 | find-antipatterns | search_conversations | `--query "again same mistake repeated"` | — |
 

@@ -22,6 +22,7 @@ from ccrecall.schema import SCHEMA, SCHEMA_CORE, detect_fts_support
 from ccrecall.search_cli import format_markdown, print_status, run, run_messages
 from ccrecall.search_conversations import OVERFETCH_FLOOR, compute_caveat, search_messages, search_sessions
 from ccrecall.search_hydrate import dedup_by_session, hydrate_cards
+from ccrecall.search_query import ScopeFilter
 from ccrecall.search_vector import execute_chunk_knn, get_vec_chunk_ids
 
 
@@ -203,7 +204,9 @@ class TestSearchSessionsFTS:
         if fts_level not in ("fts5", "fts4"):
             pytest.skip("FTS not available")
 
-        results, _ranked = search_sessions(search_db, "pytest", fts_level, max_results=10, projects=["alpha"])
+        results, _ranked = search_sessions(
+            search_db, "pytest", fts_level, max_results=10, scope=ScopeFilter(projects=["alpha"])
+        )
         assert all(r["project"] == "alpha" for r in results), "Should only return alpha project"
         assert len(results) >= 1
 
@@ -227,7 +230,9 @@ class TestSearchSessionsFTS:
         if fts_level not in ("fts5", "fts4"):
             pytest.skip("FTS not available")
 
-        results, _ranked = search_sessions(search_db, "pytest", fts_level, max_results=10, session_id="sess-alpha-1")
+        results, _ranked = search_sessions(
+            search_db, "pytest", fts_level, max_results=10, scope=ScopeFilter(session_id="sess-alpha-1")
+        )
         assert len(results) == 1
         assert results[0]["session_uuid"] == "sess-alpha-1"
 
@@ -236,7 +241,9 @@ class TestSearchSessionsFTS:
         if fts_level not in ("fts5", "fts4"):
             pytest.skip("FTS not available")
 
-        results, _ranked = search_sessions(search_db, "pytest", fts_level, max_results=10, session_id="sess")
+        results, _ranked = search_sessions(
+            search_db, "pytest", fts_level, max_results=10, scope=ScopeFilter(session_id="sess")
+        )
         uuids = {r["session_uuid"] for r in results}
         assert len(results) == 2
         assert "sess-alpha-1" in uuids
@@ -247,7 +254,9 @@ class TestSearchSessionsFTS:
         if fts_level not in ("fts5", "fts4"):
             pytest.skip("FTS not available")
 
-        results, _ranked = search_sessions(search_db, "pytest", fts_level, max_results=10, session_id="nonexistent")
+        results, _ranked = search_sessions(
+            search_db, "pytest", fts_level, max_results=10, scope=ScopeFilter(session_id="nonexistent")
+        )
         assert len(results) == 0
 
 
@@ -314,7 +323,9 @@ class TestSearchSessionsLIKE:
         assert "sess-beta-1" not in uuids  # has "pytest" but not "fixtures"
 
     def test_like_project_filter(self, search_db):
-        results, _ranked = search_sessions(search_db, "pytest", fts_level=None, max_results=10, projects=["beta"])
+        results, _ranked = search_sessions(
+            search_db, "pytest", fts_level=None, max_results=10, scope=ScopeFilter(projects=["beta"])
+        )
         assert all(r["project"] == "beta" for r in results)
 
     def test_like_empty_query(self, search_db):
@@ -326,7 +337,9 @@ class TestSearchSessionsLIKE:
         assert len(results) <= 1
 
     def test_like_session_filter(self, search_db):
-        results, _ranked = search_sessions(search_db, "pytest", fts_level=None, max_results=10, session_id="sess-beta")
+        results, _ranked = search_sessions(
+            search_db, "pytest", fts_level=None, max_results=10, scope=ScopeFilter(session_id="sess-beta")
+        )
         assert len(results) == 1
         assert results[0]["session_uuid"] == "sess-beta-1"
 
@@ -428,22 +441,22 @@ class TestRecentChatsSessionFilter:
     """Test --session filter on get_recent_sessions."""
 
     def test_session_filter_exact(self, search_db):
-        results = get_recent_sessions(search_db, n=10, session_id="sess-alpha-1")
+        results = get_recent_sessions(search_db, n=10, scope=ScopeFilter(session_id="sess-alpha-1"))
         assert len(results) == 1
         assert results[0]["uuid"] == "sess-alpha-1"
 
     def test_session_filter_prefix(self, search_db):
-        results = get_recent_sessions(search_db, n=10, session_id="sess-alpha")
+        results = get_recent_sessions(search_db, n=10, scope=ScopeFilter(session_id="sess-alpha"))
         assert len(results) == 2
         uuids = {r["uuid"] for r in results}
         assert uuids == {"sess-alpha-1", "sess-alpha-2"}
 
     def test_session_filter_no_match(self, search_db):
-        results = get_recent_sessions(search_db, n=10, session_id="nonexistent")
+        results = get_recent_sessions(search_db, n=10, scope=ScopeFilter(session_id="nonexistent"))
         assert len(results) == 0
 
     def test_session_filter_short_prefix(self, search_db):
-        results = get_recent_sessions(search_db, n=10, session_id="sess")
+        results = get_recent_sessions(search_db, n=10, scope=ScopeFilter(session_id="sess"))
         assert len(results) == 3
 
 
@@ -451,28 +464,28 @@ class TestPathFilter:
     """Test --path filter on both get_recent_sessions and search_sessions."""
 
     def test_recent_path_worktree_name(self, search_db):
-        results = get_recent_sessions(search_db, n=10, path="ui-decomp")
+        results = get_recent_sessions(search_db, n=10, scope=ScopeFilter(path="ui-decomp"))
         assert len(results) == 1
         assert results[0]["uuid"] == "sess-alpha-2"
 
     def test_recent_path_no_match(self, search_db):
-        results = get_recent_sessions(search_db, n=10, path="nonexistent-worktree")
+        results = get_recent_sessions(search_db, n=10, scope=ScopeFilter(path="nonexistent-worktree"))
         assert len(results) == 0
 
     def test_recent_path_substring_matches_base_and_worktrees(self, search_db):
         """Substring match on a repo path includes worktrees under it."""
-        results = get_recent_sessions(search_db, n=10, path="/home/user/alpha")
+        results = get_recent_sessions(search_db, n=10, scope=ScopeFilter(path="/home/user/alpha"))
         assert len(results) == 2
         uuids = {r["uuid"] for r in results}
         assert uuids == {"sess-alpha-1", "sess-alpha-2"}
 
     def test_recent_path_combined_with_project(self, search_db):
-        results = get_recent_sessions(search_db, n=10, projects=["alpha"], path="ui-decomp")
+        results = get_recent_sessions(search_db, n=10, scope=ScopeFilter(projects=["alpha"], path="ui-decomp"))
         assert len(results) == 1
         assert results[0]["uuid"] == "sess-alpha-2"
 
     def test_recent_path_project_mismatch(self, search_db):
-        results = get_recent_sessions(search_db, n=10, projects=["beta"], path="ui-decomp")
+        results = get_recent_sessions(search_db, n=10, scope=ScopeFilter(projects=["beta"], path="ui-decomp"))
         assert len(results) == 0
 
     def test_search_path_fts(self, search_db):
@@ -480,12 +493,16 @@ class TestPathFilter:
         if fts_level not in ("fts5", "fts4"):
             pytest.skip("FTS not available")
 
-        results, _ranked = search_sessions(search_db, "database", fts_level, max_results=10, path="ui-decomp")
+        results, _ranked = search_sessions(
+            search_db, "database", fts_level, max_results=10, scope=ScopeFilter(path="ui-decomp")
+        )
         assert len(results) == 1
         assert results[0]["session_uuid"] == "sess-alpha-2"
 
     def test_search_path_like_fallback(self, search_db):
-        results, _ranked = search_sessions(search_db, "database", fts_level=None, max_results=10, path="ui-decomp")
+        results, _ranked = search_sessions(
+            search_db, "database", fts_level=None, max_results=10, scope=ScopeFilter(path="ui-decomp")
+        )
         assert len(results) == 1
         assert results[0]["session_uuid"] == "sess-alpha-2"
 
@@ -495,7 +512,9 @@ class TestPathFilter:
             pytest.skip("FTS not available")
 
         all_pytest, _r1 = search_sessions(search_db, "pytest", fts_level, max_results=10)
-        with_path, _r2 = search_sessions(search_db, "pytest", fts_level, max_results=10, path="/home/user/beta")
+        with_path, _r2 = search_sessions(
+            search_db, "pytest", fts_level, max_results=10, scope=ScopeFilter(path="/home/user/beta")
+        )
         assert len(with_path) < len(all_pytest)
         assert all(r["session_uuid"] == "sess-beta-1" for r in with_path)
 
@@ -993,11 +1012,7 @@ class TestAdaptiveChunkKnn:
         results = search_vector._filter_chunk_knn_rows(
             cursor,
             knn_rows,
-            projects=["proj"],
-            session_id=None,
-            path=None,
-            before=None,
-            after=None,
+            ScopeFilter(projects=["proj"]),
         )
 
         filter_param_lengths = [
@@ -1029,11 +1044,7 @@ class TestAdaptiveChunkKnn:
         results = search_vector._filter_chunk_knn_rows(
             cursor,
             [(chunk_id, 0.0)],
-            projects=["proj"],
-            session_id=None,
-            path=None,
-            before=None,
-            after=None,
+            ScopeFilter(projects=["proj"]),
         )
 
         assert results == []
@@ -1108,7 +1119,7 @@ class TestAdaptiveChunkKnnScopes:
             project="alpha",
         )
 
-        results = execute_chunk_knn(conn.cursor(), query_vec, top_k=1, projects=["alpha"])
+        results = execute_chunk_knn(conn.cursor(), query_vec, top_k=1, scope=ScopeFilter(projects=["alpha"]))
 
         assert len(results) == 1
         assert results[0][:2] == (valid_chunk_id, valid_branch_id)
@@ -1135,7 +1146,7 @@ class TestAdaptiveChunkKnnScopes:
             embed_vec=far_vec,
         )
 
-        results = execute_chunk_knn(conn.cursor(), query_vec, top_k=1, session_id="sess_100%")
+        results = execute_chunk_knn(conn.cursor(), query_vec, top_k=1, scope=ScopeFilter(session_id="sess_100%"))
 
         assert len(results) == 1
         assert results[0][:2] == (valid_chunk_id, valid_branch_id)
@@ -1164,7 +1175,7 @@ class TestAdaptiveChunkKnnScopes:
             cwd="/home/user/worktrees/feature_%/repo",
         )
 
-        results = execute_chunk_knn(conn.cursor(), query_vec, top_k=1, path="feature_%")
+        results = execute_chunk_knn(conn.cursor(), query_vec, top_k=1, scope=ScopeFilter(path="feature_%"))
 
         assert len(results) == 1
         assert results[0][:2] == (valid_chunk_id, valid_branch_id)
@@ -1200,7 +1211,7 @@ class TestAdaptiveChunkKnnScopes:
             started_at="2025-01-01T10:00:00Z",
         )
 
-        results = execute_chunk_knn(conn.cursor(), query_vec, top_k=1, before="2025-03-01")
+        results = execute_chunk_knn(conn.cursor(), query_vec, top_k=1, scope=ScopeFilter(before="2025-03-01"))
 
         assert len(results) == 1
         assert results[0][:2] == (valid_chunk_id, valid_branch_id)
@@ -1236,7 +1247,7 @@ class TestAdaptiveChunkKnnScopes:
             started_at="2025-06-01T10:00:00Z",
         )
 
-        results = execute_chunk_knn(conn.cursor(), query_vec, top_k=1, after="2025-03-01")
+        results = execute_chunk_knn(conn.cursor(), query_vec, top_k=1, scope=ScopeFilter(after="2025-03-01"))
 
         assert len(results) == 1
         assert results[0][:2] == (valid_chunk_id, valid_branch_id)
@@ -1276,8 +1287,7 @@ class TestAdaptiveChunkKnnScopes:
             conn.cursor(),
             query_vec,
             top_k=1,
-            session_id="sess_combo%",
-            before="2025-03-01",
+            scope=ScopeFilter(session_id="sess_combo%", before="2025-03-01"),
         )
 
         assert len(results) == 1
@@ -1331,7 +1341,9 @@ class TestSearchSessionsFusionScopeRetry:
             patch("ccrecall.search_conversations.embed_text", return_value=query_vec),
             patch("ccrecall.search_conversations.rrf_scored", wraps=rrf_scored) as fusion_mock,
         ):
-            results, ranked = search_sessions(conn, query, fts_level, max_results=1, projects=["alpha"])
+            results, ranked = search_sessions(
+                conn, query, fts_level, max_results=1, scope=ScopeFilter(projects=["alpha"])
+            )
 
         fusion_inputs = fusion_mock.call_args.args[0]
         assert target_branch_id in fusion_inputs[0]
@@ -2062,7 +2074,7 @@ class TestSearchMessages:
                 return_value=[{"session_uuid": "sess", "exchange_index": 0}],
             ),
         ):
-            search_messages(conn, "test query", max_results=2, projects=["alpha"])
+            search_messages(conn, "test query", max_results=2, scope=ScopeFilter(projects=["alpha"]))
 
         assert execute_mock.call_args.kwargs["target_results"] == 2
         assert execute_mock.call_args.args[2] == OVERFETCH_FLOOR
@@ -2113,7 +2125,7 @@ class TestSearchMessages:
             patch("ccrecall.search_conversations.model_available", return_value=True),
             patch("ccrecall.search_conversations.embed_text", return_value=query_vec),
         ):
-            snippets, ranked = search_messages(conn, "test query", max_results=2, projects=["alpha"])
+            snippets, ranked = search_messages(conn, "test query", max_results=2, scope=ScopeFilter(projects=["alpha"]))
 
         assert ranked is True
         assert [snippet["session_uuid"] for snippet in snippets] == ["sess-alpha-mid", "sess-alpha-far"]
@@ -2542,14 +2554,14 @@ class TestSearchSessionsDateFilters:
 
     def test_before_excludes_later_session(self, dated_search_db):
         results, _ranked = search_sessions(
-            dated_search_db, "pytest", fts_level=None, max_results=10, before="2025-03-01"
+            dated_search_db, "pytest", fts_level=None, max_results=10, scope=ScopeFilter(before="2025-03-01")
         )
         uuids = {r["session_uuid"] for r in results}
         assert uuids == {"sess-dated-old"}
 
     def test_after_excludes_earlier_session(self, dated_search_db):
         results, _ranked = search_sessions(
-            dated_search_db, "pytest", fts_level=None, max_results=10, after="2025-03-01"
+            dated_search_db, "pytest", fts_level=None, max_results=10, scope=ScopeFilter(after="2025-03-01")
         )
         uuids = {r["session_uuid"] for r in results}
         assert uuids == {"sess-dated-new"}
@@ -2558,7 +2570,11 @@ class TestSearchSessionsDateFilters:
         # Neither branch's started_at (2025-01-01, 2025-06-01) falls inside
         # this window -- proves the two clauses actually AND together.
         results, _ranked = search_sessions(
-            dated_search_db, "pytest", fts_level=None, max_results=10, after="2025-02-01", before="2025-03-01"
+            dated_search_db,
+            "pytest",
+            fts_level=None,
+            max_results=10,
+            scope=ScopeFilter(after="2025-02-01", before="2025-03-01"),
         )
         assert results == []
 
@@ -2607,7 +2623,9 @@ class TestSearchMessagesDateFilters:
             patch("ccrecall.search_conversations.model_available", return_value=True),
             patch("ccrecall.search_conversations.embed_text", return_value=query_vec),
         ):
-            snippets, ranked = search_messages(conn, "test query", max_results=10, before="2025-03-01")
+            snippets, ranked = search_messages(
+                conn, "test query", max_results=10, scope=ScopeFilter(before="2025-03-01")
+            )
 
         assert ranked is True
         assert {s["session_uuid"] for s in snippets} == {"sess-msg-old"}

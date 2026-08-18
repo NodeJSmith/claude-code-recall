@@ -9,10 +9,11 @@ from pathlib import Path
 
 from ccrecall.config import DEFAULT_DB_PATH
 from ccrecall.dates import validate_or_exit
-from ccrecall.db import escape_like, get_connection, parse_project_filter, resolve_db_settings
+from ccrecall.db import get_connection, has_tool_counts, parse_project_filter, resolve_db_settings
 from ccrecall.db_vec import fetch_branch_messages
 from ccrecall.errors import emit_error
 from ccrecall.formatting import format_json_sessions, format_markdown_session
+from ccrecall.search_query import EMPTY_SCOPE, ScopeFilter, scope_filter_clause
 from ccrecall.serialization import decode_json_column
 
 # Upper bound on --n, single-sourced here and referenced by the CLI validator
@@ -24,23 +25,16 @@ def get_recent_sessions(
     conn: sqlite3.Connection,
     n: int = 3,
     sort_order: str = "desc",
-    before: str | None = None,
-    after: str | None = None,
-    projects: list[str] | None = None,
-    session_id: str | None = None,
-    path: str | None = None,
+    scope: ScopeFilter = EMPTY_SCOPE,
     verbose: bool = False,
     include_notifications: bool = False,
 ) -> list[dict]:
     """Get n most recent sessions with all their messages."""
     cursor = conn.cursor()
 
-    # Check if tool_counts column exists (absent on DBs created before it was added to SCHEMA_CORE)
-    cursor.execute("PRAGMA table_info(branches)")
-    branch_columns = {row[1] for row in cursor.fetchall()}
-    has_tool_counts = "tool_counts" in branch_columns
+    has_tc = has_tool_counts(cursor)
 
-    tool_counts_col = ", b.tool_counts" if has_tool_counts else ""
+    tool_counts_col = ", b.tool_counts" if has_tc else ""
     sql = f"""
         SELECT s.id, s.uuid, b.started_at, b.ended_at, b.exchange_count,
                b.files_modified, b.commits, s.git_branch,
@@ -51,32 +45,8 @@ def get_recent_sessions(
         JOIN projects p ON s.project_id = p.id
         WHERE 1=1
     """
-    params = []
-
-    if session_id:
-        sql += " AND s.uuid LIKE ? ESCAPE '\\'"
-        params.append(f"{escape_like(session_id)}%")
-
-    # Mirrors search_query.py's scope_filter_clause (before/after clauses) —
-    # not reused because this function already builds its project/session/path
-    # filters inline rather than via that helper. Keep both in sync if the
-    # before/after comparison semantics ever change.
-    if before:
-        sql += " AND b.started_at < ?"
-        params.append(before)
-
-    if after:
-        sql += " AND b.started_at > ?"
-        params.append(after)
-
-    if projects:
-        placeholders = ",".join("?" * len(projects))
-        sql += f" AND p.name IN ({placeholders})"
-        params.extend(projects)
-
-    if path:
-        sql += " AND s.cwd LIKE ? ESCAPE '\\'"
-        params.append(f"%{escape_like(path)}%")
+    scope_sql, params = scope_filter_clause(scope)
+    sql += scope_sql
 
     order = "DESC" if sort_order == "desc" else "ASC"
     sql += f" ORDER BY b.ended_at {order} LIMIT ?"
@@ -88,7 +58,7 @@ def get_recent_sessions(
     results = []
 
     for session in sessions:
-        if has_tool_counts:
+        if has_tc:
             (
                 _session_id,
                 uuid,
@@ -184,6 +154,8 @@ def run(
             remediation="Run ccrecall import or start a session with the ccrecall plugin installed.",
         )
 
+    scope = ScopeFilter(projects=projects, session_id=session, path=path, before=before, after=after)
+
     try:
         settings = resolve_db_settings(db)
         with get_connection(settings) as conn:
@@ -191,11 +163,7 @@ def run(
                 conn,
                 n=n,
                 sort_order=sort_order,
-                before=before,
-                after=after,
-                projects=projects,
-                session_id=session,
-                path=path,
+                scope=scope,
                 verbose=verbose,
                 include_notifications=include_notifications,
             )

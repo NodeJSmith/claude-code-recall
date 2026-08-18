@@ -15,6 +15,7 @@ from conftest import make_vec_conn
 
 from ccrecall.recent_chats import get_recent_sessions
 from ccrecall.recent_chats import run as recent_chats_run
+from ccrecall.search_query import ScopeFilter
 
 
 def _seed_sessions(conn: sqlite3.Connection) -> list[str]:
@@ -152,11 +153,11 @@ class TestRecentChatsInvariant:
         """project filter works correctly with embedding columns present."""
         _seed_sessions(memory_db)
 
-        results = get_recent_sessions(memory_db, n=10, projects=["proj"])
+        results = get_recent_sessions(memory_db, n=10, scope=ScopeFilter(projects=["proj"]))
         assert len(results) == 3
         assert all(r["project"] == "proj" for r in results)
 
-        results_no_match = get_recent_sessions(memory_db, n=10, projects=["nonexistent"])
+        results_no_match = get_recent_sessions(memory_db, n=10, scope=ScopeFilter(projects=["nonexistent"]))
         assert len(results_no_match) == 0
 
 
@@ -172,31 +173,33 @@ class TestRecentChatsDateFilters:
 
     def test_after_exact_instant_excludes_that_session_and_earlier(self, memory_db):
         _seed_sessions(memory_db)
-        results = get_recent_sessions(memory_db, n=10, after="2025-01-01T10:00:00Z")
+        results = get_recent_sessions(memory_db, n=10, scope=ScopeFilter(after="2025-01-01T10:00:00Z"))
         assert {r["uuid"] for r in results} == {"sess-rc-2", "sess-rc-3"}
 
     def test_before_exact_instant_excludes_that_session_and_later(self, memory_db):
         _seed_sessions(memory_db)
-        results = get_recent_sessions(memory_db, n=10, before="2025-01-03T10:00:00Z")
+        results = get_recent_sessions(memory_db, n=10, scope=ScopeFilter(before="2025-01-03T10:00:00Z"))
         assert {r["uuid"] for r in results} == {"sess-rc-1", "sess-rc-2"}
 
     def test_before_and_after_combine_to_a_range(self, memory_db):
         _seed_sessions(memory_db)
-        results = get_recent_sessions(memory_db, n=10, after="2025-01-01T10:00:00Z", before="2025-01-03T10:00:00Z")
+        results = get_recent_sessions(
+            memory_db, n=10, scope=ScopeFilter(after="2025-01-01T10:00:00Z", before="2025-01-03T10:00:00Z")
+        )
         assert {r["uuid"] for r in results} == {"sess-rc-2"}
 
     def test_bare_date_after_includes_sessions_starting_that_day_onward(self, memory_db):
         # "2025-01-02T10:00:00Z" > "2025-01-02" lexicographically, so a bare
         # date --after is inclusive of that whole day.
         _seed_sessions(memory_db)
-        results = get_recent_sessions(memory_db, n=10, after="2025-01-02")
+        results = get_recent_sessions(memory_db, n=10, scope=ScopeFilter(after="2025-01-02"))
         assert {r["uuid"] for r in results} == {"sess-rc-2", "sess-rc-3"}
 
     def test_bare_date_before_excludes_sessions_starting_that_day(self, memory_db):
         # "2025-01-02T10:00:00Z" is NOT < "2025-01-02" lexicographically, so a
         # bare date --before excludes that whole day (only strictly earlier days).
         _seed_sessions(memory_db)
-        results = get_recent_sessions(memory_db, n=10, before="2025-01-02")
+        results = get_recent_sessions(memory_db, n=10, scope=ScopeFilter(before="2025-01-02"))
         assert {r["uuid"] for r in results} == {"sess-rc-1"}
 
     def test_no_filter_returns_all_sessions(self, memory_db):
@@ -206,7 +209,7 @@ class TestRecentChatsDateFilters:
 
     def test_filter_matching_nothing_returns_empty(self, memory_db):
         _seed_sessions(memory_db)
-        results = get_recent_sessions(memory_db, n=10, after="2030-01-01")
+        results = get_recent_sessions(memory_db, n=10, scope=ScopeFilter(after="2030-01-01"))
         assert results == []
 
 

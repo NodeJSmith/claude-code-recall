@@ -8,12 +8,15 @@ top; keeping that split is what lets a caller migrate the DB without paying the
 those, so keep new heavy dependencies out of it.
 """
 
+import logging
 import sqlite3
 from collections.abc import Callable
 
 from ccrecall.config import ensure_parent_dir, get_db_path
-from ccrecall.models import BUSY_TIMEOUT_MS
+from ccrecall.models import BUSY_TIMEOUT_MS, LOGGER_NAME
 from ccrecall.schema import SCHEMA_CORE, SCHEMA_FTS4, SCHEMA_FTS5, detect_fts_support
+
+log = logging.getLogger(LOGGER_NAME)
 
 # Current schema version. Bump when adding a migration and wire the new DDL
 # delta into _apply_migrations (see _migrate_to_v1 for the version-1 shape).
@@ -298,6 +301,8 @@ def _apply_migrations(
                     migrate_to_v2(conn)
                 conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             conn.execute("COMMIT")
+            if current < SCHEMA_VERSION:
+                log.debug("migrated schema from v%d to v%d", current, SCHEMA_VERSION)
         except Exception:
             conn.execute("ROLLBACK")
             raise
