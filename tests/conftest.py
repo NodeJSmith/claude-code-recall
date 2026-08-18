@@ -18,7 +18,7 @@ FIXTURE_DIR = Path(__file__).parent / "fixtures"
 
 
 @pytest.fixture(autouse=True)
-def _isolated_runtime_dir(tmp_path, monkeypatch):
+def _isolated_runtime_dir(tmp_path, monkeypatch) -> None:
     """Redirect the known ccrecall runtime-dir write sites to this test's tmp_path.
 
     Closes #151: RUNTIME_DIR-derived paths are computed once, at import time
