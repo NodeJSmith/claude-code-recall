@@ -5,6 +5,7 @@ import sqlite3
 
 from whenever import Instant
 
+import ccrecall.health as health
 from ccrecall.health import (
     ALERT_CANT_PERSIST,
     ALERT_EMBEDDINGS_FAILING,
@@ -205,6 +206,61 @@ class TestEmbeddingStatus:
         data = read_embedding_status(path=path)
         assert data is not None
         assert data["reason"] == "second failure"
+
+    def test_omitted_path_resolves_module_constant_at_call_time(self, monkeypatch, tmp_path):
+        """Regression for #151: path defaults must resolve EMBEDDING_STATUS_PATH
+        at call time, not bake it in when the function was defined — otherwise a
+        test-time monkeypatch of the module constant is silently ignored and a
+        caller that omits `path` writes to the real ~/.ccrecall instead."""
+        patched = tmp_path / "embedding-status.json"
+        monkeypatch.setattr(health, "EMBEDDING_STATUS_PATH", patched)
+
+        record_embedding_failure("vec unavailable")
+
+        assert patched.exists()
+        assert read_embedding_status() is not None
+        assert read_embedding_status()["reason"] == "vec unavailable"
+
+        clear_embedding_failure()
+        assert not patched.exists()
+
+
+class TestClearEmbeddingFailureLedger:
+    """clear_embedding_failure's snooze-ledger cleanup (#152)."""
+
+    def test_drops_embeddings_failing_key(self, tmp_path):
+        """Clearing the sidecar also removes the ledger's stale fire-history entry."""
+        status_path = tmp_path / "embedding-status.json"
+        snooze_path = tmp_path / "alert-snooze.json"
+        record_embedding_failure("vec unavailable", path=status_path)
+        evaluate_alerts({ALERT_EMBEDDINGS_FAILING}, snooze_hours=24, snooze_path=snooze_path)
+        assert ALERT_EMBEDDINGS_FAILING in _read_snooze_ledger(snooze_path)
+
+        clear_embedding_failure(path=status_path, snooze_path=snooze_path)
+
+        assert ALERT_EMBEDDINGS_FAILING not in _read_snooze_ledger(snooze_path)
+
+    def test_leaves_other_ledger_keys_untouched(self, tmp_path):
+        """Only ALERT_EMBEDDINGS_FAILING is dropped — other fired alerts stay recorded."""
+        status_path = tmp_path / "embedding-status.json"
+        snooze_path = tmp_path / "alert-snooze.json"
+        record_embedding_failure("vec unavailable", path=status_path)
+        evaluate_alerts({ALERT_EMBEDDINGS_FAILING, ALERT_CANT_PERSIST}, snooze_hours=24, snooze_path=snooze_path)
+
+        clear_embedding_failure(path=status_path, snooze_path=snooze_path)
+
+        assert ALERT_CANT_PERSIST in _read_snooze_ledger(snooze_path)
+
+    def test_no_op_when_ledger_has_no_entry(self, tmp_path):
+        """Clearing with no prior ledger entry (or no ledger file at all) doesn't error."""
+        status_path = tmp_path / "embedding-status.json"
+        snooze_path = tmp_path / "alert-snooze.json"
+        record_embedding_failure("vec unavailable", path=status_path)
+
+        clear_embedding_failure(path=status_path, snooze_path=snooze_path)
+
+        assert not status_path.exists()
+        assert _read_snooze_ledger(snooze_path) == {}
 
 
 class TestSnoozeLedger:

@@ -57,10 +57,10 @@ def proactive_alert_block(
     """
     try:
         # 1. Filesystem probe — no DB needed, unconditional.
-        fs_result = probe_filesystem() if _marker_path is None else probe_filesystem(_marker_path)
+        fs_result = probe_filesystem(_marker_path)
 
         # 2. Embedding-status sidecar — plain file read only, no vec/fastembed load.
-        embedding_status = read_embedding_status() if _status_path is None else read_embedding_status(_status_path)
+        embedding_status = read_embedding_status(_status_path)
 
         # 3. DB probe — only when the DB file exists; a missing DB is not a fault
         # (fresh install). conn=None here means the connection failed (dir/WAL
@@ -95,11 +95,7 @@ def proactive_alert_block(
         # load_settings() always carries alert_snooze_hours from DEFAULT_SETTINGS;
         # fall back to the canonical default only for sparse (test) settings dicts.
         snooze_hours = float(settings.get("alert_snooze_hours", DEFAULT_SETTINGS["alert_snooze_hours"]))
-        keys_to_fire = (
-            evaluate_alerts(active_keys, snooze_hours)
-            if _snooze_path is None
-            else evaluate_alerts(active_keys, snooze_hours, _snooze_path)
-        )
+        keys_to_fire = evaluate_alerts(active_keys, snooze_hours, _snooze_path)
 
         # 6. Build one combined block.
         return build_alert_block(

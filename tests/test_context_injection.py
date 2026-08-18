@@ -1158,8 +1158,11 @@ class TestProactiveAlerts:
         assert "## ⚠" in block1, "Alert should have fired on first session"
         assert snooze_path.exists(), "Snooze ledger should have been written"
 
-        # Step 2: embedding process clears the status (condition resolved)
-        clear_embedding_failure(path=status_path)
+        # Step 2: embedding process clears the status (condition resolved). Also
+        # passing snooze_path here (not just path) so this exercises
+        # clear_embedding_failure's own immediate ledger-drop (#152), not only
+        # the auto-clear evaluate_alerts falls back to in step 3 below.
+        clear_embedding_failure(path=status_path, snooze_path=snooze_path)
         assert not status_path.exists()
 
         # Step 3: next session — no active conditions → no block, ledger reset
