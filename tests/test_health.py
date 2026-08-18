@@ -225,42 +225,40 @@ class TestEmbeddingStatus:
         assert not patched.exists()
 
 
-class TestClearEmbeddingFailureLedger:
-    """clear_embedding_failure's snooze-ledger cleanup (#152)."""
+class TestClearEmbeddingFailureLeavesLedgerAlone:
+    """clear_embedding_failure must not write the snooze ledger (#153 review).
 
-    def test_drops_embeddings_failing_key(self, tmp_path):
-        """Clearing the sidecar also removes the ledger's stale fire-history entry."""
-        status_path = tmp_path / "embedding-status.json"
-        snooze_path = tmp_path / "alert-snooze.json"
-        record_embedding_failure("vec unavailable", path=status_path)
-        evaluate_alerts({ALERT_EMBEDDINGS_FAILING}, snooze_hours=24, snooze_path=snooze_path)
-        assert ALERT_EMBEDDINGS_FAILING in _read_snooze_ledger(snooze_path)
+    The ledger is written only by SessionStart hooks (single-writer invariant,
+    design/specs/002-ccrecall-surfacing-model/design.md § Edge Cases). An
+    earlier version of this function also dropped ALERT_EMBEDDINGS_FAILING from
+    the ledger (#152), which introduced a second writer and could race with
+    evaluate_alerts()'s own read-modify-write, clobbering an unrelated alert
+    key's snooze timestamp. Reverted — see clear_embedding_failure's docstring
+    for why the resulting staleness window is self-healing.
+    """
 
-        clear_embedding_failure(path=status_path, snooze_path=snooze_path)
-
-        assert ALERT_EMBEDDINGS_FAILING not in _read_snooze_ledger(snooze_path)
-
-    def test_leaves_other_ledger_keys_untouched(self, tmp_path):
-        """Only ALERT_EMBEDDINGS_FAILING is dropped — other fired alerts stay recorded."""
+    def test_clearing_sidecar_does_not_touch_ledger(self, tmp_path):
+        """Clearing the sidecar leaves an existing ledger entry in place."""
         status_path = tmp_path / "embedding-status.json"
         snooze_path = tmp_path / "alert-snooze.json"
         record_embedding_failure("vec unavailable", path=status_path)
         evaluate_alerts({ALERT_EMBEDDINGS_FAILING, ALERT_CANT_PERSIST}, snooze_hours=24, snooze_path=snooze_path)
+        ledger_before = _read_snooze_ledger(snooze_path)
 
-        clear_embedding_failure(path=status_path, snooze_path=snooze_path)
+        clear_embedding_failure(path=status_path)
 
-        assert ALERT_CANT_PERSIST in _read_snooze_ledger(snooze_path)
+        assert _read_snooze_ledger(snooze_path) == ledger_before
 
     def test_no_op_when_ledger_has_no_entry(self, tmp_path):
-        """Clearing with no prior ledger entry (or no ledger file at all) doesn't error."""
+        """Clearing with no ledger file present doesn't error or create one."""
         status_path = tmp_path / "embedding-status.json"
         snooze_path = tmp_path / "alert-snooze.json"
         record_embedding_failure("vec unavailable", path=status_path)
 
-        clear_embedding_failure(path=status_path, snooze_path=snooze_path)
+        clear_embedding_failure(path=status_path)
 
         assert not status_path.exists()
-        assert _read_snooze_ledger(snooze_path) == {}
+        assert not snooze_path.exists()
 
 
 class TestSnoozeLedger:

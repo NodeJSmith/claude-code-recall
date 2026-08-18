@@ -175,42 +175,31 @@ def record_embedding_failure(reason: str, path: Path | None = None) -> None:
     atomic_write_json(path, {"reason": reason, "since": Instant.now().format_iso()})
 
 
-def clear_embedding_failure(path: Path | None = None, snooze_path: Path | None = None) -> None:
-    """Remove the embedding-capability-failure sidecar and its snooze-ledger entry.
+def clear_embedding_failure(path: Path | None = None) -> None:
+    """Remove the embedding-capability-failure sidecar.
 
     Called by the embedding process on a successful embed run. No-op if the
     sidecar is already absent.
 
-    Also drops ALERT_EMBEDDINGS_FAILING from the snooze ledger. Without this,
-    the ledger only loses a stale key on evaluate_alerts()'s NEXT call (its
-    auto-clear compares against whatever active_keys that call happens to
-    pass), so the ledger and the sidecar this function just cleared could
-    otherwise disagree about "is this currently a problem" for an unbounded
-    stretch — misleading to anyone reading alert-snooze.json directly instead
-    of going through evaluate_alerts().
+    Deliberately does NOT touch the snooze ledger — the ledger is written only
+    by SessionStart hooks (design/specs/002-ccrecall-surfacing-model/design.md
+    § Edge Cases, "Two sidecar concerns, two writer classes"), to keep this
+    file's read-modify-write single-writer. A second writer here previously
+    raced with evaluate_alerts()'s own read-modify-write and could clobber an
+    unrelated alert key's snooze timestamp (#153 review). The ledger catches up
+    on its own within one hook cycle regardless: evaluate_alerts()'s auto-clear
+    drops any key no longer in active_keys, and active_keys for
+    ALERT_EMBEDDINGS_FAILING is recomputed from this sidecar's live existence
+    on every call — so the brief disagreement this reopens (ledger still lists
+    ALERT_EMBEDDINGS_FAILING until the next SessionStart hook runs) is
+    self-healing, not a stuck state.
 
-    ``path``/``snooze_path`` resolve to ``EMBEDDING_STATUS_PATH``/
-    ``ALERT_SNOOZE_PATH`` at call time — see the "Sidecar paths" comment
-    above for why this isn't a signature default.
+    ``path`` resolves to ``EMBEDDING_STATUS_PATH`` at call time — see the
+    "Sidecar paths" comment above for why this isn't a signature default.
     """
     if path is None:
         path = EMBEDDING_STATUS_PATH
-    if snooze_path is None:
-        snooze_path = ALERT_SNOOZE_PATH
     path.unlink(missing_ok=True)
-    ledger = _read_snooze_ledger(snooze_path)
-    if ALERT_EMBEDDINGS_FAILING in ledger:
-        del ledger[ALERT_EMBEDDINGS_FAILING]
-        try:
-            _write_snooze_ledger(snooze_path, ledger)
-        except Exception:
-            # Mirrors evaluate_alerts's degrade-and-log: both callers of this
-            # function wrap it in contextlib.suppress(Exception) with no
-            # logging of their own, so without this the ledger-write failure
-            # would vanish silently instead of surfacing here.
-            logging.getLogger(LOGGER_NAME).exception(
-                "snooze ledger write failed while clearing embeddings_failing entry"
-            )
 
 
 # ── Snooze ledger ──────────────────────────────────────────────────────────────
