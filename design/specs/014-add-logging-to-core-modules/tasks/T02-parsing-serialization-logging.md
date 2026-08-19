@@ -35,3 +35,21 @@ These 5 modules currently have zero logging. For each file:
 - [ ] FR#4: `grep -n "getLogger\|basicConfig\|setLevel\|addHandler"` on each of the 5 files shows only `getLogger(LOGGER_NAME)`.
 - [ ] AC#4 (partial — `parsing.py`): Manually run `parse_jsonl_file` (or a downstream import path that calls it) against a transcript file containing at least one malformed JSON line, and confirm the summary log line appears in the relevant per-process log file after the run.
 - [ ] `uv run pytest` passes with no new failures introduced by this task's changes.
+
+## Completion Note: `dates.py`
+
+`dates.py` was read in full against `rules/common/logging.md`'s decision tree (re-review, run 102)
+and found FR#6-exempt — no logging added, `git diff` for this file is intentionally empty. Its
+three `except` blocks:
+
+- `parse_date_boundary`'s `except ValueError: pass` (date-parse attempt falling through to the
+  instant-parse attempt) is intentional control-flow, not a failure — the function hasn't given up
+  yet.
+- `parse_date_boundary`'s `except ValueError: raise ValueError(...) from None` re-raises, exempt
+  under this task's own item 5 ("do not add a log call inside any `except` block that already
+  re-raises").
+- `validate_or_exit`'s `except ValueError as e: emit_error(...)` hands off to `emit_error`, which
+  raises `SystemExit` after printing the CLI-facing error (the rule 2 "CLI Tools: Print, Not
+  Logging" convention) — also a re-raise-equivalent path, exempt under item 5.
+
+No dark operation exists in this file.

@@ -13,6 +13,7 @@ import pytest
 
 from ccrecall.transcript_sources import (
     _candidate_subagent_dirs,
+    _ChildAction,
     _dedupe_paths,
     _dir_contains_matching_session_transcript,
     _is_safe_transcript_file,
@@ -20,6 +21,7 @@ from ccrecall.transcript_sources import (
     _resolved_path,
     _symlinked_project_contains_session_candidate,
     _unsafe_subagent_dirs_contain_session_candidate,
+    _walk_subagents_dirs,
     discover_importable_transcript_files,
     discover_project_transcript_files,
     discover_session_transcript_files,
@@ -165,6 +167,43 @@ class TestDedupePaths:
 
     def test_empty_list(self):
         assert _dedupe_paths([]) == []
+
+
+class TestWalkSubagentsDirsChildIsolation:
+    """Pins the per-child OSError isolation introduced when the per-child try/except
+    was split out of `_walk_subagents_dirs`' loop body into `_process_subagents_walk_child`
+    (to avoid ruff PERF203). An `OSError` while processing one child no longer aborts the
+    rest of that directory's listing — only the failing child is skipped, and siblings are
+    still walked. This is narrower isolation than the original `contextlib.suppress(OSError)`,
+    which wrapped the whole per-directory loop.
+    """
+
+    def test_oserror_on_one_child_does_not_abort_siblings(self, tmp_path):
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        (state_dir / "a").mkdir()
+        (state_dir / "b").mkdir()
+        (state_dir / "c").mkdir()
+
+        visited: list[str] = []
+
+        def non_subagents_policy(child: Path) -> _ChildAction:
+            if child.name == "b":
+                raise OSError("simulated failure")
+            visited.append(child.name)
+            return _ChildAction.SKIP
+
+        result = _walk_subagents_dirs(
+            state_dir,
+            on_subagents_dir=lambda _child: False,
+            non_subagents_policy=non_subagents_policy,
+            dedupe_by_resolved_path=True,
+        )
+
+        assert result is False
+        # "a" and "c" were both reached despite "b" raising -- proves the
+        # isolation is per-child, not per-directory-listing.
+        assert set(visited) == {"a", "c"}
 
 
 class TestResolvedPath:

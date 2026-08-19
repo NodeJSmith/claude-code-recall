@@ -126,6 +126,7 @@ def _probe_project_dir(project_dir: Path) -> str | None:
         # worth surfacing — it means the derived project path/name may be degraded.
         log.warning(
             "project cwd probe failed; falling back to lossy key reconstruction",
+            exc_info=True,
             extra={"jsonl_file": str(jsonl_file)},
         )
         return None

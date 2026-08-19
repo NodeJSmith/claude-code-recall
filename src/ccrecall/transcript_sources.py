@@ -55,8 +55,13 @@ def _process_subagents_walk_child(
     """Process one child dir during `_walk_subagents_dirs`. Returns True to stop the whole walk.
 
     Split out of the loop body (rather than an inline try/except) so the try/except
-    isn't itself inside a `for` loop — avoids ruff PERF203 while keeping the same
-    per-child failure isolation the original `contextlib.suppress(OSError)` gave.
+    isn't itself inside a `for` loop — avoids ruff PERF203. Note this is a narrower
+    failure-isolation scope than the original `contextlib.suppress(OSError)`, which
+    wrapped the whole per-directory loop: an `OSError` on one child used to abort
+    every remaining sibling in that directory listing, whereas now only the failing
+    child is skipped and the rest of the listing is still walked. Deliberate — a
+    single transient stat failure no longer silently drops discovery of unrelated
+    siblings — but distinct from "same isolation," so call it out explicitly.
     """
     try:
         if child.name == _SUBAGENTS_DIRNAME:

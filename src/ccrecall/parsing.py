@@ -20,6 +20,14 @@ from ccrecall.models import LOGGER_NAME, TranscriptEntry, is_valid
 log = logging.getLogger(LOGGER_NAME)
 
 
+def _warn_skipped_lines(skipped: int, source: str | None) -> None:
+    """Log a per-call summary of skipped malformed JSONL lines, shared by the
+    three line-parsing generators below so the warning is worded/keyed once.
+    """
+    if skipped:
+        log.warning("skipped malformed JSONL lines", extra={"skipped_count": skipped, "source": source})
+
+
 def is_valid_entry(obj: object) -> bool:
     """Validate a raw transcript entry at the ingest boundary.
 
@@ -71,11 +79,7 @@ def parse_jsonl_file(filepath: Path) -> Generator[dict, None, None]:
                 if is_insertable_message(entry):
                     yield entry
     finally:
-        if skipped:
-            log.warning(
-                "skipped malformed JSONL lines",
-                extra={"filepath": str(filepath), "skipped_count": skipped},
-            )
+        _warn_skipped_lines(skipped, str(filepath))
 
 
 def parse_lines_with_uuids(lines: Iterable[str], *, source: str | None = None) -> Generator[dict, None, None]:
@@ -103,8 +107,7 @@ def parse_lines_with_uuids(lines: Iterable[str], *, source: str | None = None) -
             if entry.get("uuid"):
                 yield entry
     finally:
-        if skipped:
-            log.warning("skipped malformed JSONL lines", extra={"skipped_count": skipped, "source": source})
+        _warn_skipped_lines(skipped, source)
 
 
 def parse_lines_with_uuids_and_numbers(
@@ -127,8 +130,7 @@ def parse_lines_with_uuids_and_numbers(
             if entry.get("uuid"):
                 yield line_number, entry
     finally:
-        if skipped:
-            log.warning("skipped malformed JSONL lines", extra={"skipped_count": skipped, "source": source})
+        _warn_skipped_lines(skipped, source)
 
 
 def parse_all_with_uuids(filepath: Path) -> Generator[dict, None, None]:

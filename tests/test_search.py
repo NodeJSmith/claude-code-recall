@@ -1592,6 +1592,29 @@ class TestStatusFlag:
         # run() exits 2 when neither --query nor --status is given
         assert exc.value.code != 0
 
+    def test_status_unexpected_exception_exits_cleanly(self, tmp_path, capsys):
+        """An unexpected (non-DB) exception during --status must not crash with
+        TypeError from `len(query)` on a None query — it should exit 1 via
+        emit_error like any other unhandled error in run()."""
+        db_path = tmp_path / "conv4.db"
+        c = sqlite3.connect(str(db_path))
+        c.executescript(SCHEMA_CORE)
+        c.commit()
+        c.close()
+
+        # print_status only catches (sqlite3.Error, OSError) internally; a
+        # ValueError from get_connection propagates up into run()'s outer
+        # except Exception, where query is still None.
+        with (
+            patch("ccrecall.search_cli.get_connection", side_effect=ValueError("boom")),
+            pytest.raises(SystemExit) as exc,
+        ):
+            run(status=True, db=db_path)
+
+        assert exc.value.code == 1
+        captured = capsys.readouterr()
+        assert "search_error" in captured.err
+
 
 class TestExceptionNarrowing:
     """The vec/FTS degradation paths catch DB errors only (issue #10): a query

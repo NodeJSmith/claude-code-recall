@@ -474,18 +474,21 @@ class TestPidGuard:
         assert flags & os.O_EXCL, "O_EXCL must be set for atomic create"
 
 
-class TestNeedsReimportDbError:
-    """_needs_reimport gracefully degrades (returns False) on DB access failure.
+class TestNeedsCheckDbError:
+    """_needs_reimport and _needs_backfill both gracefully degrade (return False)
+    on DB access failure.
 
-    Regression coverage: this function's `(sqlite3.Error, OSError)` except clause
+    Regression coverage: each function's `(sqlite3.Error, OSError)` except clause
     (and its new required `logger` parameter) had zero direct test coverage —
     every main()-level test monkeypatches the function away entirely. These
     tests exercise the graceful-degradation behavior directly: a DB failure
-    must not propagate, and must resolve to "no reimport needed" rather than
-    crashing the SessionStart hook.
+    must not propagate, and must resolve to "no work needed" rather than
+    crashing the SessionStart hook. Parametrized over both functions since they
+    share the identical except-and-degrade shape.
     """
 
-    def test_returns_false_when_query_raises_sqlite_error(self):
+    @pytest.mark.parametrize("target_fn", [memory_setup._needs_reimport, memory_setup._needs_backfill])
+    def test_returns_false_when_query_raises_sqlite_error(self, target_fn):
         """A query failure (e.g. DB busy/corrupt) is swallowed; result defaults to False."""
         mock_conn = MagicMock()
         mock_conn.cursor.return_value.execute.side_effect = sqlite3.OperationalError("database is locked")
@@ -494,41 +497,15 @@ class TestNeedsReimportDbError:
         mock_ctx.__exit__.return_value = False
 
         with patch.object(memory_setup, "get_connection", return_value=mock_ctx):
-            result = memory_setup._needs_reimport(None, MagicMock())
+            result = target_fn(None, MagicMock())
 
         assert result is False
 
-    def test_returns_false_when_connection_raises_os_error(self):
+    @pytest.mark.parametrize("target_fn", [memory_setup._needs_reimport, memory_setup._needs_backfill])
+    def test_returns_false_when_connection_raises_os_error(self, target_fn):
         """A connection failure (e.g. unwritable runtime dir) is swallowed; result defaults to False."""
         with patch.object(memory_setup, "get_connection", side_effect=OSError("read-only filesystem")):
-            result = memory_setup._needs_reimport(None, MagicMock())
-
-        assert result is False
-
-
-class TestNeedsBackfillDbError:
-    """_needs_backfill gracefully degrades (returns False) on DB access failure.
-
-    Same coverage gap and rationale as TestNeedsReimportDbError above.
-    """
-
-    def test_returns_false_when_query_raises_sqlite_error(self):
-        """A query failure (e.g. DB busy/corrupt) is swallowed; result defaults to False."""
-        mock_conn = MagicMock()
-        mock_conn.cursor.return_value.execute.side_effect = sqlite3.OperationalError("database is locked")
-        mock_ctx = MagicMock()
-        mock_ctx.__enter__.return_value = mock_conn
-        mock_ctx.__exit__.return_value = False
-
-        with patch.object(memory_setup, "get_connection", return_value=mock_ctx):
-            result = memory_setup._needs_backfill(None, MagicMock())
-
-        assert result is False
-
-    def test_returns_false_when_connection_raises_os_error(self):
-        """A connection failure (e.g. unwritable runtime dir) is swallowed; result defaults to False."""
-        with patch.object(memory_setup, "get_connection", side_effect=OSError("read-only filesystem")):
-            result = memory_setup._needs_backfill(None, MagicMock())
+            result = target_fn(None, MagicMock())
 
         assert result is False
 

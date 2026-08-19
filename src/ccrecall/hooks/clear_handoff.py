@@ -27,7 +27,7 @@ def main():
             hook_input = HookInput.model_validate_json(raw)
         except ValidationError:
             logger.warning(
-                "clear-handoff: malformed hook input on stdin, dropping",
+                "malformed hook input on stdin, dropping",
                 extra={"raw_len": len(raw)},
             )
             return

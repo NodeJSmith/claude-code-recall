@@ -112,7 +112,7 @@ def run_messages(
             print(format_messages_markdown(snippets, query, ranked))
 
     except Exception as e:
-        log.exception("message search failed", extra={"query": query})
+        log.exception("message search failed", extra={"query_length": len(query)})
         emit_error(
             str(e),
             code="search_error",
@@ -231,6 +231,8 @@ def run(
         # Past the status branch with the xor-validation above satisfied, query is
         # guaranteed present (status is False, so a missing query already exited 2).
         assert query is not None  # noqa: S101 — type-checker narrowing; the real guard is the exit above
+        # (the except block below still defends query being None: an exception raised
+        # from the status=True branch above reaches it before this assert ever runs)
 
         with get_connection(settings, load_vec=True) as conn:
             fts_level = detect_fts_support(conn)
@@ -257,7 +259,7 @@ def run(
             print(md)
 
     except Exception as e:
-        log.exception("session search failed", extra={"query": query})
+        log.exception("session search failed", extra={"query_length": len(query) if query else 0})
         emit_error(
             str(e),
             code="search_error",

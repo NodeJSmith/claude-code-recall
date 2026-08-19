@@ -64,6 +64,7 @@ Enforced by `prek` (pre-commit) hooks + custom checks in `tools/`:
 - **`whenever`** for all date/time, not stdlib `datetime` (convert only at library boundaries).
 - **setuptools** build backend (never hatchling). License is declared as an SPDX expression (`license = "MIT"` + `license-files`).
 - **Conventional Commits.** Releases are automated by **release-please**; the version lives in `pyproject.toml`, is mirrored into `.claude-plugin/plugin.json` (release-please `extra-files`), and `uv.lock` is re-locked on the release PR by a `sync-lockfile` CI job so its self-version never drifts. `feat`/`fix`/`perf`/`refactor`/`docs` land in the changelog.
+- **Logging coverage on new files.** New files under `src/ccrecall/` or `src/ccrecall/hooks/` should be checked against `rules/common/logging.md`'s decision tree before merge. A one-shot `grep -rL getLogger` inventory does not re-run itself — three separate audits during the 014 logging effort each missed a file the previous one had (a hook module logging via `setup_logging()` instead of a literal `getLogger` call, and `hooks/backfill_runner.py`, created by a PR that landed between the original audit and the design's execution).
 
 ## Commands
 

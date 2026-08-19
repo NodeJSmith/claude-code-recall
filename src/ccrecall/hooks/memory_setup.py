@@ -57,8 +57,7 @@ def _spawn_background(argv: list[str], pid_key: str, logger: logging.Logger) -> 
             except (ValueError, OSError):
                 # Dead process (OSError ESRCH) or unreadable PID — reap and retry
                 logger.warning(
-                    "stale PID file for %s, reaping and retrying spawn",
-                    pid_key,
+                    "stale PID file, reaping and retrying spawn",
                     extra={"pid_key": pid_key, "pid_path": str(pid_path)},
                 )
                 with contextlib.suppress(OSError):
@@ -89,7 +88,7 @@ def _needs_reimport(settings: dict | None, logger: logging.Logger) -> bool:
             count = cursor.fetchone()[0]
         return count > 0
     except (sqlite3.Error, OSError):
-        logger.exception("_needs_reimport: DB check failed, assuming no reimport needed")
+        logger.exception("DB check failed, assuming no reimport needed")
         return False
 
 
@@ -110,7 +109,7 @@ def _needs_backfill(settings: dict | None, logger: logging.Logger) -> bool:
             count = cursor.fetchone()[0]
         return count > 0
     except (sqlite3.Error, OSError):
-        logger.exception("_needs_backfill: DB check failed, assuming no backfill needed")
+        logger.exception("DB check failed, assuming no backfill needed")
         return False
 
 
