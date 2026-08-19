@@ -1,7 +1,7 @@
 ---
 task_id: "T05"
 title: "Add logging to clear_handoff.py, memory_context.py, memory_setup.py; audit the 3 no-op hook modules; run full-repo verification"
-status: "planned"
+status: "done"
 depends_on: ["T01", "T02", "T03", "T04"]
 implements: ["FR#4", "FR#5", "FR#6", "AC#1", "AC#2", "AC#3"]
 ---

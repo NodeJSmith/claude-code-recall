@@ -2,9 +2,12 @@
 
 import ast
 import importlib.util
+import io
 import json
 import sqlite3
+import sys
 from pathlib import Path
+from unittest.mock import patch
 from uuid import uuid4
 
 from ccrecall.health import (
@@ -16,6 +19,7 @@ from ccrecall.health import (
     probe_db,
     record_embedding_failure,
 )
+from ccrecall.hooks import memory_context
 from ccrecall.hooks.context_alerts import proactive_alert_block
 from ccrecall.hooks.context_rendering import (
     TOPIC_PREVIEW_MAX_CHARS,
@@ -1215,3 +1219,57 @@ class TestProactiveAlerts:
             status_path=tmp_path / "status.json",  # absent → no embedding failure
         )
         assert block == "", f"Expected empty block on healthy system; got: {block!r}"
+
+
+class TestMemoryContextMalformedInput:
+    """memory_context.main() must gracefully default on malformed stdin.
+
+    Regression coverage: main()'s `except ValidationError: hook_input = HookInput()`
+    fallback had zero test coverage — main() was never invoked by any test, only
+    its sub-components (select_sessions, proactive_alert_block, context_rendering)
+    were unit-tested independently. These tests exercise main() end-to-end so the
+    fallback's graceful-degradation *behavior* — no crash, valid JSON stdout, no
+    session context injected — is verified at the behavior level, not the log
+    line itself (see testing.md "No Log Capture Tests").
+    """
+
+    def _run_main(self, tmp_path, stdin_data: str) -> str:
+        # Pre-create the isolated runtime dir the autouse _isolated_runtime_dir
+        # fixture points RUNTIME_DIR at, so proactive_alert_block's filesystem
+        # writability probe (os.open, not mkdir) doesn't spuriously fault on a
+        # fresh tmp_path — that's a fixture-ordering artifact unrelated to what
+        # this test class verifies (the ValidationError fallback behavior).
+        (tmp_path / "ccrecall-runtime").mkdir(parents=True, exist_ok=True)
+        fake_settings = {"logging_enabled": False, "db_path": str(tmp_path / "conversations.db")}
+        stdout_capture = io.StringIO()
+        with (
+            patch.object(sys, "stdin", io.StringIO(stdin_data)),
+            patch.object(sys, "stdout", stdout_capture),
+            patch.object(memory_context, "load_settings", return_value=fake_settings),
+        ):
+            memory_context.main()
+        return stdout_capture.getvalue()
+
+    def test_malformed_json_stdin_does_not_crash(self, tmp_path):
+        """Malformed stdin must not raise — main() falls back to an empty HookInput."""
+        output = self._run_main(tmp_path, "not valid json")
+        parsed = json.loads(output)  # must be valid JSON — proves no crash/garbage stdout
+        assert isinstance(parsed, dict)
+
+    def test_malformed_json_stdin_matches_empty_stdin_behavior(self, tmp_path):
+        """Malformed stdin defaults identically to no stdin at all (both -> HookInput())."""
+        malformed_output = self._run_main(tmp_path, "not valid json")
+        empty_output = self._run_main(tmp_path, "")
+        assert json.loads(malformed_output) == json.loads(empty_output)
+
+    def test_malformed_json_stdin_injects_no_session_context(self, tmp_path):
+        """With no session_id/cwd recovered from malformed input, no session-specific
+        context is injected — main() must take the early-return gate, not the full
+        context-assembly path."""
+        output = self._run_main(tmp_path, "{not json at all")
+        parsed = json.loads(output)
+        additional_context = parsed.get("hookSpecificOutput", {}).get("additionalContext", "")
+        assert "How To Use This Context" not in additional_context, (
+            "Malformed input has no session_id/cwd, so the full context-injection "
+            "path (which always includes this directive) must not run"
+        )

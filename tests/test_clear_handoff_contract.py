@@ -145,11 +145,22 @@ class TestClearHandoffAtomicity:
         assert json.loads(handoff_path.read_text())["session_id"] == "sid-concurrent"
 
     def test_leaves_no_temporary_file_behind(self, tmp_path):
+        """No leftover .tmp staging files from atomic_write_json.
+
+        Cannot assert exact directory contents any more: clear_handoff.py now
+        calls setup_logging() (added by this task's fix so the malformed-input
+        warning actually reaches a log file), which writes
+        ccrecall-clear-handoff.log into the same runtime directory the handoff
+        lives in — matching production, where RUNTIME_DIR doubles as both the
+        DB directory and the log directory for every ccrecall hook.
+        """
         handoff_path, _ = _run_handoff_main(
             tmp_path, {"end_reason": "clear", "session_id": "sid-clean", "cwd": "/my/project"}
         )
 
-        assert [p.name for p in handoff_path.parent.iterdir()] == ["clear-handoff.json"]
+        leftover_tmp = [p.name for p in handoff_path.parent.iterdir() if p.name.endswith(".tmp")]
+        assert leftover_tmp == [], f"atomic_write_json left temp file(s) behind: {leftover_tmp}"
+        assert handoff_path.exists()
 
 
 class TestClearHandoffStdout:

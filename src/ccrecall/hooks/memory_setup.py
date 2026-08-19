@@ -129,9 +129,10 @@ def _reap_stale_temp_files() -> None:
 
 
 def main():
-    settings = load_settings()
-    logger = setup_logging(settings, process_name="setup")
     try:
+        settings = load_settings()
+        logger = setup_logging(settings, process_name="setup")
+
         ensure_parent_dir(DEFAULT_DB_PATH)
 
         # Clean up stale temp files from crashed/killed sync processes
