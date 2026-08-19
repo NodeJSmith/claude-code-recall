@@ -1,8 +1,12 @@
-import contextlib
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum, auto
 from pathlib import Path
+
+from ccrecall.models import LOGGER_NAME
+
+log = logging.getLogger(LOGGER_NAME)
 
 _SUBAGENTS_DIRNAME = "subagents"
 _STATE_DIRNAME = "state"
@@ -34,9 +38,41 @@ def _dedupe_paths(paths: list[Path]) -> list[Path]:
 
 
 def _resolved_path(path: Path) -> Path | None:
-    with contextlib.suppress(OSError, RuntimeError):
+    try:
         return path.resolve()
-    return None
+    except (OSError, RuntimeError):
+        log.warning("failed to resolve path during subagents walk", extra={"path": str(path)})
+        return None
+
+
+def _process_subagents_walk_child(
+    child: Path,
+    *,
+    on_subagents_dir: Callable[[Path], bool],
+    non_subagents_policy: Callable[[Path], _ChildAction],
+    pending: list[Path],
+) -> bool:
+    """Process one child dir during `_walk_subagents_dirs`. Returns True to stop the whole walk.
+
+    Split out of the loop body (rather than an inline try/except) so the try/except
+    isn't itself inside a `for` loop — avoids ruff PERF203 while keeping the same
+    per-child failure isolation the original `contextlib.suppress(OSError)` gave.
+    """
+    try:
+        if child.name == _SUBAGENTS_DIRNAME:
+            return on_subagents_dir(child)
+        if child.is_dir():
+            action = non_subagents_policy(child)
+            if action is _ChildAction.RECURSE:
+                pending.append(child)
+            elif action is _ChildAction.STOP:
+                return True
+    except OSError:
+        log.warning(
+            "failed to process child during subagents walk, skipping",
+            extra={"path": str(child)},
+        )
+    return False
 
 
 def _walk_subagents_dirs(
@@ -77,17 +113,22 @@ def _walk_subagents_dirs(
             if current in visited:
                 continue
             visited.add(current)
-        with contextlib.suppress(OSError):
-            for child in sorted(current.iterdir()):
-                if child.name == _SUBAGENTS_DIRNAME:
-                    if on_subagents_dir(child):
-                        return True
-                elif child.is_dir():
-                    action = non_subagents_policy(child)
-                    if action is _ChildAction.RECURSE:
-                        pending.append(child)
-                    elif action is _ChildAction.STOP:
-                        return True
+        try:
+            children = sorted(current.iterdir())
+        except OSError:
+            log.warning(
+                "failed to list directory during subagents walk, skipping subtree",
+                extra={"dir": str(current)},
+            )
+            continue
+        for child in children:
+            if _process_subagents_walk_child(
+                child,
+                on_subagents_dir=on_subagents_dir,
+                non_subagents_policy=non_subagents_policy,
+                pending=pending,
+            ):
+                return True
     return False
 
 
@@ -98,18 +139,28 @@ def _symlinked_project_contains_session_candidate(project_dir: Path, session_uui
 
     direct_subagents = project_dir / _SUBAGENTS_DIRNAME
     if direct_subagents.exists() or direct_subagents.is_symlink():
-        with contextlib.suppress(OSError):
+        try:
             for _path in direct_subagents.glob(f"*{session_uuid}*.jsonl"):
                 return True
+        except OSError:
+            log.warning(
+                "failed to glob symlinked subagents dir for session candidate",
+                extra={"dir": str(direct_subagents)},
+            )
 
     state_dir = project_dir / _STATE_DIRNAME
     if not (state_dir.exists() or state_dir.is_symlink()):
         return False
 
     def on_subagents_dir(child: Path) -> bool:
-        with contextlib.suppress(OSError):
+        try:
             for _path in child.glob(f"*{session_uuid}*.jsonl"):
                 return True
+        except OSError:
+            log.warning(
+                "failed to glob subagents dir for session candidate",
+                extra={"dir": str(child)},
+            )
         return False
 
     def non_subagents_policy(child: Path) -> _ChildAction:
@@ -131,11 +182,16 @@ def _dir_contains_matching_session_transcript(path: Path, session_uuid: str) -> 
         if current in visited:
             continue
         visited.add(current)
-        with contextlib.suppress(OSError):
+        try:
             for candidate in current.glob(f"*{session_uuid}*.jsonl"):
                 if candidate.is_file() or candidate.is_symlink():
                     return True
             pending.extend(child for child in sorted(current.iterdir()) if child.is_dir() and not child.is_symlink())
+        except OSError:
+            log.warning(
+                "failed to search directory for matching session transcript",
+                extra={"dir": str(current)},
+            )
     return False
 
 

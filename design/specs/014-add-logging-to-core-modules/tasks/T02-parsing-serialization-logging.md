@@ -1,7 +1,7 @@
 ---
 task_id: "T02"
 title: "Add logging to parsing/serialization core modules"
-status: "planned"
+status: "done"
 depends_on: []
 implements: ["FR#1", "FR#2", "FR#3", "FR#4", "AC#4"]
 ---

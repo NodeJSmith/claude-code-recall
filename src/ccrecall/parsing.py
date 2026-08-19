@@ -3,6 +3,7 @@ JSONL parsing, branch detection, and metadata extraction.
 """
 
 import json
+import logging
 import sqlite3
 from collections.abc import Generator, Iterable
 from pathlib import Path
@@ -14,7 +15,9 @@ from ccrecall.content import (
     is_teammate_message,
     is_tool_result,
 )
-from ccrecall.models import TranscriptEntry, is_valid
+from ccrecall.models import LOGGER_NAME, TranscriptEntry, is_valid
+
+log = logging.getLogger(LOGGER_NAME)
 
 
 def is_valid_entry(obj: object) -> bool:
@@ -51,54 +54,81 @@ def is_insertable_message(entry: dict) -> bool:
 
 def parse_jsonl_file(filepath: Path) -> Generator[dict, None, None]:
     """Parse JSONL file, yielding user/assistant entries for import."""
-    with open(filepath, encoding="utf-8", errors="replace") as f:
-        for line in f:
+    skipped = 0
+    try:
+        with open(filepath, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                stripped_line = line.strip()
+                if not stripped_line:
+                    continue
+                try:
+                    entry = json.loads(stripped_line)
+                except json.JSONDecodeError:
+                    skipped += 1
+                    continue
+                if not is_valid_entry(entry):
+                    continue
+                if is_insertable_message(entry):
+                    yield entry
+    finally:
+        if skipped:
+            log.warning(
+                "skipped malformed JSONL lines",
+                extra={"filepath": str(filepath), "skipped_count": skipped},
+            )
+
+
+def parse_lines_with_uuids(lines: Iterable[str], *, source: str | None = None) -> Generator[dict, None, None]:
+    """Yield parsed JSONL entries that carry a uuid, skipping blanks and bad JSON.
+
+    Shared by the full-file reader and session_tail's tail-bounded reader.
+    ``source`` is an optional label (typically a file path) attached to the
+    skipped-lines warning so it's traceable back to which of potentially
+    thousands of transcript files it came from; callers with no real file
+    path (e.g. a synthetic line stream) may omit it.
+    """
+    skipped = 0
+    try:
+        for line in lines:
             stripped_line = line.strip()
             if not stripped_line:
                 continue
             try:
                 entry = json.loads(stripped_line)
             except json.JSONDecodeError:
+                skipped += 1
                 continue
             if not is_valid_entry(entry):
                 continue
-            if is_insertable_message(entry):
+            if entry.get("uuid"):
                 yield entry
+    finally:
+        if skipped:
+            log.warning("skipped malformed JSONL lines", extra={"skipped_count": skipped, "source": source})
 
 
-def parse_lines_with_uuids(lines: Iterable[str]) -> Generator[dict, None, None]:
-    """Yield parsed JSONL entries that carry a uuid, skipping blanks and bad JSON.
-
-    Shared by the full-file reader and session_tail's tail-bounded reader.
-    """
-    for line in lines:
-        stripped_line = line.strip()
-        if not stripped_line:
-            continue
-        try:
-            entry = json.loads(stripped_line)
-        except json.JSONDecodeError:
-            continue
-        if not is_valid_entry(entry):
-            continue
-        if entry.get("uuid"):
-            yield entry
-
-
-def parse_lines_with_uuids_and_numbers(lines: Iterable[str]) -> Generator[tuple[int, dict], None, None]:
+def parse_lines_with_uuids_and_numbers(
+    lines: Iterable[str], *, source: str | None = None
+) -> Generator[tuple[int, dict], None, None]:
     """Yield line-numbered parsed JSONL entries that carry a uuid."""
-    for line_number, line in enumerate(lines, start=1):
-        stripped_line = line.strip()
-        if not stripped_line:
-            continue
-        try:
-            entry = json.loads(stripped_line)
-        except json.JSONDecodeError:
-            continue
-        if not is_valid_entry(entry):
-            continue
-        if entry.get("uuid"):
-            yield line_number, entry
+    skipped = 0
+    try:
+        for line_number, line in enumerate(lines, start=1):
+            stripped_line = line.strip()
+            if not stripped_line:
+                continue
+            try:
+                entry = json.loads(stripped_line)
+            except json.JSONDecodeError:
+                skipped += 1
+                continue
+            if not is_valid_entry(entry):
+                continue
+            if entry.get("uuid"):
+                yield line_number, entry
+    finally:
+        if skipped:
+            log.warning("skipped malformed JSONL lines", extra={"skipped_count": skipped, "source": source})
 
 
 def parse_all_with_uuids(filepath: Path) -> Generator[dict, None, None]:
@@ -107,13 +137,13 @@ def parse_all_with_uuids(filepath: Path) -> Generator[dict, None, None]:
     Used for building the parentUuid chain to find branches.
     """
     with open(filepath, encoding="utf-8", errors="replace") as f:
-        yield from parse_lines_with_uuids(f)
+        yield from parse_lines_with_uuids(f, source=str(filepath))
 
 
 def parse_all_with_uuids_and_numbers(filepath: Path) -> Generator[tuple[int, dict], None, None]:
     """Parse JSONL file yielding line-numbered entries that carry UUIDs."""
     with open(filepath, encoding="utf-8", errors="replace") as f:
-        yield from parse_lines_with_uuids_and_numbers(f)
+        yield from parse_lines_with_uuids_and_numbers(f, source=str(filepath))
 
 
 def branch_depth(uuid: str, uuid_to_parent: dict[str, str | None]) -> int:
