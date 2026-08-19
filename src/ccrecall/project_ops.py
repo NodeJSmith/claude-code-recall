@@ -9,7 +9,7 @@ into the projects table. Two path strategies are supported:
     extract cwd metadata when no direct cwd is available
 """
 
-import contextlib
+import logging
 import sqlite3
 from pathlib import Path
 
@@ -20,8 +20,11 @@ from ccrecall.formatting import (
     normalize_project_key,
     parse_project_key,
 )
+from ccrecall.models import LOGGER_NAME
 from ccrecall.parsing import extract_session_metadata, parse_all_with_uuids
 from ccrecall.transcript_sources import discover_project_transcript_files
+
+log = logging.getLogger(LOGGER_NAME)
 
 
 def upsert_project(
@@ -105,14 +108,24 @@ def key_could_match_excluded(key: str, exclude_projects: list[str]) -> bool:
 def _probe_project_dir(project_dir: Path) -> str | None:
     """Probe the first JSONL file in project_dir for cwd metadata.
 
-    Returns the cwd string if found, or None if no JSONL exists or has no cwd.
+    Returns the cwd string if found, or None if no JSONL exists, has no cwd, or
+    the probe fails outright (falls through to upsert_project's lossy
+    hyphen-reconstruction fallback either way).
     """
     projects_dir = project_dir.parent
     project_discovery = discover_project_transcript_files(project_dir, projects_dir)
-    for jsonl_file in project_discovery.files[:1]:
-        with contextlib.suppress(Exception):
-            entries = list(parse_all_with_uuids(jsonl_file))
-            meta = extract_session_metadata(entries)
-            if meta.get("cwd"):
-                return meta["cwd"]
-    return None
+    if not project_discovery.files:
+        return None
+    jsonl_file = project_discovery.files[0]
+    try:
+        entries = list(parse_all_with_uuids(jsonl_file))
+        meta = extract_session_metadata(entries)
+        return meta.get("cwd")
+    except Exception:
+        # A genuine parse/read failure (vs. simply no cwd in this transcript) is
+        # worth surfacing — it means the derived project path/name may be degraded.
+        log.warning(
+            "project cwd probe failed; falling back to lossy key reconstruction",
+            extra={"jsonl_file": str(jsonl_file)},
+        )
+        return None
