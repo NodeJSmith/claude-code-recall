@@ -2,10 +2,16 @@
 Conversation-DB schema constants (SCHEMA_CORE/FTS5/FTS4) and FTS capability
 detection.
 
-This module has no ccrecall dependencies — only the stdlib sqlite3 module.
+This module has no ccrecall dependencies beyond the shared logger name —
+only the stdlib sqlite3 module for the schema/detection logic itself.
 """
 
+import logging
 import sqlite3
+
+from ccrecall.models import LOGGER_NAME
+
+log = logging.getLogger(LOGGER_NAME)
 
 # Split into core (tables/indexes) and FTS variants for compatibility
 SCHEMA_CORE = """
@@ -191,6 +197,10 @@ def detect_fts_support(conn: sqlite3.Connection) -> str | None:
     try:
         opts = {row[0] for row in conn.execute("PRAGMA compile_options").fetchall()}
     except sqlite3.Error:
+        log.exception(
+            "failed to query sqlite compile_options; FTS support undetected, "
+            "keyword search will fall back to unranked LIKE matching"
+        )
         return None
     if "ENABLE_FTS5" in opts:
         return "fts5"

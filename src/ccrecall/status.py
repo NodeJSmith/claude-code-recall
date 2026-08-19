@@ -6,6 +6,7 @@ confirmed-OK cache metadata for future deep-check runs.
 
 import contextlib
 import json
+import logging
 import sqlite3
 import sys
 from pathlib import Path
@@ -16,9 +17,12 @@ from ccrecall.db_vec import branch_embedding_coverage, chunk_vec_queryable, vec_
 from ccrecall.hooks.backfill_status import count_status as count_embedding_status
 from ccrecall.import_log_ops import import_log_source_index
 from ccrecall.ingestion_status import summarize_ingestion
+from ccrecall.models import LOGGER_NAME
 from ccrecall.tool_content_status import count_eligible as count_tool_content_pending
 from ccrecall.tool_content_status import count_pending_missing_jsonl
 from ccrecall.tool_content_status import count_total_sessions as count_tool_content_total
+
+log = logging.getLogger(LOGGER_NAME)
 
 
 @contextlib.contextmanager
@@ -138,6 +142,11 @@ def collect_status(*, db: Path = DEFAULT_DB_PATH, days: int | None = None, check
                     "chunks": {"done": counts["done"], "total": counts["universe"]},
                 }
     except (sqlite3.Error, OSError) as exc:
+        log.warning(
+            "embedding backfill status query failed; reporting unavailable",
+            exc_info=True,
+            extra={"db_path": str(db_path)},
+        )
         embedding_backfill["error"] = str(exc)
 
     return {

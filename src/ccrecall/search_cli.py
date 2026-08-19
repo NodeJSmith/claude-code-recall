@@ -5,6 +5,7 @@ Returns markdown by default (token-efficient), or JSON when output_format="json"
 """
 
 import json
+import logging
 import sqlite3
 import sys
 from pathlib import Path
@@ -24,9 +25,12 @@ from ccrecall.formatting import (
     format_snippet_json,
     format_snippet_markdown,
 )
+from ccrecall.models import LOGGER_NAME
 from ccrecall.schema import detect_fts_support
 from ccrecall.search_conversations import compute_caveat, search_messages, search_sessions
 from ccrecall.search_query import ScopeFilter
+
+log = logging.getLogger(LOGGER_NAME)
 
 # Upper bound on --max-results, single-sourced here and referenced by the CLI
 # validator (cli/commands.py) so the clamp and the validator can't drift apart.
@@ -108,6 +112,7 @@ def run_messages(
             print(format_messages_markdown(snippets, query, ranked))
 
     except Exception as e:
+        log.exception("message search failed", extra={"query": query})
         emit_error(
             str(e),
             code="search_error",
@@ -145,9 +150,11 @@ def print_status(settings: dict | None) -> None:
                 embedded_branches, total_branches = branch_embedding_coverage(conn)
                 print(f"embedded branches: {embedded_branches}/{total_branches} (watermark)")
             except sqlite3.Error as e:
+                log.warning("chunk coverage query failed; reporting degraded status", exc_info=True)
                 print(f"chunk coverage: error ({e})")
                 print(f"embedded branches: error ({e})")
     except (sqlite3.Error, OSError):
+        log.exception("failed to open database for status check")
         print("vec extension: no")
         print(f"model: {EMBEDDING_MODEL} (deps {'available' if DEPS_AVAILABLE else 'missing'})")
         print("chunk coverage: error (could not open database)")
@@ -250,6 +257,7 @@ def run(
             print(md)
 
     except Exception as e:
+        log.exception("session search failed", extra={"query": query})
         emit_error(
             str(e),
             code="search_error",

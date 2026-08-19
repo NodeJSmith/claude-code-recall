@@ -1,7 +1,7 @@
 ---
 task_id: "T01"
 title: "Add logging to DB/status-facing core modules (highest dark-operation risk)"
-status: "planned"
+status: "done"
 depends_on: []
 implements: ["FR#1", "FR#3", "FR#4", "AC#4"]
 ---

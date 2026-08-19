@@ -4,6 +4,7 @@ Diagnostics are read-only except for confirmed-OK cache rows, which let later
 deep-check runs skip reparsing unchanged transcript sources.
 """
 
+import logging
 from pathlib import Path
 from sqlite3 import Connection
 
@@ -11,7 +12,10 @@ from whenever import Instant
 
 from ccrecall.import_log_ops import import_log_source_index
 from ccrecall.message_ops import message_content_parts
+from ccrecall.models import LOGGER_NAME
 from ccrecall.parsing import parse_all_with_uuids, select_active_leaf_entry
+
+log = logging.getLogger(LOGGER_NAME)
 
 STALE_TAIL_SECONDS = 15 * 60
 
@@ -56,6 +60,11 @@ def _source_fingerprint(filepaths: list[Path]) -> str | None:
         try:
             stat = path.stat()
         except FileNotFoundError:
+            log.warning(
+                "transcript source missing while computing ingestion fingerprint; "
+                "session will be counted as missing_source",
+                extra={"path": str(path)},
+            )
             return None
         parts.append(f"{path}\t{stat.st_size}\t{stat.st_mtime_ns}")
     return "\n".join(parts)
