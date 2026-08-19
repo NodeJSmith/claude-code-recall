@@ -1,7 +1,7 @@
 # Design: Add Logging to Silent Core Modules
 
 **Date:** 2026-08-19
-**Status:** draft
+**Status:** archived
 **Mode:** sketch
 
 ## Problem
