@@ -1,7 +1,7 @@
 ---
 task_id: "T04"
 title: "Add logging to remaining silent core modules"
-status: "planned"
+status: "done"
 depends_on: []
 implements: ["FR#1", "FR#3", "FR#4", "FR#6"]
 ---
