@@ -2,6 +2,7 @@
 
 import contextlib
 import json
+import logging
 import os
 import sqlite3
 import subprocess
@@ -17,6 +18,7 @@ from ccrecall.config import (
     load_settings,
     log_hook_exception,
     pid_file_path,
+    setup_logging,
 )
 from ccrecall.db import CONTENT_ERROR_VERSION, get_connection
 from ccrecall.hooks import backfill_summaries, import_conversations
@@ -28,7 +30,7 @@ from ccrecall.summarizer import SUMMARY_VERSION
 STALE_TEMP_FILE_MAX_AGE_SECONDS = 3600
 
 
-def _spawn_background(argv: list[str], pid_key: str) -> None:
+def _spawn_background(argv: list[str], pid_key: str, logger: logging.Logger) -> None:
     """Spawn an installed entry point as a detached background process.
 
     ``argv`` is the command to run (e.g. ``["ccrecall", "import"]``); ``pid_key``
@@ -54,6 +56,11 @@ def _spawn_background(argv: list[str], pid_key: str) -> None:
                 return
             except (ValueError, OSError):
                 # Dead process (OSError ESRCH) or unreadable PID — reap and retry
+                logger.warning(
+                    "stale PID file for %s, reaping and retrying spawn",
+                    pid_key,
+                    extra={"pid_key": pid_key, "pid_path": str(pid_path)},
+                )
                 with contextlib.suppress(OSError):
                     pid_path.unlink()
                 continue
@@ -70,7 +77,7 @@ def _spawn_background(argv: list[str], pid_key: str) -> None:
         os.close(fd)
 
 
-def _needs_reimport(settings: dict | None = None) -> bool:
+def _needs_reimport(settings: dict | None, logger: logging.Logger) -> bool:
     """Check if any import_log entries have NULL file_hash.
 
     NULL file_hash is written by the normal sync path when file_hash is unavailable.
@@ -82,10 +89,11 @@ def _needs_reimport(settings: dict | None = None) -> bool:
             count = cursor.fetchone()[0]
         return count > 0
     except (sqlite3.Error, OSError):
+        logger.exception("_needs_reimport: DB check failed, assuming no reimport needed")
         return False
 
 
-def _needs_backfill(settings: dict | None = None) -> bool:
+def _needs_backfill(settings: dict | None, logger: logging.Logger) -> bool:
     """Check if any branches need summary backfill. Returns False on any error."""
     try:
         with get_connection(settings) as conn:
@@ -102,6 +110,7 @@ def _needs_backfill(settings: dict | None = None) -> bool:
             count = cursor.fetchone()[0]
         return count > 0
     except (sqlite3.Error, OSError):
+        logger.exception("_needs_backfill: DB check failed, assuming no backfill needed")
         return False
 
 
@@ -120,21 +129,21 @@ def _reap_stale_temp_files() -> None:
 
 
 def main():
+    settings = load_settings()
+    logger = setup_logging(settings, process_name="setup")
     try:
         ensure_parent_dir(DEFAULT_DB_PATH)
 
         # Clean up stale temp files from crashed/killed sync processes
         _reap_stale_temp_files()
 
-        settings = load_settings()
-
         db_absent = not DEFAULT_DB_PATH.exists()
 
-        if db_absent or _needs_reimport(settings):
-            _spawn_background(["ccrecall", "import"], import_conversations.PID_KEY)
+        if db_absent or _needs_reimport(settings, logger):
+            _spawn_background(["ccrecall", "import"], import_conversations.PID_KEY, logger)
 
-        if _needs_backfill(settings):
-            _spawn_background(["ccrecall", "backfill", "summaries"], backfill_summaries.PID_KEY)
+        if _needs_backfill(settings, logger):
+            _spawn_background(["ccrecall", "backfill", "summaries"], backfill_summaries.PID_KEY, logger)
 
         # Note: embedding backfill is NOT auto-spawned. Embeddings are filled
         # forward by embed-on-write (active leaves only); historical seeding is
@@ -146,7 +155,7 @@ def main():
         # (O_CREAT|O_EXCL): at most one concurrent warm runs at a time.
         # Runs on every SessionStart; fast no-op after the first download since the
         # model is already cached on disk.
-        _spawn_background(["ccrecall-warm-model"], WARM_MODEL_PID_KEY)
+        _spawn_background(["ccrecall-warm-model"], WARM_MODEL_PID_KEY, logger)
     except Exception:
         # Top-level hook guard: must never crash the session start. Log
         # best-effort (no-op unless logging_enabled) so the failure isn't silent.

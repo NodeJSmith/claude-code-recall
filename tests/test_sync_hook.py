@@ -411,7 +411,7 @@ class TestPidGuard:
         pid_path.write_text(str(os.getpid()))
 
         with patch("subprocess.Popen") as mock_popen:
-            memory_setup._spawn_background(["cm-test-cmd"], "cm-test-cmd")
+            memory_setup._spawn_background(["cm-test-cmd"], "cm-test-cmd", MagicMock())
             mock_popen.assert_not_called()
 
     def test_pid_guard_reaps_stale_pid(self, tmp_path, monkeypatch):
@@ -436,7 +436,7 @@ class TestPidGuard:
         mock_proc.pid = 99999
 
         with patch("subprocess.Popen", return_value=mock_proc) as mock_popen, patch("os.write"):
-            memory_setup._spawn_background(["cm-test-cmd"], "cm-test-cmd")
+            memory_setup._spawn_background(["cm-test-cmd"], "cm-test-cmd", MagicMock())
             mock_popen.assert_called_once()
 
         # PID file should have been reaped (it no longer exists or has been rewritten)
@@ -466,7 +466,7 @@ class TestPidGuard:
             patch("os.write"),
             patch("os.close"),
         ):
-            memory_setup._spawn_background(["cm-test-cmd"], "cm-test-cmd")
+            memory_setup._spawn_background(["cm-test-cmd"], "cm-test-cmd", MagicMock())
 
         assert created_flags, "os.open must have been called for the PID file"
         flags = created_flags[0]
@@ -816,7 +816,7 @@ class TestModelWarmOnSetup:
         """memory_setup.main() spawns ccrecall-warm-model after DB setup."""
         spawned: list[tuple[list[str], str]] = []
 
-        def mock_spawn(argv, pid_key):
+        def mock_spawn(argv, pid_key, logger):
             spawned.append((argv, pid_key))
 
         monkeypatch.setattr(memory_setup, "_spawn_background", mock_spawn)
@@ -837,7 +837,7 @@ class TestModelWarmOnSetup:
         """The warm spawn uses _spawn_background (which has the atomic PID guard)."""
         spawn_keys: list[str] = []
 
-        def recording_spawn(argv, pid_key):
+        def recording_spawn(argv, pid_key, logger):
             spawn_keys.append(pid_key)
 
         monkeypatch.setattr(memory_setup, "_spawn_background", recording_spawn)

@@ -1,6 +1,7 @@
 """SessionEnd hook (matcher: clear) — writes handoff file for SessionStart to link sessions."""
 
 import json
+import logging
 import sys
 
 from pydantic import ValidationError
@@ -13,7 +14,9 @@ from ccrecall.config import (
     load_settings,
     log_hook_exception,
 )
-from ccrecall.models import HookInput
+from ccrecall.models import LOGGER_NAME, HookInput
+
+log = logging.getLogger(LOGGER_NAME)
 
 
 def main():
@@ -22,6 +25,7 @@ def main():
         try:
             hook_input = HookInput.model_validate_json(raw)
         except ValidationError:
+            log.warning("clear-handoff: malformed hook input on stdin, dropping")
             return
 
         if hook_input.end_reason != "clear":
