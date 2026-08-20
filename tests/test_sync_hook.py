@@ -934,6 +934,37 @@ class TestModelWarmOnSetup:
             mock_get_logger.assert_not_called()
 
 
+class TestSetupLoggingBestEffort:
+    """A setup_logging() failure (bad log path) must not block the rest of main()."""
+
+    WARM_PID_KEY = "ccrecall-warm-model"
+
+    def test_setup_logging_failure_does_not_block_spawns(self, tmp_path, monkeypatch):
+        spawned: list[str] = []
+
+        def mock_spawn(argv, pid_key, logger):
+            spawned.append(pid_key)
+
+        def raise_bad_log_path(*_a, **_k):
+            raise OSError("bad log path")
+
+        monkeypatch.setattr(memory_setup, "setup_logging", raise_bad_log_path)
+        monkeypatch.setattr(memory_setup, "_spawn_background", mock_spawn)
+        monkeypatch.setattr(memory_setup, "DEFAULT_DB_PATH", tmp_path / "conversations.db")
+        monkeypatch.setattr(memory_setup, "load_settings", lambda: {"logging_enabled": False})
+        monkeypatch.setattr(memory_setup, "_needs_reimport", lambda *a, **k: False)
+        monkeypatch.setattr(memory_setup, "_needs_backfill", lambda *a, **k: False)
+        monkeypatch.setattr(memory_setup, "_reap_stale_temp_files", lambda: None)
+
+        captured = io.StringIO()
+        with patch("sys.stdout", captured):
+            memory_setup.main()
+
+        assert self.WARM_PID_KEY in spawned, f"setup_logging() failure blocked the rest of main(); spawns: {spawned}"
+        out = json.loads(captured.getvalue())
+        assert out.get("continue") is True
+
+
 # Embedding-status sidecar recording/clearing in sync_current.run()
 
 

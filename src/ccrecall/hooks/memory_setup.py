@@ -24,6 +24,7 @@ from ccrecall.db import CONTENT_ERROR_VERSION, get_connection
 from ccrecall.hooks import backfill_summaries, import_conversations
 from ccrecall.hooks.subprocess_utils import detached_popen_kwargs
 from ccrecall.hooks.warm_model import PID_KEY as WARM_MODEL_PID_KEY
+from ccrecall.models import LOGGER_NAME
 from ccrecall.summarizer import SUMMARY_VERSION
 
 # Stale sync temp files older than this (seconds) are reaped on SessionStart.
@@ -128,10 +129,22 @@ def _reap_stale_temp_files() -> None:
 
 
 def main():
+    settings = None
     try:
         settings = load_settings()
         logger = setup_logging(settings, process_name="setup")
+    except Exception:
+        # Logging setup is best-effort: a bad log path (unwritable dir, a file
+        # where a directory is expected) must not block the real setup work
+        # below. Fall back to the bare named logger — with no handler attached
+        # it can't raise on .warning()/.exception() calls (stdlib routes
+        # WARNING+ through logging.lastResort to stderr instead). `settings`
+        # stays whatever load_settings() last returned (None if that itself
+        # failed) — the callers below already treat None as "use defaults".
+        log_hook_exception("setup")
+        logger = logging.getLogger(LOGGER_NAME)
 
+    try:
         ensure_parent_dir(DEFAULT_DB_PATH)
 
         # Clean up stale temp files from crashed/killed sync processes

@@ -162,6 +162,29 @@ class TestClearHandoffAtomicity:
         assert leftover_tmp == [], f"atomic_write_json left temp file(s) behind: {leftover_tmp}"
         assert handoff_path.exists()
 
+    def test_setup_logging_failure_does_not_lose_the_handoff(self, tmp_path):
+        """A bad log path (setup_logging() raising) must not cost the user their handoff write."""
+        fake_db = tmp_path / "conversations.db"
+        handoff_path = tmp_path / "clear-handoff.json"
+        stdin_data = json.dumps({"end_reason": "clear", "session_id": "sid-logging-fail", "cwd": "/my/project"})
+        stdout_capture = io.StringIO()
+
+        def raise_bad_log_path(*_a, **_k):
+            raise OSError("bad log path")
+
+        with (
+            patch.object(sys, "stdin", io.StringIO(stdin_data)),
+            patch.object(sys, "stdout", stdout_capture),
+            patch.object(_clear_handoff, "load_settings", return_value={"db_path": str(fake_db)}),
+            patch.object(_clear_handoff, "get_db_path", return_value=fake_db),
+            patch.object(_clear_handoff, "setup_logging", raise_bad_log_path),
+        ):
+            _clear_handoff.main()
+
+        assert handoff_path.exists(), "setup_logging() failure lost the handoff write"
+        assert json.loads(handoff_path.read_text())["session_id"] == "sid-logging-fail"
+        assert stdout_capture.getvalue().strip() == "{}"
+
 
 class TestClearHandoffStdout:
     """Hook must always print valid JSON to stdout for the harness."""
