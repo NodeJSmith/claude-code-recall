@@ -26,6 +26,10 @@
 
 * cache unchanged ingestion checks ([#105](https://github.com/NodeJSmith/claude-code-recall/issues/105)) ([64e8a39](https://github.com/NodeJSmith/claude-code-recall/commit/64e8a39fd9ad1742ae2170241630bf4c1bb36264))
 
+## 2026-08-19
+
+- surface previously-silent parsing, database, and hook failures to the per-process log files instead of failing silently (#154)
+
 ## 2026-08-14
 
 - fix a crash on upgrading pre-v4 databases caused by an index referencing a column added by a later migration (#136)
