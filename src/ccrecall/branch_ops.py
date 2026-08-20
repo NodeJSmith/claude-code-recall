@@ -246,6 +246,6 @@ def sync_branch(
         # broad Exception catch here is still a genuine I/O/inference boundary
         # (DB read + embed_batch), so log it rather than let it vanish silently.
         log.exception(
-            "sync: embedding failed for branch; watermark left stale for backfill",
+            "embedding failed for branch; watermark left stale for backfill",
             extra={"branch_id": branch_db_id},
         )
