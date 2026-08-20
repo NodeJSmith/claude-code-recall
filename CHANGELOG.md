@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.23.0](https://github.com/NodeJSmith/claude-code-recall/compare/v0.22.1...v0.23.0) (2026-08-20)
+
+
+### ⚠ BREAKING CHANGES
+
+* delete orphaned LLM summary enrichment subsystem ([#134](https://github.com/NodeJSmith/claude-code-recall/issues/134))
+
+### Bug Fixes
+
+* add logging to silent core modules and hooks ([#154](https://github.com/NodeJSmith/claude-code-recall/issues/154)) ([f0a5d21](https://github.com/NodeJSmith/claude-code-recall/commit/f0a5d2123a6162413ef43eb5f4c624f4c740b7af)), closes [#145](https://github.com/NodeJSmith/claude-code-recall/issues/145)
+* exclude hyphenated project names on lossy fallback path ([#135](https://github.com/NodeJSmith/claude-code-recall/issues/135)) ([002b5f1](https://github.com/NodeJSmith/claude-code-recall/commit/002b5f1ac26abeda7f49d4f6658244c7725d90d2))
+* salvage three independent bug fixes from the abandoned recap branch ([#132](https://github.com/NodeJSmith/claude-code-recall/issues/132)) ([574d177](https://github.com/NodeJSmith/claude-code-recall/commit/574d17762bae40d04dd8d00148591774f1d69c25))
+
+
+### Refactoring
+
+* delete orphaned LLM summary enrichment subsystem ([#134](https://github.com/NodeJSmith/claude-code-recall/issues/134)) ([4199480](https://github.com/NodeJSmith/claude-code-recall/commit/419948085cb39db7cea8d8f3b248ba102861de3d))
+* extract shared backfill batch-loop and transcript tree-walk ([#153](https://github.com/NodeJSmith/claude-code-recall/issues/153)) ([83dbe3b](https://github.com/NodeJSmith/claude-code-recall/commit/83dbe3b6b46ac4f170906bd3be776ff2208d7168))
+* wave 1 logging, dead code cleanup, test consolidation ([#148](https://github.com/NodeJSmith/claude-code-recall/issues/148)) ([cbfe0ce](https://github.com/NodeJSmith/claude-code-recall/commit/cbfe0cee1ca8ae269aa5ad0e7a1721cfde1c8457))
+* wave 3 structural decompositions (db.py, session_tail.py, embed_branch_chunks) ([#149](https://github.com/NodeJSmith/claude-code-recall/issues/149)) ([fba4458](https://github.com/NodeJSmith/claude-code-recall/commit/fba4458c84fe452b36820f90987e8bbd219e9afe))
+* wave 4 polish — consolidate patterns, CLI flags, logging ([#150](https://github.com/NodeJSmith/claude-code-recall/issues/150)) ([b4ac7f4](https://github.com/NodeJSmith/claude-code-recall/commit/b4ac7f439ece48975c2f501e88c9d98101dbd013))
+
+
+### Documentation
+
+* codebase health audit and attack plan ([#147](https://github.com/NodeJSmith/claude-code-recall/issues/147)) ([8a577e6](https://github.com/NodeJSmith/claude-code-recall/commit/8a577e6c407d4be31bd8bf022cd98940b375f6c4))
+
 ## [0.22.1](https://github.com/NodeJSmith/claude-code-recall/compare/v0.22.0...v0.22.1) (2026-08-09)
 
 
