@@ -209,6 +209,27 @@ def get_db_path(settings: dict | None = None) -> Path:
     return DEFAULT_DB_PATH
 
 
+_LOG_RECORD_RESERVED_FIELDS = frozenset(logging.makeLogRecord({}).__dict__) | {"message", "asctime"}
+
+
+class _ExtraFieldsFormatter(logging.Formatter):
+    """Appends any `extra=` fields (beyond the standard `LogRecord` attributes) as
+    `key=value` pairs after the base message.
+
+    The stdlib `Formatter` only renders fields named in its format string, so
+    context passed via `extra={...}` is otherwise silently absent from the
+    rendered line even though it's attached to the `LogRecord`.
+    """
+
+    def format(self, record: logging.LogRecord) -> str:
+        base = super().format(record)
+        extras = {k: v for k, v in record.__dict__.items() if k not in _LOG_RECORD_RESERVED_FIELDS}
+        if not extras:
+            return base
+        extra_str = " ".join(f"{k}={v!r}" for k, v in sorted(extras.items()))
+        return f"{base} | {extra_str}"
+
+
 def setup_logging(
     settings: dict | None = None,
     process_name: str = "ccrecall",
@@ -236,7 +257,7 @@ def setup_logging(
     log_path = RUNTIME_DIR / f"ccrecall-{process_name}.log"
     ensure_parent_dir(log_path)
 
-    formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+    formatter = _ExtraFieldsFormatter("%(asctime)s - %(levelname)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
 
     file_handler = RotatingFileHandler(
         log_path,

@@ -9,7 +9,12 @@ different shapes — these helpers give each shape one home:
 """
 
 import json
+import logging
 from typing import Any
+
+from ccrecall.models import LOGGER_NAME
+
+log = logging.getLogger(LOGGER_NAME)
 
 
 def decode_json_column(raw: str | None, default: Any) -> Any:
@@ -38,4 +43,8 @@ def decode_json_field(value: object, default: Any) -> Any:
     try:
         return json.loads(value)
     except json.JSONDecodeError:
+        log.warning(
+            "malformed JSON in decoded field, falling back to default",
+            extra={"value_length": len(value)},
+        )
         return default

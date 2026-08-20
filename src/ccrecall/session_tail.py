@@ -60,7 +60,7 @@ def load_tail_entries(path: Path, tail_lines: int = _HOOK_TAIL_LINES) -> list[di
     """
     with open(path, encoding="utf-8", errors="replace") as fh:
         lines = deque(fh, maxlen=tail_lines)
-    return list(parse_lines_with_uuids(lines))
+    return list(parse_lines_with_uuids(lines, source=str(path)))
 
 
 def last_typed_instruction(entries: list[dict]) -> str | None:

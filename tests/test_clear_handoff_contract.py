@@ -145,11 +145,45 @@ class TestClearHandoffAtomicity:
         assert json.loads(handoff_path.read_text())["session_id"] == "sid-concurrent"
 
     def test_leaves_no_temporary_file_behind(self, tmp_path):
+        """No leftover .tmp staging files from atomic_write_json.
+
+        Cannot assert exact directory contents any more: clear_handoff.py now
+        calls setup_logging() (added by this task's fix so the malformed-input
+        warning actually reaches a log file), which writes
+        ccrecall-clear-handoff.log into the same runtime directory the handoff
+        lives in — matching production, where RUNTIME_DIR doubles as both the
+        DB directory and the log directory for every ccrecall hook.
+        """
         handoff_path, _ = _run_handoff_main(
             tmp_path, {"end_reason": "clear", "session_id": "sid-clean", "cwd": "/my/project"}
         )
 
-        assert [p.name for p in handoff_path.parent.iterdir()] == ["clear-handoff.json"]
+        leftover_tmp = [p.name for p in handoff_path.parent.iterdir() if p.name.endswith(".tmp")]
+        assert leftover_tmp == [], f"atomic_write_json left temp file(s) behind: {leftover_tmp}"
+        assert handoff_path.exists()
+
+    def test_setup_logging_failure_does_not_lose_the_handoff(self, tmp_path):
+        """A bad log path (setup_logging() raising) must not cost the user their handoff write."""
+        fake_db = tmp_path / "conversations.db"
+        handoff_path = tmp_path / "clear-handoff.json"
+        stdin_data = json.dumps({"end_reason": "clear", "session_id": "sid-logging-fail", "cwd": "/my/project"})
+        stdout_capture = io.StringIO()
+
+        def raise_bad_log_path(*_a, **_k):
+            raise OSError("bad log path")
+
+        with (
+            patch.object(sys, "stdin", io.StringIO(stdin_data)),
+            patch.object(sys, "stdout", stdout_capture),
+            patch.object(_clear_handoff, "load_settings", return_value={"db_path": str(fake_db)}),
+            patch.object(_clear_handoff, "get_db_path", return_value=fake_db),
+            patch.object(_clear_handoff, "setup_logging", raise_bad_log_path),
+        ):
+            _clear_handoff.main()
+
+        assert handoff_path.exists(), "setup_logging() failure lost the handoff write"
+        assert json.loads(handoff_path.read_text())["session_id"] == "sid-logging-fail"
+        assert stdout_capture.getvalue().strip() == "{}"
 
 
 class TestClearHandoffStdout:

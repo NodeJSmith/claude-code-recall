@@ -1,9 +1,14 @@
 """Session formatting, time utilities, and project path helpers."""
 
 import json
+import logging
 from pathlib import Path
 
 from whenever import Instant
+
+from ccrecall.models import LOGGER_NAME
+
+log = logging.getLogger(LOGGER_NAME)
 
 # Verbose output lists at most this many modified files before collapsing to a count.
 MAX_FILES_DISPLAYED = 10
@@ -24,6 +29,10 @@ def format_time(ts_str: str | None, fmt: str = "%H:%M") -> str:
         local = Instant.parse_iso(ts_str).to_system_tz()
         return local.to_stdlib().strftime(fmt)
     except ValueError:
+        log.warning(
+            "unparseable timestamp, falling back to raw prefix",
+            extra={"timestamp_prefix": ts_str[:32]},
+        )
         return ts_str[:16] if ts_str else "??:??"
 
 

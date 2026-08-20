@@ -5,13 +5,16 @@ diffs the branch_messages link table; ``sync_branch`` is the per-branch
 coordinator that ties metadata, links, summary, and embedding together.
 """
 
-import contextlib
 import json
+import logging
 import sqlite3
 
 from ccrecall.db_vec import fetch_branch_messages
 from ccrecall.embed_ops import embed_branch_chunks, write_branch_summary
+from ccrecall.models import LOGGER_NAME
 from ccrecall.parsing import build_aggregated_content, compute_branch_metadata, extract_session_metadata
+
+log = logging.getLogger(LOGGER_NAME)
 
 
 def _to_json_or_none(value) -> str | None:
@@ -233,6 +236,16 @@ def sync_branch(
     # fetch_branch_messages returns flat {role, content, timestamp, uuid} dicts — the
     # format build_exchange_pairs expects. branch_msgs (raw JSONL) is the right input
     # for metadata computation above but not for embedding.
-    with contextlib.suppress(Exception):
+    try:
         embed_msgs = fetch_branch_messages(cursor, branch_db_id, include_notifications=False)
         embed_branch_chunks(cursor, branch_db_id, embed_msgs, is_active, vec_writable)
+    except Exception:
+        # embed_branch_chunks raises on failure by design (see its docstring) and
+        # leaves the embedding watermark stale, so the background backfill will
+        # pick this branch back up — the suppression itself is intentional. But a
+        # broad Exception catch here is still a genuine I/O/inference boundary
+        # (DB read + embed_batch), so log it rather than let it vanish silently.
+        log.exception(
+            "embedding failed for branch; watermark left stale for backfill",
+            extra={"branch_id": branch_db_id},
+        )

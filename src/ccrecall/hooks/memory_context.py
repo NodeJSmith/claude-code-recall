@@ -80,6 +80,7 @@ def main():
     try:
         hook_input = HookInput.model_validate_json(raw) if raw else HookInput()
     except ValidationError:
+        logger.warning("malformed hook input on stdin, defaulting", extra={"raw_len": len(raw)})
         hook_input = HookInput()
 
     cwd = hook_input.cwd

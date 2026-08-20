@@ -411,7 +411,7 @@ class TestPidGuard:
         pid_path.write_text(str(os.getpid()))
 
         with patch("subprocess.Popen") as mock_popen:
-            memory_setup._spawn_background(["cm-test-cmd"], "cm-test-cmd")
+            memory_setup._spawn_background(["cm-test-cmd"], "cm-test-cmd", MagicMock())
             mock_popen.assert_not_called()
 
     def test_pid_guard_reaps_stale_pid(self, tmp_path, monkeypatch):
@@ -436,7 +436,7 @@ class TestPidGuard:
         mock_proc.pid = 99999
 
         with patch("subprocess.Popen", return_value=mock_proc) as mock_popen, patch("os.write"):
-            memory_setup._spawn_background(["cm-test-cmd"], "cm-test-cmd")
+            memory_setup._spawn_background(["cm-test-cmd"], "cm-test-cmd", MagicMock())
             mock_popen.assert_called_once()
 
         # PID file should have been reaped (it no longer exists or has been rewritten)
@@ -466,12 +466,48 @@ class TestPidGuard:
             patch("os.write"),
             patch("os.close"),
         ):
-            memory_setup._spawn_background(["cm-test-cmd"], "cm-test-cmd")
+            memory_setup._spawn_background(["cm-test-cmd"], "cm-test-cmd", MagicMock())
 
         assert created_flags, "os.open must have been called for the PID file"
         flags = created_flags[0]
         assert flags & os.O_CREAT, "O_CREAT must be set"
         assert flags & os.O_EXCL, "O_EXCL must be set for atomic create"
+
+
+class TestNeedsCheckDbError:
+    """_needs_reimport and _needs_backfill both gracefully degrade (return False)
+    on DB access failure.
+
+    Regression coverage: each function's `(sqlite3.Error, OSError)` except clause
+    (and its new required `logger` parameter) had zero direct test coverage —
+    every main()-level test monkeypatches the function away entirely. These
+    tests exercise the graceful-degradation behavior directly: a DB failure
+    must not propagate, and must resolve to "no work needed" rather than
+    crashing the SessionStart hook. Parametrized over both functions since they
+    share the identical except-and-degrade shape.
+    """
+
+    @pytest.mark.parametrize("target_fn", [memory_setup._needs_reimport, memory_setup._needs_backfill])
+    def test_returns_false_when_query_raises_sqlite_error(self, target_fn):
+        """A query failure (e.g. DB busy/corrupt) is swallowed; result defaults to False."""
+        mock_conn = MagicMock()
+        mock_conn.cursor.return_value.execute.side_effect = sqlite3.OperationalError("database is locked")
+        mock_ctx = MagicMock()
+        mock_ctx.__enter__.return_value = mock_conn
+        mock_ctx.__exit__.return_value = False
+
+        with patch.object(memory_setup, "get_connection", return_value=mock_ctx):
+            result = target_fn(None, MagicMock())
+
+        assert result is False
+
+    @pytest.mark.parametrize("target_fn", [memory_setup._needs_reimport, memory_setup._needs_backfill])
+    def test_returns_false_when_connection_raises_os_error(self, target_fn):
+        """A connection failure (e.g. unwritable runtime dir) is swallowed; result defaults to False."""
+        with patch.object(memory_setup, "get_connection", side_effect=OSError("read-only filesystem")):
+            result = target_fn(None, MagicMock())
+
+        assert result is False
 
 
 class TestMemorySyncTempCleanup:
@@ -816,7 +852,7 @@ class TestModelWarmOnSetup:
         """memory_setup.main() spawns ccrecall-warm-model after DB setup."""
         spawned: list[tuple[list[str], str]] = []
 
-        def mock_spawn(argv, pid_key):
+        def mock_spawn(argv, pid_key, logger):
             spawned.append((argv, pid_key))
 
         monkeypatch.setattr(memory_setup, "_spawn_background", mock_spawn)
@@ -837,7 +873,7 @@ class TestModelWarmOnSetup:
         """The warm spawn uses _spawn_background (which has the atomic PID guard)."""
         spawn_keys: list[str] = []
 
-        def recording_spawn(argv, pid_key):
+        def recording_spawn(argv, pid_key, logger):
             spawn_keys.append(pid_key)
 
         monkeypatch.setattr(memory_setup, "_spawn_background", recording_spawn)
@@ -896,6 +932,37 @@ class TestModelWarmOnSetup:
         ):
             sync_current._warn_cold_model()
             mock_get_logger.assert_not_called()
+
+
+class TestSetupLoggingBestEffort:
+    """A setup_logging() failure (bad log path) must not block the rest of main()."""
+
+    WARM_PID_KEY = "ccrecall-warm-model"
+
+    def test_setup_logging_failure_does_not_block_spawns(self, tmp_path, monkeypatch):
+        spawned: list[str] = []
+
+        def mock_spawn(argv, pid_key, logger):
+            spawned.append(pid_key)
+
+        def raise_bad_log_path(*_a, **_k):
+            raise OSError("bad log path")
+
+        monkeypatch.setattr(memory_setup, "setup_logging", raise_bad_log_path)
+        monkeypatch.setattr(memory_setup, "_spawn_background", mock_spawn)
+        monkeypatch.setattr(memory_setup, "DEFAULT_DB_PATH", tmp_path / "conversations.db")
+        monkeypatch.setattr(memory_setup, "load_settings", lambda: {"logging_enabled": False})
+        monkeypatch.setattr(memory_setup, "_needs_reimport", lambda *a, **k: False)
+        monkeypatch.setattr(memory_setup, "_needs_backfill", lambda *a, **k: False)
+        monkeypatch.setattr(memory_setup, "_reap_stale_temp_files", lambda: None)
+
+        captured = io.StringIO()
+        with patch("sys.stdout", captured):
+            memory_setup.main()
+
+        assert self.WARM_PID_KEY in spawned, f"setup_logging() failure blocked the rest of main(); spawns: {spawned}"
+        out = json.loads(captured.getvalue())
+        assert out.get("continue") is True
 
 
 # Embedding-status sidecar recording/clearing in sync_current.run()
