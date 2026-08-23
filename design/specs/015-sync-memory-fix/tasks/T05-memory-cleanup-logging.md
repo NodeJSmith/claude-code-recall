@@ -44,19 +44,19 @@ where `longest` is `token_counts[batch[0]]` (the first index in the batch, which
 
 **embed_branch_chunks WARNING (embed_ops.py):** In `embed_branch_chunks`, after `exchange_data = _prepare_exchange_data(exchanges, cap_limit=cap_limit)` and before the `_diff_exchanges` call, iterate `exchange_data` and log a WARNING for any exchange whose pre-cap token count exceeds `cap_limit`. This requires knowing the pre-cap token count — use the model's `token_count` on the raw `combined` text. Alternatively, since `_prepare_exchange_data` now caps at `cap_limit` and sets `was_capped`, log a WARNING for any exchange where `was_capped=True` and include the cap_limit.
 
-**sync_current INFO (hooks/sync_current.py):** In `run()`, capture start time before calling `sync_session` and compute elapsed. After the commit, add:
+**sync_current INFO (hooks/sync_current.py):** In `run()`, compute `file_size = session_file.stat().st_size` (where `session_file` is the Path to the JSONL transcript — check how it's resolved in the function). Note: there is no existing `file_size` variable in this file; the stat-based skip check lives in `import_conversations.py`, not here. Capture start time before calling `sync_session` and compute elapsed. After the commit, add:
 ```python
-log.info("sync complete", extra={"file_size": file_size, "duration_s": elapsed})
+logger.info("sync complete", extra={"file_size": file_size, "duration_s": elapsed})
 ```
-The `file_size` is available from `filepath.stat().st_size` (it's already read at line 185-186 for the import log). The sync_current module already has a logger.
+Note: this file has no module-level `log` variable. The logger available inside `run()` is a local named `logger` (from `setup_logging(settings, process_name="sync")` at ~line 130). Use that local `logger`, not `log`.
 
 ## Focus
 
 - `session_ops.py` line 100: `meta = extract_session_metadata(all_entries)` — this is the last use of `all_entries`. After line 125 (`insert_new_messages`), `all_entries` is genuinely unused.
 - `branch_ops.py` does NOT currently import from `hooks.subprocess_utils`. Verify the import path works — `hooks.subprocess_utils` is a module in the hooks package, importable as `ccrecall.hooks.subprocess_utils`.
 - `embeddings.py` might already have `import logging` — check. It definitely imports from `fastembed`, so adding a logger is safe.
-- `sync_current.py` already has `log = logging.getLogger(__name__)` at the module level (check around line 20-30). Use the existing logger.
-- The `file_size` in `sync_current.py` is computed at line 185-186 as part of the stat-based skip check. It's available as a local variable in `run()`.
+- `sync_current.py` has NO module-level `log` variable. Inside `run()`, the logger is a local variable named `logger` (from `setup_logging(settings, process_name="sync")`). Use that local `logger`.
+- There is no existing `file_size` variable in `sync_current.py`. The stat-based skip check with `file_size` lives in `import_conversations.py` (a different pipeline). You must compute `file_size` yourself from the session file path.
 
 ## Verify
 
