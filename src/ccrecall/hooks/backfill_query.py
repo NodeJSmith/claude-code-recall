@@ -7,7 +7,7 @@ status reporter (`backfill_status`) need to agree on.
 
 from ccrecall.config import remove_pid_file
 from ccrecall.db import CHUNK_EMBEDDABLE_BRANCH_FILTER, CONTENT_ERROR_VERSION
-from ccrecall.embeddings import EMBEDDING_MODEL, EMBEDDING_VERSION
+from ccrecall.embeddings import EMBEDDING_MODEL, EMBEDDING_VERSION, MODEL_TOKEN_LIMIT
 from ccrecall.hooks.tool_content_eligibility import days_modifier
 
 BATCH_SIZE = 20
@@ -41,6 +41,12 @@ def build_selection(days: int | None) -> tuple[str, list]:
       the backfill owns their re-embed.
     - heal clause: EXISTS a chunks row without a chunk_vec — catches crash
       victims and post-drop orphans the watermark can't see (design C1).
+    - cap-tokens clause: EXISTS a chunks row with cap_tokens < MODEL_TOKEN_LIMIT
+      — draft-quality chunks needing an upgrade (design/specs/015 FR#15),
+      selected even when the branch's embedding_version watermark is
+      otherwise current (FR#14 withholds that watermark for exactly these
+      branches, but this clause also re-selects branches stamped before the
+      cap_tokens check existed).
 
     summary_version_at_embed is dropped from the predicate: chunk staleness is
     driven by content_hash + EMBEDDING_VERSION, not the summary version.
@@ -61,9 +67,15 @@ def build_selection(days: int | None) -> tuple[str, list]:
               WHERE c.branch_id = branches.id
                 AND NOT EXISTS (SELECT 1 FROM chunk_vec WHERE chunk_id = c.id)
             )
+            OR EXISTS (
+              SELECT 1 FROM chunks c
+              WHERE c.branch_id = branches.id
+                AND c.cap_tokens IS NOT NULL
+                AND c.cap_tokens < ?
+            )
           )
     """
-    params: list = [EMBEDDING_VERSION, EMBEDDING_MODEL]
+    params: list = [EMBEDDING_VERSION, EMBEDDING_MODEL, MODEL_TOKEN_LIMIT]
     if days is not None:
         where += "          AND ended_at > datetime('now', ?)\n"
         params.append(days_modifier(days))

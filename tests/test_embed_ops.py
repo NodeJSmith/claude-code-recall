@@ -11,8 +11,14 @@ from unittest.mock import patch
 import pytest
 
 from ccrecall.db_vec import _ensure_vec_schema, vec_available
-from ccrecall.embed_ops import _prepare_exchange_data, _write_embedded_chunks, embed_branch_chunks
-from ccrecall.embeddings import EMBEDDING_DIM, MODEL_TOKEN_LIMIT, SYNC_PATH_TOKEN_LIMIT
+from ccrecall.embed_ops import (
+    _diff_exchanges,
+    _prepare_exchange_data,
+    _should_stamp_watermark,
+    _write_embedded_chunks,
+    embed_branch_chunks,
+)
+from ccrecall.embeddings import EMBEDDING_DIM, EMBEDDING_VERSION, MODEL_TOKEN_LIMIT, SYNC_PATH_TOKEN_LIMIT
 from ccrecall.schema import SCHEMA
 
 
@@ -346,3 +352,118 @@ class TestEmbedBranchChunksCapLimit:
         _, kwargs = mock_embed_batch.call_args
         assert kwargs.get("max_token_cap") == 4096
         conn.close()
+
+
+class TestDiffExchangesCapTokensUpgrade:
+    """FR#6, AC#3, AC#11: _diff_exchanges flags cap-tokens upgrades even when
+    content_hash matches, and is NULL-safe. See design/specs/015-sync-memory-fix."""
+
+    def test_flags_chunk_when_cap_tokens_below_target(self):
+        """FR#6: a chunk with cap_tokens=4096 is flagged when target_cap=MODEL_TOKEN_LIMIT
+        (backfill context), even though content_hash matches."""
+        exchange_data = [{"index": 0, "content_hash": "hash0"}]
+        existing_chunks = {0: {"content_hash": "hash0", "cap_tokens": 4096}}
+
+        needing_embed, indices_to_prune = _diff_exchanges(exchange_data, existing_chunks, target_cap=MODEL_TOKEN_LIMIT)
+
+        assert needing_embed == exchange_data
+        assert indices_to_prune == set()
+
+    def test_does_not_flag_chunk_when_cap_tokens_meets_target(self):
+        """AC#3 (second half): after upgrading to MODEL_TOKEN_LIMIT, the sync-context
+        target_cap (SYNC_PATH_TOKEN_LIMIT) does not flag it again — no ping-pong."""
+        exchange_data = [{"index": 0, "content_hash": "hash0"}]
+        existing_chunks = {0: {"content_hash": "hash0", "cap_tokens": MODEL_TOKEN_LIMIT}}
+
+        needing_embed, indices_to_prune = _diff_exchanges(
+            exchange_data, existing_chunks, target_cap=SYNC_PATH_TOKEN_LIMIT
+        )
+
+        assert needing_embed == []
+        assert indices_to_prune == set()
+
+    def test_null_cap_tokens_treated_as_full_quality(self):
+        """AC#11: cap_tokens=NULL (pre-migration/untruncated) does not raise and is
+        treated as full-quality via effective_cap_tokens — not flagged."""
+        exchange_data = [{"index": 0, "content_hash": "hash0"}]
+        existing_chunks = {0: {"content_hash": "hash0", "cap_tokens": None}}
+
+        needing_embed, _ = _diff_exchanges(exchange_data, existing_chunks, target_cap=MODEL_TOKEN_LIMIT)
+
+        assert needing_embed == []
+
+    def test_default_target_cap_is_model_token_limit(self):
+        exchange_data = [{"index": 0, "content_hash": "hash0"}]
+        existing_chunks = {0: {"content_hash": "hash0", "cap_tokens": 4096}}
+
+        needing_embed, _ = _diff_exchanges(exchange_data, existing_chunks)
+
+        assert needing_embed == exchange_data
+
+    def test_hash_mismatch_still_flags_independent_of_cap_tokens(self):
+        """The existing hash-mismatch condition is additive, not replaced by the
+        cap-tokens check."""
+        exchange_data = [{"index": 0, "content_hash": "new-hash"}]
+        existing_chunks = {0: {"content_hash": "old-hash", "cap_tokens": None}}
+
+        needing_embed, _ = _diff_exchanges(exchange_data, existing_chunks, target_cap=MODEL_TOKEN_LIMIT)
+
+        assert needing_embed == exchange_data
+
+    def test_cap_tokens_upgrade_does_not_add_to_prune_set(self):
+        """Cap-tokens upgrades are additive to needing_embed only — pruning stays
+        reserved for exchange indices that no longer exist in exchange_data."""
+        exchange_data = [{"index": 0, "content_hash": "hash0"}]
+        existing_chunks = {
+            0: {"content_hash": "hash0", "cap_tokens": 4096},
+            1: {"content_hash": "hash1", "cap_tokens": None},  # no longer in exchange_data
+        }
+
+        needing_embed, indices_to_prune = _diff_exchanges(exchange_data, existing_chunks, target_cap=MODEL_TOKEN_LIMIT)
+
+        assert needing_embed == exchange_data
+        assert indices_to_prune == {1}
+
+
+class TestShouldStampWatermarkCapTokens:
+    """FR#14, AC#9, AC#10, AC#11: watermark withheld while any chunk (existing or
+    freshly-embedded) is draft quality; stamped once every chunk is full quality."""
+
+    def test_existing_chunk_below_full_quality_withholds_watermark(self):
+        """AC#9 (negative case): an existing chunk with cap_tokens=4096 withholds
+        the watermark even though embedding_version and content_hash both match."""
+        exchange_data = [{"index": 0, "content_hash": "hash0", "cap_tokens": None}]
+        existing_chunks = {0: {"content_hash": "hash0", "embedding_version": EMBEDDING_VERSION, "cap_tokens": 4096}}
+
+        result = _should_stamp_watermark(exchange_data, embedded_indices=set(), existing_chunks=existing_chunks)
+
+        assert result is False
+
+    def test_existing_chunk_null_cap_tokens_does_not_withhold(self):
+        """AC#11: NULL cap_tokens on an existing chunk is full-quality and does not
+        raise TypeError."""
+        exchange_data = [{"index": 0, "content_hash": "hash0", "cap_tokens": None}]
+        existing_chunks = {0: {"content_hash": "hash0", "embedding_version": EMBEDDING_VERSION, "cap_tokens": None}}
+
+        result = _should_stamp_watermark(exchange_data, embedded_indices=set(), existing_chunks=existing_chunks)
+
+        assert result is True
+
+    def test_freshly_embedded_draft_quality_withholds_watermark(self):
+        """FR#14: a freshly-embedded chunk (in embedded_indices) with per-exchange
+        cap_tokens=4096 (< MODEL_TOKEN_LIMIT) still withholds the watermark — the
+        `idx in embedded_indices` shortcut must not bypass this check."""
+        exchange_data = [{"index": 0, "content_hash": "hash0", "cap_tokens": 4096}]
+
+        result = _should_stamp_watermark(exchange_data, embedded_indices={0}, existing_chunks={})
+
+        assert result is False
+
+    def test_freshly_embedded_full_quality_stamps_watermark(self):
+        """AC#10: freshly-embedded chunks all with cap_tokens=NULL (was_capped=False,
+        untruncated) still stamp the watermark — the positive case for FR#14."""
+        exchange_data = [{"index": 0, "content_hash": "hash0", "cap_tokens": None}]
+
+        result = _should_stamp_watermark(exchange_data, embedded_indices={0}, existing_chunks={})
+
+        assert result is True

@@ -24,11 +24,12 @@ from conftest import VEC_SKIP, make_vec_conn, patched_clear, patched_record
 from ccrecall.cli.commands import cmd_backfill_embeddings
 from ccrecall.config import remove_pid_file, try_acquire_pid_file
 from ccrecall.db import CONTENT_ERROR_VERSION
+from ccrecall.db_vec import upsert_chunk_vec
 from ccrecall.embed_ops import MAX_WRITE_PATH_EMBEDS_PER_SYNC
 from ccrecall.embeddings import EMBEDDING_DIM, EMBEDDING_MODEL, EMBEDDING_VERSION
 from ccrecall.health import REASON_VEC_UNAVAILABLE
 from ccrecall.hooks.backfill_embeddings import run
-from ccrecall.hooks.backfill_query import BATCH_SIZE, EXIT_ABORT, EXIT_OK, PID_KEY
+from ccrecall.hooks.backfill_query import BATCH_SIZE, EXIT_ABORT, EXIT_OK, PID_KEY, build_selection
 
 # A fixed EMBEDDING_DIM-dim float vector for stubbing embed_text.
 _FIXED_VEC = [0.001] * EMBEDDING_DIM
@@ -452,6 +453,73 @@ class TestBackfillVersionBump:
 
         assert _branch_embedding_version(conn, bid) == EMBEDDING_VERSION
         assert _branch_has_chunk_vecs(conn, bid)
+
+
+# Cap-tokens-based selection (draft-quality upgrade candidates)
+
+
+@_VEC_SKIP
+class TestBuildSelectionCapTokens:
+    """build_selection selects branches with draft-quality chunks (cap_tokens <
+    MODEL_TOKEN_LIMIT) even when the branch's embedding_version watermark is
+    otherwise current. See design/specs/015-sync-memory-fix (FR#15, AC#9)."""
+
+    def _insert_current_branch_with_chunk(self, conn: sqlite3.Connection, cap_tokens: int | None) -> int:
+        """Insert a branch already at the current watermark, with one chunk (+
+        vector) at the given cap_tokens. Every other build_selection clause
+        (version, model, heal) is satisfied, so only the new cap-tokens clause
+        can explain a match."""
+        branch_id = _insert_branch_with_messages(conn)
+        conn.execute(
+            "UPDATE branches SET embedding_version = ?, embedding_model = ? WHERE id = ?",
+            (EMBEDDING_VERSION, EMBEDDING_MODEL, branch_id),
+        )
+        conn.execute(
+            """
+            INSERT INTO chunks (
+                branch_id, exchange_index, content_hash, was_capped, cap_tokens,
+                embedding_version, embedding_model
+            ) VALUES (?, 0, 'hash0', ?, ?, ?, ?)
+            """,
+            (branch_id, int(cap_tokens is not None), cap_tokens, EMBEDDING_VERSION, EMBEDDING_MODEL),
+        )
+        chunk_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        upsert_chunk_vec(conn.cursor(), chunk_id, _FIXED_VEC)
+        conn.commit()
+        return branch_id
+
+    def _is_selected(self, conn: sqlite3.Connection, branch_id: int) -> bool:
+        where, params = build_selection(days=None)
+        rows = conn.execute(f"SELECT id FROM branches {where}", params).fetchall()
+        return branch_id in {row[0] for row in rows}
+
+    def test_draft_quality_chunk_makes_branch_eligible(self):
+        """FR#15: a branch whose only chunk has cap_tokens=4096 is selected even
+        though its embedding_version/embedding_model watermark is current."""
+        conn = make_vec_conn()
+        bid = self._insert_current_branch_with_chunk(conn, cap_tokens=4096)
+
+        assert self._is_selected(conn, bid)
+
+    def test_full_quality_chunk_not_selected(self):
+        """A branch whose only chunk has cap_tokens=NULL (full quality) and a
+        current watermark is not selected."""
+        conn = make_vec_conn()
+        bid = self._insert_current_branch_with_chunk(conn, cap_tokens=None)
+
+        assert not self._is_selected(conn, bid)
+
+    def test_upgrade_removes_branch_from_selection(self):
+        """AC#9: after backfill re-embeds a draft chunk at full quality
+        (cap_tokens -> NULL), the branch is no longer selected."""
+        conn = make_vec_conn()
+        bid = self._insert_current_branch_with_chunk(conn, cap_tokens=4096)
+        assert self._is_selected(conn, bid)
+
+        conn.execute("UPDATE chunks SET cap_tokens = NULL WHERE branch_id = ?", (bid,))
+        conn.commit()
+
+        assert not self._is_selected(conn, bid)
 
 
 # No-progress guard: loop breaks when same batch re-selected

@@ -1,7 +1,7 @@
 ---
 task_id: "T03"
 title: "Add upgrade detection, watermark, and backfill selection"
-status: "planned"
+status: "done"
 depends_on: ["T02"]
 implements: ["FR#6", "FR#14", "FR#15", "AC#3", "AC#9", "AC#10"]
 ---

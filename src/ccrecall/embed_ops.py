@@ -123,18 +123,33 @@ def _prepare_exchange_data(exchanges: list[dict], cap_limit: int = MODEL_TOKEN_L
     return exchange_data
 
 
-def _diff_exchanges(exchange_data: list[dict], existing_chunks: dict[int, dict]) -> tuple[list[dict], set[int]]:
-    """Step 5 — diff: eligible = no chunk row OR content_hash changed.
+def _diff_exchanges(
+    exchange_data: list[dict], existing_chunks: dict[int, dict], target_cap: int = MODEL_TOKEN_LIMIT
+) -> tuple[list[dict], set[int]]:
+    """Step 5 — diff: eligible = no chunk row, content_hash changed, OR cap-tokens upgrade needed.
 
     Version-stale (embedding_version < EMBEDDING_VERSION) but content-unchanged
     chunks are deliberately excluded — those are backfill's job (design H6).
+
+    A chunk is also flagged when its stored cap_tokens is below ``target_cap``,
+    even if content_hash matches — this is how backfill detects draft-quality
+    chunks needing an upgrade (design/specs/015 FR#6). ``target_cap`` is the
+    caller's own token limit (SYNC_PATH_TOKEN_LIMIT on sync, MODEL_TOKEN_LIMIT
+    on backfill), so the sync path never flags a chunk already embedded at a
+    higher backfill cap for downgrade. Cap-tokens upgrades are never added to
+    indices_to_prune — pruning is only for exchange indices that no longer
+    exist.
     """
     current_indices = {ed["index"] for ed in exchange_data}
-    needing_embed = [
-        ed
-        for ed in exchange_data
-        if ed["index"] not in existing_chunks or existing_chunks[ed["index"]]["content_hash"] != ed["content_hash"]
-    ]
+    needing_embed = []
+    for ed in exchange_data:
+        existing = existing_chunks.get(ed["index"])
+        if (
+            existing is None
+            or existing["content_hash"] != ed["content_hash"]
+            or effective_cap_tokens(existing.get("cap_tokens")) < target_cap
+        ):
+            needing_embed.append(ed)
     indices_to_prune = set(existing_chunks) - current_indices
     return needing_embed, indices_to_prune
 
@@ -193,20 +208,30 @@ def _prune_stale_chunks(cursor: sqlite3.Cursor, branch_db_id: int, indices_to_pr
 def _should_stamp_watermark(
     exchange_data: list[dict], embedded_indices: set[int], existing_chunks: dict[int, dict]
 ) -> bool:
-    """Step 8 — every exchange now has a current-version chunk with the correct content_hash?
+    """Step 8 — every exchange now has a current-version, full-quality chunk with the correct content_hash?
 
-    Checks both version AND content_hash so that content-changed exchanges
-    beyond the cap (left for backfill) don't falsely satisfy the predicate.
+    Checks version, content_hash, AND cap_tokens so that content-changed
+    exchanges beyond the cap (left for backfill) or draft-quality chunks
+    (cap_tokens < MODEL_TOKEN_LIMIT, design/specs/015 FR#14) don't falsely
+    satisfy the predicate. The withhold-until-full-quality check applies to
+    freshly-embedded chunks too: `idx in embedded_indices` alone does not
+    prove full quality, so it must not bypass the per-exchange cap_tokens
+    check via ed["cap_tokens"] (the value _prepare_exchange_data just wrote —
+    NOT the caller's raw cap_limit, which would incorrectly treat every
+    untruncated exchange embedded at a lower cap as draft quality).
     """
     for ed in exchange_data:
         idx = ed["index"]
         if idx in embedded_indices:
-            continue  # just embedded at EMBEDDING_VERSION with correct content_hash
+            if ed.get("cap_tokens") is not None and ed["cap_tokens"] < MODEL_TOKEN_LIMIT:
+                return False
+            continue  # just embedded at EMBEDDING_VERSION, correct content_hash, full quality
         existing = existing_chunks.get(idx)
         if (
             existing is None
             or existing["embedding_version"] != EMBEDDING_VERSION
             or existing["content_hash"] != ed["content_hash"]
+            or effective_cap_tokens(existing.get("cap_tokens")) < MODEL_TOKEN_LIMIT
         ):
             return False
     return True
@@ -256,15 +281,18 @@ def embed_branch_chunks(
     exchange_data = _prepare_exchange_data(exchanges, cap_limit=cap_limit)
 
     cursor.execute(
-        "SELECT exchange_index, content_hash, embedding_version, embedding_model FROM chunks WHERE branch_id = ?",
+        """
+        SELECT exchange_index, content_hash, embedding_version, embedding_model, cap_tokens
+        FROM chunks WHERE branch_id = ?
+        """,
         (branch_db_id,),
     )
     existing_chunks: dict[int, dict] = {
-        row[0]: {"content_hash": row[1], "embedding_version": row[2], "embedding_model": row[3]}
+        row[0]: {"content_hash": row[1], "embedding_version": row[2], "embedding_model": row[3], "cap_tokens": row[4]}
         for row in cursor.fetchall()
     }
 
-    needing_embed_full, indices_to_prune = _diff_exchanges(exchange_data, existing_chunks)
+    needing_embed_full, indices_to_prune = _diff_exchanges(exchange_data, existing_chunks, target_cap=cap_limit)
 
     if not needing_embed_full and not indices_to_prune:
         # Idempotent watermark repair: repairs a prior failed step 8.
