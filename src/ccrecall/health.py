@@ -57,6 +57,11 @@ ALERT_CANT_PERSIST = "cant_persist"
 ALERT_EMBEDDINGS_FAILING = "embeddings_failing"
 ALERT_TOOL_CONTENT_INCOMPLETE = "tool_content_incomplete"
 
+# Deliberate duplication of embeddings.MODEL_TOKEN_LIMIT: health.py must never
+# import from embeddings.py (see module docstring's hot-path invariant), so this
+# is a plain int literal kept in sync by tests/test_health.py's cross-check.
+FULL_QUALITY_TOKEN_LIMIT = 8192
+
 # Embedding-capability failure reason codes (the sub-protocol the detached embedding
 # process writes into the embedding-status sidecar; the SessionStart hook reads them back). Shared here
 # so the writer (backfill/sync) and any reader agree on the exact strings.

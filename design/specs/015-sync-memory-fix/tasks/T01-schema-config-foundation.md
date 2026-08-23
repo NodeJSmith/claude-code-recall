@@ -1,7 +1,7 @@
 ---
 task_id: "T01"
 title: "Add schema, config, and foundation constants"
-status: "planned"
+status: "done"
 depends_on: []
 implements: ["FR#5", "AC#11"]
 ---

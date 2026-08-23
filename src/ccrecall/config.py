@@ -46,6 +46,7 @@ DEFAULT_SETTINGS = {
     "logging_enabled": True,
     "log_level": "INFO",
     "alert_snooze_hours": 24,
+    "sync_path_token_limit": 4096,
 }
 
 # Rotating memory-log handler sizing.

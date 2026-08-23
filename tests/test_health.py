@@ -6,6 +6,7 @@ import sqlite3
 from whenever import Instant
 
 import ccrecall.health as health
+from ccrecall.embeddings import MODEL_TOKEN_LIMIT
 from ccrecall.health import (
     ALERT_CANT_PERSIST,
     ALERT_EMBEDDINGS_FAILING,
@@ -496,3 +497,12 @@ class TestConstants:
         fault = ProbeResult(ok=False, reason="disk full")
         assert ok.ok is True
         assert fault.reason == "disk full"
+
+    def test_full_quality_token_limit_matches_embeddings_model_token_limit(self):
+        """health.FULL_QUALITY_TOKEN_LIMIT is a deliberate duplicate of embeddings.MODEL_TOKEN_LIMIT.
+
+        health.py must never import from embeddings.py (hot-path invariant), so
+        the value is a plain int literal — this cross-check guards the two from
+        drifting apart.
+        """
+        assert health.FULL_QUALITY_TOKEN_LIMIT == MODEL_TOKEN_LIMIT

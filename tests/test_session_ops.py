@@ -12,8 +12,8 @@ import pytest
 from conftest import FIXTURE_DIR
 
 from ccrecall.db_vec import _ensure_vec_schema, vec_available
-from ccrecall.embed_ops import MAX_WRITE_PATH_EMBEDS_PER_SYNC, embed_branch_chunks
-from ccrecall.embeddings import EMBEDDING_DIM, EMBEDDING_MODEL, EMBEDDING_VERSION
+from ccrecall.embed_ops import MAX_WRITE_PATH_EMBEDS_PER_SYNC, effective_cap_tokens, embed_branch_chunks
+from ccrecall.embeddings import EMBEDDING_DIM, EMBEDDING_MODEL, EMBEDDING_VERSION, MODEL_TOKEN_LIMIT
 from ccrecall.hooks.import_conversations import get_file_hash
 from ccrecall.import_log_ops import has_pending_tool_content
 from ccrecall.parsing import extract_session_uuid
@@ -663,6 +663,22 @@ def _make_msgs(*exchange_pairs: tuple[str, str]) -> list[dict]:
                 }
             )
     return msgs
+
+
+class TestEffectiveCapTokens:
+    """Tests for effective_cap_tokens: NULL-safe cap_tokens comparison helper."""
+
+    def test_none_returns_model_token_limit(self):
+        assert effective_cap_tokens(None) == MODEL_TOKEN_LIMIT
+
+    def test_int_returns_value_unchanged(self):
+        assert effective_cap_tokens(4096) == 4096
+
+    def test_no_type_error_on_none_input(self):
+        # Regression guard: a bare `cap_tokens < other_int` comparison raises
+        # TypeError when cap_tokens is None; the helper must never do that.
+        result = effective_cap_tokens(None)
+        assert result < MODEL_TOKEN_LIMIT + 1
 
 
 class TestEmbedBranchChunks:

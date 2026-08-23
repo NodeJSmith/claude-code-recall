@@ -140,10 +140,15 @@ CREATE TABLE IF NOT EXISTS chunks (
   was_capped        INTEGER NOT NULL DEFAULT 0,
   embedding_version INTEGER NOT NULL DEFAULT 0,
   embedding_model   TEXT,
+  cap_tokens        INTEGER,
   UNIQUE(branch_id, exchange_index)
 );
 CREATE INDEX IF NOT EXISTS idx_chunks_branch ON chunks(branch_id);
 CREATE INDEX IF NOT EXISTS idx_chunks_version ON chunks(embedding_version);
+-- idx_chunks_cap_tokens is created by _migrate_to_v8, not here: on a pre-v8
+-- upgrade the chunks table already exists WITHOUT cap_tokens, so a CREATE INDEX
+-- referencing that column in SCHEMA_CORE would crash before the migration gets
+-- a chance to ADD COLUMN.
 
 """
 

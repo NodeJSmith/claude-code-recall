@@ -1,8 +1,8 @@
-"""Tests for ccrecall.config — logging formatter."""
+"""Tests for ccrecall.config — logging formatter and default settings."""
 
 import logging
 
-from ccrecall.config import _ExtraFieldsFormatter
+from ccrecall.config import DEFAULT_SETTINGS, _ExtraFieldsFormatter
 
 
 def _format(record_kwargs: dict, extra: dict | None = None) -> str:
@@ -39,3 +39,8 @@ class TestExtraFieldsFormatter:
         rendered = _format({"msg": "m"}, extra={"zeta": 1, "alpha": 2})
 
         assert rendered == "WARNING - m | alpha=2 zeta=1"
+
+
+class TestDefaultSettings:
+    def test_sync_path_token_limit_present_with_default_value(self):
+        assert DEFAULT_SETTINGS["sync_path_token_limit"] == 4096

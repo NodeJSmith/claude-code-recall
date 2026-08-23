@@ -47,6 +47,10 @@ EMBEDDING_MODEL_CACHE_SUBDIR = "models--" + EMBEDDING_MODEL_HF_SOURCE.replace("/
 EMBED_CHAR_BUDGET = 32_000
 MODEL_TOKEN_LIMIT = 8192
 
+# Token cap applied on the interactive sync-current write path — tighter than
+# MODEL_TOKEN_LIMIT to bound per-sync inference cost. See design/specs/015.
+SYNC_PATH_TOKEN_LIMIT = 4096
+
 # Marker spliced between the kept head and tail when the middle is dropped.
 # Both build sites in cap_for_embedding must agree, so the literal lives here once.
 _CAP_MARKER = "\n\n[...]\n\n"

@@ -82,6 +82,7 @@ _migrate_to_v4 = db_base._migrate_to_v4
 _migrate_to_v5 = db_base._migrate_to_v5
 _migrate_to_v6 = db_base._migrate_to_v6
 _migrate_to_v7 = db_base._migrate_to_v7
+_migrate_to_v8 = db_base._migrate_to_v8
 
 
 def _apply_migrations(conn: sqlite3.Connection) -> None:

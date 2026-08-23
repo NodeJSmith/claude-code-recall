@@ -10,7 +10,7 @@ import logging
 import sqlite3
 
 from ccrecall.db_vec import write_chunk_embedding
-from ccrecall.embeddings import EMBEDDING_MODEL, EMBEDDING_VERSION, cap_for_embedding, embed_batch
+from ccrecall.embeddings import EMBEDDING_MODEL, EMBEDDING_VERSION, MODEL_TOKEN_LIMIT, cap_for_embedding, embed_batch
 from ccrecall.models import LOGGER_NAME
 from ccrecall.summarizer import SUMMARY_VERSION, build_exchange_pairs, compute_context_summary
 
@@ -20,6 +20,19 @@ from ccrecall.summarizer import SUMMARY_VERSION, build_exchange_pairs, compute_c
 # here. This cap bounds the detached sync-current process's worst case even for a
 # first-sync of a long imported session or a rewind with many fresh exchanges.
 MAX_WRITE_PATH_EMBEDS_PER_SYNC = 8
+
+
+def effective_cap_tokens(cap_tokens: int | None) -> int:
+    """Resolve a chunk's stored cap_tokens to a comparable int.
+
+    A NULL cap_tokens means the chunk was embedded before this column existed
+    (or under no cap), which is equivalent to the model's own hard limit.
+    Every comparison site must go through this helper instead of comparing
+    cap_tokens directly, to avoid TypeError on `None < int`.
+    """
+    if cap_tokens is None:
+        return MODEL_TOKEN_LIMIT
+    return cap_tokens
 
 
 def write_branch_summary(cursor: sqlite3.Cursor, branch_db_id: int) -> str | None:
