@@ -274,6 +274,8 @@ def embed_batch(texts: list[str], max_token_cap: int = MODEL_TOKEN_LIMIT) -> lis
     vectors: dict[int, list[float]] = {}
     for batch in _plan_embed_batches(token_counts, max_token_cap=max_token_cap):
         batch_texts = [texts[i] for i in batch]
+        longest = token_counts[batch[0]]
+        log.debug("embedding batch", extra={"batch_size": len(batch_texts), "longest_tokens": longest})
         for i, vec in zip(batch, model.embed(batch_texts, batch_size=len(batch_texts)), strict=True):
             vectors[i] = normalize(vec.astype(np.float32)).tolist()
     return [vectors[i] for i in range(len(texts))]

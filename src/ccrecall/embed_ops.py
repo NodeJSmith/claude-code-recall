@@ -14,6 +14,8 @@ from ccrecall.embeddings import EMBEDDING_MODEL, EMBEDDING_VERSION, MODEL_TOKEN_
 from ccrecall.models import LOGGER_NAME
 from ccrecall.summarizer import SUMMARY_VERSION, build_exchange_pairs, compute_context_summary
 
+log = logging.getLogger(LOGGER_NAME)
+
 # Maximum number of exchanges embedded per sync on the write path. Version-stale
 # chunks (those only needing an EMBEDDING_VERSION bump) are deliberately left to
 # the background backfill — only new or content-changed exchanges are eligible
@@ -64,7 +66,7 @@ def write_branch_summary(cursor: sqlite3.Cursor, branch_db_id: int) -> str | Non
         # outer handler in the import loop). The branch stays eligible for
         # backfill, and the failure is observable in the log instead of being
         # silently swallowed.
-        logging.getLogger(LOGGER_NAME).exception("sync: summary write failed for branch %s", branch_db_id)
+        log.exception("sync: summary write failed for branch %s", branch_db_id)
         summary_md = None
     return summary_md
 
@@ -293,6 +295,18 @@ def embed_branch_chunks(
     }
 
     needing_embed_full, indices_to_prune = _diff_exchanges(exchange_data, existing_chunks, target_cap=cap_limit)
+
+    # Path-aware cap-exceeded warning: was_capped=True means cap_for_embedding
+    # actually truncated this exchange's text at cap_limit — the sync path warns
+    # above SYNC_PATH_TOKEN_LIMIT, backfill warns above MODEL_TOKEN_LIMIT, since
+    # cap_limit is whichever the caller passed in. Scoped to exchanges actually
+    # selected for (re-)embedding this call (needing_embed_full), not the whole
+    # branch history — an exchange that was capped once but is already embedded
+    # and unchanged must not re-warn on every subsequent sync. See
+    # design/specs/015 (FR#11).
+    for ed in needing_embed_full:
+        if ed["was_capped"]:
+            log.warning("exchange exceeds cap", extra={"cap": cap_limit})
 
     if not needing_embed_full and not indices_to_prune:
         # Idempotent watermark repair: repairs a prior failed step 8.

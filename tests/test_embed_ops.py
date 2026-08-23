@@ -4,6 +4,7 @@ FR#13, AC#1, AC#2, AC#8).
 """
 
 import hashlib
+import logging
 import sqlite3
 from pathlib import Path
 from unittest.mock import patch
@@ -351,6 +352,57 @@ class TestEmbedBranchChunksCapLimit:
         mock_embed_batch.assert_called_once()
         _, kwargs = mock_embed_batch.call_args
         assert kwargs.get("max_token_cap") == 4096
+        conn.close()
+
+
+class TestEmbedBranchChunksCapExceededWarning:
+    """FR#11: embed_branch_chunks emits a path-aware WARNING for exchanges the
+    caller's cap_limit actually truncated (was_capped=True)."""
+
+    def test_warns_when_exchange_was_capped(self, tmp_path, caplog):
+        conn = _make_vec_conn(tmp_path)
+        if conn is None:
+            pytest.skip("sqlite-vec not available")
+        cursor = conn.cursor()
+        branch_id = _seed_branch(cursor)
+        conn.commit()
+
+        real_texts = _msgs(("Hello", "Hi there"))
+        fake_vec = [0.1] * EMBEDDING_DIM
+
+        with (
+            patch("ccrecall.embed_ops.cap_for_embedding", side_effect=lambda text, max_tokens=None: (text, True)),
+            patch("ccrecall.embed_ops.embed_batch", side_effect=lambda texts, **kw: [fake_vec] * len(texts)),
+            caplog.at_level(logging.WARNING, logger="ccrecall"),
+        ):
+            embed_branch_chunks(cursor, branch_id, real_texts, is_active=True, vec_writable=True, cap_limit=4096)
+
+        warnings = [r for r in caplog.records if r.message == "exchange exceeds cap"]
+        assert warnings, "was_capped=True exchange must emit a WARNING"
+        assert warnings[0].levelno == logging.WARNING
+        assert warnings[0].cap == 4096
+        conn.close()
+
+    def test_no_warning_when_not_capped(self, tmp_path, caplog):
+        conn = _make_vec_conn(tmp_path)
+        if conn is None:
+            pytest.skip("sqlite-vec not available")
+        cursor = conn.cursor()
+        branch_id = _seed_branch(cursor)
+        conn.commit()
+
+        real_texts = _msgs(("Hello", "Hi there"))
+        fake_vec = [0.1] * EMBEDDING_DIM
+
+        with (
+            patch("ccrecall.embed_ops.cap_for_embedding", side_effect=lambda text, max_tokens=None: (text, False)),
+            patch("ccrecall.embed_ops.embed_batch", side_effect=lambda texts, **kw: [fake_vec] * len(texts)),
+            caplog.at_level(logging.WARNING, logger="ccrecall"),
+        ):
+            embed_branch_chunks(cursor, branch_id, real_texts, is_active=True, vec_writable=True, cap_limit=4096)
+
+        warnings = [r for r in caplog.records if r.message == "exchange exceeds cap"]
+        assert not warnings, "untruncated exchange must not emit the cap-exceeded WARNING"
         conn.close()
 
 

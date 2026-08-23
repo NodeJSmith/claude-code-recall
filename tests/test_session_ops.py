@@ -1,10 +1,12 @@
 """Tests for session sync, branch ops, message ops, and embed ops."""
 
 import contextlib
+import gc
 import json
 import logging
 import sqlite3
 import tempfile
+import weakref
 from pathlib import Path
 from unittest.mock import patch
 
@@ -23,7 +25,7 @@ from ccrecall.embeddings import (
 )
 from ccrecall.hooks.import_conversations import get_file_hash
 from ccrecall.import_log_ops import has_pending_tool_content
-from ccrecall.parsing import extract_session_uuid
+from ccrecall.parsing import extract_session_uuid, parse_all_with_uuids
 from ccrecall.schema import SCHEMA
 from ccrecall.session_ops import sync_session
 from ccrecall.summarizer import SUMMARY_VERSION
@@ -688,79 +690,78 @@ class TestEffectiveCapTokens:
         assert result < MODEL_TOKEN_LIMIT + 1
 
 
+def _make_conn_for_sync_branch() -> tuple[sqlite3.Connection, int, int, dict[str, int], list[dict], dict[str, object]]:
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(SCHEMA)
+    conn.commit()
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO projects (path, key, name) VALUES (?, ?, ?)",
+        ("/test/proj", "-test-proj", "proj"),
+    )
+    cursor.execute(
+        "INSERT INTO sessions (uuid, project_id, git_branch) VALUES (?, ?, ?)",
+        ("sess-clamp", 1, "main"),
+    )
+    session_id = cursor.lastrowid
+    assert session_id is not None
+    cursor.execute(
+        """
+        INSERT INTO branches (session_id, leaf_uuid, is_active, exchange_count, aggregated_content, summary_version)
+        VALUES (?, ?, 1, ?, ?, ?)
+        """,
+        (session_id, "assistant-1", 1, "", SUMMARY_VERSION),
+    )
+    branch_id = cursor.lastrowid
+    assert branch_id is not None
+    cursor.executemany(
+        """
+        INSERT INTO messages (session_id, uuid, role, content, timestamp, tool_content, is_notification)
+        VALUES (?, ?, ?, ?, ?, ?, 0)
+        """,
+        [
+            (session_id, "user-1", "user", "hello", "2026-01-01T10:00:00Z", ""),
+            (session_id, "assistant-1", "assistant", "hi", "2026-01-01T10:01:00Z", ""),
+        ],
+    )
+    uuid_to_msg_id = {uuid: msg_id for msg_id, uuid in cursor.execute("SELECT id, uuid FROM messages")}
+    cursor.executemany(
+        "INSERT INTO branch_messages (branch_id, message_id) VALUES (?, ?)",
+        [(branch_id, msg_id) for msg_id in uuid_to_msg_id.values()],
+    )
+    conn.commit()
+    messages = [
+        {
+            "uuid": "user-1",
+            "parentUuid": None,
+            "type": "user",
+            "timestamp": "2026-01-01T10:00:00Z",
+            "gitBranch": "main",
+            "cwd": "/test/proj",
+            "message": {"role": "user", "content": "hello"},
+        },
+        {
+            "uuid": "assistant-1",
+            "parentUuid": "user-1",
+            "type": "assistant",
+            "timestamp": "2026-01-01T10:01:00Z",
+            "gitBranch": "main",
+            "cwd": "/test/proj",
+            "message": {"role": "assistant", "content": "hi"},
+        },
+    ]
+    branch = {
+        "leaf_uuid": "assistant-1",
+        "uuids": {"user-1", "assistant-1"},
+        "is_active": True,
+    }
+    return conn, branch_id, session_id, uuid_to_msg_id, messages, branch
+
+
 class TestSyncBranchCapLimitClamp:
     """sync_branch's sync_path_token_limit clamp math must actually reach
     embed_branch_chunks as cap_limit. Covers the settings-threading glue T02
     was built to add (code review MEDIUM finding)."""
-
-    def _make_conn_for_sync_branch(
-        self,
-    ) -> tuple[sqlite3.Connection, int, int, dict[str, int], list[dict], dict[str, object]]:
-        conn = sqlite3.connect(":memory:")
-        conn.executescript(SCHEMA)
-        conn.commit()
-        cursor = conn.cursor()
-        cursor.execute(
-            "INSERT INTO projects (path, key, name) VALUES (?, ?, ?)",
-            ("/test/proj", "-test-proj", "proj"),
-        )
-        cursor.execute(
-            "INSERT INTO sessions (uuid, project_id, git_branch) VALUES (?, ?, ?)",
-            ("sess-clamp", 1, "main"),
-        )
-        session_id = cursor.lastrowid
-        assert session_id is not None
-        cursor.execute(
-            """
-            INSERT INTO branches (session_id, leaf_uuid, is_active, exchange_count, aggregated_content, summary_version)
-            VALUES (?, ?, 1, ?, ?, ?)
-            """,
-            (session_id, "assistant-1", 1, "", SUMMARY_VERSION),
-        )
-        branch_id = cursor.lastrowid
-        assert branch_id is not None
-        cursor.executemany(
-            """
-            INSERT INTO messages (session_id, uuid, role, content, timestamp, tool_content, is_notification)
-            VALUES (?, ?, ?, ?, ?, ?, 0)
-            """,
-            [
-                (session_id, "user-1", "user", "hello", "2026-01-01T10:00:00Z", ""),
-                (session_id, "assistant-1", "assistant", "hi", "2026-01-01T10:01:00Z", ""),
-            ],
-        )
-        uuid_to_msg_id = {uuid: msg_id for msg_id, uuid in cursor.execute("SELECT id, uuid FROM messages")}
-        cursor.executemany(
-            "INSERT INTO branch_messages (branch_id, message_id) VALUES (?, ?)",
-            [(branch_id, msg_id) for msg_id in uuid_to_msg_id.values()],
-        )
-        conn.commit()
-        messages = [
-            {
-                "uuid": "user-1",
-                "parentUuid": None,
-                "type": "user",
-                "timestamp": "2026-01-01T10:00:00Z",
-                "gitBranch": "main",
-                "cwd": "/test/proj",
-                "message": {"role": "user", "content": "hello"},
-            },
-            {
-                "uuid": "assistant-1",
-                "parentUuid": "user-1",
-                "type": "assistant",
-                "timestamp": "2026-01-01T10:01:00Z",
-                "gitBranch": "main",
-                "cwd": "/test/proj",
-                "message": {"role": "assistant", "content": "hi"},
-            },
-        ]
-        branch = {
-            "leaf_uuid": "assistant-1",
-            "uuids": {"user-1", "assistant-1"},
-            "is_active": True,
-        }
-        return conn, branch_id, session_id, uuid_to_msg_id, messages, branch
 
     @pytest.mark.parametrize(
         ("sync_path_token_limit", "expected_cap"),
@@ -773,7 +774,7 @@ class TestSyncBranchCapLimitClamp:
         ],
     )
     def test_clamp_reaches_embed_branch_chunks(self, sync_path_token_limit, expected_cap):
-        conn, _branch_id, session_id, uuid_to_msg_id, messages, branch = self._make_conn_for_sync_branch()
+        conn, _branch_id, session_id, uuid_to_msg_id, messages, branch = _make_conn_for_sync_branch()
         cursor = conn.cursor()
 
         captured = {}
@@ -832,6 +833,92 @@ class TestSyncSessionSettingsThreading:
 
         assert captured, "sync_branch must be called for the fixture's branch(es)"
         assert all(v is None for v in captured)
+
+
+class TestSyncBranchReclaimMemory:
+    """FR#10: sync_branch calls reclaim_memory() between its three phases
+    (after aggregated content, after summary, before embedding)."""
+
+    def test_reclaim_memory_called_three_times(self):
+        conn, _branch_id, session_id, uuid_to_msg_id, messages, branch = _make_conn_for_sync_branch()
+        cursor = conn.cursor()
+
+        with (
+            patch("ccrecall.branch_ops.embed_branch_chunks"),
+            patch("ccrecall.branch_ops.reclaim_memory") as mock_reclaim,
+        ):
+            sync_branch(cursor, branch, messages, uuid_to_msg_id, session_id, vec_writable=False)
+
+        assert mock_reclaim.call_count == 3, f"expected 3 reclaim_memory calls, got {mock_reclaim.call_count}"
+        conn.close()
+
+    def test_libc_loaded_once_per_sync_branch_call(self):
+        """try_load_libc is called once at function entry and reused for all three calls."""
+        conn, _branch_id, session_id, uuid_to_msg_id, messages, branch = _make_conn_for_sync_branch()
+        cursor = conn.cursor()
+
+        with (
+            patch("ccrecall.branch_ops.embed_branch_chunks"),
+            patch("ccrecall.branch_ops.try_load_libc") as mock_load_libc,
+        ):
+            sync_branch(cursor, branch, messages, uuid_to_msg_id, session_id, vec_writable=False)
+
+        assert mock_load_libc.call_count == 1, f"expected try_load_libc called once, got {mock_load_libc.call_count}"
+        conn.close()
+
+
+class _TrackableEntry(dict):
+    """A dict subclass — behaves identically to a parsed JSONL entry but,
+    unlike a plain dict, supports weakref.ref() so tests can detect whether
+    something still holds it alive."""
+
+
+class TestSyncSessionFreesAllEntries:
+    """AC#6 / FR#9: sync_session must not hold a reference to the parsed JSONL
+    list (all_entries) once the branch loop (sync_branch) begins.
+
+    A synthetic non-message entry (type='notification', excluded from
+    `messages` by the user/assistant filter) is injected into the parsed
+    entries. If sync_session still held a reference to it (directly, or
+    via the `all_entries` list container) by the time sync_branch is
+    invoked, the weakref below would still resolve after a forced gc.collect().
+    """
+
+    def test_non_message_entry_unreachable_before_branch_loop(self, memory_db, monkeypatch):
+        fixture_path = FIXTURE_DIR / "linear_3_exchange.jsonl"
+        real_entries = list(parse_all_with_uuids(fixture_path))
+
+        notification_entry = _TrackableEntry(type="notification")
+        patched_entries = [*real_entries, notification_entry]
+        ref = weakref.ref(notification_entry)
+
+        monkeypatch.setattr("ccrecall.session_ops.parse_all_with_uuids", lambda _fp: patched_entries)
+
+        captured: dict[str, bool] = {}
+
+        def spying_sync_branch(*args, **kwargs):
+            nonlocal patched_entries, notification_entry
+            # Drop every reference this test frame holds to the entries list and
+            # the synthetic entry (this also clears the closure cell shared with
+            # the monkeypatched parse_all_with_uuids lambda above) so the only
+            # remaining referrer, if any, is production code inside sync_session.
+            del patched_entries
+            del notification_entry
+            gc.collect()
+            captured["alive"] = ref() is not None
+            return sync_branch(*args, **kwargs)
+
+        with (
+            tempfile.TemporaryDirectory() as tmpdir,
+            patch("ccrecall.session_ops.sync_branch", side_effect=spying_sync_branch),
+        ):
+            sync_session(memory_db, fixture_path, Path(tmpdir))
+
+        assert captured, "sync_branch must have been called for the fixture's branch(es)"
+        assert captured["alive"] is False, (
+            "sync_session must drop its reference to all_entries (del all_entries) "
+            "before entering the branch loop — the non-message entry is still reachable"
+        )
 
 
 class TestEmbedBranchChunks:

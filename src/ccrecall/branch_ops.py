@@ -12,6 +12,7 @@ import sqlite3
 from ccrecall.db_vec import fetch_branch_messages
 from ccrecall.embed_ops import embed_branch_chunks, write_branch_summary
 from ccrecall.embeddings import MODEL_TOKEN_LIMIT, SYNC_PATH_TOKEN_LIMIT
+from ccrecall.hooks.subprocess_utils import reclaim_memory, try_load_libc
 from ccrecall.models import LOGGER_NAME
 from ccrecall.parsing import build_aggregated_content, compute_branch_metadata, extract_session_metadata
 
@@ -209,6 +210,8 @@ def sync_branch(
     fastembed/onnxruntime imports on the hook hot path) or config.py (which
     must stay free of heavy deps entirely). See design/specs/015.
     """
+    libc = try_load_libc()
+
     branch_uuids = branch["uuids"]
     is_active = branch["is_active"]
 
@@ -242,12 +245,16 @@ def sync_branch(
         "UPDATE branches SET aggregated_content = ?, summary_version = NULL WHERE id = ?",
         (agg_content, branch_db_id),
     )
+    reclaim_memory(libc)
 
     write_branch_summary(cursor, branch_db_id)
+    reclaim_memory(libc)
+
     # fetch_branch_messages returns flat {role, content, timestamp, uuid} dicts — the
     # format build_exchange_pairs expects. branch_msgs (raw JSONL) is the right input
     # for metadata computation above but not for embedding.
     cap = min(max(sync_path_token_limit or SYNC_PATH_TOKEN_LIMIT, 1), MODEL_TOKEN_LIMIT)
+    reclaim_memory(libc)
     try:
         embed_msgs = fetch_branch_messages(cursor, branch_db_id, include_notifications=False)
         embed_branch_chunks(cursor, branch_db_id, embed_msgs, is_active, vec_writable, cap_limit=cap)

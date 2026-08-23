@@ -1,5 +1,6 @@
 """Tests for the shared embedding module."""
 
+import logging
 import math
 from unittest.mock import MagicMock
 
@@ -382,6 +383,27 @@ class TestEmbedBatchBounded:
         for batch_texts, batch_size in recorded:
             assert len(batch_texts) == 1
             assert batch_size == 1
+
+    def test_debug_log_emitted_before_each_model_embed_call(self, monkeypatch, caplog):
+        """FR#11: embed_batch logs batch_size and longest_tokens at DEBUG before
+        each model.embed() call — one log record per inference call planned."""
+        counts = [8192, 100, 8192, 50]
+        texts = [f"t{i}" for i in range(len(counts))]
+        recorded: list = []
+        monkeypatch.setattr("ccrecall.embeddings._model", self._make_model(counts, recorded))
+
+        with caplog.at_level(logging.DEBUG, logger="ccrecall"):
+            embed_batch(texts)
+
+        debug_records = [r for r in caplog.records if r.message == "embedding batch"]
+        assert len(debug_records) == len(recorded), (
+            "one DEBUG 'embedding batch' record expected per planned inference call"
+        )
+        for record, (batch_texts, batch_size) in zip(debug_records, recorded, strict=True):
+            assert record.levelno == logging.DEBUG
+            assert record.batch_size == batch_size == len(batch_texts)
+            longest = max(counts[int(t[1:])] for t in batch_texts)
+            assert record.longest_tokens == longest
 
 
 @pytest.mark.skipif(not model_available(), reason="fastembed model unavailable (jina-v2-small-en)")

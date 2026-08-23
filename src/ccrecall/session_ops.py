@@ -130,6 +130,14 @@ def sync_session(
     repaired_tool_content = update_missing_tool_content(cursor, session_id, messages, existing_uuids)
     new_count = insert_new_messages(cursor, session_id, messages, valid_branch_uuids, existing_uuids)
 
+    # all_entries is no longer needed past this point — messages have been
+    # inserted. Free the list container and any entries not carried forward
+    # in `messages` (e.g. notifications). Note: `messages` shares dict
+    # references with `all_entries`'s user/assistant entries, so this frees
+    # only the list container and the non-message entries, not the bulk of
+    # the transcript data. See design/specs/015 (FR#9).
+    del all_entries
+
     # Build uuid -> message_id mapping
     cursor.execute(
         "SELECT id, uuid FROM messages WHERE session_id = ? AND uuid IS NOT NULL",

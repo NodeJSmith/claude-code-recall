@@ -11,6 +11,7 @@ import json
 import logging
 import re
 import sys
+import time
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -181,6 +182,9 @@ def run(input_file: Path | None = None) -> None:
         _warn_cold_model()
 
         try:
+            file_size = session_file.stat().st_size
+            started = time.monotonic()
+
             with get_connection(settings, load_vec=True) as conn:
                 project_dir = _project_root_for_session_file(session_file, DEFAULT_PROJECTS_DIR)
 
@@ -206,6 +210,9 @@ def run(input_file: Path | None = None) -> None:
 
             if new_messages > 0:
                 logger.info("Synced %s new message(s) from session %s", new_messages, session_id[:8])
+
+            elapsed = time.monotonic() - started
+            logger.info("sync complete", extra={"file_size": file_size, "duration_s": elapsed})
 
             # Clear the embedding failure sidecar on a clean sync pass.
             # Only when vec was available — if it wasn't, we already recorded above
