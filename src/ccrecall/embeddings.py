@@ -210,17 +210,23 @@ def embed_text(text: str) -> list[float]:
     return embed_one(get_model(), text)
 
 
-def _plan_embed_batches(token_counts: list[int]) -> list[list[int]]:
+def _plan_embed_batches(token_counts: list[int], max_token_cap: int = MODEL_TOKEN_LIMIT) -> list[list[int]]:
     """Group text indices into inference batches under the memory bounds above.
 
     Longest-first ordering packs similar lengths together (tight padding — short
     texts never ride a batch padded to a long outlier) and makes each batch's
     longest text its first element, so the attention-area budget check is simply
-    ``(len(batch) + 1) * longest**2 > EMBED_BATCH_ATTENTION_BUDGET``. Every index
-    appears in exactly one batch; a single text larger than the budget gets a
-    batch to itself (cap_for_embedding keeps it <= MODEL_TOKEN_LIMIT, so a lone
-    text is always inferable).
+    ``(len(batch) + 1) * longest**2 > max_token_cap**2``. Every index appears in
+    exactly one batch; a single text larger than the budget gets a batch to
+    itself (cap_for_embedding keeps it <= the caller's cap, so a lone text is
+    always inferable).
+
+    ``max_token_cap`` scales the budget to the caller's token cap — the sync
+    path passes SYNC_PATH_TOKEN_LIMIT (4096) so batches never pack multiple
+    texts up to the full MODEL_TOKEN_LIMIT**2 attention area; backfill passes
+    the default MODEL_TOKEN_LIMIT, preserving today's budget. See design/specs/015.
     """
+    budget = max_token_cap * max_token_cap
     order = sorted(range(len(token_counts)), key=lambda i: token_counts[i], reverse=True)
     batches: list[list[int]] = []
     current: list[int] = []
@@ -229,7 +235,7 @@ def _plan_embed_batches(token_counts: list[int]) -> list[list[int]]:
         # order is descending, so token_counts[i] <= longest for any non-empty
         # batch: longest**2 already covers the candidate's area contribution.
         next_area = (len(current) + 1) * longest * longest
-        if current and (len(current) >= EMBED_BATCH_MAX_TEXTS or next_area > EMBED_BATCH_ATTENTION_BUDGET):
+        if current and (len(current) >= EMBED_BATCH_MAX_TEXTS or next_area > budget):
             batches.append(current)
             current = []
         if not current:
@@ -240,7 +246,7 @@ def _plan_embed_batches(token_counts: list[int]) -> list[list[int]]:
     return batches
 
 
-def embed_batch(texts: list[str]) -> list[list[float]]:
+def embed_batch(texts: list[str], max_token_cap: int = MODEL_TOKEN_LIMIT) -> list[list[float]]:
     """Embed multiple texts, returning vectors in the same order as the input.
 
     Plans memory-bounded batches (see EMBED_BATCH_ATTENTION_BUDGET /
@@ -252,6 +258,10 @@ def embed_batch(texts: list[str]) -> list[list[float]]:
     not re-slice the group into larger batches. Batching changes nothing about
     the output: each text's vector is computed independently (padding is masked
     out) and restored to input position here. Raises on failure.
+
+    ``max_token_cap`` is threaded to ``_plan_embed_batches`` so the attention
+    budget scales to the caller's token cap (see its docstring). Defaults to
+    MODEL_TOKEN_LIMIT, preserving today's budget for callers that don't pass it.
     """
     if not texts:
         return []
@@ -262,14 +272,14 @@ def embed_batch(texts: list[str]) -> list[list[float]]:
     # memory-budget violation.
     token_counts = [model.token_count([text]) for text in texts]
     vectors: dict[int, list[float]] = {}
-    for batch in _plan_embed_batches(token_counts):
+    for batch in _plan_embed_batches(token_counts, max_token_cap=max_token_cap):
         batch_texts = [texts[i] for i in batch]
         for i, vec in zip(batch, model.embed(batch_texts, batch_size=len(batch_texts)), strict=True):
             vectors[i] = normalize(vec.astype(np.float32)).tolist()
     return [vectors[i] for i in range(len(texts))]
 
 
-def cap_for_embedding(text: str) -> tuple[str, bool]:
+def cap_for_embedding(text: str, max_tokens: int | None = None) -> tuple[str, bool]:
     """Head+tail-cap text to fit within the embedding model's token limit.
 
     Returns ``(possibly_capped_text, was_capped)``. ``was_capped=False`` means
@@ -277,12 +287,18 @@ def cap_for_embedding(text: str) -> tuple[str, bool]:
     returned unchanged. ``was_capped=True`` means the middle was dropped and the
     returned text is the head+tail-capped form.
 
+    ``max_tokens``, when provided, overrides MODEL_TOKEN_LIMIT as the token
+    limit the cap tightens against — used by the sync path to cap at
+    SYNC_PATH_TOKEN_LIMIT (4096) instead of the model's full 8192-token
+    context. Only affects the token check, not the EMBED_CHAR_BUDGET char
+    check (see design/specs/015 Edge Cases: char/token conflation).
+
     The cap always keeps both the beginning and the end of the text so a single
     large pasted block or tool dump degrades one chunk's signal rather than
     discarding the exchange. The post-check loop tightens the cap until
-    ``len(tokens) <= MODEL_TOKEN_LIMIT``, so dense content (base64, minified JSON)
-    that is under the char budget but over the token limit cannot reach
-    ``embed_text`` and trip ``CONTENT_ERROR``.
+    ``len(tokens) <= limit``, so dense content (base64, minified JSON) that is
+    under the char budget but over the token limit cannot reach ``embed_text``
+    and trip ``CONTENT_ERROR``.
 
     Reaches the tokenizer through ``get_model()`` (the singleton accessor) — no
     second embedding code path is created.
@@ -290,10 +306,11 @@ def cap_for_embedding(text: str) -> tuple[str, bool]:
     if not text:
         return text, False
 
+    limit = max_tokens if max_tokens is not None else MODEL_TOKEN_LIMIT
     model = get_model()
 
     # Fast path: text fits within both budgets as-is
-    if len(text) <= EMBED_CHAR_BUDGET and model.token_count([text]) <= MODEL_TOKEN_LIMIT:
+    if len(text) <= EMBED_CHAR_BUDGET and model.token_count([text]) <= limit:
         return text, False
 
     # Determine initial head/tail split.
@@ -310,7 +327,7 @@ def cap_for_embedding(text: str) -> tuple[str, bool]:
 
     capped = text[:head] + _CAP_MARKER + text[-tail:]
 
-    while model.token_count([capped]) > MODEL_TOKEN_LIMIT:
+    while model.token_count([capped]) > limit:
         head = max(head * SHRINK_NUMERATOR // SHRINK_DENOMINATOR, 1)
         tail = max(tail * SHRINK_NUMERATOR // SHRINK_DENOMINATOR, 1)
         next_capped = text[:head] + _CAP_MARKER + text[-tail:]

@@ -11,9 +11,16 @@ from unittest.mock import patch
 import pytest
 from conftest import FIXTURE_DIR
 
+from ccrecall.branch_ops import sync_branch
 from ccrecall.db_vec import _ensure_vec_schema, vec_available
 from ccrecall.embed_ops import MAX_WRITE_PATH_EMBEDS_PER_SYNC, effective_cap_tokens, embed_branch_chunks
-from ccrecall.embeddings import EMBEDDING_DIM, EMBEDDING_MODEL, EMBEDDING_VERSION, MODEL_TOKEN_LIMIT
+from ccrecall.embeddings import (
+    EMBEDDING_DIM,
+    EMBEDDING_MODEL,
+    EMBEDDING_VERSION,
+    MODEL_TOKEN_LIMIT,
+    SYNC_PATH_TOKEN_LIMIT,
+)
 from ccrecall.hooks.import_conversations import get_file_hash
 from ccrecall.import_log_ops import has_pending_tool_content
 from ccrecall.parsing import extract_session_uuid
@@ -681,6 +688,152 @@ class TestEffectiveCapTokens:
         assert result < MODEL_TOKEN_LIMIT + 1
 
 
+class TestSyncBranchCapLimitClamp:
+    """sync_branch's sync_path_token_limit clamp math must actually reach
+    embed_branch_chunks as cap_limit. Covers the settings-threading glue T02
+    was built to add (code review MEDIUM finding)."""
+
+    def _make_conn_for_sync_branch(
+        self,
+    ) -> tuple[sqlite3.Connection, int, int, dict[str, int], list[dict], dict[str, object]]:
+        conn = sqlite3.connect(":memory:")
+        conn.executescript(SCHEMA)
+        conn.commit()
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO projects (path, key, name) VALUES (?, ?, ?)",
+            ("/test/proj", "-test-proj", "proj"),
+        )
+        cursor.execute(
+            "INSERT INTO sessions (uuid, project_id, git_branch) VALUES (?, ?, ?)",
+            ("sess-clamp", 1, "main"),
+        )
+        session_id = cursor.lastrowid
+        assert session_id is not None
+        cursor.execute(
+            """
+            INSERT INTO branches (session_id, leaf_uuid, is_active, exchange_count, aggregated_content, summary_version)
+            VALUES (?, ?, 1, ?, ?, ?)
+            """,
+            (session_id, "assistant-1", 1, "", SUMMARY_VERSION),
+        )
+        branch_id = cursor.lastrowid
+        assert branch_id is not None
+        cursor.executemany(
+            """
+            INSERT INTO messages (session_id, uuid, role, content, timestamp, tool_content, is_notification)
+            VALUES (?, ?, ?, ?, ?, ?, 0)
+            """,
+            [
+                (session_id, "user-1", "user", "hello", "2026-01-01T10:00:00Z", ""),
+                (session_id, "assistant-1", "assistant", "hi", "2026-01-01T10:01:00Z", ""),
+            ],
+        )
+        uuid_to_msg_id = {uuid: msg_id for msg_id, uuid in cursor.execute("SELECT id, uuid FROM messages")}
+        cursor.executemany(
+            "INSERT INTO branch_messages (branch_id, message_id) VALUES (?, ?)",
+            [(branch_id, msg_id) for msg_id in uuid_to_msg_id.values()],
+        )
+        conn.commit()
+        messages = [
+            {
+                "uuid": "user-1",
+                "parentUuid": None,
+                "type": "user",
+                "timestamp": "2026-01-01T10:00:00Z",
+                "gitBranch": "main",
+                "cwd": "/test/proj",
+                "message": {"role": "user", "content": "hello"},
+            },
+            {
+                "uuid": "assistant-1",
+                "parentUuid": "user-1",
+                "type": "assistant",
+                "timestamp": "2026-01-01T10:01:00Z",
+                "gitBranch": "main",
+                "cwd": "/test/proj",
+                "message": {"role": "assistant", "content": "hi"},
+            },
+        ]
+        branch = {
+            "leaf_uuid": "assistant-1",
+            "uuids": {"user-1", "assistant-1"},
+            "is_active": True,
+        }
+        return conn, branch_id, session_id, uuid_to_msg_id, messages, branch
+
+    @pytest.mark.parametrize(
+        ("sync_path_token_limit", "expected_cap"),
+        [
+            (None, SYNC_PATH_TOKEN_LIMIT),  # default fallback
+            (0, SYNC_PATH_TOKEN_LIMIT),  # falsy -> default fallback via `or`
+            (-5, 1),  # negative clamped up to the floor
+            (2048, 2048),  # in-range value passes through unchanged
+            (20000, MODEL_TOKEN_LIMIT),  # above MODEL_TOKEN_LIMIT clamped down to the ceiling
+        ],
+    )
+    def test_clamp_reaches_embed_branch_chunks(self, sync_path_token_limit, expected_cap):
+        conn, _branch_id, session_id, uuid_to_msg_id, messages, branch = self._make_conn_for_sync_branch()
+        cursor = conn.cursor()
+
+        captured = {}
+
+        def fake_embed_branch_chunks(*_args, **kwargs):
+            captured["cap_limit"] = kwargs.get("cap_limit")
+
+        with patch("ccrecall.branch_ops.embed_branch_chunks", side_effect=fake_embed_branch_chunks):
+            sync_branch(
+                cursor,
+                branch,
+                messages,
+                uuid_to_msg_id,
+                session_id,
+                vec_writable=False,
+                sync_path_token_limit=sync_path_token_limit,
+            )
+
+        assert captured["cap_limit"] == expected_cap
+        conn.close()
+
+
+class TestSyncSessionSettingsThreading:
+    """sync_session must extract the raw sync_path_token_limit setting and pass
+    it through to sync_branch unclamped (session_ops.py must not import from
+    embeddings.py — the clamp happens downstream in branch_ops.sync_branch)."""
+
+    def test_settings_value_reaches_sync_branch_unclamped(self, memory_db):
+        fixture_path = FIXTURE_DIR / "single_rewind.jsonl"
+        captured = []
+
+        def fake_sync_branch(*_args, **kwargs):
+            captured.append(kwargs.get("sync_path_token_limit"))
+
+        with (
+            tempfile.TemporaryDirectory() as tmpdir,
+            patch("ccrecall.session_ops.sync_branch", side_effect=fake_sync_branch),
+        ):
+            sync_session(memory_db, fixture_path, Path(tmpdir), settings={"sync_path_token_limit": 1234})
+
+        assert captured, "sync_branch must be called for the fixture's branch(es)"
+        assert all(v == 1234 for v in captured), "raw settings value must reach sync_branch unclamped"
+
+    def test_missing_settings_passes_none(self, memory_db):
+        fixture_path = FIXTURE_DIR / "single_rewind.jsonl"
+        captured = []
+
+        def fake_sync_branch(*_args, **kwargs):
+            captured.append(kwargs.get("sync_path_token_limit"))
+
+        with (
+            tempfile.TemporaryDirectory() as tmpdir,
+            patch("ccrecall.session_ops.sync_branch", side_effect=fake_sync_branch),
+        ):
+            sync_session(memory_db, fixture_path, Path(tmpdir))
+
+        assert captured, "sync_branch must be called for the fixture's branch(es)"
+        assert all(v is None for v in captured)
+
+
 class TestEmbedBranchChunks:
     """Tests for embed_branch_chunks: incremental write path per design.md §(2)."""
 
@@ -697,7 +850,9 @@ class TestEmbedBranchChunks:
         msgs_2 = _make_msgs(("Hello", "Hi there"), ("How are you?", "Fine thanks"))
         fake_vec = [0.1] * EMBEDDING_DIM
 
-        with patch("ccrecall.embed_ops.embed_batch", side_effect=lambda texts: [fake_vec] * len(texts)) as mock_embed:
+        with patch(
+            "ccrecall.embed_ops.embed_batch", side_effect=lambda texts, **kwargs: [fake_vec] * len(texts)
+        ) as mock_embed:
             embed_branch_chunks(cursor, branch_id, msgs_2, is_active=True, vec_writable=True)
 
         total = sum(len(c.args[0]) for c in mock_embed.call_args_list)
@@ -709,7 +864,9 @@ class TestEmbedBranchChunks:
         # Now add a 3rd exchange
         msgs_3 = _make_msgs(("Hello", "Hi there"), ("How are you?", "Fine thanks"), ("New q?", "New a"))
 
-        with patch("ccrecall.embed_ops.embed_batch", side_effect=lambda texts: [fake_vec] * len(texts)) as mock_embed2:
+        with patch(
+            "ccrecall.embed_ops.embed_batch", side_effect=lambda texts, **kwargs: [fake_vec] * len(texts)
+        ) as mock_embed2:
             embed_branch_chunks(cursor, branch_id, msgs_3, is_active=True, vec_writable=True)
 
         total2 = sum(len(c.args[0]) for c in mock_embed2.call_args_list)
@@ -736,11 +893,13 @@ class TestEmbedBranchChunks:
         msgs = _make_msgs(("Hello", "Hi"), ("What's up?", "Nothing much"))
         fake_vec = [0.1] * EMBEDDING_DIM
 
-        with patch("ccrecall.embed_ops.embed_batch", side_effect=lambda texts: [fake_vec] * len(texts)):
+        with patch("ccrecall.embed_ops.embed_batch", side_effect=lambda texts, **kwargs: [fake_vec] * len(texts)):
             embed_branch_chunks(cursor, branch_id, msgs, is_active=True, vec_writable=True)
 
         # Re-sync with exactly the same messages
-        with patch("ccrecall.embed_ops.embed_batch", side_effect=lambda texts: [fake_vec] * len(texts)) as mock_embed:
+        with patch(
+            "ccrecall.embed_ops.embed_batch", side_effect=lambda texts, **kwargs: [fake_vec] * len(texts)
+        ) as mock_embed:
             embed_branch_chunks(cursor, branch_id, msgs, is_active=True, vec_writable=True)
 
         assert mock_embed.call_count == 0, "unchanged content must not trigger re-embedding"
@@ -807,7 +966,7 @@ class TestEmbedBranchChunks:
         msgs_3 = _make_msgs(("q1", "a1"), ("q2", "a2"), ("q3", "a3"))
         fake_vec = [0.1] * EMBEDDING_DIM
 
-        with patch("ccrecall.embed_ops.embed_batch", side_effect=lambda texts: [fake_vec] * len(texts)):
+        with patch("ccrecall.embed_ops.embed_batch", side_effect=lambda texts, **kwargs: [fake_vec] * len(texts)):
             embed_branch_chunks(cursor, branch_id, msgs_3, is_active=True, vec_writable=True)
 
         cursor.execute("SELECT COUNT(*) FROM chunks WHERE branch_id = ?", (branch_id,))
@@ -816,7 +975,7 @@ class TestEmbedBranchChunks:
         # Shrink: remove the 3rd exchange
         msgs_2 = _make_msgs(("q1", "a1"), ("q2", "a2"))
 
-        with patch("ccrecall.embed_ops.embed_batch", side_effect=lambda texts: [fake_vec] * len(texts)):
+        with patch("ccrecall.embed_ops.embed_batch", side_effect=lambda texts, **kwargs: [fake_vec] * len(texts)):
             embed_branch_chunks(cursor, branch_id, msgs_2, is_active=True, vec_writable=True)
 
         cursor.execute("SELECT COUNT(*) FROM chunks WHERE branch_id = ?", (branch_id,))
@@ -869,7 +1028,9 @@ class TestEmbedBranchChunks:
         msgs = _make_msgs(*[(f"question {i}", f"answer {i}") for i in range(n_exchanges)])
         fake_vec = [0.1] * EMBEDDING_DIM
 
-        with patch("ccrecall.embed_ops.embed_batch", side_effect=lambda texts: [fake_vec] * len(texts)) as mock_embed:
+        with patch(
+            "ccrecall.embed_ops.embed_batch", side_effect=lambda texts, **kwargs: [fake_vec] * len(texts)
+        ) as mock_embed:
             embed_branch_chunks(cursor, branch_id, msgs, is_active=True, vec_writable=True)
 
         total_embedded = sum(len(c.args[0]) for c in mock_embed.call_args_list)
@@ -951,7 +1112,7 @@ class TestEmbedOnWriteOrderingInvariant:
         # embed_text succeeds, but the vec upsert (called first by write_chunk_embedding)
         # raises — simulating a vec-write failure after a successful embed.
         with (
-            patch("ccrecall.embed_ops.embed_batch", side_effect=lambda texts: [fake_vec] * len(texts)),
+            patch("ccrecall.embed_ops.embed_batch", side_effect=lambda texts, **kwargs: [fake_vec] * len(texts)),
             patch("ccrecall.db_vec.upsert_chunk_vec", side_effect=RuntimeError("vec write failed")),
             contextlib.suppress(Exception),
         ):
@@ -996,7 +1157,7 @@ class TestEmbedOnWriteSuccess:
         fake_vec = [0.1] * EMBEDDING_DIM
 
         with (
-            patch("ccrecall.embed_ops.embed_batch", side_effect=lambda texts: [fake_vec] * len(texts)),
+            patch("ccrecall.embed_ops.embed_batch", side_effect=lambda texts, **kwargs: [fake_vec] * len(texts)),
             tempfile.TemporaryDirectory() as tmpdir,
         ):
             result = sync_session(conn, fixture_path, Path(tmpdir))

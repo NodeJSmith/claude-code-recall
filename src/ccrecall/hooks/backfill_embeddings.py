@@ -40,7 +40,13 @@ from ccrecall.config import DEFAULT_DB_PATH, load_settings_for_db, setup_logging
 from ccrecall.db import CONTENT_ERROR_VERSION, get_connection
 from ccrecall.db_vec import chunk_vec_queryable, fetch_branch_messages
 from ccrecall.embed_ops import embed_branch_chunks
-from ccrecall.embeddings import DEFAULT_EMBED_THREADS, EMBEDDING_MODEL, EMBEDDING_VERSION, model_available
+from ccrecall.embeddings import (
+    DEFAULT_EMBED_THREADS,
+    EMBEDDING_MODEL,
+    EMBEDDING_VERSION,
+    MODEL_TOKEN_LIMIT,
+    model_available,
+)
 from ccrecall.health import (
     REASON_MODEL_UNAVAILABLE,
     REASON_VEC_UNAVAILABLE,
@@ -339,7 +345,13 @@ def _embed_one_branch(
         # embedded), so total_inferences excludes already-current chunks the
         # pre-delete preserved.
         embedded = embed_branch_chunks(
-            cursor, branch_id, branch_msgs, is_active=True, vec_writable=True, max_embeds=None
+            cursor,
+            branch_id,
+            branch_msgs,
+            is_active=True,
+            vec_writable=True,
+            max_embeds=None,
+            cap_limit=MODEL_TOKEN_LIMIT,
         )
         cursor.execute(f"RELEASE SAVEPOINT {_SAVEPOINT_NAME}")
         return _EmbedResult(message_count=len(branch_msgs), updated=1, inferences=embedded)

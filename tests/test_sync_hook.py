@@ -1156,7 +1156,7 @@ class TestSyncCurrentTranscriptDiscovery:
 
         seen_project_dirs = []
 
-        def fake_sync_session(_conn, _session_file, root_dir):
+        def fake_sync_session(_conn, _session_file, root_dir, **_kwargs):
             seen_project_dirs.append(root_dir)
             return 0
 
@@ -1178,3 +1178,50 @@ class TestSyncCurrentTranscriptDiscovery:
 
         assert json.loads(captured.getvalue()) == {"continue": True}
         assert seen_project_dirs == [project_dir]
+
+    def test_run_passes_settings_to_sync_session(self, tmp_path, monkeypatch):
+        """T02 review MEDIUM finding: run() must pass settings=settings through to
+        sync_session so sync_path_token_limit reaches sync_branch's clamp."""
+        projects_dir = tmp_path / "projects"
+        project_dir = projects_dir / "project-a"
+        session_file = project_dir / f"{VALID_SYNC_UUID}.jsonl"
+        session_file.parent.mkdir(parents=True)
+        session_file.write_text("{}", encoding="utf-8")
+
+        settings = {"exclude_projects": [], "logging_enabled": False, "sync_path_token_limit": 2048}
+
+        monkeypatch.setattr("ccrecall.config.pid_file_path", lambda key: tmp_path / f".pid-{key}")
+        monkeypatch.setattr(sync_current, "DEFAULT_PROJECTS_DIR", projects_dir)
+        monkeypatch.setattr(sync_current, "remove_pid_file", lambda key: None)
+        monkeypatch.setattr(sync_current, "load_settings", lambda: settings)
+        monkeypatch.setattr(sync_current, "setup_logging", lambda *_a, **_k: MagicMock())
+        monkeypatch.setattr(sync_current, "_warn_cold_model", lambda: None)
+        monkeypatch.setattr(sync_current, "record_embedding_failure", lambda *a, **k: None)
+        monkeypatch.setattr(sync_current, "clear_embedding_failure", lambda: None)
+        monkeypatch.setattr(sync_current, "get_session_file", lambda *a, **k: session_file)
+        monkeypatch.setattr(sync_current, "chunk_vec_queryable", lambda conn: True)
+
+        seen_settings = []
+
+        def fake_sync_session(*_args, **kwargs):
+            seen_settings.append(kwargs.get("settings"))
+            return 0
+
+        class _ConnContext:
+            def __enter__(self):
+                return MagicMock()
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        monkeypatch.setattr(sync_current, "sync_session", fake_sync_session)
+        monkeypatch.setattr(sync_current, "get_connection", lambda *a, **k: _ConnContext())
+
+        input_file = tmp_path / "hook.json"
+        input_file.write_text(json.dumps({"session_id": VALID_SYNC_UUID}), encoding="utf-8")
+        captured = io.StringIO()
+        with patch("sys.stdout", captured):
+            sync_current.run(input_file=input_file)
+
+        assert json.loads(captured.getvalue()) == {"continue": True}
+        assert seen_settings == [settings]

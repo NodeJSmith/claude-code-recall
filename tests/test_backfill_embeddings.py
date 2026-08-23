@@ -210,7 +210,7 @@ def _run_backfill_with_stub(conn: sqlite3.Connection, *, days=None, limit=None):
     """Run run() with embed_text stubbed via session_ops to _FIXED_VEC."""
     with (
         patch("ccrecall.hooks.backfill_embeddings.model_available", return_value=True),
-        patch("ccrecall.embed_ops.embed_batch", side_effect=lambda texts: [_FIXED_VEC] * len(texts)),
+        patch("ccrecall.embed_ops.embed_batch", side_effect=lambda texts, **kwargs: [_FIXED_VEC] * len(texts)),
         patch(
             "ccrecall.hooks.backfill_embeddings.get_connection",
             return_value=_NoCloseConn(conn),
@@ -255,7 +255,7 @@ class TestBackfillEmbedsFull:
 
         with (
             patch("ccrecall.hooks.backfill_embeddings.model_available", return_value=True),
-            patch("ccrecall.embed_ops.embed_batch", side_effect=lambda texts: [_FIXED_VEC] * len(texts)),
+            patch("ccrecall.embed_ops.embed_batch", side_effect=lambda texts, **kwargs: [_FIXED_VEC] * len(texts)),
             patch("ccrecall.hooks.backfill_embeddings.get_connection", return_value=_NoCloseConn(conn)),
             patch("ccrecall.hooks.backfill_embeddings.load_settings_for_db", return_value={}),
             patch("ccrecall.hooks.backfill_embeddings.time.sleep"),
@@ -339,7 +339,7 @@ class TestBackfillResume:
 
         call_count = [0]
 
-        def counting_embed(texts: list[str]) -> list[list[float]]:
+        def counting_embed(texts: list[str], **kwargs) -> list[list[float]]:
             call_count[0] += len(texts)
             return [_FIXED_VEC[:]] * len(texts)
 
@@ -550,7 +550,7 @@ class TestBackfillFailureModes:
         # Raise on the second call (bad_id was inserted second)
         call_no = [0]
 
-        def counting_embed(texts: list[str]) -> list[list[float]]:
+        def counting_embed(texts: list[str], **kwargs) -> list[list[float]]:
             call_no[0] += 1
             if call_no[0] == 2:  # second branch's embed raises
                 raise ValueError("simulated tokenizer overflow")
@@ -606,7 +606,7 @@ class TestBackfillFailureModes:
 
         call_count = [0]
 
-        def counting_embed(texts: list[str]) -> list[list[float]]:
+        def counting_embed(texts: list[str], **kwargs) -> list[list[float]]:
             call_count[0] += len(texts)
             return [_FIXED_VEC] * len(texts)
 
@@ -882,7 +882,7 @@ class TestBackfillInferencesCounter:
 
         with (
             patch("ccrecall.hooks.backfill_embeddings.model_available", return_value=True),
-            patch("ccrecall.embed_ops.embed_batch", side_effect=lambda texts: [_FIXED_VEC] * len(texts)),
+            patch("ccrecall.embed_ops.embed_batch", side_effect=lambda texts, **kwargs: [_FIXED_VEC] * len(texts)),
             patch("ccrecall.hooks.backfill_embeddings.get_connection", return_value=_NoCloseConn(conn)),
             patch("ccrecall.hooks.backfill_embeddings.load_settings_for_db", return_value={}),
             patch("ccrecall.hooks.backfill_embeddings.time.sleep"),
@@ -964,7 +964,7 @@ class TestBackfillEmbeddingStatusRecording:
 
         with (
             patch("ccrecall.hooks.backfill_embeddings.model_available", return_value=True),
-            patch("ccrecall.embed_ops.embed_batch", side_effect=lambda texts: [_FIXED_VEC] * len(texts)),
+            patch("ccrecall.embed_ops.embed_batch", side_effect=lambda texts, **kwargs: [_FIXED_VEC] * len(texts)),
             patch("ccrecall.hooks.backfill_embeddings.get_connection", return_value=_NoCloseConn(conn)),
             patch("ccrecall.hooks.backfill_embeddings.load_settings_for_db", return_value={}),
             patch("ccrecall.hooks.backfill_embeddings.time.sleep"),
@@ -1125,7 +1125,7 @@ class TestBackfillETAProgress:
 
         with (
             patch("ccrecall.hooks.backfill_embeddings.model_available", return_value=True),
-            patch("ccrecall.embed_ops.embed_batch", side_effect=lambda texts: [_FIXED_VEC] * len(texts)),
+            patch("ccrecall.embed_ops.embed_batch", side_effect=lambda texts, **kwargs: [_FIXED_VEC] * len(texts)),
             patch("ccrecall.hooks.backfill_embeddings.get_connection", return_value=_NoCloseConn(conn)),
             patch("ccrecall.hooks.backfill_embeddings.load_settings_for_db", return_value={}),
             patch("ccrecall.hooks.backfill_embeddings.time.sleep"),
@@ -1147,7 +1147,7 @@ class TestBackfillETAProgress:
 
         with (
             patch("ccrecall.hooks.backfill_embeddings.model_available", return_value=True),
-            patch("ccrecall.embed_ops.embed_batch", side_effect=lambda texts: [_FIXED_VEC] * len(texts)),
+            patch("ccrecall.embed_ops.embed_batch", side_effect=lambda texts, **kwargs: [_FIXED_VEC] * len(texts)),
             patch("ccrecall.hooks.backfill_embeddings.get_connection", return_value=_NoCloseConn(conn)),
             patch("ccrecall.hooks.backfill_embeddings.load_settings_for_db", return_value={}),
             patch("ccrecall.hooks.backfill_embeddings.time.sleep"),
@@ -1169,7 +1169,7 @@ class TestBackfillETAProgress:
         conn = make_vec_conn()
         ids = [_insert_branch_with_messages(conn, num_exchanges=2) for _ in range(3)]
 
-        def always_fail(texts: list[str]) -> list[list[float]]:
+        def always_fail(texts: list[str], **kwargs) -> list[list[float]]:
             raise ValueError("simulated tokenizer overflow")
 
         with (

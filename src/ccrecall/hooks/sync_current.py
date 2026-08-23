@@ -200,6 +200,7 @@ def run(input_file: Path | None = None) -> None:
                     conn,
                     session_file,
                     project_dir,
+                    settings=settings,
                 )
             # conn is committed and closed on the line above (context manager exit).
 

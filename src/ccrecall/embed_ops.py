@@ -82,21 +82,28 @@ def _stamp_branch_watermark(cursor: sqlite3.Cursor, branch_db_id: int) -> None:
     )
 
 
-def _prepare_exchange_data(exchanges: list[dict]) -> list[dict]:
+def _prepare_exchange_data(exchanges: list[dict], cap_limit: int = MODEL_TOKEN_LIMIT) -> list[dict]:
     """Step 3 — compute embedded text, content hash, and bounded display text per exchange.
 
-    Display columns use the same head+tail cap per turn so the shown excerpt aligns
-    with the embedded region (design.md challenge M14).
+    ``content_hash`` is derived from the raw, uncapped ``combined`` text — not
+    from the post-cap output — so content identity is stable across cap tiers
+    (sync at 4096 vs backfill at 8192). Hashing the capped text would make the
+    same exchange hash differently depending on which path embedded it,
+    causing sync/backfill to ping-pong re-embedding each other's work forever.
+    See design/specs/015 (FR#1, AC#1).
+
+    Display columns use the same head+tail cap per turn (at ``cap_limit``) so
+    the shown excerpt aligns with the embedded region (design.md challenge M14).
     """
     exchange_data = []
     for ex in exchanges:
         user = ex.get("user") or ""
         assistant = ex.get("assistant") or ""
         combined = f"{user}\n\n{assistant}"
-        text, was_capped = cap_for_embedding(combined)
-        content_hash = hashlib.sha256(text.encode()).hexdigest()
-        user_text, _ = cap_for_embedding(user)
-        assistant_text, _ = cap_for_embedding(assistant)
+        content_hash = hashlib.sha256(combined.encode()).hexdigest()
+        text, was_capped = cap_for_embedding(combined, max_tokens=cap_limit)
+        user_text, _ = cap_for_embedding(user, max_tokens=cap_limit)
+        assistant_text, _ = cap_for_embedding(assistant, max_tokens=cap_limit)
         exchange_data.append(
             {
                 "index": ex["index"],
@@ -107,6 +114,10 @@ def _prepare_exchange_data(exchanges: list[dict]) -> list[dict]:
                 "first_message_uuid": ex.get("first_message_uuid"),
                 "user_text": user_text,
                 "assistant_text": assistant_text,
+                # NULL unless the text was actually truncated — an untruncated
+                # exchange is full-quality regardless of which cap was applied.
+                # See design/specs/015 (FR#5, Edge Cases).
+                "cap_tokens": cap_limit if was_capped else None,
             }
         )
     return exchange_data
@@ -144,9 +155,9 @@ def _write_embedded_chunks(cursor: sqlite3.Cursor, branch_db_id: int, needing_em
             """
             INSERT INTO chunks (
                 branch_id, exchange_index, content_hash, first_message_uuid,
-                timestamp, user_text, assistant_text, was_capped,
+                timestamp, user_text, assistant_text, was_capped, cap_tokens,
                 embedding_version, embedding_model
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, NULL)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL)
             """,
             (
                 branch_db_id,
@@ -157,6 +168,7 @@ def _write_embedded_chunks(cursor: sqlite3.Cursor, branch_db_id: int, needing_em
                 ed["user_text"],
                 ed["assistant_text"],
                 int(ed["was_capped"]),
+                ed["cap_tokens"],
             ),
         )
         chunk_id = cursor.lastrowid
@@ -207,6 +219,7 @@ def embed_branch_chunks(
     is_active: bool,
     vec_writable: bool,
     max_embeds: int | None = MAX_WRITE_PATH_EMBEDS_PER_SYNC,
+    cap_limit: int = MODEL_TOKEN_LIMIT,
 ) -> int:
     """Embed per-exchange chunks for an active-leaf branch (incremental write path).
 
@@ -218,6 +231,12 @@ def embed_branch_chunks(
     ``max_embeds`` bounds per-call inference cost (defaults to
     MAX_WRITE_PATH_EMBEDS_PER_SYNC for the write path; backfill passes None so a
     single call fully embeds a branch, avoiding backfill's no-progress guard).
+
+    ``cap_limit`` bounds the per-exchange token cap (see ``cap_for_embedding``)
+    and the batch attention budget (see ``embed_batch``). Defaults to
+    MODEL_TOKEN_LIMIT (8192, backfill quality); the sync path passes the
+    configured SYNC_PATH_TOKEN_LIMIT (4096) via ``sync_branch``. See
+    design/specs/015 (FR#3, FR#4, FR#13).
 
     Returns the inference count (exchanges embedded). Raises on failure — callers
     (sync_branch) must wrap in contextlib.suppress(Exception). Does not commit; the
@@ -234,7 +253,7 @@ def embed_branch_chunks(
         _stamp_branch_watermark(cursor, branch_db_id)
         return 0
 
-    exchange_data = _prepare_exchange_data(exchanges)
+    exchange_data = _prepare_exchange_data(exchanges, cap_limit=cap_limit)
 
     cursor.execute(
         "SELECT exchange_index, content_hash, embedding_version, embedding_model FROM chunks WHERE branch_id = ?",
@@ -264,7 +283,7 @@ def embed_branch_chunks(
     # Embed-before-write (step 6): batch-embed all texts BEFORE any DB write,
     # so a failed embed_batch call leaves every existing chunk row/vector intact.
     texts = [ed["text"] for ed in needing_embed]
-    vecs = embed_batch(texts)
+    vecs = embed_batch(texts, max_token_cap=cap_limit)
 
     _write_embedded_chunks(cursor, branch_db_id, needing_embed, vecs)
     _prune_stale_chunks(cursor, branch_db_id, indices_to_prune)

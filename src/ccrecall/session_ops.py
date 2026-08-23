@@ -46,6 +46,7 @@ def sync_session(
     embed: bool = True,
     file_size: int | None = None,
     file_mtime: float | None = None,
+    settings: dict | None = None,
     *,
     force: bool = False,
 ) -> int:
@@ -67,6 +68,11 @@ def sync_session(
     runs. ``embed`` controls whether chunk embeddings are written — the import
     path passes False to load vec (for trigger support) without paying for
     inference.
+    ``settings``, when provided, supplies the raw ``sync_path_token_limit``
+    config value threaded to ``sync_branch``. This module must not import from
+    ``embeddings.py`` (the hook hot path — see architecture invariant 2), so
+    the value is passed through unclamped; ``branch_ops.sync_branch`` (which
+    already imports ``embeddings``) does the clamping.
     """
     cursor = conn.cursor()
 
@@ -137,9 +143,18 @@ def sync_session(
     # leaf just to have the write swallowed. The import path passes embed=False
     # to load vec (for trigger support) without paying for inference.
     vec_writable = embed and chunk_vec_queryable(conn)
+    sync_path_token_limit = settings.get("sync_path_token_limit") if settings else None
 
     for branch in branches:
-        sync_branch(cursor, branch, messages, uuid_to_msg_id, session_id, vec_writable)
+        sync_branch(
+            cursor,
+            branch,
+            messages,
+            uuid_to_msg_id,
+            session_id,
+            vec_writable,
+            sync_path_token_limit=sync_path_token_limit,
+        )
 
     upsert_import_log(cursor, filepath, session_id, file_hash, log_row, file_size, file_mtime)
 
