@@ -1,7 +1,7 @@
 ---
 task_id: "T04"
 title: "Add alert, schedule CLI, dismiss, and three-state caveat"
-status: "planned"
+status: "done"
 depends_on: ["T01"]
 implements: ["FR#7", "FR#8", "FR#16", "FR#17", "FR#18", "AC#5", "AC#12"]
 ---

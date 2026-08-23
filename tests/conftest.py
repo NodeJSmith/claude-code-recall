@@ -52,6 +52,7 @@ def _isolated_runtime_dir(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(config, "CONFIG_PATH", isolated / "config.json")
     monkeypatch.setattr(health, "EMBEDDING_STATUS_PATH", isolated / "embedding-status.json")
     monkeypatch.setattr(health, "ALERT_SNOOZE_PATH", isolated / "alert-snooze.json")
+    monkeypatch.setattr(health, "BACKFILL_SCHEDULE_PATH", isolated / "backfill-schedule.json")
     monkeypatch.setattr(health, "_PROBE_MARKER_PATH", isolated / ".write-probe")
     monkeypatch.setattr(sync_current, "DEFAULT_LOG_PATH", isolated / "ccrecall.log")
 

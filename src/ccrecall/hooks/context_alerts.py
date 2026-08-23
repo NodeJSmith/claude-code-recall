@@ -13,13 +13,16 @@ from pathlib import Path
 from ccrecall.config import DEFAULT_SETTINGS
 from ccrecall.health import (
     ALERT_CANT_PERSIST,
+    ALERT_DRAFT_QUALITY_VECTORS,
     ALERT_EMBEDDINGS_FAILING,
     ALERT_TOOL_CONTENT_INCOMPLETE,
     build_alert_block,
+    count_draft_quality_chunks,
     evaluate_alerts,
     probe_db,
     probe_filesystem,
     read_embedding_status,
+    read_schedule_marker,
 )
 from ccrecall.hooks.tool_content_eligibility import eligibility_clause
 from ccrecall.models import LOGGER_NAME
@@ -35,6 +38,7 @@ def proactive_alert_block(
     marker_path: Path | None = None,
     snooze_path: Path | None = None,
     status_path: Path | None = None,
+    schedule_path: Path | None = None,
 ) -> str:
     """Build the proactive health-alert block for SessionStart injection.
 
@@ -44,6 +48,9 @@ def proactive_alert_block(
       fastembed/onnxruntime/sqlite_vec — hot-path invariant)
     - DB write-lock probe (active, on the already-open connection, or conn=None
       when the connection itself failed — that failure becomes a fault)
+    - Draft-quality chunk check (a cheap COUNT(*) on the already-open
+      connection) gated by the backfill-schedule marker (FR#8): a configured
+      schedule or an explicit dismiss suppresses the alert entirely.
 
     Passes active keys through the snooze ledger (fire / suppress / auto-clear)
     and builds ONE combined block for whatever fires.
@@ -52,8 +59,9 @@ def proactive_alert_block(
     exception degrades to "" so the hook is never broken and context injection is
     unaffected.
 
-    marker_path / snooze_path / status_path: test injection points for sidecar
-    paths; None means use the health.py function defaults (production paths).
+    marker_path / snooze_path / status_path / schedule_path: test injection
+    points for sidecar paths; None means use the health.py function defaults
+    (production paths).
     """
     try:
         # 1. Filesystem probe — no DB needed, unconditional.
@@ -91,6 +99,9 @@ def proactive_alert_block(
         if conn is not None and has_backfillable_tool_content(conn):
             active_keys.add(ALERT_TOOL_CONTENT_INCOMPLETE)
 
+        if conn is not None and has_draft_quality_chunks(conn) and read_schedule_marker(schedule_path) is None:
+            active_keys.add(ALERT_DRAFT_QUALITY_VECTORS)
+
         # 5. Evaluate snooze ledger: fire / suppress / auto-clear.
         # load_settings() always carries alert_snooze_hours from DEFAULT_SETTINGS;
         # fall back to the canonical default only for sparse (test) settings dicts.
@@ -110,6 +121,17 @@ def proactive_alert_block(
         # logging_enabled) so the failure isn't silently lost.
         logging.getLogger(LOGGER_NAME).exception("proactive alert block failed")
         return ""
+
+
+def has_draft_quality_chunks(conn: sqlite3.Connection) -> bool:
+    """Return True iff any chunk was embedded below FULL_QUALITY_TOKEN_LIMIT tokens.
+
+    Thin bool wrapper around health.count_draft_quality_chunks — the shared
+    predicate also backing `ccrecall backfill schedule status`'s raw count
+    (cli/commands.py), so the draft-quality definition can't drift between
+    the two call sites.
+    """
+    return count_draft_quality_chunks(conn) > 0
 
 
 def has_backfillable_tool_content(conn: sqlite3.Connection) -> bool:

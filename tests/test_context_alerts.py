@@ -9,9 +9,11 @@ from pathlib import Path
 
 import pytest
 
+from ccrecall.health import write_schedule_marker
 from ccrecall.hooks.context_alerts import (
     _TOOL_CONTENT_SAMPLE_SIZE,
     has_backfillable_tool_content,
+    has_draft_quality_chunks,
     proactive_alert_block,
 )
 
@@ -53,6 +55,150 @@ def _seed_session(
     )
     conn.commit()
     return session_id
+
+
+def _seed_branch_with_chunk(conn: sqlite3.Connection, *, session_uuid: str, cap_tokens: int | None) -> int:
+    """Seed a minimal active branch with one chunk row. Returns branch_id."""
+    conn.execute("INSERT INTO sessions (uuid) VALUES (?)", (session_uuid,))
+    session_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+    conn.execute(
+        "INSERT INTO branches (session_id, leaf_uuid, is_active) VALUES (?, ?, 1)",
+        (session_id, f"leaf-{session_uuid}"),
+    )
+    branch_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+    conn.execute(
+        "INSERT INTO chunks (branch_id, exchange_index, content_hash, cap_tokens) VALUES (?, 0, 'hash', ?)",
+        (branch_id, cap_tokens),
+    )
+    conn.commit()
+    return branch_id
+
+
+class TestHasDraftQualityChunks:
+    """cap_tokens-based draft-quality chunk detection (FR#7)."""
+
+    def test_no_chunks_returns_false(self, memory_db):
+        """Empty chunks table → no draft-quality chunks."""
+        assert has_draft_quality_chunks(memory_db) is False
+
+    def test_full_quality_chunk_returns_false(self, memory_db):
+        """NULL cap_tokens (untruncated, full quality) → no draft-quality chunks."""
+        _seed_branch_with_chunk(memory_db, session_uuid="sess-full", cap_tokens=None)
+        assert has_draft_quality_chunks(memory_db) is False
+
+    def test_draft_quality_chunk_returns_true(self, memory_db):
+        """cap_tokens below FULL_QUALITY_TOKEN_LIMIT → draft-quality chunk found."""
+        _seed_branch_with_chunk(memory_db, session_uuid="sess-draft", cap_tokens=4096)
+        assert has_draft_quality_chunks(memory_db) is True
+
+
+class TestDraftQualityAlertWiring:
+    """ALERT_DRAFT_QUALITY_VECTORS wiring into proactive_alert_block (FR#7, FR#8, AC#5)."""
+
+    def test_alert_fires_when_draft_chunks_present_and_no_marker(self, tmp_path, memory_db):
+        """A draft-quality chunk with no schedule marker → alert fires (AC#5 step 1)."""
+        conn = memory_db
+        _seed_branch_with_chunk(conn, session_uuid="sess-i", cap_tokens=4096)
+
+        block = proactive_alert_block(
+            {"alert_snooze_hours": 0},
+            conn,
+            db_available=True,
+            marker_path=tmp_path / ".write-probe",
+            snooze_path=tmp_path / "snooze.json",
+            status_path=tmp_path / "embedding-status.json",
+            schedule_path=tmp_path / "backfill-schedule.json",
+        )
+        assert "draft-quality" in block.lower()
+
+    def test_alert_suppressed_when_schedule_marker_configured(self, tmp_path, memory_db):
+        """A configured_at marker suppresses the alert (AC#5 step 2)."""
+        conn = memory_db
+        _seed_branch_with_chunk(conn, session_uuid="sess-j", cap_tokens=4096)
+        schedule = tmp_path / "backfill-schedule.json"
+        write_schedule_marker("configured_at", path=schedule)
+
+        block = proactive_alert_block(
+            {"alert_snooze_hours": 0},
+            conn,
+            db_available=True,
+            marker_path=tmp_path / ".write-probe",
+            snooze_path=tmp_path / "snooze.json",
+            status_path=tmp_path / "embedding-status.json",
+            schedule_path=schedule,
+        )
+        assert "draft-quality" not in block.lower()
+
+    def test_alert_suppressed_when_schedule_marker_dismissed(self, tmp_path, memory_db):
+        """A dismissed_at marker also suppresses the alert (FR#17)."""
+        conn = memory_db
+        _seed_branch_with_chunk(conn, session_uuid="sess-k", cap_tokens=4096)
+        schedule = tmp_path / "backfill-schedule.json"
+        write_schedule_marker("dismissed_at", path=schedule)
+
+        block = proactive_alert_block(
+            {"alert_snooze_hours": 0},
+            conn,
+            db_available=True,
+            marker_path=tmp_path / ".write-probe",
+            snooze_path=tmp_path / "snooze.json",
+            status_path=tmp_path / "embedding-status.json",
+            schedule_path=schedule,
+        )
+        assert "draft-quality" not in block.lower()
+
+    def test_alert_fires_when_marker_has_no_recognized_fields(self, tmp_path, memory_db):
+        """An empty-dict marker (`{}`) doesn't count as configured/dismissed — alert fires."""
+        conn = memory_db
+        _seed_branch_with_chunk(conn, session_uuid="sess-l", cap_tokens=4096)
+        schedule = tmp_path / "backfill-schedule.json"
+        schedule.write_text("{}")
+
+        block = proactive_alert_block(
+            {"alert_snooze_hours": 0},
+            conn,
+            db_available=True,
+            marker_path=tmp_path / ".write-probe",
+            snooze_path=tmp_path / "snooze.json",
+            status_path=tmp_path / "embedding-status.json",
+            schedule_path=schedule,
+        )
+        assert "draft-quality" in block.lower()
+
+    def test_ac5_marker_removed_fires_again(self, tmp_path, memory_db):
+        """Remove the marker after a suppressed session → alert fires again (AC#5 step 3)."""
+        conn = memory_db
+        _seed_branch_with_chunk(conn, session_uuid="sess-m", cap_tokens=4096)
+        schedule = tmp_path / "backfill-schedule.json"
+        write_schedule_marker("configured_at", path=schedule)
+        schedule.unlink()
+
+        block = proactive_alert_block(
+            {"alert_snooze_hours": 0},
+            conn,
+            db_available=True,
+            marker_path=tmp_path / ".write-probe",
+            snooze_path=tmp_path / "snooze.json",
+            status_path=tmp_path / "embedding-status.json",
+            schedule_path=schedule,
+        )
+        assert "draft-quality" in block.lower()
+
+    def test_no_alert_when_no_draft_quality_chunks(self, tmp_path, memory_db):
+        """No draft-quality chunks at all → block is empty."""
+        conn = memory_db
+        block = proactive_alert_block(
+            {"alert_snooze_hours": 0},
+            conn,
+            db_available=True,
+            marker_path=tmp_path / ".write-probe",
+            snooze_path=tmp_path / "snooze.json",
+            status_path=tmp_path / "embedding-status.json",
+            schedule_path=tmp_path / "backfill-schedule.json",
+        )
+        assert block == ""
 
 
 class TestHasBackfillableToolContent:

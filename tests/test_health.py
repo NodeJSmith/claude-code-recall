@@ -9,6 +9,7 @@ import ccrecall.health as health
 from ccrecall.embeddings import MODEL_TOKEN_LIMIT
 from ccrecall.health import (
     ALERT_CANT_PERSIST,
+    ALERT_DRAFT_QUALITY_VECTORS,
     ALERT_EMBEDDINGS_FAILING,
     ALERT_TOOL_CONTENT_INCOMPLETE,
     RECALL_CAVEAT_COVERAGE_THRESHOLD,
@@ -17,11 +18,14 @@ from ccrecall.health import (
     _write_snooze_ledger,
     build_alert_block,
     clear_embedding_failure,
+    clear_schedule_marker,
     evaluate_alerts,
     probe_db,
     probe_filesystem,
     read_embedding_status,
+    read_schedule_marker,
     record_embedding_failure,
+    write_schedule_marker,
 )
 
 
@@ -479,6 +483,93 @@ class TestBlockBuilder:
         lower = result.lower()
         assert "surface" in lower
 
+    def test_draft_quality_block_mentions_backfill_schedule_and_dismiss_commands(self):
+        """draft_quality_vectors block names all three remediation commands (FR#7)."""
+        result = build_alert_block([ALERT_DRAFT_QUALITY_VECTORS])
+        assert "ccrecall backfill embeddings" in result
+        assert "ccrecall backfill schedule write" in result
+        assert "--dismiss" in result
+
+    def test_draft_quality_block_has_relay_instruction(self):
+        """draft_quality_vectors block instructs relay without hard-coded prominence."""
+        result = build_alert_block([ALERT_DRAFT_QUALITY_VECTORS])
+        lower = result.lower()
+        assert "surface" in lower
+
+
+class TestScheduleMarker:
+    """Backfill-schedule marker sidecar helpers (FR#8, FR#17, FR#18)."""
+
+    def test_read_missing_file_returns_none(self, tmp_path):
+        """Missing backfill-schedule.json → None (no error)."""
+        path = tmp_path / "backfill-schedule.json"
+        assert read_schedule_marker(path=path) is None
+
+    def test_write_configured_then_read_round_trip(self, tmp_path):
+        """write_schedule_marker('configured_at') is readable back with a parseable timestamp."""
+        path = tmp_path / "backfill-schedule.json"
+        write_schedule_marker("configured_at", path=path)
+        data = read_schedule_marker(path=path)
+        assert data is not None
+        assert "configured_at" in data
+        Instant.parse_iso(data["configured_at"])  # must not raise
+
+    def test_write_dismissed_then_read_round_trip(self, tmp_path):
+        """write_schedule_marker('dismissed_at') is readable back."""
+        path = tmp_path / "backfill-schedule.json"
+        write_schedule_marker("dismissed_at", path=path)
+        data = read_schedule_marker(path=path)
+        assert data is not None
+        assert "dismissed_at" in data
+
+    def test_read_malformed_json_returns_none(self, tmp_path):
+        """Malformed JSON → None."""
+        path = tmp_path / "backfill-schedule.json"
+        path.write_text("{bad json}")
+        assert read_schedule_marker(path=path) is None
+
+    def test_read_non_dict_json_returns_none(self, tmp_path):
+        """Non-dict JSON (array, string) → None."""
+        path = tmp_path / "backfill-schedule.json"
+        path.write_text(json.dumps([1, 2, 3]))
+        assert read_schedule_marker(path=path) is None
+
+    def test_read_dict_missing_required_fields_returns_none(self, tmp_path):
+        """A marker present but with neither configured_at nor dismissed_at doesn't suppress."""
+        path = tmp_path / "backfill-schedule.json"
+        path.write_text(json.dumps({"unrelated": "value"}))
+        assert read_schedule_marker(path=path) is None
+
+    def test_clear_removes_marker_and_reports_it_existed(self, tmp_path):
+        """clear_schedule_marker removes the file and returns True when it was present."""
+        path = tmp_path / "backfill-schedule.json"
+        write_schedule_marker("configured_at", path=path)
+        existed = clear_schedule_marker(path=path)
+        assert existed is True
+        assert not path.exists()
+        assert read_schedule_marker(path=path) is None
+
+    def test_clear_returns_false_when_absent(self, tmp_path):
+        """clear_schedule_marker on a missing file returns False and doesn't error."""
+        path = tmp_path / "backfill-schedule.json"
+        assert clear_schedule_marker(path=path) is False
+
+    def test_omitted_path_resolves_module_constant_at_call_time(self, monkeypatch, tmp_path):
+        """Same #151-shaped guard as EMBEDDING_STATUS_PATH: monkeypatching
+        health.BACKFILL_SCHEDULE_PATH must reach callers that omit `path`."""
+        patched = tmp_path / "backfill-schedule.json"
+        monkeypatch.setattr(health, "BACKFILL_SCHEDULE_PATH", patched)
+
+        write_schedule_marker("configured_at")
+
+        assert patched.exists()
+        assert read_schedule_marker() is not None
+        assert "configured_at" in read_schedule_marker()
+
+        cleared = clear_schedule_marker()
+        assert cleared is True
+        assert not patched.exists()
+
 
 class TestConstants:
     """Module-level constants are correct."""
@@ -487,9 +578,14 @@ class TestConstants:
         assert RECALL_CAVEAT_COVERAGE_THRESHOLD == 0.95
 
     def test_alert_keys_are_distinct_nonempty_strings(self):
-        keys = {ALERT_CANT_PERSIST, ALERT_EMBEDDINGS_FAILING, ALERT_TOOL_CONTENT_INCOMPLETE}
+        keys = {
+            ALERT_CANT_PERSIST,
+            ALERT_EMBEDDINGS_FAILING,
+            ALERT_TOOL_CONTENT_INCOMPLETE,
+            ALERT_DRAFT_QUALITY_VECTORS,
+        }
         assert all(isinstance(k, str) and k for k in keys)
-        assert len(keys) == 3
+        assert len(keys) == 4
 
     def test_probe_result_frozen_dataclass(self):
         """ProbeResult is frozen and carries ok + reason fields."""

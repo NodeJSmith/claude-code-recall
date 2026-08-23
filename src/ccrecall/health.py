@@ -40,6 +40,7 @@ from ccrecall.models import LOGGER_NAME
 # "simplify" any of these back to a signature default — that reintroduces the bug.
 EMBEDDING_STATUS_PATH = RUNTIME_DIR / "embedding-status.json"
 ALERT_SNOOZE_PATH = RUNTIME_DIR / "alert-snooze.json"
+BACKFILL_SCHEDULE_PATH = RUNTIME_DIR / "backfill-schedule.json"
 
 # Fixed marker path for the filesystem writability probe (private; inject via
 # probe_filesystem(marker_path=...) in tests).
@@ -56,6 +57,7 @@ SECONDS_PER_HOUR = 3600
 ALERT_CANT_PERSIST = "cant_persist"
 ALERT_EMBEDDINGS_FAILING = "embeddings_failing"
 ALERT_TOOL_CONTENT_INCOMPLETE = "tool_content_incomplete"
+ALERT_DRAFT_QUALITY_VECTORS = "draft_quality_vectors"
 
 # Deliberate duplication of embeddings.MODEL_TOKEN_LIMIT: health.py must never
 # import from embeddings.py (see module docstring's hot-path invariant), so this
@@ -207,6 +209,113 @@ def clear_embedding_failure(path: Path | None = None) -> None:
     path.unlink(missing_ok=True)
 
 
+# ── Backfill schedule marker ───────────────────────────────────────────────────
+# Suppresses ALERT_DRAFT_QUALITY_VECTORS (FR#8): a user who has configured a
+# scheduled backfill job, or explicitly dismissed the alert, shouldn't be
+# nagged every session. Two writers share this one sidecar — `ccrecall backfill
+# schedule write` sets "configured_at"; `ccrecall backfill embeddings --dismiss`
+# sets "dismissed_at" — either field satisfies the suppression check below.
+
+
+def read_schedule_marker(path: Path | None = None) -> dict | None:
+    """Read the backfill-schedule marker sidecar.
+
+    Returns the parsed dict when it carries "configured_at" or "dismissed_at"
+    (either satisfies FR#8's suppression check). Returns None when the file is
+    missing, malformed, not a JSON object, or present but missing both
+    recognized fields — treating an unrecognized marker as absent so the alert
+    still fires rather than being silently suppressed by garbage content.
+
+    ``path`` resolves to ``BACKFILL_SCHEDULE_PATH`` at call time — see the
+    "Sidecar paths" comment above for why this isn't a signature default.
+    """
+    if path is None:
+        path = BACKFILL_SCHEDULE_PATH
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    if "configured_at" not in data and "dismissed_at" not in data:
+        return None
+    return data
+
+
+def write_schedule_marker(field: str, path: Path | None = None) -> None:
+    """Write the backfill-schedule marker with a single timestamp field.
+
+    ``field`` is "configured_at" (``ccrecall backfill schedule write``) or
+    "dismissed_at" (``ccrecall backfill embeddings --dismiss``). Uses an
+    atomic write so a concurrent SessionStart hook read never sees a partial
+    file.
+
+    ``path`` resolves to ``BACKFILL_SCHEDULE_PATH`` at call time — see the
+    "Sidecar paths" comment above for why this isn't a signature default.
+    """
+    if path is None:
+        path = BACKFILL_SCHEDULE_PATH
+    atomic_write_json(path, {field: Instant.now().format_iso()})
+
+
+def clear_schedule_marker(path: Path | None = None) -> bool:
+    """Remove the backfill-schedule marker sidecar. Returns True iff it existed.
+
+    ``path`` resolves to ``BACKFILL_SCHEDULE_PATH`` at call time — see the
+    "Sidecar paths" comment above for why this isn't a signature default.
+    """
+    if path is None:
+        path = BACKFILL_SCHEDULE_PATH
+    existed = path.exists()
+    path.unlink(missing_ok=True)
+    return existed
+
+
+def describe_schedule_marker(marker: dict | None) -> str:
+    """Render the backfill-schedule marker state as a one-line human string.
+
+    Shared by `ccrecall backfill schedule status` so the marker-state prose
+    lives in one place rather than being re-derived in the CLI layer. Takes
+    the already-parsed marker (from read_schedule_marker) rather than a path,
+    so callers control the DB/IO boundary.
+    """
+    if marker is None:
+        return "not set"
+    if "dismissed_at" in marker:
+        return f"dismissed at {marker['dismissed_at']}"
+    if "configured_at" in marker:
+        return f"configured at {marker['configured_at']}"
+    return "present but unrecognized"
+
+
+# ── Draft-quality chunk count ────────────────────────────────────────────────
+# Plain sqlite3 query — no vec/fastembed/onnxruntime import needed, so this
+# stays safe on the SessionStart hot path (see module docstring). Shared by
+# hooks.context_alerts.has_draft_quality_chunks (bool check, hot path) and
+# `ccrecall backfill schedule status` (raw count, cli/commands.py) so the
+# draft-quality predicate can't drift between the two call sites.
+
+
+def count_draft_quality_chunks(conn: sqlite3.Connection) -> int:
+    """Return the count of chunks embedded below FULL_QUALITY_TOKEN_LIMIT tokens.
+
+    Cheap COUNT(*) — cap_tokens lives in the base `chunks` table, so this
+    needs no vec extension or embedding model. NULL cap_tokens means
+    untruncated (full quality), so it's excluded by the `IS NOT NULL` guard
+    rather than by a value comparison. Joined to `branches` and filtered on
+    `is_active = 1` so a chunk left behind by an inactive (historical/orphaned)
+    branch never counts — mirrors the standing `is_active = 1` invariant every
+    other read path in this codebase follows.
+    """
+    return conn.execute(
+        "SELECT COUNT(*) FROM chunks c JOIN branches b ON b.id = c.branch_id "
+        "WHERE b.is_active = 1 AND c.cap_tokens IS NOT NULL AND c.cap_tokens < ?",
+        (FULL_QUALITY_TOKEN_LIMIT,),
+    ).fetchone()[0]
+
+
 # ── Snooze ledger ──────────────────────────────────────────────────────────────
 
 
@@ -318,6 +427,15 @@ _ALERT_PROSE: dict[str, tuple[str, str, str]] = {
         "ccrecall's tool-content index is incomplete — tool_use content from older sessions is not yet searchable.",
         "sessions synced before tool-content extraction was added have not been backfilled",
         "run `ccrecall backfill tool-content` to index historical tool_use content (one-time, opt-in)",
+    ),
+    ALERT_DRAFT_QUALITY_VECTORS: (
+        "Some conversations have draft-quality embeddings — semantic search works but may miss context "
+        "from long exchanges.",
+        "the sync path caps embeddings at 4096 tokens for memory safety; full 8192-token quality requires "
+        "a scheduled backfill",
+        "run `ccrecall backfill embeddings` to upgrade existing drafts; to prevent recurrence, set up a "
+        "scheduled job (`ccrecall backfill schedule write`) or dismiss permanently "
+        "(`ccrecall backfill embeddings --dismiss`)",
     ),
 }
 
