@@ -1,7 +1,7 @@
 ---
 task_id: "T06"
 title: "Add integration tests for no-ping-pong and backfill lifecycle"
-status: "planned"
+status: "done"
 depends_on: ["T03", "T05"]
 implements: ["AC#4", "AC#9"]
 ---

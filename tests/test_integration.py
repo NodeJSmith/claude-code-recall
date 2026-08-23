@@ -17,7 +17,15 @@ from ccrecall.content import (
     is_teammate_message,
     is_tool_result,
 )
-from ccrecall.embeddings import EMBEDDING_DIM
+from ccrecall.embed_ops import embed_branch_chunks
+from ccrecall.embeddings import (
+    EMBEDDING_DIM,
+    EMBEDDING_MODEL,
+    EMBEDDING_VERSION,
+    MODEL_TOKEN_LIMIT,
+    SYNC_PATH_TOKEN_LIMIT,
+)
+from ccrecall.hooks.backfill_query import build_selection
 from ccrecall.hooks.backfill_tool_content import run as run_backfill_tool_content
 from ccrecall.parsing import (
     build_aggregated_content,
@@ -508,4 +516,176 @@ class TestSearchMessagesToolContentMatch:
         assert any("retry task" in (s.get("assistant") or "").lower() for s in snippets), (
             f"expected the AskUserQuestion tool content in a snippet's assistant text, got: {snippets}"
         )
+        conn.close()
+
+
+# Sync-current memory fix (design/specs/015-sync-memory-fix): the sync path
+# caps embeddings at SYNC_PATH_TOKEN_LIMIT (4096) for memory safety while
+# backfill caps at MODEL_TOKEN_LIMIT (8192). These integration tests exercise
+# the assembled behavior across embed_branch_chunks, _diff_exchanges,
+# _should_stamp_watermark, and build_selection with real (unmocked)
+# cap_for_embedding/tokenization -- only embed_batch (the actual onnxruntime
+# inference call) is mocked out.
+
+# ~31k chars / ~5.7k tokens for the sentence below repeated 300 times, combined
+# with a short assistant reply: over SYNC_PATH_TOKEN_LIMIT (4096) but under
+# both MODEL_TOKEN_LIMIT (8192) and EMBED_CHAR_BUDGET (32000 chars) -- so the
+# exchange is truncated at the sync cap but fits untouched at the backfill cap.
+_LONG_EXCHANGE_SENTENCE = (
+    "The quick brown fox jumps over the lazy dog and continues running through the forest looking for food. "
+)
+_LONG_EXCHANGE_REPEATS = 300
+_LONG_EXCHANGE_ASSISTANT_REPLY = "Understood, here is my response to that long message."
+
+
+def _long_exchange_msgs() -> list[dict]:
+    """One user/assistant exchange whose combined text is >4096 and <8192 tokens."""
+    return [
+        {
+            "role": "user",
+            "content": _LONG_EXCHANGE_SENTENCE * _LONG_EXCHANGE_REPEATS,
+            "timestamp": "2026-01-01T00:00:00",
+            "uuid": "long-user-uuid",
+        },
+        {
+            "role": "assistant",
+            "content": _LONG_EXCHANGE_ASSISTANT_REPLY,
+            "timestamp": "2026-01-01T00:00:30",
+            "uuid": None,
+        },
+    ]
+
+
+def _seed_embeddable_branch(cursor: sqlite3.Cursor) -> int:
+    """Seed project/session/branch/message rows so the branch satisfies
+    CHUNK_EMBEDDABLE_BRANCH_FILTER (is_active=1, >=1 branch_messages row) --
+    required for build_selection to consider it a candidate at all."""
+    cursor.execute(
+        "INSERT INTO projects (path, key) VALUES (?, ?)",
+        ("/test/lifecycle-proj", "lifecycle-proj"),
+    )
+    project_id = cursor.lastrowid
+    cursor.execute(
+        "INSERT INTO sessions (uuid, project_id) VALUES (?, ?)",
+        ("lifecycle-session", project_id),
+    )
+    session_id = cursor.lastrowid
+    cursor.execute(
+        "INSERT INTO branches (session_id, leaf_uuid, is_active, embedding_version) VALUES (?, ?, 1, 0)",
+        (session_id, "lifecycle-leaf"),
+    )
+    branch_id = cursor.lastrowid
+    cursor.execute(
+        "INSERT INTO messages (session_id, uuid, role, content, timestamp) VALUES (?, ?, 'user', 'seed', ?)",
+        (session_id, "seed-msg", "2026-01-01T00:00:00"),
+    )
+    message_id = cursor.lastrowid
+    cursor.execute(
+        "INSERT INTO branch_messages (branch_id, message_id) VALUES (?, ?)",
+        (branch_id, message_id),
+    )
+    return branch_id
+
+
+class TestEmbeddingLifecycle:
+    """Integration tests for the sync -> backfill -> sync embedding lifecycle
+    (design/specs/015-sync-memory-fix): no ping-pong between cap tiers (AC#4)
+    and the backfill watermark/selection handoff (AC#9)."""
+
+    @VEC_SKIP
+    def test_no_ping_pong_across_sync_and_backfill_cap_tiers(self):
+        """AC#4: sync-cap embed (4096) -> backfill upgrade (8192) -> sync-cap
+        embed again must NOT re-embed the now-full-quality chunk."""
+        conn = make_vec_conn()
+        cursor = conn.cursor()
+        branch_id = _seed_embeddable_branch(cursor)
+        conn.commit()
+
+        msgs = _long_exchange_msgs()
+        fake_vec = [0.1] * EMBEDDING_DIM
+
+        with patch("ccrecall.embed_ops.embed_batch", side_effect=lambda texts, **kw: [fake_vec] * len(texts)):
+            # Step 1: sync-path embed, capped at SYNC_PATH_TOKEN_LIMIT (4096).
+            count1 = embed_branch_chunks(
+                cursor, branch_id, msgs, is_active=True, vec_writable=True, cap_limit=SYNC_PATH_TOKEN_LIMIT
+            )
+            assert count1 == 1, "sync-path embed must embed the over-cap exchange"
+            cursor.execute("SELECT cap_tokens FROM chunks WHERE branch_id = ?", (branch_id,))
+            assert cursor.fetchone()[0] == SYNC_PATH_TOKEN_LIMIT
+
+            # Step 2: backfill upgrades to MODEL_TOKEN_LIMIT (8192). The text fits
+            # without truncation at 8192, so cap_tokens becomes NULL (full quality).
+            count2 = embed_branch_chunks(
+                cursor,
+                branch_id,
+                msgs,
+                is_active=True,
+                vec_writable=True,
+                cap_limit=MODEL_TOKEN_LIMIT,
+                max_embeds=None,
+            )
+            assert count2 == 1, "backfill must re-embed the draft-quality chunk"
+            cursor.execute("SELECT cap_tokens FROM chunks WHERE branch_id = ?", (branch_id,))
+            assert cursor.fetchone()[0] is None, "untruncated text at 8192 must store cap_tokens=NULL"
+
+            # Step 3: sync-path embed again -- content_hash is unchanged (raw text
+            # never changed) and cap_tokens IS NULL (>= SYNC_PATH_TOKEN_LIMIT), so
+            # no ping-pong re-embed.
+            count3 = embed_branch_chunks(
+                cursor, branch_id, msgs, is_active=True, vec_writable=True, cap_limit=SYNC_PATH_TOKEN_LIMIT
+            )
+            assert count3 == 0, "no-ping-pong: sync path must not re-embed a full-quality chunk"
+
+        conn.close()
+
+    @VEC_SKIP
+    def test_backfill_lifecycle_watermark_and_selection(self):
+        """AC#9: sync-cap embed withholds the watermark and build_selection
+        includes the branch; backfill upgrade stamps the watermark and
+        build_selection excludes the branch."""
+        conn = make_vec_conn()
+        cursor = conn.cursor()
+        branch_id = _seed_embeddable_branch(cursor)
+        conn.commit()
+
+        msgs = _long_exchange_msgs()
+        fake_vec = [0.1] * EMBEDDING_DIM
+
+        with patch("ccrecall.embed_ops.embed_batch", side_effect=lambda texts, **kw: [fake_vec] * len(texts)):
+            # Step 1: sync-path embed at SYNC_PATH_TOKEN_LIMIT (4096).
+            embed_branch_chunks(
+                cursor, branch_id, msgs, is_active=True, vec_writable=True, cap_limit=SYNC_PATH_TOKEN_LIMIT
+            )
+            conn.commit()
+
+            cursor.execute("SELECT embedding_version FROM branches WHERE id = ?", (branch_id,))
+            assert cursor.fetchone()[0] == 0, "watermark must be withheld for a draft-quality chunk"
+
+            where, params = build_selection(None)
+            cursor.execute(f"SELECT id FROM branches {where}", params)
+            selected_ids = {row[0] for row in cursor.fetchall()}
+            assert branch_id in selected_ids, "build_selection must select the draft-quality branch"
+
+            # Step 2: backfill upgrades to MODEL_TOKEN_LIMIT (8192).
+            embed_branch_chunks(
+                cursor,
+                branch_id,
+                msgs,
+                is_active=True,
+                vec_writable=True,
+                cap_limit=MODEL_TOKEN_LIMIT,
+                max_embeds=None,
+            )
+            conn.commit()
+
+            cursor.execute("SELECT embedding_version, embedding_model FROM branches WHERE id = ?", (branch_id,))
+            stamped_version, stamped_model = cursor.fetchone()
+            assert stamped_version == EMBEDDING_VERSION, "watermark must be stamped once every chunk is full quality"
+            assert stamped_model == EMBEDDING_MODEL
+
+            where, params = build_selection(None)
+            cursor.execute(f"SELECT id FROM branches {where}", params)
+            selected_ids = {row[0] for row in cursor.fetchall()}
+            assert branch_id not in selected_ids, "build_selection must exclude the now full-quality branch"
+
         conn.close()
