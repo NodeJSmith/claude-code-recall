@@ -39,9 +39,9 @@ Implement the content-hash fix, cap parameterization, and attention budget chang
 
 **embed_branch_chunks (embed_ops.py:190):** Add `cap_limit: int = MODEL_TOKEN_LIMIT` parameter. Thread to `_prepare_exchange_data(exchanges, cap_limit=cap_limit)` and to `embed_batch(texts, max_token_cap=cap_limit)`.
 
-**sync_branch (branch_ops.py:192):** Add `sync_path_token_limit: int = MODEL_TOKEN_LIMIT` parameter. Pass to `embed_branch_chunks(cursor, branch_db_id, embed_msgs, is_active, vec_writable, cap_limit=sync_path_token_limit)`.
+**sync_branch (branch_ops.py:192):** Add `sync_path_token_limit: int | None = None` parameter. Clamp: `cap = min(max(sync_path_token_limit or SYNC_PATH_TOKEN_LIMIT, 1), MODEL_TOKEN_LIMIT)`. Pass to `embed_branch_chunks(cursor, branch_db_id, embed_msgs, is_active, vec_writable, cap_limit=cap)`. The clamp lives here (not in session_ops.py or config.py) because branch_ops.py already imports `embeddings`.
 
-**sync_session (session_ops.py:40):** Add a `settings: dict | None = None` parameter. Read `sync_path_token_limit` from settings (with clamp: `min(max(val, 1), MODEL_TOKEN_LIMIT)`). Thread to `sync_branch`. Import `MODEL_TOKEN_LIMIT` from `embeddings` and `SYNC_PATH_TOKEN_LIMIT` from `embeddings` for the default.
+**sync_session (session_ops.py:40):** Add a `settings: dict | None = None` parameter. Read the raw `sync_path_token_limit` from settings and thread to `sync_branch`. Do NOT clamp here — `session_ops.py` must not import from `embeddings.py` (the hook hot path). The clamp happens in `branch_ops.py:sync_branch`, which already imports `embeddings`.
 
 **sync_current (hooks/sync_current.py):** Pass settings to `sync_session(...)`.
 

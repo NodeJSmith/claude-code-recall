@@ -2,7 +2,7 @@
 task_id: "T05"
 title: "Add memory cleanup and hot-path logging"
 status: "planned"
-depends_on: ["T02"]
+depends_on: ["T02", "T03"]
 implements: ["FR#9", "FR#10", "FR#11", "FR#12", "AC#6", "AC#7"]
 ---
 

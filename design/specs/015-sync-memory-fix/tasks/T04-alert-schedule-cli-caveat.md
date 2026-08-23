@@ -57,7 +57,7 @@ ALERT_DRAFT_QUALITY_VECTORS: (
 
 **--dismiss flag (cli/commands.py):** Add `dismiss: bool = False` parameter to `cmd_backfill_embeddings` (line 134). If `dismiss` is True, write `{"dismissed_at": "<ISO timestamp>"}` to `BACKFILL_SCHEDULE_PATH` and return early (don't run backfill).
 
-**Three-state coverage (db_vec.py):** Change `branch_embedding_coverage` return type to `tuple[int, int, int]` — `(embedded_full, embedded_draft, total)`. `embedded_full` = branches with watermark at current version (existing query). `embedded_draft` = branches where watermark is not current BUT have at least one chunk with `cap_tokens IS NOT NULL`. `total` = all embeddable branches (existing query).
+**Three-state coverage (db_vec.py):** Change `branch_embedding_coverage` return type to `tuple[int, int, int]` — `(embedded_full, embedded_draft, total)`. `embedded_full` = branches with watermark at current version (existing query). `embedded_draft` = branches where watermark is not current BUT have at least one chunk with `cap_tokens IS NOT NULL AND cap_tokens < FULL_QUALITY_TOKEN_LIMIT`. `total` = all embeddable branches (existing query).
 
 **Three-state caveat (search_conversations.py):** Update `compute_caveat` to use the three-state return. If there are draft-quality branches, return a message like "N% of history fully embedded; M branches have draft-quality embeddings" instead of treating them as "not embedded."
 
