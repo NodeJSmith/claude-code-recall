@@ -1,6 +1,7 @@
 """Tests for ccrecall.db — schema creation, settings, and vec operations."""
 
 import json
+import logging
 import os
 import sqlite3
 import subprocess
@@ -1567,6 +1568,90 @@ class TestMigrationVersionMatrix:
             self._assert_post_migration(conn, start_version)
             surviving = conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE name = 'chunk_vec'").fetchone()[0]
             assert surviving == 1, "chunk_vec must survive the migration"
+
+    def test_migration_at_current_version_is_noop(self, tmp_path, caplog):
+        """A DB already at SCHEMA_VERSION opens without touching the schema or warning.
+
+        Regression guard for #156: range(SCHEMA_VERSION) in the parametrized tests
+        above never exercises user_version == SCHEMA_VERSION, the normal steady state
+        every database reaches after its first full migration.
+        """
+        db_path = tmp_path / "current.db"
+        with get_connection(settings={"db_path": str(db_path)}) as conn:
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+
+        with (
+            caplog.at_level(logging.WARNING, logger="ccrecall"),
+            get_connection(settings={"db_path": str(db_path)}) as conn,
+        ):
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+
+        assert not any("ahead" in r.message for r in caplog.records)
+
+    def test_migration_ahead_of_code_warns_and_skips(self, tmp_path, caplog):
+        """A DB stamped ahead of SCHEMA_VERSION is left untouched and logs a WARNING.
+
+        Regression guard for #156: a DB whose user_version exceeds this code's
+        SCHEMA_VERSION (e.g. from a reverted feature branch that bumped it and
+        stamped a real database) must be detected and reported, not silently
+        treated as fully migrated.
+        """
+        db_path = tmp_path / "ahead.db"
+        with get_connection(settings={"db_path": str(db_path)}):
+            pass
+
+        raw = sqlite3.connect(db_path)
+        ahead_version = SCHEMA_VERSION + 2
+        raw.execute(f"PRAGMA user_version = {ahead_version}")
+        raw.commit()
+        raw.close()
+
+        with (
+            caplog.at_level(logging.WARNING, logger="ccrecall"),
+            get_connection(settings={"db_path": str(db_path)}) as conn,
+        ):
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == ahead_version
+            assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert any(
+            "ahead" in r.message
+            and getattr(r, "db_user_version", None) == ahead_version
+            and getattr(r, "code_schema_version", None) == SCHEMA_VERSION
+            for r in warnings
+        ), (
+            f"expected an ahead-of-code WARNING naming v{ahead_version}, got: {[(r.message, r.__dict__) for r in warnings]}"
+        )
+
+    def test_partial_migration_failure_rolls_back_cleanly(self, tmp_path):
+        """A migration that raises partway through leaves user_version and schema untouched.
+
+        Regression guard for #156: the reshape migrations (v1/v2) and their final
+        PRAGMA user_version stamp all run inside one BEGIN IMMEDIATE transaction.
+        If _migrate_to_v2 raises after _migrate_to_v1 already rebuilt `branches`,
+        the whole transaction must still roll back atomically — not leave the
+        database half-migrated with a version that lies about its actual shape
+        (the exact failure mode #156 is about).
+        """
+        db_path = tmp_path / "partial_fail.db"
+        self._build_db_at_version(db_path, 0)
+
+        def failing_migrate_to_v2(conn: sqlite3.Connection) -> None:
+            raise RuntimeError("boom")
+
+        def apply_migrations_callback(conn: sqlite3.Connection) -> None:
+            db_module.db_base._apply_migrations(conn, migrate_to_v2=failing_migrate_to_v2)
+
+        with pytest.raises(RuntimeError, match="boom"):
+            db_module.db_base.open_connection(
+                settings={"db_path": str(db_path)}, apply_migrations_callback=apply_migrations_callback
+            )
+
+        raw = sqlite3.connect(db_path)
+        assert raw.execute("PRAGMA user_version").fetchone()[0] == 0
+        columns = {row[1] for row in raw.execute("PRAGMA table_info(branches)").fetchall()}
+        assert "fork_point_uuid" in columns, "v1's table rebuild must have rolled back"
+        raw.close()
 
 
 class TestSchemaEquivalencePin:

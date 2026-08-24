@@ -277,8 +277,24 @@ def _apply_migrations(
     migrate_to_v1: Callable[[sqlite3.Connection], None] = _migrate_to_v1,
     migrate_to_v2: Callable[[sqlite3.Connection], None] = _migrate_to_v2,
 ) -> None:
-    """Apply version-gated schema migrations up to SCHEMA_VERSION, atomically."""
+    """Apply version-gated schema migrations up to SCHEMA_VERSION, atomically.
+
+    If the database's stored version is already ahead of SCHEMA_VERSION, logs a
+    WARNING and skips the version-gated reshape migrations (v1/v2) rather than
+    touch a schema shape this code doesn't know about — see #156.
+    """
     current = conn.execute("PRAGMA user_version").fetchone()[0]
+
+    if current > SCHEMA_VERSION:
+        log.warning(
+            "database schema is ahead of this code's SCHEMA_VERSION — skipping the "
+            "version-gated reshape migrations (v1/v2) rather than rebuild a table "
+            "this code doesn't know the shape of; additive column/table checks "
+            "(v3-v8) still run as no-ops. If this wasn't intentional (e.g. a reverted "
+            "feature branch that bumped SCHEMA_VERSION), this database's actual "
+            "structure may not match what its stored version implies",
+            extra={"db_user_version": current, "code_schema_version": SCHEMA_VERSION},
+        )
 
     _migrate_to_v3(conn)
     _migrate_to_v4(conn)
