@@ -36,6 +36,13 @@ CHUNK_EMBEDDABLE_BRANCH_FILTER = "is_active = 1 AND EXISTS(SELECT 1 FROM branch_
 # Excluded from eligibility so it isn't retried forever; counted separately as
 # "errored".
 CONTENT_ERROR_VERSION = -1
+# Chunk-grain draft-quality predicate: a chunk embedded under a cap below the
+# model's full token limit. Single source of truth for backfill_query,
+# backfill_status, and db_vec — binds MODEL_TOKEN_LIMIT as a parameter (?).
+# health.py deliberately uses its own literal (FULL_QUALITY_TOKEN_LIMIT) to
+# avoid importing embeddings.py on the hot path; a cross-check test keeps them
+# in sync.
+CHUNK_DRAFT_QUALITY_FILTER = "cap_tokens IS NOT NULL AND cap_tokens < ?"
 
 
 def apply_base_pragmas(conn: sqlite3.Connection) -> None:

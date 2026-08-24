@@ -6,7 +6,7 @@ status reporter (`backfill_status`) need to agree on.
 """
 
 from ccrecall.config import remove_pid_file
-from ccrecall.db import CHUNK_EMBEDDABLE_BRANCH_FILTER, CONTENT_ERROR_VERSION
+from ccrecall.db import CHUNK_DRAFT_QUALITY_FILTER, CHUNK_EMBEDDABLE_BRANCH_FILTER, CONTENT_ERROR_VERSION
 from ccrecall.embeddings import EMBEDDING_MODEL, EMBEDDING_VERSION, MODEL_TOKEN_LIMIT
 from ccrecall.hooks.tool_content_eligibility import days_modifier
 
@@ -70,8 +70,7 @@ def build_selection(days: int | None) -> tuple[str, list]:
             OR EXISTS (
               SELECT 1 FROM chunks c
               WHERE c.branch_id = branches.id
-                AND c.cap_tokens IS NOT NULL
-                AND c.cap_tokens < ?
+                AND {CHUNK_DRAFT_QUALITY_FILTER}
             )
           )
     """

@@ -110,7 +110,6 @@ def _prepare_exchange_data(exchanges: list[dict], cap_limit: int = MODEL_TOKEN_L
             {
                 "index": ex["index"],
                 "text": text,
-                "was_capped": was_capped,
                 "content_hash": content_hash,
                 "timestamp": ex.get("timestamp"),
                 "first_message_uuid": ex.get("first_message_uuid"),
@@ -172,9 +171,9 @@ def _write_embedded_chunks(cursor: sqlite3.Cursor, branch_db_id: int, needing_em
             """
             INSERT INTO chunks (
                 branch_id, exchange_index, content_hash, first_message_uuid,
-                timestamp, user_text, assistant_text, was_capped, cap_tokens,
+                timestamp, user_text, assistant_text, cap_tokens,
                 embedding_version, embedding_model
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, NULL)
             """,
             (
                 branch_db_id,
@@ -184,7 +183,6 @@ def _write_embedded_chunks(cursor: sqlite3.Cursor, branch_db_id: int, needing_em
                 ed["timestamp"],
                 ed["user_text"],
                 ed["assistant_text"],
-                int(ed["was_capped"]),
                 ed["cap_tokens"],
             ),
         )
@@ -225,7 +223,7 @@ def _should_stamp_watermark(
     for ed in exchange_data:
         idx = ed["index"]
         if idx in embedded_indices:
-            if ed.get("cap_tokens") is not None and ed["cap_tokens"] < MODEL_TOKEN_LIMIT:
+            if effective_cap_tokens(ed.get("cap_tokens")) < MODEL_TOKEN_LIMIT:
                 return False
             continue  # just embedded at EMBEDDING_VERSION, correct content_hash, full quality
         existing = existing_chunks.get(idx)
@@ -296,16 +294,14 @@ def embed_branch_chunks(
 
     needing_embed_full, indices_to_prune = _diff_exchanges(exchange_data, existing_chunks, target_cap=cap_limit)
 
-    # Path-aware cap-exceeded warning: was_capped=True means cap_for_embedding
-    # actually truncated this exchange's text at cap_limit — the sync path warns
-    # above SYNC_PATH_TOKEN_LIMIT, backfill warns above MODEL_TOKEN_LIMIT, since
-    # cap_limit is whichever the caller passed in. Scoped to exchanges actually
-    # selected for (re-)embedding this call (needing_embed_full), not the whole
-    # branch history — an exchange that was capped once but is already embedded
-    # and unchanged must not re-warn on every subsequent sync. See
-    # design/specs/015 (FR#11).
+    # Path-aware cap-exceeded warning: cap_tokens is non-None when
+    # cap_for_embedding actually truncated this exchange's text at cap_limit.
+    # Scoped to exchanges actually selected for (re-)embedding this call
+    # (needing_embed_full), not the whole branch history — an exchange that was
+    # capped once but is already embedded and unchanged must not re-warn on
+    # every subsequent sync. See design/specs/015 (FR#11).
     for ed in needing_embed_full:
-        if ed["was_capped"]:
+        if ed["cap_tokens"] is not None:
             log.warning("exchange exceeds cap", extra={"cap": cap_limit})
 
     if not needing_embed_full and not indices_to_prune:

@@ -1910,15 +1910,15 @@ class TestCappedChunkRetrieval:
         )
         branch_id = cursor.lastrowid
 
-        # The capped chunk: its embedded text was head+tail-capped (was_capped=1), so the
+        # The capped chunk: its embedded text was head+tail-capped, so the
         # stored display text shows the head and tail only. Its vector is the query vector.
         query_vec = [1.0 / EMBEDDING_DIM**0.5] * EMBEDDING_DIM
         head_tail_text = "HEAD: opening of the pasted blob …(capped)… TAIL: closing of the pasted blob"
         cursor.execute(
             """
             INSERT INTO chunks (branch_id, exchange_index, content_hash, user_text,
-                                was_capped, embedding_version, embedding_model)
-            VALUES (?, 0, ?, ?, 1, ?, ?)
+                                cap_tokens, embedding_version, embedding_model)
+            VALUES (?, 0, ?, ?, 4096, ?, ?)
             """,
             (branch_id, "hash-capped", head_tail_text, EMBEDDING_VERSION, EMBEDDING_MODEL),
         )
@@ -1957,8 +1957,8 @@ class TestCappedChunkRetrieval:
         # The best chunk for that branch is the capped one we seeded.
         winning_chunk_id = next(r[2] for r in results if r[0] == branch_id)
         assert winning_chunk_id == capped_chunk_id
-        was_capped = cursor.execute("SELECT was_capped FROM chunks WHERE id = ?", (winning_chunk_id,)).fetchone()[0]
-        assert was_capped == 1, "retrieved chunk must be the head+tail-capped one"
+        cap_tokens = cursor.execute("SELECT cap_tokens FROM chunks WHERE id = ?", (winning_chunk_id,)).fetchone()[0]
+        assert cap_tokens is not None, "retrieved chunk must be the head+tail-capped one"
         conn.close()
 
 

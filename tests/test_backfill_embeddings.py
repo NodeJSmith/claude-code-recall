@@ -477,11 +477,11 @@ class TestBuildSelectionCapTokens:
         conn.execute(
             """
             INSERT INTO chunks (
-                branch_id, exchange_index, content_hash, was_capped, cap_tokens,
+                branch_id, exchange_index, content_hash, cap_tokens,
                 embedding_version, embedding_model
-            ) VALUES (?, 0, 'hash0', ?, ?, ?, ?)
+            ) VALUES (?, 0, 'hash0', ?, ?, ?)
             """,
-            (branch_id, int(cap_tokens is not None), cap_tokens, EMBEDDING_VERSION, EMBEDDING_MODEL),
+            (branch_id, cap_tokens, EMBEDDING_VERSION, EMBEDDING_MODEL),
         )
         chunk_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
         upsert_chunk_vec(conn.cursor(), chunk_id, _FIXED_VEC)

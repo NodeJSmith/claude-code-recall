@@ -12,7 +12,7 @@ import sqlite3
 
 import sqlite_vec
 
-from ccrecall.db import CHUNK_EMBEDDABLE_BRANCH_FILTER
+from ccrecall.db import CHUNK_DRAFT_QUALITY_FILTER, CHUNK_EMBEDDABLE_BRANCH_FILTER
 from ccrecall.embeddings import EMBEDDING_DIM, EMBEDDING_MODEL, EMBEDDING_VERSION, MODEL_TOKEN_LIMIT
 from ccrecall.models import LOGGER_NAME
 
@@ -233,7 +233,7 @@ def branch_embedding_coverage(conn: sqlite3.Connection) -> tuple[int, int, int]:
         f"SELECT COUNT(*) FROM branches WHERE {CHUNK_EMBEDDABLE_BRANCH_FILTER} "
         "AND NOT (embedding_version = ? AND embedding_model = ?) "
         "AND EXISTS (SELECT 1 FROM chunks WHERE chunks.branch_id = branches.id "
-        "AND chunks.cap_tokens IS NOT NULL AND chunks.cap_tokens < ?)",
+        f"AND {CHUNK_DRAFT_QUALITY_FILTER})",
         (EMBEDDING_VERSION, EMBEDDING_MODEL, MODEL_TOKEN_LIMIT),
     ).fetchone()[0]
     return embedded_full, embedded_draft, total

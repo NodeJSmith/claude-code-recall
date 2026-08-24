@@ -137,7 +137,8 @@ CREATE TABLE IF NOT EXISTS chunks (
   timestamp         TEXT,
   user_text         TEXT,
   assistant_text    TEXT,
-  was_capped        INTEGER NOT NULL DEFAULT 0,
+  was_capped        INTEGER NOT NULL DEFAULT 0, -- dead: cap_tokens IS NOT NULL is the live equivalent
+
   embedding_version INTEGER NOT NULL DEFAULT 0,
   embedding_model   TEXT,
   cap_tokens        INTEGER,

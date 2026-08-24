@@ -226,11 +226,13 @@ def run(
                 except Exception:
                     # Infra/session failure (e.g. ONNX session crash, sqlite3.Error on
                     # fetch_branch_messages, OOM): abort without marking the content-error
-                    # sentinel. Any committed partial state (a pre-delete + cleared watermark
-                    # from an interrupted row) is recovered by the heal clause / watermark-
-                    # stale predicate on the next run; affected rows stay eligible.
+                    # sentinel. Rolling back discards the entire current batch — both the
+                    # failed branch's partial state and any earlier branches whose
+                    # SAVEPOINTs were released but not yet committed. All are re-selected
+                    # cleanly on the next run. Prior batches (committed by after_batch)
+                    # are unaffected.
                     logger.exception("%s: session failure, aborting", _LOG_PREFIX)
-                    conn.commit()
+                    conn.rollback()
                     return False
                 return True
 

@@ -9,9 +9,14 @@ import logging
 import sqlite3
 import sys
 
-from ccrecall.db import CHUNK_EMBEDDABLE_BRANCH_FILTER, CONTENT_ERROR_VERSION, get_connection
+from ccrecall.db import (
+    CHUNK_DRAFT_QUALITY_FILTER,
+    CHUNK_EMBEDDABLE_BRANCH_FILTER,
+    CONTENT_ERROR_VERSION,
+    get_connection,
+)
 from ccrecall.db_vec import chunk_vec_queryable
-from ccrecall.embeddings import EMBEDDING_MODEL, EMBEDDING_VERSION
+from ccrecall.embeddings import EMBEDDING_MODEL, EMBEDDING_VERSION, MODEL_TOKEN_LIMIT
 from ccrecall.hooks.backfill_query import EXIT_ABORT, EXIT_OK, build_selection, days_modifier
 
 
@@ -20,15 +25,17 @@ def count_status(cursor: sqlite3.Cursor, days: int | None) -> dict[str, int]:
 
     universe          = chunks belonging to CHUNK_EMBEDDABLE branches.
     done              = chunks with a current-version chunk_vec row.
+    draft             = subset of done embedded below MODEL_TOKEN_LIMIT
+                        (sync-path quality; backfill will upgrade).
     total_branches    = all CHUNK_EMBEDDABLE branches — the honest coverage
                         denominator (branch count).
     embedded_branches = embeddable branches that are neither pending nor errored.
     eligible          = branches still needing work (build_selection predicate).
     errored           = branches marked with the content-error sentinel.
 
-    universe/done are chunk-grain; the rest are branch-grain. Branch grain is
-    the honest coverage signal: a never-chunked branch contributes 0 to
-    universe but 1 to total_branches, so the backlog can't hide in the
+    universe/done/draft are chunk-grain; the rest are branch-grain. Branch
+    grain is the honest coverage signal: a never-chunked branch contributes 0
+    to universe but 1 to total_branches, so the backlog can't hide in the
     denominator (the misleading "100% embedded, N remaining" report).
 
     The optional --days recency bound is applied consistently to all queries.
@@ -66,6 +73,24 @@ def count_status(cursor: sqlite3.Cursor, days: int | None) -> dict[str, int]:
     )
     done = cursor.fetchone()[0]
 
+    # draft: subset of done that were embedded below MODEL_TOKEN_LIMIT (capped
+    # by the sync path). These have a current-version vector but at reduced
+    # fidelity — backfill will upgrade them. Mirrors the three-state framing
+    # in db_vec.branch_embedding_coverage.
+    cursor.execute(
+        f"""
+        SELECT COUNT(*) FROM chunks
+        JOIN branches ON chunks.branch_id = branches.id
+        WHERE {CHUNK_EMBEDDABLE_BRANCH_FILTER}
+          AND chunks.embedding_version = ?
+          AND chunks.embedding_model = ?
+          AND {CHUNK_DRAFT_QUALITY_FILTER}
+          AND EXISTS (SELECT 1 FROM chunk_vec WHERE chunk_id = chunks.id){recency_joined}
+        """,
+        [EMBEDDING_VERSION, EMBEDDING_MODEL, MODEL_TOKEN_LIMIT, *recency_params],
+    )
+    draft = cursor.fetchone()[0]
+
     # errored: branches at the content-error sentinel
     cursor.execute(
         f"""
@@ -97,11 +122,13 @@ def count_status(cursor: sqlite3.Cursor, days: int | None) -> dict[str, int]:
     total_branches = cursor.fetchone()[0]
 
     return {
-        # universe/done are chunk-grain, kept for back-compat with older
-        # --status --json consumers; total_branches/embedded_branches are the
-        # honest branch-grain coverage.
+        # universe/done/draft are chunk-grain; total_branches/embedded_branches
+        # are the honest branch-grain coverage. draft is a subset of done:
+        # chunks that have a current-version vector but were embedded under a
+        # reduced token cap (sync path) — backfill will upgrade them.
         "universe": universe,
         "done": done,
+        "draft": draft,
         "eligible": eligible,
         "errored": errored,
         "total_branches": total_branches,
@@ -151,6 +178,8 @@ def run_status(
     scope = f" (last {days}d)" if days is not None else ""
     print(f"ccrecall backfill embeddings status{scope}:")
     print(f"  branches:  {embedded} / {total} embedded  ({pct:.0f}%)")
+    if counts["draft"]:
+        print(f"  draft:     {counts['draft']} chunks  (sync quality, backfill will upgrade)")
     print(f"  remaining: {counts['eligible']} branches")
     if counts["errored"]:
         print(f"  errored:   {counts['errored']} branches  (content errors, won't retry)")

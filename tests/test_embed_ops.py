@@ -219,7 +219,6 @@ class TestWriteEmbeddedChunksCapTokens:
                 "timestamp": "2024-01-01T00:00:00",
                 "user_text": "u",
                 "assistant_text": "a",
-                "was_capped": True,
                 "cap_tokens": 4096,
             },
             {
@@ -229,7 +228,6 @@ class TestWriteEmbeddedChunksCapTokens:
                 "timestamp": "2024-01-01T00:01:00",
                 "user_text": "u2",
                 "assistant_text": "a2",
-                "was_capped": False,
                 "cap_tokens": None,
             },
         ]

@@ -432,6 +432,23 @@ No tests to remove.
 - **Recall caveat**: Updated to distinguish "draft quality" from "not embedded" — users see accurate coverage information instead of a misleading "not embedded" message for branches that have real vectors at 4096 tokens.
 - **Alert ordering**: Alert display ordering is not controlled — `active_keys` is a `set`, and adding a fourth alert class increases the chance of multi-alert sessions. Not addressed in this design.
 
+## Known Observability Gaps
+
+**sync_branch embedding failure is a dark operation.** `branch_ops.sync_branch`'s
+broad `except Exception` around `embed_branch_chunks` logs and swallows any
+exception without calling `record_embedding_failure`. If the embedding write
+path regresses (a bug in `_prepare_exchange_data`, `_diff_exchanges`, or
+`_should_stamp_watermark`), `sync-current` still calls `clear_embedding_failure()`
+(gated only on vec availability), actively erasing prior alert state. The
+`ALERT_DRAFT_QUALITY_VECTORS` alert also doesn't catch this — it requires an
+existing chunk row with `cap_tokens < ceiling`, but a branch whose embed call
+fails before writing any chunk is invisible to it. Net effect: a regression in
+the embedding write path could silently disable embedding for every new session
+with neither alert firing. Mitigated partially by the separate issue for
+reason-scoped sidecar clearing (Finding 3); a rolling-failure-count mechanism in
+`sync_branch` would close the remaining gap but needs an observed failure to
+calibrate the threshold against.
+
 ## Open Questions
 
 (none — all questions were resolved during discovery and blind-spot assessment)
