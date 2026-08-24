@@ -253,7 +253,10 @@ def sync_branch(
     # fetch_branch_messages returns flat {role, content, timestamp, uuid} dicts — the
     # format build_exchange_pairs expects. branch_msgs (raw JSONL) is the right input
     # for metadata computation above but not for embedding.
-    cap = min(max(sync_path_token_limit or SYNC_PATH_TOKEN_LIMIT, 1), MODEL_TOKEN_LIMIT)
+    raw_cap = sync_path_token_limit
+    if isinstance(raw_cap, bool) or not isinstance(raw_cap, int):
+        raw_cap = SYNC_PATH_TOKEN_LIMIT
+    cap = min(max(raw_cap, 1), MODEL_TOKEN_LIMIT)
     reclaim_memory(libc)
     try:
         embed_msgs = fetch_branch_messages(cursor, branch_db_id, include_notifications=False)

@@ -227,6 +227,9 @@ def print_status_report(status: dict) -> None:
         embedded = branches["embedded"]
         pct = (embedded / total * 100) if total else 0.0
         print(f"Embeddings: {embedded}/{total} branches embedded ({pct:.0f}%)")
+        draft = embeddings["watermark"]["draft_branches"]
+        if draft:
+            print(f"  draft quality: {draft} branch(es) searchable but not full quality")
         print(f"  branch backfill: {branches['remaining']} remaining; {branches['errored']} errored")
         print(f"  chunk coverage: {chunks['done']}/{chunks['total']} chunks at current version")
     else:

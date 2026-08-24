@@ -263,7 +263,7 @@ Follows the v3/v4 pattern: additive, unconditional (runs outside the version gat
 
 - Existing chunks have `cap_tokens = NULL`. Backfill treats `NULL` as `MODEL_TOKEN_LIMIT` — old chunks are assumed full-quality and not flagged for upgrade unless their `content_hash` changes.
 - The `content_hash` change (raw text vs capped text) means existing hashes were computed from capped text. On the next sync for each branch, `_prepare_exchange_data` computes new hashes from raw text. For exchanges shorter than 8192 tokens, `raw == capped`, so hashes match — no re-embed. For exchanges longer than 8192 tokens, hashes differ — the sync path re-embeds at 4096 (a temporary quality reduction from the prior 8192-cap embedding). This is self-healing: FR#14 withholds the watermark, FR#15 selects the branch for backfill, and backfill upgrades to 8192 with the new raw-text hash. See Architecture § Cap-tokens tracking for the full transition flow.
-- The `was_capped` boolean column is retained unchanged. It continues to mean "was the text truncated by `cap_for_embedding`" and is not repurposed.
+- The `was_capped` boolean column is retained in the schema but is no longer written or read — it is a dead column. `cap_tokens IS NOT NULL` is the live equivalent for detecting truncation.
 
 ## Convention Examples
 
@@ -420,7 +420,7 @@ No tests to remove.
 - `MODEL_TOKEN_LIMIT = 8192` is unchanged — backfill continues to produce 8192-token vectors.
 - Existing chunks with `cap_tokens = NULL` are treated as full-quality — no unnecessary re-embedding.
 - `EMBEDDING_VERSION` is unchanged — this is not a model change, just a cap-tier change.
-- The `was_capped` boolean retains its existing semantics (was the text truncated?), independent of `cap_tokens`.
+- The `was_capped` boolean column is retained in the schema but is no longer written or read — `cap_tokens IS NOT NULL` is the live equivalent.
 - Hook hot-path performance: the alert check is a DB query + file read, not a model load (invariant 3).
 - `MAX_WRITE_PATH_EMBEDS_PER_SYNC = 8` continues to bound the number of inference calls per sync.
 

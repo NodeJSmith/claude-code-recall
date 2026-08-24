@@ -302,7 +302,7 @@ def embed_branch_chunks(
     # every subsequent sync.
     for ed in needing_embed_full:
         if ed["cap_tokens"] is not None:
-            log.warning("exchange exceeds cap", extra={"cap": cap_limit})
+            log.warning("exchange truncated for embedding", extra={"cap": cap_limit})
 
     if not needing_embed_full and not indices_to_prune:
         # Idempotent watermark repair: repairs a prior failed step 8.

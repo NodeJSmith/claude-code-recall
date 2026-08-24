@@ -16,6 +16,7 @@ import pytest
 
 import ccrecall.health as health
 from ccrecall.cli.commands import cmd_backfill_embeddings, cmd_schedule_clear, cmd_schedule_status, cmd_schedule_write
+from ccrecall.cli.context import CLIContext
 from ccrecall.config import load_settings_for_db
 from ccrecall.db import get_connection
 from ccrecall.hooks.backfill_query import EXIT_OK, PID_KEY
@@ -134,3 +135,47 @@ class TestBackfillEmbeddingsDismiss:
         mock_acquire.assert_called_once_with(PID_KEY)
         mock_run.assert_called_once()
         assert not health.BACKFILL_SCHEDULE_PATH.exists()
+
+
+JSON_CTX = CLIContext(json_mode=True)
+
+
+class TestScheduleJsonMode:
+    def test_write_json(self, capsys):
+        cmd_schedule_write(ctx=JSON_CTX)
+
+        data = json.loads(capsys.readouterr().out)
+        assert data["action"] == "write"
+        assert "path" in data
+
+    def test_clear_json_existed(self, capsys):
+        health.write_schedule_marker("configured_at")
+        cmd_schedule_clear(ctx=JSON_CTX)
+
+        data = json.loads(capsys.readouterr().out)
+        assert data == {"action": "clear", "existed": True}
+
+    def test_clear_json_not_existed(self, capsys):
+        cmd_schedule_clear(ctx=JSON_CTX)
+
+        data = json.loads(capsys.readouterr().out)
+        assert data == {"action": "clear", "existed": False}
+
+    def test_status_json(self, tmp_path, capsys):
+        health.write_schedule_marker("configured_at")
+        cmd_schedule_status(db=tmp_path / "status.db", ctx=JSON_CTX)
+
+        data = json.loads(capsys.readouterr().out)
+        assert "configured_at" in data["marker"]
+        assert data["draft_quality_remaining"] == 0
+
+    def test_dismiss_json(self, capsys):
+        with (
+            patch("ccrecall.cli.commands.try_acquire_pid_file"),
+            patch("ccrecall.cli.commands.backfill_embeddings_mod.run"),
+        ):
+            cmd_backfill_embeddings(dismiss=True, ctx=JSON_CTX)
+
+        data = json.loads(capsys.readouterr().out)
+        assert data["action"] == "dismiss"
+        assert "path" in data

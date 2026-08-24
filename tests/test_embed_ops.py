@@ -374,7 +374,7 @@ class TestEmbedBranchChunksCapExceededWarning:
         ):
             embed_branch_chunks(cursor, branch_id, real_texts, is_active=True, vec_writable=True, cap_limit=4096)
 
-        warnings = [r for r in caplog.records if r.message == "exchange exceeds cap"]
+        warnings = [r for r in caplog.records if r.message == "exchange truncated for embedding"]
         assert warnings, "was_capped=True exchange must emit a WARNING"
         assert warnings[0].levelno == logging.WARNING
         assert warnings[0].cap == 4096
@@ -398,7 +398,7 @@ class TestEmbedBranchChunksCapExceededWarning:
         ):
             embed_branch_chunks(cursor, branch_id, real_texts, is_active=True, vec_writable=True, cap_limit=4096)
 
-        warnings = [r for r in caplog.records if r.message == "exchange exceeds cap"]
+        warnings = [r for r in caplog.records if r.message == "exchange truncated for embedding"]
         assert not warnings, "untruncated exchange must not emit the cap-exceeded WARNING"
         conn.close()
 

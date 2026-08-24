@@ -766,10 +766,12 @@ class TestSyncBranchCapLimitClamp:
         ("sync_path_token_limit", "expected_cap"),
         [
             (None, SYNC_PATH_TOKEN_LIMIT),  # default fallback
-            (0, SYNC_PATH_TOKEN_LIMIT),  # falsy -> default fallback via `or`
+            (0, 1),  # explicit zero clamped to floor
             (-5, 1),  # negative clamped up to the floor
             (2048, 2048),  # in-range value passes through unchanged
             (20000, MODEL_TOKEN_LIMIT),  # above MODEL_TOKEN_LIMIT clamped down to the ceiling
+            ("4096", SYNC_PATH_TOKEN_LIMIT),  # non-int falls back to default
+            (True, SYNC_PATH_TOKEN_LIMIT),  # bool falls back to default
         ],
     )
     def test_clamp_reaches_embed_branch_chunks(self, sync_path_token_limit, expected_cap):

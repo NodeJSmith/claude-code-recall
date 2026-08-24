@@ -28,7 +28,7 @@
 
 ## 2026-08-24
 
-- fix a memory leak in sync-current that could freeze the machine (7.5 GB observed) by capping sync-path embedding at 4096 tokens, dropping the worst-case peak to ~4 GB (#166)
+- fix a memory spike in sync-current that could freeze the machine (7.5 GB observed) by capping sync-path embedding at 4096 tokens, dropping the worst-case peak to ~4 GB (#166)
 
 ## 2026-08-19
 

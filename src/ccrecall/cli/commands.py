@@ -6,6 +6,7 @@ PID-file lifecycle are preserved from the former cm-* entry points; only the
 argument-parsing layer changed (argparse -> cyclopts).
 """
 
+import json
 import sqlite3
 import sys
 from pathlib import Path
@@ -139,38 +140,57 @@ backfill_app.command(schedule_app)
 
 
 @schedule_app.command(name="write")
-def cmd_schedule_write() -> None:
+def cmd_schedule_write(*, ctx: CLIContextParam = DEFAULT_CLI_CONTEXT) -> None:
     """Record that a scheduled embeddings backfill job has been configured."""
     health.write_schedule_marker("configured_at")
-    print(f"Wrote backfill schedule marker to {health.BACKFILL_SCHEDULE_PATH}")
+    if ctx.json_mode:
+        print(json.dumps({"action": "write", "path": str(health.BACKFILL_SCHEDULE_PATH)}))
+    else:
+        print(f"Wrote backfill schedule marker to {health.BACKFILL_SCHEDULE_PATH}")
 
 
 @schedule_app.command(name="clear")
-def cmd_schedule_clear() -> None:
+def cmd_schedule_clear(*, ctx: CLIContextParam = DEFAULT_CLI_CONTEXT) -> None:
     """Remove the backfill-schedule marker."""
     existed = health.clear_schedule_marker()
-    if existed:
-        print(f"Removed backfill schedule marker at {health.BACKFILL_SCHEDULE_PATH}")
+    if ctx.json_mode:
+        print(json.dumps({"action": "clear", "existed": existed}))
     else:
-        print("No backfill schedule marker was present.")
+        if existed:
+            print(f"Removed backfill schedule marker at {health.BACKFILL_SCHEDULE_PATH}")
+        else:
+            print("No backfill schedule marker was present.")
 
 
 @schedule_app.command(name="status")
 def cmd_schedule_status(
     *,
     db: _DB = DEFAULT_DB_PATH,
+    ctx: CLIContextParam = DEFAULT_CLI_CONTEXT,
 ) -> None:
     """Report the backfill-schedule marker state and remaining draft-quality chunks."""
     marker = health.read_schedule_marker()
-    print(f"Schedule marker: {health.describe_schedule_marker(marker)}")
 
+    remaining: int | None = None
+    error: str | None = None
     settings = load_settings_for_db(db)
     try:
         with get_connection(settings, load_vec=False) as conn:
             remaining = health.count_draft_quality_chunks(conn)
-        print(f"Draft-quality chunks remaining: {remaining}")
     except (sqlite3.Error, OSError) as exc:
-        print(f"Draft-quality chunks remaining: unknown ({exc})")
+        error = str(exc)
+
+    if ctx.json_mode:
+        result: dict = {"marker": marker, "draft_quality_remaining": remaining}
+        if error:
+            result["error"] = error
+        print(json.dumps(result))
+    else:
+        print(f"Schedule marker: {health.describe_schedule_marker(marker)}")
+        if error:
+            print(f"Draft-quality chunks remaining: unknown ({error})")
+        else:
+            print(f"Draft-quality chunks remaining: {remaining}")
 
 
 @backfill_app.command(name="embeddings")
@@ -209,7 +229,10 @@ def cmd_backfill_embeddings(
     # only records a marker so the SessionStart alert stops firing.
     if dismiss:
         health.write_schedule_marker("dismissed_at")
-        print(f"Dismissed the draft-quality-vectors alert (wrote {health.BACKFILL_SCHEDULE_PATH}).")
+        if ctx.json_mode:
+            print(json.dumps({"action": "dismiss", "path": str(health.BACKFILL_SCHEDULE_PATH)}))
+        else:
+            print(f"Dismissed the draft-quality-vectors alert (wrote {health.BACKFILL_SCHEDULE_PATH}).")
         return
 
     # Self-concurrency guard: at most one embeddings backfill at a time — a
