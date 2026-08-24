@@ -270,6 +270,30 @@ def _migrate_to_v8(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_chunks_cap_tokens ON chunks(cap_tokens) WHERE cap_tokens IS NOT NULL")
 
 
+def _warn_if_schema_ahead(current: int) -> None:
+    """Log a WARNING if the database's stored version exceeds this code's SCHEMA_VERSION.
+
+    A database ahead of SCHEMA_VERSION (e.g. from a reverted feature branch that
+    bumped it and stamped a real database) is otherwise indistinguishable from a
+    fully-migrated one, and its actual structure may not match what its stored
+    version implies — see #156.
+    """
+    if current <= SCHEMA_VERSION:
+        return
+    log.warning(
+        "database schema is ahead of this code's SCHEMA_VERSION — skipping the "
+        "version-gated reshape migrations (v1/v2) rather than rebuild a table "
+        "this code doesn't know the shape of; additive column/table checks "
+        "(v3-v8) still run — they're guarded (IF NOT EXISTS / duplicate-column "
+        "handling) so they're safe regardless of this database's actual shape, "
+        "but are only true no-ops if it already has those columns/tables. If "
+        "this wasn't intentional (e.g. a reverted feature branch that bumped "
+        "SCHEMA_VERSION), this database's actual structure may not match what "
+        "its stored version implies",
+        extra={"db_user_version": current, "code_schema_version": SCHEMA_VERSION},
+    )
+
+
 def _apply_migrations(
     conn: sqlite3.Connection,
     *,
@@ -331,6 +355,14 @@ def open_connection(
     ensure_parent_dir(db_path)
     conn = sqlite3.connect(db_path)
     apply_base_pragmas(conn)
+
+    # Warn before running any schema DDL: an ahead-of-code database's actual
+    # structure may not match what SCHEMA_CORE expects (e.g. a column its
+    # CREATE INDEX statements reference could be gone), which would raise
+    # before _apply_migrations ever runs. Checking version first means the
+    # warning fires even in exactly the incompatible-schema case it exists
+    # to diagnose — see #156.
+    _warn_if_schema_ahead(conn.execute("PRAGMA user_version").fetchone()[0])
 
     fts = detect_fts_support(conn)
     conn.executescript(SCHEMA_CORE)

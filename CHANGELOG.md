@@ -29,6 +29,7 @@
 ## 2026-08-24
 
 - fix a memory spike in sync-current that could freeze the machine (7.5 GB observed) by capping sync-path embedding at 4096 tokens, dropping the worst-case peak to ~4 GB (#166)
+- warn when a database's schema version is ahead of what the running code expects, instead of silently treating it as fully migrated (#167)
 
 ## 2026-08-19
 
