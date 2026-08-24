@@ -1601,7 +1601,7 @@ class TestMigrationVersionMatrix:
             pass
 
         raw = sqlite3.connect(db_path)
-        ahead_version = SCHEMA_VERSION + 2
+        ahead_version = SCHEMA_VERSION + 1  # smallest value that proves "ahead", not "equal"
         raw.execute(f"PRAGMA user_version = {ahead_version}")
         raw.commit()
         raw.close()
