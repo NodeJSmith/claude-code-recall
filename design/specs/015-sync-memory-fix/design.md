@@ -1,7 +1,7 @@
 # Design: Sync-Current Memory Fix
 
 **Date:** 2026-08-23
-**Status:** approved
+**Status:** archived
 **Scope-mode:** hold
 **Research:** design/research/2026-08-23-sync-memory-leak/research.md
 
