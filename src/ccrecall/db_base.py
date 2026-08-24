@@ -284,9 +284,12 @@ def _warn_if_schema_ahead(current: int) -> None:
         "database schema is ahead of this code's SCHEMA_VERSION — skipping the "
         "version-gated reshape migrations (v1/v2) rather than rebuild a table "
         "this code doesn't know the shape of; additive column/table checks "
-        "(v3-v8) still run as no-ops. If this wasn't intentional (e.g. a reverted "
-        "feature branch that bumped SCHEMA_VERSION), this database's actual "
-        "structure may not match what its stored version implies",
+        "(v3-v8) still run — they're guarded (IF NOT EXISTS / duplicate-column "
+        "handling) so they're safe regardless of this database's actual shape, "
+        "but are only true no-ops if it already has those columns/tables. If "
+        "this wasn't intentional (e.g. a reverted feature branch that bumped "
+        "SCHEMA_VERSION), this database's actual structure may not match what "
+        "its stored version implies",
         extra={"db_user_version": current, "code_schema_version": SCHEMA_VERSION},
     )
 
@@ -300,7 +303,6 @@ def _apply_migrations(
 ) -> None:
     """Apply version-gated schema migrations up to SCHEMA_VERSION, atomically."""
     current = conn.execute("PRAGMA user_version").fetchone()[0]
-    _warn_if_schema_ahead(current)
 
     _migrate_to_v3(conn)
     _migrate_to_v4(conn)
@@ -353,6 +355,14 @@ def open_connection(
     ensure_parent_dir(db_path)
     conn = sqlite3.connect(db_path)
     apply_base_pragmas(conn)
+
+    # Warn before running any schema DDL: an ahead-of-code database's actual
+    # structure may not match what SCHEMA_CORE expects (e.g. a column its
+    # CREATE INDEX statements reference could be gone), which would raise
+    # before _apply_migrations ever runs. Checking version first means the
+    # warning fires even in exactly the incompatible-schema case it exists
+    # to diagnose — see #156.
+    _warn_if_schema_ahead(conn.execute("PRAGMA user_version").fetchone()[0])
 
     fts = detect_fts_support(conn)
     conn.executescript(SCHEMA_CORE)
