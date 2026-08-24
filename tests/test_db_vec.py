@@ -92,3 +92,17 @@ class TestBranchEmbeddingCoverageThreeState:
 
     def test_zero_branches_returns_all_zero(self, memory_db):
         assert branch_embedding_coverage(memory_db) == (0, 0, 0)
+
+    def test_pre_v8_schema_without_cap_tokens(self, memory_db):
+        """On a pre-v8 DB (no cap_tokens column), embedded_draft is 0."""
+        memory_db.execute("ALTER TABLE chunks DROP COLUMN cap_tokens")
+        memory_db.commit()
+        _seed_branch(memory_db, 1, embedding_version=EMBEDDING_VERSION, embedding_model=EMBEDDING_MODEL)
+        assert branch_embedding_coverage(memory_db) == (1, 0, 1)
+
+    def test_pre_v8_schema_stale_watermark(self, memory_db):
+        """On a pre-v8 DB, stale watermark with no cap_tokens → (0, 0, 1)."""
+        memory_db.execute("ALTER TABLE chunks DROP COLUMN cap_tokens")
+        memory_db.commit()
+        _seed_branch(memory_db, 1)
+        assert branch_embedding_coverage(memory_db) == (0, 0, 1)

@@ -213,10 +213,12 @@ def branch_embedding_coverage(conn: sqlite3.Connection) -> tuple[int, int, int]:
     a current watermark nor any capped chunk (no chunk at all yet) counts in
     neither embedded_full nor embedded_draft.
 
-    Vec-free — reads only the branches/chunks tables, whose relevant columns
-    live in the base schema — so coverage reports work even where sqlite-vec
-    can't load. Shared by `ccrecall status`, `compute_caveat`, and search's
-    `print_status` so the surfaces can't drift (see CHUNK_EMBEDDABLE_BRANCH_FILTER).
+    Vec-free — reads only the branches/chunks tables so coverage reports work
+    even where sqlite-vec can't load. The ``cap_tokens`` column (v8 migration)
+    may be absent on a read-only connection that skips migrations; when missing,
+    ``embedded_draft`` is reported as 0. Shared by ``ccrecall status``,
+    ``compute_caveat``, and search's ``print_status`` so the surfaces can't
+    drift (see CHUNK_EMBEDDABLE_BRANCH_FILTER).
 
     This is the watermark view. `backfill embeddings --status` reports a
     stricter, heal-aware count (its eligible set also flags watermark-current
@@ -229,11 +231,15 @@ def branch_embedding_coverage(conn: sqlite3.Connection) -> tuple[int, int, int]:
         "AND embedding_version = ? AND embedding_model = ?",
         (EMBEDDING_VERSION, EMBEDDING_MODEL),
     ).fetchone()[0]
-    embedded_draft = conn.execute(
-        f"SELECT COUNT(*) FROM branches WHERE {CHUNK_EMBEDDABLE_BRANCH_FILTER} "
-        "AND NOT (embedding_version = ? AND embedding_model = ?) "
-        "AND EXISTS (SELECT 1 FROM chunks WHERE chunks.branch_id = branches.id "
-        f"AND {CHUNK_DRAFT_QUALITY_FILTER})",
-        (EMBEDDING_VERSION, EMBEDDING_MODEL, MODEL_TOKEN_LIMIT),
-    ).fetchone()[0]
+    has_cap_tokens = any(row[1] == "cap_tokens" for row in conn.execute("PRAGMA table_info(chunks)"))
+    if has_cap_tokens:
+        embedded_draft = conn.execute(
+            f"SELECT COUNT(*) FROM branches WHERE {CHUNK_EMBEDDABLE_BRANCH_FILTER} "
+            "AND NOT (embedding_version = ? AND embedding_model = ?) "
+            "AND EXISTS (SELECT 1 FROM chunks WHERE chunks.branch_id = branches.id "
+            f"AND {CHUNK_DRAFT_QUALITY_FILTER})",
+            (EMBEDDING_VERSION, EMBEDDING_MODEL, MODEL_TOKEN_LIMIT),
+        ).fetchone()[0]
+    else:
+        embedded_draft = 0
     return embedded_full, embedded_draft, total
