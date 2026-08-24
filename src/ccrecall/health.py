@@ -210,7 +210,7 @@ def clear_embedding_failure(path: Path | None = None) -> None:
 
 
 # ── Backfill schedule marker ───────────────────────────────────────────────────
-# Suppresses ALERT_DRAFT_QUALITY_VECTORS (FR#8): a user who has configured a
+# Suppresses ALERT_DRAFT_QUALITY_VECTORS: a user who has configured a
 # scheduled backfill job, or explicitly dismissed the alert, shouldn't be
 # nagged every session. Two writers share this one sidecar — `ccrecall backfill
 # schedule write` sets "configured_at"; `ccrecall backfill embeddings --dismiss`
@@ -221,7 +221,7 @@ def read_schedule_marker(path: Path | None = None) -> dict | None:
     """Read the backfill-schedule marker sidecar.
 
     Returns the parsed dict when it carries "configured_at" or "dismissed_at"
-    (either satisfies FR#8's suppression check). Returns None when the file is
+    (either satisfies the suppression check). Returns None when the file is
     missing, malformed, not a JSON object, or present but missing both
     recognized fields — treating an unrecognized marker as absent so the alert
     still fires rather than being silently suppressed by garbage content.

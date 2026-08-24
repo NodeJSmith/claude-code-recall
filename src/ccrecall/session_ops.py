@@ -135,7 +135,7 @@ def sync_session(
     # in `messages` (e.g. notifications). Note: `messages` shares dict
     # references with `all_entries`'s user/assistant entries, so this frees
     # only the list container and the non-message entries, not the bulk of
-    # the transcript data. See design/specs/015 (FR#9).
+    # the transcript data.
     del all_entries
 
     # Build uuid -> message_id mapping

@@ -484,7 +484,7 @@ class TestBlockBuilder:
         assert "surface" in lower
 
     def test_draft_quality_block_mentions_backfill_schedule_and_dismiss_commands(self):
-        """draft_quality_vectors block names all three remediation commands (FR#7)."""
+        """draft_quality_vectors block names all three remediation commands."""
         result = build_alert_block([ALERT_DRAFT_QUALITY_VECTORS])
         assert "ccrecall backfill embeddings" in result
         assert "ccrecall backfill schedule write" in result
@@ -498,7 +498,7 @@ class TestBlockBuilder:
 
 
 class TestScheduleMarker:
-    """Backfill-schedule marker sidecar helpers (FR#8, FR#17, FR#18)."""
+    """Backfill-schedule marker sidecar helpers."""
 
     def test_read_missing_file_returns_none(self, tmp_path):
         """Missing backfill-schedule.json → None (no error)."""

@@ -92,7 +92,7 @@ def _prepare_exchange_data(exchanges: list[dict], cap_limit: int = MODEL_TOKEN_L
     (sync at 4096 vs backfill at 8192). Hashing the capped text would make the
     same exchange hash differently depending on which path embedded it,
     causing sync/backfill to ping-pong re-embedding each other's work forever.
-    See design/specs/015 (FR#1, AC#1).
+    See design/specs/015.
 
     Display columns use the same head+tail cap per turn (at ``cap_limit``) so
     the shown excerpt aligns with the embedded region (design.md challenge M14).
@@ -117,7 +117,7 @@ def _prepare_exchange_data(exchanges: list[dict], cap_limit: int = MODEL_TOKEN_L
                 "assistant_text": assistant_text,
                 # NULL unless the text was actually truncated — an untruncated
                 # exchange is full-quality regardless of which cap was applied.
-                # See design/specs/015 (FR#5, Edge Cases).
+                # See design/specs/015 (Edge Cases).
                 "cap_tokens": cap_limit if was_capped else None,
             }
         )
@@ -134,7 +134,7 @@ def _diff_exchanges(
 
     A chunk is also flagged when its stored cap_tokens is below ``target_cap``,
     even if content_hash matches — this is how backfill detects draft-quality
-    chunks needing an upgrade (design/specs/015 FR#6). ``target_cap`` is the
+    chunks needing an upgrade. ``target_cap`` is the
     caller's own token limit (SYNC_PATH_TOKEN_LIMIT on sync, MODEL_TOKEN_LIMIT
     on backfill), so the sync path never flags a chunk already embedded at a
     higher backfill cap for downgrade. Cap-tokens upgrades are never added to
@@ -212,7 +212,7 @@ def _should_stamp_watermark(
 
     Checks version, content_hash, AND cap_tokens so that content-changed
     exchanges beyond the cap (left for backfill) or draft-quality chunks
-    (cap_tokens < MODEL_TOKEN_LIMIT, design/specs/015 FR#14) don't falsely
+    (cap_tokens < MODEL_TOKEN_LIMIT) don't falsely
     satisfy the predicate. The withhold-until-full-quality check applies to
     freshly-embedded chunks too: `idx in embedded_indices` alone does not
     prove full quality, so it must not bypass the per-exchange cap_tokens
@@ -261,7 +261,7 @@ def embed_branch_chunks(
     and the batch attention budget (see ``embed_batch``). Defaults to
     MODEL_TOKEN_LIMIT (8192, backfill quality); the sync path passes the
     configured SYNC_PATH_TOKEN_LIMIT (4096) via ``sync_branch``. See
-    design/specs/015 (FR#3, FR#4, FR#13).
+    design/specs/015.
 
     Returns the inference count (exchanges embedded). Raises on failure — callers
     (sync_branch) must wrap in contextlib.suppress(Exception). Does not commit; the
@@ -299,7 +299,7 @@ def embed_branch_chunks(
     # Scoped to exchanges actually selected for (re-)embedding this call
     # (needing_embed_full), not the whole branch history — an exchange that was
     # capped once but is already embedded and unchanged must not re-warn on
-    # every subsequent sync. See design/specs/015 (FR#11).
+    # every subsequent sync.
     for ed in needing_embed_full:
         if ed["cap_tokens"] is not None:
             log.warning("exchange exceeds cap", extra={"cap": cap_limit})

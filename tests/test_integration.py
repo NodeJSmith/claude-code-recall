@@ -588,13 +588,12 @@ def _seed_embeddable_branch(cursor: sqlite3.Cursor) -> int:
 
 
 class TestEmbeddingLifecycle:
-    """Integration tests for the sync -> backfill -> sync embedding lifecycle
-    (design/specs/015-sync-memory-fix): no ping-pong between cap tiers (AC#4)
-    and the backfill watermark/selection handoff (AC#9)."""
+    """Integration tests for the sync -> backfill -> sync embedding lifecycle:
+    no ping-pong between cap tiers and the backfill watermark/selection handoff."""
 
     @VEC_SKIP
     def test_no_ping_pong_across_sync_and_backfill_cap_tiers(self):
-        """AC#4: sync-cap embed (4096) -> backfill upgrade (8192) -> sync-cap
+        """Sync-cap embed (4096) -> backfill upgrade (8192) -> sync-cap
         embed again must NOT re-embed the now-full-quality chunk."""
         conn = make_vec_conn()
         cursor = conn.cursor()
@@ -640,7 +639,7 @@ class TestEmbeddingLifecycle:
 
     @VEC_SKIP
     def test_backfill_lifecycle_watermark_and_selection(self):
-        """AC#9: sync-cap embed withholds the watermark and build_selection
+        """Sync-cap embed withholds the watermark and build_selection
         includes the branch; backfill upgrade stamps the watermark and
         build_selection excludes the branch."""
         conn = make_vec_conn()

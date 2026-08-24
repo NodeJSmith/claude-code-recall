@@ -42,9 +42,9 @@ def build_selection(days: int | None) -> tuple[str, list]:
     - heal clause: EXISTS a chunks row without a chunk_vec — catches crash
       victims and post-drop orphans the watermark can't see (design C1).
     - cap-tokens clause: EXISTS a chunks row with cap_tokens < MODEL_TOKEN_LIMIT
-      — draft-quality chunks needing an upgrade (design/specs/015 FR#15),
+      — draft-quality chunks needing an upgrade,
       selected even when the branch's embedding_version watermark is
-      otherwise current (FR#14 withholds that watermark for exactly these
+      otherwise current (the watermark is withheld for exactly these
       branches, but this clause also re-selects branches stamped before the
       cap_tokens check existed).
 

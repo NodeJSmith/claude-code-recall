@@ -192,7 +192,7 @@ def compute_caveat(conn: sqlite3.Connection) -> str | None:
     degradation). A failure computing coverage degrades to None so a broken
     probe never breaks the recall itself.
 
-    Three-state coverage (FR#16, AC#12): a branch with only draft-quality
+    Three-state coverage: a branch with only draft-quality
     chunks is searchable, just not at full fidelity — it must not read as
     "not embedded" the way a bare embedded/total ratio would suggest.
     """

@@ -1181,7 +1181,7 @@ class TestSyncCurrentTranscriptDiscovery:
         assert seen_project_dirs == [project_dir]
 
     def test_run_passes_settings_to_sync_session(self, tmp_path, monkeypatch):
-        """T02 review MEDIUM finding: run() must pass settings=settings through to
+        """run() must pass settings=settings through to
         sync_session so sync_path_token_limit reaches sync_branch's clamp."""
         projects_dir = tmp_path / "projects"
         project_dir = projects_dir / "project-a"
@@ -1229,7 +1229,7 @@ class TestSyncCurrentTranscriptDiscovery:
 
 
 class TestSyncCurrentCompletionLogging:
-    """FR#12 / AC#7: sync_current.run() logs an INFO 'sync complete' line with
+    """sync_current.run() logs an INFO 'sync complete' line with
     file_size and duration_s after every sync."""
 
     def test_logs_file_size_and_duration_on_success(self, tmp_path, monkeypatch, caplog):

@@ -1,6 +1,5 @@
 """Tests for embed_ops.py: content-hash derivation, cap-tokens tracking, and cap
-parameterization. See design/specs/015-sync-memory-fix (FR#1, FR#2, FR#3, FR#4,
-FR#13, AC#1, AC#2, AC#8).
+parameterization.
 """
 
 import hashlib
@@ -89,7 +88,7 @@ def _seed_branch(cursor: sqlite3.Cursor, is_active: int = 1, embedding_version: 
 
 
 class TestPrepareExchangeDataContentHash:
-    """FR#1/AC#1: content_hash is derived from raw text, independent of the cap."""
+    """content_hash is derived from raw text, independent of the cap."""
 
     def test_hash_derived_from_raw_text_not_capped_output(self, monkeypatch):
         """The stored content_hash matches hashing the raw combined text, even when
@@ -112,7 +111,7 @@ class TestPrepareExchangeDataContentHash:
         assert result[0]["text"] == "TRUNCATED-PLACEHOLDER"
 
     def test_same_raw_text_different_cap_limit_same_hash(self, monkeypatch):
-        """AC#1 (second half): identical raw text hashes identically regardless of
+        """Identical raw text hashes identically regardless of
         cap_limit — this is what prevents sync (4096) and backfill (8192) from
         ping-ponging re-embeds of the same unchanged exchange."""
         monkeypatch.setattr(
@@ -126,7 +125,7 @@ class TestPrepareExchangeDataContentHash:
         assert result_sync[0]["content_hash"] == result_backfill[0]["content_hash"]
 
     def test_texts_differing_past_cap_produce_different_hashes(self, monkeypatch):
-        """AC#1 (first half): two exchange texts differing only past the cap mark
+        """Two exchange texts differing only past the cap mark
         produce DIFFERENT content_hash values — the hash reflects the full raw
         content, not just the portion that survives capping."""
         # cap_for_embedding truncates everything to the first 10 chars, simulating
@@ -148,7 +147,7 @@ class TestPrepareExchangeDataContentHash:
 
 
 class TestPrepareExchangeDataCapTokens:
-    """FR#5 (storage half): cap_tokens is cap_limit when truncated, else NULL."""
+    """cap_tokens is cap_limit when truncated, else NULL."""
 
     def test_was_capped_true_stores_cap_limit(self, monkeypatch):
         monkeypatch.setattr(
@@ -168,7 +167,7 @@ class TestPrepareExchangeDataCapTokens:
 
 
 class TestPrepareExchangeDataCapLimitThreading:
-    """FR#2/FR#3/FR#4: cap_limit is threaded to every cap_for_embedding call."""
+    """cap_limit is threaded to every cap_for_embedding call."""
 
     def test_cap_limit_passed_as_max_tokens_to_combined_and_turn_caps(self, monkeypatch):
         captured: list[int | None] = []
@@ -200,7 +199,7 @@ class TestPrepareExchangeDataCapLimitThreading:
 
 
 class TestWriteEmbeddedChunksCapTokens:
-    """FR#5 (write half): _write_embedded_chunks persists cap_tokens to the chunks row."""
+    """_write_embedded_chunks persists cap_tokens to the chunks row."""
 
     def test_cap_tokens_written_to_chunks_row(self):
         conn = sqlite3.connect(":memory:")
@@ -246,11 +245,11 @@ class TestWriteEmbeddedChunksCapTokens:
 
 
 class TestEmbedBranchChunksCapLimit:
-    """FR#3, FR#4, AC#2: embed_branch_chunks threads cap_limit to cap_for_embedding
+    """embed_branch_chunks threads cap_limit to cap_for_embedding
     and embed_batch (via _prepare_exchange_data / embed_batch's max_token_cap)."""
 
     def test_default_cap_limit_caps_at_model_token_limit(self, tmp_path):
-        """AC#2 (second half): default embed_branch_chunks call caps at MODEL_TOKEN_LIMIT."""
+        """Default embed_branch_chunks call caps at MODEL_TOKEN_LIMIT."""
         conn = _make_vec_conn(tmp_path)
         if conn is None:
             pytest.skip("sqlite-vec not available")
@@ -280,7 +279,7 @@ class TestEmbedBranchChunksCapLimit:
         conn.close()
 
     def test_default_cap_limit_stores_8192_for_truncated_text(self, tmp_path):
-        """FR#4: embed_branch_chunks with default cap_limit produces cap_tokens=8192
+        """embed_branch_chunks with default cap_limit produces cap_tokens=8192
         for exchanges that were actually truncated (was_capped=True)."""
         conn = _make_vec_conn(tmp_path)
         if conn is None:
@@ -303,7 +302,7 @@ class TestEmbedBranchChunksCapLimit:
         conn.close()
 
     def test_explicit_cap_limit_caps_at_4096(self, tmp_path):
-        """AC#2 (first half): embed_branch_chunks(cap_limit=4096) caps at 4096."""
+        """embed_branch_chunks(cap_limit=4096) caps at 4096."""
         conn = _make_vec_conn(tmp_path)
         if conn is None:
             pytest.skip("sqlite-vec not available")
@@ -333,7 +332,7 @@ class TestEmbedBranchChunksCapLimit:
         conn.close()
 
     def test_cap_limit_threaded_to_embed_batch_max_token_cap(self, tmp_path):
-        """FR#13: embed_branch_chunks passes cap_limit to embed_batch as max_token_cap."""
+        """embed_branch_chunks passes cap_limit to embed_batch as max_token_cap."""
         conn = _make_vec_conn(tmp_path)
         if conn is None:
             pytest.skip("sqlite-vec not available")
@@ -354,7 +353,7 @@ class TestEmbedBranchChunksCapLimit:
 
 
 class TestEmbedBranchChunksCapExceededWarning:
-    """FR#11: embed_branch_chunks emits a path-aware WARNING for exchanges the
+    """embed_branch_chunks emits a path-aware WARNING for exchanges the
     caller's cap_limit actually truncated (was_capped=True)."""
 
     def test_warns_when_exchange_was_capped(self, tmp_path, caplog):
@@ -405,11 +404,11 @@ class TestEmbedBranchChunksCapExceededWarning:
 
 
 class TestDiffExchangesCapTokensUpgrade:
-    """FR#6, AC#3, AC#11: _diff_exchanges flags cap-tokens upgrades even when
+    """_diff_exchanges flags cap-tokens upgrades even when
     content_hash matches, and is NULL-safe. See design/specs/015-sync-memory-fix."""
 
     def test_flags_chunk_when_cap_tokens_below_target(self):
-        """FR#6: a chunk with cap_tokens=4096 is flagged when target_cap=MODEL_TOKEN_LIMIT
+        """A chunk with cap_tokens=4096 is flagged when target_cap=MODEL_TOKEN_LIMIT
         (backfill context), even though content_hash matches."""
         exchange_data = [{"index": 0, "content_hash": "hash0"}]
         existing_chunks = {0: {"content_hash": "hash0", "cap_tokens": 4096}}
@@ -420,7 +419,7 @@ class TestDiffExchangesCapTokensUpgrade:
         assert indices_to_prune == set()
 
     def test_does_not_flag_chunk_when_cap_tokens_meets_target(self):
-        """AC#3 (second half): after upgrading to MODEL_TOKEN_LIMIT, the sync-context
+        """After upgrading to MODEL_TOKEN_LIMIT, the sync-context
         target_cap (SYNC_PATH_TOKEN_LIMIT) does not flag it again — no ping-pong."""
         exchange_data = [{"index": 0, "content_hash": "hash0"}]
         existing_chunks = {0: {"content_hash": "hash0", "cap_tokens": MODEL_TOKEN_LIMIT}}
@@ -433,7 +432,7 @@ class TestDiffExchangesCapTokensUpgrade:
         assert indices_to_prune == set()
 
     def test_null_cap_tokens_treated_as_full_quality(self):
-        """AC#11: cap_tokens=NULL (pre-migration/untruncated) does not raise and is
+        """cap_tokens=NULL (pre-migration/untruncated) does not raise and is
         treated as full-quality via effective_cap_tokens — not flagged."""
         exchange_data = [{"index": 0, "content_hash": "hash0"}]
         existing_chunks = {0: {"content_hash": "hash0", "cap_tokens": None}}
@@ -476,11 +475,11 @@ class TestDiffExchangesCapTokensUpgrade:
 
 
 class TestShouldStampWatermarkCapTokens:
-    """FR#14, AC#9, AC#10, AC#11: watermark withheld while any chunk (existing or
+    """Watermark withheld while any chunk (existing or
     freshly-embedded) is draft quality; stamped once every chunk is full quality."""
 
     def test_existing_chunk_below_full_quality_withholds_watermark(self):
-        """AC#9 (negative case): an existing chunk with cap_tokens=4096 withholds
+        """An existing chunk with cap_tokens=4096 withholds
         the watermark even though embedding_version and content_hash both match."""
         exchange_data = [{"index": 0, "content_hash": "hash0", "cap_tokens": None}]
         existing_chunks = {0: {"content_hash": "hash0", "embedding_version": EMBEDDING_VERSION, "cap_tokens": 4096}}
@@ -490,7 +489,7 @@ class TestShouldStampWatermarkCapTokens:
         assert result is False
 
     def test_existing_chunk_null_cap_tokens_does_not_withhold(self):
-        """AC#11: NULL cap_tokens on an existing chunk is full-quality and does not
+        """NULL cap_tokens on an existing chunk is full-quality and does not
         raise TypeError."""
         exchange_data = [{"index": 0, "content_hash": "hash0", "cap_tokens": None}]
         existing_chunks = {0: {"content_hash": "hash0", "embedding_version": EMBEDDING_VERSION, "cap_tokens": None}}
@@ -500,7 +499,7 @@ class TestShouldStampWatermarkCapTokens:
         assert result is True
 
     def test_freshly_embedded_draft_quality_withholds_watermark(self):
-        """FR#14: a freshly-embedded chunk (in embedded_indices) with per-exchange
+        """A freshly-embedded chunk (in embedded_indices) with per-exchange
         cap_tokens=4096 (< MODEL_TOKEN_LIMIT) still withholds the watermark — the
         `idx in embedded_indices` shortcut must not bypass this check."""
         exchange_data = [{"index": 0, "content_hash": "hash0", "cap_tokens": 4096}]
@@ -510,8 +509,8 @@ class TestShouldStampWatermarkCapTokens:
         assert result is False
 
     def test_freshly_embedded_full_quality_stamps_watermark(self):
-        """AC#10: freshly-embedded chunks all with cap_tokens=NULL (was_capped=False,
-        untruncated) still stamp the watermark — the positive case for FR#14."""
+        """Freshly-embedded chunks all with cap_tokens=NULL (untruncated)
+        still stamp the watermark."""
         exchange_data = [{"index": 0, "content_hash": "hash0", "cap_tokens": None}]
 
         result = _should_stamp_watermark(exchange_data, embedded_indices={0}, existing_chunks={})

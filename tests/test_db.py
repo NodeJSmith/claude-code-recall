@@ -349,7 +349,7 @@ class TestVecSchema:
         """
         conn = make_vec_conn()
         tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
-        assert "branch_vec" not in tables, "branch_vec must be absent after T06 teardown"
+        assert "branch_vec" not in tables, "branch_vec must be absent after vec schema teardown"
         conn.close()
 
     @VEC_SKIP
@@ -357,7 +357,7 @@ class TestVecSchema:
         """branch_vec teardown: branches_vec_ad is dropped; branches_chunks_ad + chunks_vec_ad are present."""
         conn = make_vec_conn()
         triggers = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='trigger'").fetchall()}
-        assert "branches_vec_ad" not in triggers, "branches_vec_ad must be dropped by T06 teardown"
+        assert "branches_vec_ad" not in triggers, "branches_vec_ad must be dropped by vec schema teardown"
         assert "branches_chunks_ad" in triggers, "branches_chunks_ad must exist after _ensure_vec_schema"
         assert "chunks_vec_ad" in triggers, "chunks_vec_ad must exist after _ensure_vec_schema"
         conn.close()
@@ -477,7 +477,7 @@ class TestLoadVecParameter:
             count = conn.execute("SELECT COUNT(*) FROM chunk_vec").fetchone()[0]
             assert count == 0
             tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
-            assert "branch_vec" not in tables, "branch_vec must be absent after T06 teardown"
+            assert "branch_vec" not in tables, "branch_vec must be absent after vec schema teardown"
 
     def test_load_vec_false_default_does_not_require_extension(self, tmp_path, monkeypatch):
         """get_connection() default path works even on machines where vec is unavailable.
@@ -1308,7 +1308,7 @@ class TestSchemaVersioning:
             assert columns == ["session_uuid", "source_fingerprint", "db_coverage_fingerprint", "checked_at"]
 
     def test_fresh_db_has_cap_tokens_column_and_partial_index(self, tmp_path):
-        """A fresh install's chunks table carries cap_tokens and its partial index (FR#5)."""
+        """A fresh install's chunks table carries cap_tokens and its partial index."""
         db_path = tmp_path / "fresh_v8.db"
         with get_connection(settings={"db_path": str(db_path)}) as conn:
             assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
@@ -1887,7 +1887,7 @@ class TestChunkSchema:
         """branch_vec teardown: branch_vec absent, chunk_vec present after _ensure_vec_schema."""
         conn = make_vec_conn()
         tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
-        assert "branch_vec" not in tables, "branch_vec must be torn down by T06"
+        assert "branch_vec" not in tables, "branch_vec must be torn down by vec schema init"
         assert "chunk_vec" in tables, "chunk_vec must be present after _ensure_vec_schema"
         conn.close()
 

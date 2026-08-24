@@ -77,7 +77,7 @@ def _seed_branch_with_chunk(conn: sqlite3.Connection, *, session_uuid: str, cap_
 
 
 class TestHasDraftQualityChunks:
-    """cap_tokens-based draft-quality chunk detection (FR#7)."""
+    """cap_tokens-based draft-quality chunk detection."""
 
     def test_no_chunks_returns_false(self, memory_db):
         """Empty chunks table → no draft-quality chunks."""
@@ -95,10 +95,10 @@ class TestHasDraftQualityChunks:
 
 
 class TestDraftQualityAlertWiring:
-    """ALERT_DRAFT_QUALITY_VECTORS wiring into proactive_alert_block (FR#7, FR#8, AC#5)."""
+    """ALERT_DRAFT_QUALITY_VECTORS wiring into proactive_alert_block."""
 
     def test_alert_fires_when_draft_chunks_present_and_no_marker(self, tmp_path, memory_db):
-        """A draft-quality chunk with no schedule marker → alert fires (AC#5 step 1)."""
+        """A draft-quality chunk with no schedule marker fires the alert."""
         conn = memory_db
         _seed_branch_with_chunk(conn, session_uuid="sess-i", cap_tokens=4096)
 
@@ -114,7 +114,7 @@ class TestDraftQualityAlertWiring:
         assert "draft-quality" in block.lower()
 
     def test_alert_suppressed_when_schedule_marker_configured(self, tmp_path, memory_db):
-        """A configured_at marker suppresses the alert (AC#5 step 2)."""
+        """A configured_at marker suppresses the alert."""
         conn = memory_db
         _seed_branch_with_chunk(conn, session_uuid="sess-j", cap_tokens=4096)
         schedule = tmp_path / "backfill-schedule.json"
@@ -132,7 +132,7 @@ class TestDraftQualityAlertWiring:
         assert "draft-quality" not in block.lower()
 
     def test_alert_suppressed_when_schedule_marker_dismissed(self, tmp_path, memory_db):
-        """A dismissed_at marker also suppresses the alert (FR#17)."""
+        """A dismissed_at marker also suppresses the alert."""
         conn = memory_db
         _seed_branch_with_chunk(conn, session_uuid="sess-k", cap_tokens=4096)
         schedule = tmp_path / "backfill-schedule.json"
@@ -168,7 +168,7 @@ class TestDraftQualityAlertWiring:
         assert "draft-quality" in block.lower()
 
     def test_ac5_marker_removed_fires_again(self, tmp_path, memory_db):
-        """Remove the marker after a suppressed session → alert fires again (AC#5 step 3)."""
+        """Remove the marker after a suppressed session → alert fires again."""
         conn = memory_db
         _seed_branch_with_chunk(conn, session_uuid="sess-m", cap_tokens=4096)
         schedule = tmp_path / "backfill-schedule.json"

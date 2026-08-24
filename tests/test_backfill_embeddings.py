@@ -462,7 +462,7 @@ class TestBackfillVersionBump:
 class TestBuildSelectionCapTokens:
     """build_selection selects branches with draft-quality chunks (cap_tokens <
     MODEL_TOKEN_LIMIT) even when the branch's embedding_version watermark is
-    otherwise current. See design/specs/015-sync-memory-fix (FR#15, AC#9)."""
+    otherwise current."""
 
     def _insert_current_branch_with_chunk(self, conn: sqlite3.Connection, cap_tokens: int | None) -> int:
         """Insert a branch already at the current watermark, with one chunk (+
@@ -494,7 +494,7 @@ class TestBuildSelectionCapTokens:
         return branch_id in {row[0] for row in rows}
 
     def test_draft_quality_chunk_makes_branch_eligible(self):
-        """FR#15: a branch whose only chunk has cap_tokens=4096 is selected even
+        """A branch whose only chunk has cap_tokens=4096 is selected even
         though its embedding_version/embedding_model watermark is current."""
         conn = make_vec_conn()
         bid = self._insert_current_branch_with_chunk(conn, cap_tokens=4096)
@@ -510,7 +510,7 @@ class TestBuildSelectionCapTokens:
         assert not self._is_selected(conn, bid)
 
     def test_upgrade_removes_branch_from_selection(self):
-        """AC#9: after backfill re-embeds a draft chunk at full quality
+        """After backfill re-embeds a draft chunk at full quality
         (cap_tokens -> NULL), the branch is no longer selected."""
         conn = make_vec_conn()
         bid = self._insert_current_branch_with_chunk(conn, cap_tokens=4096)

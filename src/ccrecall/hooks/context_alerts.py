@@ -49,7 +49,7 @@ def proactive_alert_block(
     - DB write-lock probe (active, on the already-open connection, or conn=None
       when the connection itself failed — that failure becomes a fault)
     - Draft-quality chunk check (a cheap COUNT(*) on the already-open
-      connection) gated by the backfill-schedule marker (FR#8): a configured
+      connection) gated by the backfill-schedule marker: a configured
       schedule or an explicit dismiss suppresses the alert entirely.
 
     Passes active keys through the snooze ledger (fire / suppress / auto-clear)

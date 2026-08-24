@@ -220,7 +220,7 @@ class TestSearchSessionsFTS:
         matching = [r for r in results if r["session_uuid"] == "sess-alpha-1"]
         assert len(matching) == 1
         card = matching[0]
-        assert "messages" not in card, "A-path cards must not include a full message list (FR#12)"
+        assert "messages" not in card, "A-path cards must not include a full message list"
         assert "session_uuid" in card
         assert "handle" in card
         assert "exchange_count" in card
@@ -1825,7 +1825,7 @@ class TestMidSessionRecall:
         results = get_vec_chunk_ids(cursor, query_vec, top_k=5)
         branch_ids = [r[0] for r in results]
         assert branch_id in branch_ids, (
-            "AC#1: branch must appear in chunk-KNN results when the middle exchange matches the query"
+            "branch must appear in chunk-KNN results when the middle exchange matches the query"
         )
 
         # The matching chunk is exchange_index=4 — verify best-chunk rollup picked the right one
@@ -1952,7 +1952,7 @@ class TestCappedChunkRetrieval:
         results = get_vec_chunk_ids(cursor, query_vec, top_k=5)
         branch_ids = [r[0] for r in results]
         assert branch_id in branch_ids, (
-            "AC#9: a head+tail-capped chunk must be retrievable via chunk-KNN for a matching query"
+            "a head+tail-capped chunk must be retrievable via chunk-KNN for a matching query"
         )
         # The best chunk for that branch is the capped one we seeded.
         winning_chunk_id = next(r[2] for r in results if r[0] == branch_id)

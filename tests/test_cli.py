@@ -1,5 +1,5 @@
 """Tests for the `ccrecall backfill schedule` subcommand group and the
-`ccrecall backfill embeddings --dismiss` flag (FR#8, FR#17, FR#18, AC#5).
+`ccrecall backfill embeddings --dismiss` flag.
 
 BACKFILL_SCHEDULE_PATH is one of the sidecar paths tests/conftest.py's autouse
 `_isolated_runtime_dir` fixture redirects to a tmp_path location. The local
@@ -16,7 +16,9 @@ import pytest
 
 import ccrecall.health as health
 from ccrecall.cli.commands import cmd_backfill_embeddings, cmd_schedule_clear, cmd_schedule_status, cmd_schedule_write
-from ccrecall.hooks.backfill_query import PID_KEY
+from ccrecall.config import load_settings_for_db
+from ccrecall.db import get_connection
+from ccrecall.hooks.backfill_query import EXIT_OK, PID_KEY
 
 
 @pytest.fixture(autouse=True)
@@ -82,9 +84,6 @@ class TestScheduleStatus:
         assert "dismissed" in out.lower()
 
     def test_reports_draft_quality_chunk_count(self, tmp_path, capsys):
-        from ccrecall.config import load_settings_for_db
-        from ccrecall.db import get_connection
-
         db_path = tmp_path / "status.db"
         with get_connection(load_settings_for_db(db_path), load_vec=False) as conn:
             conn.execute("INSERT INTO sessions (uuid) VALUES ('s1')")
@@ -123,8 +122,6 @@ class TestBackfillEmbeddingsDismiss:
 
     def test_non_dismiss_run_untouched(self):
         """dismiss=False (the default) preserves the existing PID-guard/run wiring."""
-        from ccrecall.hooks.backfill_query import EXIT_OK
-
         with (
             patch("ccrecall.cli.commands.try_acquire_pid_file", return_value=True) as mock_acquire,
             patch("ccrecall.cli.commands.backfill_embeddings_mod.run", return_value=EXIT_OK) as mock_run,

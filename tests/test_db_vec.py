@@ -1,4 +1,4 @@
-"""Tests for ccrecall.db_vec.branch_embedding_coverage's three-state return (FR#16).
+"""Tests for ccrecall.db_vec.branch_embedding_coverage's three-state return.
 
 Vec-free (branch_embedding_coverage reads only branches/chunks, per its
 docstring), so these use the plain `memory_db` fixture rather than

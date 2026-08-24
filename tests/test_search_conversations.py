@@ -1,4 +1,4 @@
-"""Tests for the three-state compute_caveat (FR#16, AC#12).
+"""Tests for the three-state compute_caveat.
 
 Full compute_caveat coverage for the vec-unavailable/error-degradation/
 at-threshold cases already lives in test_search.py's TestRecallCaveat class;
@@ -9,6 +9,7 @@ branch_embedding_coverage's three-tuple return adds.
 import sqlite3
 from unittest.mock import patch
 
+from ccrecall.embeddings import EMBEDDING_MODEL, EMBEDDING_VERSION
 from ccrecall.schema import SCHEMA
 from ccrecall.search_conversations import compute_caveat
 
@@ -40,7 +41,7 @@ def _seed_branch(conn, i: int, *, cap_tokens: int | None, has_chunk: bool = True
 
 class TestComputeCaveatDraftQuality:
     def test_draft_only_branch_mentions_draft_quality_not_not_embedded(self):
-        """AC#12: a branch with only draft-quality chunks reads as 'draft quality',
+        """A branch with only draft-quality chunks reads as 'draft quality',
         not as an unqualified 'not embedded'/low-percentage caveat."""
         conn = sqlite3.connect(":memory:")
         conn.executescript(SCHEMA)
@@ -56,8 +57,6 @@ class TestComputeCaveatDraftQuality:
 
     def test_mixed_full_and_draft_branches_reports_both(self):
         """A DB with both fully-embedded and draft-quality branches surfaces both counts."""
-        from ccrecall.embeddings import EMBEDDING_MODEL, EMBEDDING_VERSION
-
         conn = sqlite3.connect(":memory:")
         conn.executescript(SCHEMA)
         conn.commit()

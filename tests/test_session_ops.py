@@ -760,8 +760,7 @@ def _make_conn_for_sync_branch() -> tuple[sqlite3.Connection, int, int, dict[str
 
 class TestSyncBranchCapLimitClamp:
     """sync_branch's sync_path_token_limit clamp math must actually reach
-    embed_branch_chunks as cap_limit. Covers the settings-threading glue T02
-    was built to add (code review MEDIUM finding)."""
+    embed_branch_chunks as cap_limit (settings-threading glue, code review finding)."""
 
     @pytest.mark.parametrize(
         ("sync_path_token_limit", "expected_cap"),
@@ -836,7 +835,7 @@ class TestSyncSessionSettingsThreading:
 
 
 class TestSyncBranchReclaimMemory:
-    """FR#10: sync_branch calls reclaim_memory() between its three phases
+    """sync_branch calls reclaim_memory() between its three phases
     (after aggregated content, after summary, before embedding)."""
 
     def test_reclaim_memory_called_three_times(self):
@@ -874,7 +873,7 @@ class _TrackableEntry(dict):
 
 
 class TestSyncSessionFreesAllEntries:
-    """AC#6 / FR#9: sync_session must not hold a reference to the parsed JSONL
+    """sync_session must not hold a reference to the parsed JSONL
     list (all_entries) once the branch loop (sync_branch) begins.
 
     A synthetic non-message entry (type='notification', excluded from

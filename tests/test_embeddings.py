@@ -295,7 +295,7 @@ class TestPlanEmbedBatches:
         assert _plan_embed_batches(counts) == _plan_embed_batches(counts, max_token_cap=MODEL_TOKEN_LIMIT)
 
     def test_sync_path_cap_limits_batches_to_one_text(self):
-        """AC#8/FR#13: at max_token_cap=4096, texts near 4096 tokens each get their own batch.
+        """At max_token_cap=4096, texts near 4096 tokens each get their own batch.
 
         4096**2 is the whole budget at that cap, so a second 4096-token text
         cannot ride along — this is the core memory-safety property: the sync
@@ -385,7 +385,7 @@ class TestEmbedBatchBounded:
             assert batch_size == 1
 
     def test_debug_log_emitted_before_each_model_embed_call(self, monkeypatch, caplog):
-        """FR#11: embed_batch logs batch_size and longest_tokens at DEBUG before
+        """embed_batch logs batch_size and longest_tokens at DEBUG before
         each model.embed() call — one log record per inference call planned."""
         counts = [8192, 100, 8192, 50]
         texts = [f"t{i}" for i in range(len(counts))]
