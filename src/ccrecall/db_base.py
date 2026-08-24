@@ -20,7 +20,7 @@ log = logging.getLogger(LOGGER_NAME)
 
 # Current schema version. Bump when adding a migration and wire the new DDL
 # delta into _apply_migrations (see _migrate_to_v1 for the version-1 shape).
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 V7_BRANCH_COLUMNS = {
     "summary_enrichment_json": "TEXT",
@@ -260,6 +260,16 @@ def _migrate_to_v7(conn: sqlite3.Connection) -> None:
                 raise
 
 
+def _migrate_to_v8(conn: sqlite3.Connection) -> None:
+    """Version-8 migration: add cap_tokens column and its partial index to chunks."""
+    try:
+        conn.execute("ALTER TABLE chunks ADD COLUMN cap_tokens INTEGER")
+    except sqlite3.OperationalError as e:
+        if "duplicate column name" not in str(e):
+            raise
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_chunks_cap_tokens ON chunks(cap_tokens) WHERE cap_tokens IS NOT NULL")
+
+
 def _apply_migrations(
     conn: sqlite3.Connection,
     *,
@@ -275,6 +285,7 @@ def _apply_migrations(
     _migrate_to_v5(conn)
     _migrate_to_v6(conn)
     _migrate_to_v7(conn)
+    _migrate_to_v8(conn)
     conn.commit()
 
     if current >= SCHEMA_VERSION:

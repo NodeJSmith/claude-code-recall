@@ -6,21 +6,24 @@ PID-file lifecycle are preserved from the former cm-* entry points; only the
 argument-parsing layer changed (argparse -> cyclopts).
 """
 
+import json
+import sqlite3
 import sys
 from pathlib import Path
 from typing import Annotated, Literal
 
-from cyclopts import ArgumentCollection, Group, Parameter
+from cyclopts import App, ArgumentCollection, Group, Parameter
 from cyclopts.validators import Number
 
+from ccrecall import health
 from ccrecall import recent_chats as recent_chats_mod
 from ccrecall import search_cli as search_mod
 from ccrecall import session_tail as session_tail_mod
 from ccrecall import status as status_mod
 from ccrecall.cli import app, backfill_app
 from ccrecall.cli.context import DEFAULT_CLI_CONTEXT, CLIContextParam
-from ccrecall.config import DEFAULT_DB_PATH, try_acquire_pid_file
-from ccrecall.db import DEFAULT_PROJECTS_DIR
+from ccrecall.config import DEFAULT_DB_PATH, load_settings_for_db, try_acquire_pid_file
+from ccrecall.db import DEFAULT_PROJECTS_DIR, get_connection
 from ccrecall.embeddings import DEFAULT_EMBED_THREADS
 from ccrecall.hooks import backfill_embeddings as backfill_embeddings_mod
 from ccrecall.hooks import backfill_query as backfill_query_mod
@@ -130,6 +133,66 @@ def cmd_backfill_summaries(
     backfill_summaries_mod.run(verbose=ctx.debug, db=db)
 
 
+schedule_app = App(
+    name="schedule", help="Manage the backfill-schedule marker (suppresses the draft-quality-vectors alert)."
+)
+backfill_app.command(schedule_app)
+
+
+@schedule_app.command(name="write")
+def cmd_schedule_write(*, ctx: CLIContextParam = DEFAULT_CLI_CONTEXT) -> None:
+    """Record that a scheduled embeddings backfill job has been configured."""
+    health.write_schedule_marker("configured_at")
+    if ctx.json_mode:
+        print(json.dumps({"action": "write", "path": str(health.BACKFILL_SCHEDULE_PATH)}))
+    else:
+        print(f"Wrote backfill schedule marker to {health.BACKFILL_SCHEDULE_PATH}")
+
+
+@schedule_app.command(name="clear")
+def cmd_schedule_clear(*, ctx: CLIContextParam = DEFAULT_CLI_CONTEXT) -> None:
+    """Remove the backfill-schedule marker."""
+    existed = health.clear_schedule_marker()
+    if ctx.json_mode:
+        print(json.dumps({"action": "clear", "existed": existed}))
+    else:
+        if existed:
+            print(f"Removed backfill schedule marker at {health.BACKFILL_SCHEDULE_PATH}")
+        else:
+            print("No backfill schedule marker was present.")
+
+
+@schedule_app.command(name="status")
+def cmd_schedule_status(
+    *,
+    db: _DB = DEFAULT_DB_PATH,
+    ctx: CLIContextParam = DEFAULT_CLI_CONTEXT,
+) -> None:
+    """Report the backfill-schedule marker state and remaining draft-quality chunks."""
+    marker = health.read_schedule_marker()
+
+    remaining: int | None = None
+    error: str | None = None
+    settings = load_settings_for_db(db)
+    try:
+        with get_connection(settings, load_vec=False) as conn:
+            remaining = health.count_draft_quality_chunks(conn)
+    except (sqlite3.Error, OSError) as exc:
+        error = str(exc)
+
+    if ctx.json_mode:
+        result: dict = {"marker": marker, "draft_quality_remaining": remaining}
+        if error:
+            result["error"] = error
+        print(json.dumps(result))
+    else:
+        print(f"Schedule marker: {health.describe_schedule_marker(marker)}")
+        if error:
+            print(f"Draft-quality chunks remaining: unknown ({error})")
+        else:
+            print(f"Draft-quality chunks remaining: {remaining}")
+
+
 @backfill_app.command(name="embeddings")
 def cmd_backfill_embeddings(
     *,
@@ -137,6 +200,14 @@ def cmd_backfill_embeddings(
         bool,
         _FLAG,
         Parameter(help="Report legacy embedding-only progress and exit; prefer `ccrecall status`."),
+    ] = False,
+    dismiss: Annotated[
+        bool,
+        _FLAG,
+        Parameter(
+            help="Permanently dismiss the draft-quality-vectors alert without running a backfill. "
+            "Takes precedence over --status if both are given."
+        ),
     ] = False,
     days: Annotated[
         int | None,
@@ -154,6 +225,16 @@ def cmd_backfill_embeddings(
     ctx: CLIContextParam = DEFAULT_CLI_CONTEXT,
 ) -> None:
     """Seed historical embeddings for active-leaf branch summaries (opt-in)."""
+    # --dismiss short-circuits before the PID guard and any backfill work: it
+    # only records a marker so the SessionStart alert stops firing.
+    if dismiss:
+        health.write_schedule_marker("dismissed_at")
+        if ctx.json_mode:
+            print(json.dumps({"action": "dismiss", "path": str(health.BACKFILL_SCHEDULE_PATH)}))
+        else:
+            print(f"Dismissed the draft-quality-vectors alert (wrote {health.BACKFILL_SCHEDULE_PATH}).")
+        return
+
     # Self-concurrency guard: at most one embeddings backfill at a time — a
     # second instance doubles the onnxruntime memory peak on the same machine.
     # Skip (not queue) when another instance is alive; exit 0 so a scheduler

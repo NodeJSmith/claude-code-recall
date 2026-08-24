@@ -98,7 +98,7 @@ def collect_status(*, db: Path = DEFAULT_DB_PATH, days: int | None = None, check
                     "pending_missing_jsonl_sessions": None,
                 },
                 "embeddings": {
-                    "watermark": {"embedded_branches": None, "total_branches": None},
+                    "watermark": {"embedded_branches": None, "draft_branches": None, "total_branches": None},
                     "backfill": {
                         "available": False,
                         "error": "database schema is out of date; run `ccrecall import` to migrate",
@@ -112,7 +112,7 @@ def collect_status(*, db: Path = DEFAULT_DB_PATH, days: int | None = None, check
         source_index = import_log_source_index(cursor) if tool_pending else None
         tool_missing = count_pending_missing_jsonl(cursor, days, source_index) if tool_pending else 0
         tool_total = count_tool_content_total(cursor, days)
-        embedded_watermark, embeddable_watermark = branch_embedding_coverage(conn)
+        embedded_watermark, draft_watermark, embeddable_watermark = branch_embedding_coverage(conn)
 
     if check_ingestion:
         if not db_path.exists():
@@ -164,7 +164,11 @@ def collect_status(*, db: Path = DEFAULT_DB_PATH, days: int | None = None, check
             "pending_missing_jsonl_sessions": tool_missing,
         },
         "embeddings": {
-            "watermark": {"embedded_branches": embedded_watermark, "total_branches": embeddable_watermark},
+            "watermark": {
+                "embedded_branches": embedded_watermark,
+                "draft_branches": draft_watermark,
+                "total_branches": embeddable_watermark,
+            },
             "backfill": embedding_backfill,
         },
     }
@@ -223,14 +227,20 @@ def print_status_report(status: dict) -> None:
         embedded = branches["embedded"]
         pct = (embedded / total * 100) if total else 0.0
         print(f"Embeddings: {embedded}/{total} branches embedded ({pct:.0f}%)")
+        draft = embeddings["watermark"]["draft_branches"]
+        if draft:
+            print(f"  draft quality: {draft} branch(es) searchable but not full quality")
         print(f"  branch backfill: {branches['remaining']} remaining; {branches['errored']} errored")
         print(f"  chunk coverage: {chunks['done']}/{chunks['total']} chunks at current version")
     else:
         watermark = embeddings["watermark"]
         total = watermark["total_branches"]
         embedded = watermark["embedded_branches"]
+        draft = watermark["draft_branches"]
         print(f"Embeddings: unavailable ({backfill['error']})")
         print(f"  watermark: {embedded}/{total} branches")
+        if draft:
+            print(f"  draft quality: {draft} branch(es) searchable but not full quality")
 
 
 def run(

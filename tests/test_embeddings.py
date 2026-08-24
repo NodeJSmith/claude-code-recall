@@ -1,5 +1,6 @@
 """Tests for the shared embedding module."""
 
+import logging
 import math
 from unittest.mock import MagicMock
 
@@ -186,6 +187,42 @@ class TestCapForEmbedding:
         assert was_capped is False
         mock.token_count.assert_not_called()
 
+    def test_max_tokens_caps_below_model_token_limit(self, monkeypatch):
+        """A text within MODEL_TOKEN_LIMIT but over max_tokens is capped to max_tokens."""
+        text = "x" * 1000  # well under EMBED_CHAR_BUDGET
+        # Fast-path check reports 5000 tokens — under MODEL_TOKEN_LIMIT (8192) but
+        # over the passed max_tokens=4096, so capping must occur.
+        mock = self._make_model(5000, 3000)  # 2nd call: while-loop check, now under 4096
+        monkeypatch.setattr("ccrecall.embeddings._model", mock)
+
+        result, was_capped = cap_for_embedding(text, max_tokens=4096)
+
+        assert was_capped is True
+        assert "\n\n[...]\n\n" in result
+
+    def test_no_max_tokens_defaults_to_model_token_limit(self, monkeypatch):
+        """Without max_tokens, the fast-path check uses MODEL_TOKEN_LIMIT (8192), not a tighter cap."""
+        text = "hello world"
+        # 5000 tokens is under MODEL_TOKEN_LIMIT (8192) — fast path returns unchanged.
+        mock = self._make_model(5000)
+        monkeypatch.setattr("ccrecall.embeddings._model", mock)
+
+        result, was_capped = cap_for_embedding(text)
+
+        assert result == text
+        assert was_capped is False
+
+    def test_max_tokens_none_explicit_same_as_default(self, monkeypatch):
+        """Passing max_tokens=None explicitly is equivalent to omitting it."""
+        text = "hello world"
+        mock = self._make_model(5000)
+        monkeypatch.setattr("ccrecall.embeddings._model", mock)
+
+        result, was_capped = cap_for_embedding(text, max_tokens=None)
+
+        assert result == text
+        assert was_capped is False
+
 
 class TestPlanEmbedBatches:
     """Batch planning bounds every inference call's attention area.
@@ -252,6 +289,32 @@ class TestPlanEmbedBatches:
         flat = sorted(i for batch in batches for i in batch)
         assert flat == [0, 1, 2]
 
+    def test_default_budget_matches_module_constant(self):
+        """Omitting max_token_cap preserves today's MODEL_TOKEN_LIMIT**2 budget."""
+        counts = [4096] * 5
+        assert _plan_embed_batches(counts) == _plan_embed_batches(counts, max_token_cap=MODEL_TOKEN_LIMIT)
+
+    def test_sync_path_cap_limits_batches_to_one_text(self):
+        """At max_token_cap=4096, texts near 4096 tokens each get their own batch.
+
+        4096**2 is the whole budget at that cap, so a second 4096-token text
+        cannot ride along — this is the core memory-safety property: the sync
+        path (cap=4096) never packs more than one near-cap text per inference
+        call, unlike the default MODEL_TOKEN_LIMIT (8192) budget which packs
+        four 4096-token texts together (see test_quadratic_packing).
+        """
+        counts = [4096, 4096, 4096]
+        batches = _plan_embed_batches(counts, max_token_cap=4096)
+        assert batches == [[0], [1], [2]]
+
+    def test_smaller_cap_shrinks_budget_quadratically(self):
+        """A max_token_cap of 2048 yields a 2048**2 budget — 1/16th of the 8192 default."""
+        counts = [2048] * 4
+        # 4 x 2048**2 == 8192**2 / 4 <= 2048**2? No: budget is 2048**2, and
+        # 1 x 2048**2 already fills it — a second 2048-token text can't join.
+        batches = _plan_embed_batches(counts, max_token_cap=2048)
+        assert batches == [[0], [1], [2], [3]]
+
 
 class TestEmbedBatchBounded:
     """embed_batch plans bounded batches and restores input order."""
@@ -305,6 +368,42 @@ class TestEmbedBatchBounded:
         monkeypatch.setattr("ccrecall.embeddings._model", mock)
         assert embed_batch([]) == []
         mock.embed.assert_not_called()
+
+    def test_max_token_cap_threaded_to_batch_planner(self, monkeypatch):
+        """embed_batch(max_token_cap=4096) forces one text per inference call
+        for near-4096-token texts, proving the parameter reaches _plan_embed_batches."""
+        counts = [4096, 4096]
+        texts = [f"t{i}" for i in range(len(counts))]
+        recorded: list = []
+        monkeypatch.setattr("ccrecall.embeddings._model", self._make_model(counts, recorded))
+
+        embed_batch(texts, max_token_cap=4096)
+
+        assert len(recorded) == 2, "each 4096-token text must get its own inference call at cap=4096"
+        for batch_texts, batch_size in recorded:
+            assert len(batch_texts) == 1
+            assert batch_size == 1
+
+    def test_debug_log_emitted_before_each_model_embed_call(self, monkeypatch, caplog):
+        """embed_batch logs batch_size and longest_tokens at DEBUG before
+        each model.embed() call — one log record per inference call planned."""
+        counts = [8192, 100, 8192, 50]
+        texts = [f"t{i}" for i in range(len(counts))]
+        recorded: list = []
+        monkeypatch.setattr("ccrecall.embeddings._model", self._make_model(counts, recorded))
+
+        with caplog.at_level(logging.DEBUG, logger="ccrecall"):
+            embed_batch(texts)
+
+        debug_records = [r for r in caplog.records if r.message == "embedding batch"]
+        assert len(debug_records) == len(recorded), (
+            "one DEBUG 'embedding batch' record expected per planned inference call"
+        )
+        for record, (batch_texts, batch_size) in zip(debug_records, recorded, strict=True):
+            assert record.levelno == logging.DEBUG
+            assert record.batch_size == batch_size == len(batch_texts)
+            longest = max(counts[int(t[1:])] for t in batch_texts)
+            assert record.longest_tokens == longest
 
 
 @pytest.mark.skipif(not model_available(), reason="fastembed model unavailable (jina-v2-small-en)")

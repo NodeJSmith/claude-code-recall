@@ -184,19 +184,29 @@ def search_messages(
 def compute_caveat(conn: sqlite3.Connection) -> str | None:
     """Return a one-line recall caveat or None when results are unimpaired.
 
-    Returns a caveat string when embeddings are unavailable (results degraded to
-    keyword-only) or branch coverage is below RECALL_CAVEAT_COVERAGE_THRESHOLD.
-    Returns None at/above threshold on a healthy install, or when total == 0
-    (nothing embedded yet — not a degradation). A failure computing coverage
-    degrades to None so a broken probe never breaks the recall itself.
+    Returns a caveat string when embeddings are unavailable (results degraded
+    to keyword-only), when any branch has only draft-quality embeddings, or
+    when full-quality coverage is below RECALL_CAVEAT_COVERAGE_THRESHOLD.
+    Returns None at/above threshold with no draft-quality branches on a
+    healthy install, or when total == 0 (nothing embedded yet — not a
+    degradation). A failure computing coverage degrades to None so a broken
+    probe never breaks the recall itself.
+
+    Three-state coverage: a branch with only draft-quality
+    chunks is searchable, just not at full fidelity — it must not read as
+    "not embedded" the way a bare embedded/total ratio would suggest.
     """
     try:
         if not chunk_vec_queryable(conn):
             return "embeddings unavailable — keyword-only results"
-        embedded, total = branch_embedding_coverage(conn)
-        if total > 0 and embedded / total < RECALL_CAVEAT_COVERAGE_THRESHOLD:
-            pct = int(100 * embedded / total)
-            return f"{pct}% of history embedded; results may be partial"
+        embedded_full, embedded_draft, total = branch_embedding_coverage(conn)
+        if total == 0:
+            return None
+        full_pct = int(100 * embedded_full / total)
+        if embedded_draft > 0:
+            return f"{full_pct}% of history fully embedded; {embedded_draft} branch(es) have draft quality embeddings"
+        if embedded_full / total < RECALL_CAVEAT_COVERAGE_THRESHOLD:
+            return f"{full_pct}% of history embedded; results may be partial"
         return None
     except Exception:
         log.exception("caveat computation failed")

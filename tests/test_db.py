@@ -349,7 +349,7 @@ class TestVecSchema:
         """
         conn = make_vec_conn()
         tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
-        assert "branch_vec" not in tables, "branch_vec must be absent after T06 teardown"
+        assert "branch_vec" not in tables, "branch_vec must be absent after vec schema teardown"
         conn.close()
 
     @VEC_SKIP
@@ -357,7 +357,7 @@ class TestVecSchema:
         """branch_vec teardown: branches_vec_ad is dropped; branches_chunks_ad + chunks_vec_ad are present."""
         conn = make_vec_conn()
         triggers = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='trigger'").fetchall()}
-        assert "branches_vec_ad" not in triggers, "branches_vec_ad must be dropped by T06 teardown"
+        assert "branches_vec_ad" not in triggers, "branches_vec_ad must be dropped by vec schema teardown"
         assert "branches_chunks_ad" in triggers, "branches_chunks_ad must exist after _ensure_vec_schema"
         assert "chunks_vec_ad" in triggers, "chunks_vec_ad must exist after _ensure_vec_schema"
         conn.close()
@@ -477,7 +477,7 @@ class TestLoadVecParameter:
             count = conn.execute("SELECT COUNT(*) FROM chunk_vec").fetchone()[0]
             assert count == 0
             tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
-            assert "branch_vec" not in tables, "branch_vec must be absent after T06 teardown"
+            assert "branch_vec" not in tables, "branch_vec must be absent after vec schema teardown"
 
     def test_load_vec_false_default_does_not_require_extension(self, tmp_path, monkeypatch):
         """get_connection() default path works even on machines where vec is unavailable.
@@ -696,7 +696,7 @@ def _seed_genuine_db(db_path, target_version: int) -> None:
     """Build a DB with the genuine historical schema at target_version, seeded with data.
 
     For v0/v1, delegates to the purpose-built seed functions that reproduce exact
-    pre-migration table shapes. For v2-v6, constructs the schema as it genuinely
+    pre-migration table shapes. For v2-v7, constructs the schema as it genuinely
     existed at that version — without columns/tables added by later migrations —
     so the migration ladder exercises its actual ADD COLUMN / CREATE TABLE paths
     instead of only hitting idempotent duplicate-column handlers.
@@ -709,6 +709,8 @@ def _seed_genuine_db(db_path, target_version: int) -> None:
       v4: messages has tool_content; rest same as v3
       v5: ingestion_check_cache exists WITHOUT db_coverage_fingerprint (v6 adds it)
       v6: ingestion_check_cache has db_coverage_fingerprint; branches still lacks v7 cols
+      v7: branches has summary_enrichment_*/summary_source_hash; chunks still lacks
+          cap_tokens (v8 adds it)
 
     Note: SCHEMA_CORE runs before _apply_migrations in open_connection, using
     CREATE TABLE IF NOT EXISTS — so tables that already exist keep their genuine
@@ -723,7 +725,7 @@ def _seed_genuine_db(db_path, target_version: int) -> None:
     if target_version == 1:
         _seed_v1_db_with_orphan_messages(db_path)
         return
-    if target_version > 6:
+    if target_version > 7:
         raise AssertionError(
             f"_seed_genuine_db has no genuine schema for v{target_version}; add it when SCHEMA_VERSION increases"
         )
@@ -749,6 +751,14 @@ def _seed_genuine_db(db_path, target_version: int) -> None:
     conn.execute("CREATE INDEX idx_sessions_project ON sessions(project_id)")
 
     # branches: v2+ has no fork_point_uuid; v2-v6 lack v7's summary_enrichment columns
+    branches_v7_cols = (
+        ", summary_enrichment_json TEXT, summary_enrichment_version INTEGER DEFAULT 0, "
+        "summary_enrichment_source_hash TEXT, summary_enrichment_status TEXT, "
+        "summary_enrichment_error TEXT, summary_enrichment_updated_at DATETIME, "
+        "summary_source_hash TEXT"
+        if target_version >= 7
+        else ""
+    )
     conn.execute(
         "CREATE TABLE branches ("
         "id INTEGER PRIMARY KEY, "
@@ -761,7 +771,8 @@ def _seed_genuine_db(db_path, target_version: int) -> None:
         "aggregated_content TEXT, context_summary TEXT, context_summary_json TEXT, "
         "summary_version INTEGER DEFAULT 0, "
         "embedding_version INTEGER DEFAULT 0, embedding_model TEXT, "
-        "summary_version_at_embed INTEGER, "
+        "summary_version_at_embed INTEGER"
+        f"{branches_v7_cols}, "
         "UNIQUE(session_id))"
     )
     conn.execute("CREATE INDEX idx_branches_session ON branches(session_id)")
@@ -1296,6 +1307,49 @@ class TestSchemaVersioning:
             columns = [row[1] for row in migrated.execute("PRAGMA table_info(ingestion_check_cache)").fetchall()]
             assert columns == ["session_uuid", "source_fingerprint", "db_coverage_fingerprint", "checked_at"]
 
+    def test_fresh_db_has_cap_tokens_column_and_partial_index(self, tmp_path):
+        """A fresh install's chunks table carries cap_tokens and its partial index."""
+        db_path = tmp_path / "fresh_v8.db"
+        with get_connection(settings={"db_path": str(db_path)}) as conn:
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(chunks)").fetchall()}
+            assert "cap_tokens" in columns
+
+            indexes = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'index'").fetchall()}
+            assert "idx_chunks_cap_tokens" in indexes
+
+    def test_migration_from_v7_adds_cap_tokens_column_and_index(self, tmp_path):
+        """A v7 DB (chunks lacking cap_tokens) gains the column and partial index on open."""
+        db_path = tmp_path / "v7_to_v8.db"
+        _seed_genuine_db(db_path, 7)
+
+        with get_connection(settings={"db_path": str(db_path)}) as conn:
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(chunks)").fetchall()}
+            assert "cap_tokens" in columns
+
+            indexes = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'index'").fetchall()}
+            assert "idx_chunks_cap_tokens" in indexes
+
+            # cap_tokens is nullable and defaults to NULL for pre-existing rows.
+            cap_tokens_value = conn.execute(
+                "SELECT cap_tokens FROM chunks WHERE content_hash = 'hash-genuine'"
+            ).fetchone()[0]
+            assert cap_tokens_value is None
+
+    def test_v8_migration_skips_alter_when_cap_tokens_already_present(self):
+        """Re-running _migrate_to_v8 on an already-migrated schema is a no-op ALTER-wise."""
+        conn = sqlite3.connect(":memory:")
+        conn.executescript(SCHEMA)
+
+        statements: list[str] = []
+        conn.set_trace_callback(statements.append)
+        db_module.db_base._migrate_to_v8(conn)
+        conn.set_trace_callback(None)
+
+        assert not [statement for statement in statements if "ALTER TABLE chunks ADD COLUMN" in statement]
+        conn.close()
+
     def test_migration_toctou_race_runs_migration_once(self, tmp_path):
         """Two connections racing to open the same v0 DB must not both migrate.
 
@@ -1401,7 +1455,7 @@ class TestMigrationVersionMatrix:
     # Expected row counts after migrating from each version to current.
     # v0: v1 deletes inactive branch + cascade (chunks, branch_messages)
     # v1: v2 deletes orphan messages
-    # v2-v6: v3-v7 only ADD columns/tables, no data modification
+    # v2-v7: v3-v8 only ADD columns/tables, no data modification
     EXPECTED_COUNTS: ClassVar[dict[int, dict[str, int]]] = {
         0: {
             "projects": 1,
@@ -1596,6 +1650,7 @@ class TestSchemaEquivalencePin:
             (8, "was_capped", "INTEGER", 1, "0", 0),
             (9, "embedding_version", "INTEGER", 1, "0", 0),
             (10, "embedding_model", "TEXT", 0, None, 0),
+            (11, "cap_tokens", "INTEGER", 0, None, 0),
         ],
         "import_log": [
             (0, "id", "INTEGER", 0, None, 1),
@@ -1652,6 +1707,7 @@ class TestSchemaEquivalencePin:
         "idx_branches_session",
         "idx_branches_summary_version",
         "idx_chunks_branch",
+        "idx_chunks_cap_tokens",
         "idx_chunks_version",
         "idx_messages_session",
         "idx_messages_session_uuid",
@@ -1831,7 +1887,7 @@ class TestChunkSchema:
         """branch_vec teardown: branch_vec absent, chunk_vec present after _ensure_vec_schema."""
         conn = make_vec_conn()
         tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
-        assert "branch_vec" not in tables, "branch_vec must be torn down by T06"
+        assert "branch_vec" not in tables, "branch_vec must be torn down by vec schema init"
         assert "chunk_vec" in tables, "chunk_vec must be present after _ensure_vec_schema"
         conn.close()
 

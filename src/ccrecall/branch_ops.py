@@ -11,6 +11,8 @@ import sqlite3
 
 from ccrecall.db_vec import fetch_branch_messages
 from ccrecall.embed_ops import embed_branch_chunks, write_branch_summary
+from ccrecall.embeddings import MODEL_TOKEN_LIMIT, SYNC_PATH_TOKEN_LIMIT
+from ccrecall.hooks.subprocess_utils import reclaim_memory, try_load_libc
 from ccrecall.models import LOGGER_NAME
 from ccrecall.parsing import build_aggregated_content, compute_branch_metadata, extract_session_metadata
 
@@ -196,8 +198,20 @@ def sync_branch(
     uuid_to_msg_id: dict[str, int],
     session_id: int,
     vec_writable: bool,
+    sync_path_token_limit: int | None = None,
 ) -> None:
-    """Process one branch: upsert metadata, diff links, compute summary, embed."""
+    """Process one branch: upsert metadata, diff links, compute summary, embed.
+
+    ``sync_path_token_limit`` is the raw, unclamped ``sync_path_token_limit``
+    setting from config (threaded through from ``sync_session``). Clamped here
+    to ``[1, MODEL_TOKEN_LIMIT]`` before being passed to ``embed_branch_chunks``
+    as ``cap_limit`` — this module already imports ``embeddings``, so the clamp
+    lives here rather than in session_ops.py (which must stay free of
+    fastembed/onnxruntime imports on the hook hot path) or config.py (which
+    must stay free of heavy deps entirely). See design/specs/015.
+    """
+    libc = try_load_libc()
+
     branch_uuids = branch["uuids"]
     is_active = branch["is_active"]
 
@@ -231,14 +245,22 @@ def sync_branch(
         "UPDATE branches SET aggregated_content = ?, summary_version = NULL WHERE id = ?",
         (agg_content, branch_db_id),
     )
+    reclaim_memory(libc)
 
     write_branch_summary(cursor, branch_db_id)
+    reclaim_memory(libc)
+
     # fetch_branch_messages returns flat {role, content, timestamp, uuid} dicts — the
     # format build_exchange_pairs expects. branch_msgs (raw JSONL) is the right input
     # for metadata computation above but not for embedding.
+    raw_cap = sync_path_token_limit
+    if isinstance(raw_cap, bool) or not isinstance(raw_cap, int):
+        raw_cap = SYNC_PATH_TOKEN_LIMIT
+    cap = min(max(raw_cap, 1), MODEL_TOKEN_LIMIT)
+    reclaim_memory(libc)
     try:
         embed_msgs = fetch_branch_messages(cursor, branch_db_id, include_notifications=False)
-        embed_branch_chunks(cursor, branch_db_id, embed_msgs, is_active, vec_writable)
+        embed_branch_chunks(cursor, branch_db_id, embed_msgs, is_active, vec_writable, cap_limit=cap)
     except Exception:
         # embed_branch_chunks raises on failure by design (see its docstring) and
         # leaves the embedding watermark stale, so the background backfill will

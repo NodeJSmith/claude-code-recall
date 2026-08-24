@@ -147,8 +147,10 @@ def print_status(settings: dict | None) -> None:
                 print(f"chunk coverage: {current_chunks}/{total_chunks} chunks at current version")
 
                 # Branch watermark: branches whose every current exchange is embedded.
-                embedded_branches, total_branches = branch_embedding_coverage(conn)
+                embedded_branches, draft_branches, total_branches = branch_embedding_coverage(conn)
                 print(f"embedded branches: {embedded_branches}/{total_branches} (watermark)")
+                if draft_branches:
+                    print(f"draft-quality branches: {draft_branches} (searchable, not full quality)")
             except sqlite3.Error as e:
                 log.warning("chunk coverage query failed; reporting degraded status", exc_info=True)
                 print(f"chunk coverage: error ({e})")

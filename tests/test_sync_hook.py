@@ -3,6 +3,7 @@
 import contextlib
 import io
 import json
+import logging
 import os
 import sqlite3
 import subprocess
@@ -1156,7 +1157,7 @@ class TestSyncCurrentTranscriptDiscovery:
 
         seen_project_dirs = []
 
-        def fake_sync_session(_conn, _session_file, root_dir):
+        def fake_sync_session(_conn, _session_file, root_dir, **_kwargs):
             seen_project_dirs.append(root_dir)
             return 0
 
@@ -1178,3 +1179,146 @@ class TestSyncCurrentTranscriptDiscovery:
 
         assert json.loads(captured.getvalue()) == {"continue": True}
         assert seen_project_dirs == [project_dir]
+
+    def test_run_passes_settings_to_sync_session(self, tmp_path, monkeypatch):
+        """run() must pass settings=settings through to
+        sync_session so sync_path_token_limit reaches sync_branch's clamp."""
+        projects_dir = tmp_path / "projects"
+        project_dir = projects_dir / "project-a"
+        session_file = project_dir / f"{VALID_SYNC_UUID}.jsonl"
+        session_file.parent.mkdir(parents=True)
+        session_file.write_text("{}", encoding="utf-8")
+
+        settings = {"exclude_projects": [], "logging_enabled": False, "sync_path_token_limit": 2048}
+
+        monkeypatch.setattr("ccrecall.config.pid_file_path", lambda key: tmp_path / f".pid-{key}")
+        monkeypatch.setattr(sync_current, "DEFAULT_PROJECTS_DIR", projects_dir)
+        monkeypatch.setattr(sync_current, "remove_pid_file", lambda key: None)
+        monkeypatch.setattr(sync_current, "load_settings", lambda: settings)
+        monkeypatch.setattr(sync_current, "setup_logging", lambda *_a, **_k: MagicMock())
+        monkeypatch.setattr(sync_current, "_warn_cold_model", lambda: None)
+        monkeypatch.setattr(sync_current, "record_embedding_failure", lambda *a, **k: None)
+        monkeypatch.setattr(sync_current, "clear_embedding_failure", lambda: None)
+        monkeypatch.setattr(sync_current, "get_session_file", lambda *a, **k: session_file)
+        monkeypatch.setattr(sync_current, "chunk_vec_queryable", lambda conn: True)
+
+        seen_settings = []
+
+        def fake_sync_session(*_args, **kwargs):
+            seen_settings.append(kwargs.get("settings"))
+            return 0
+
+        class _ConnContext:
+            def __enter__(self):
+                return MagicMock()
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        monkeypatch.setattr(sync_current, "sync_session", fake_sync_session)
+        monkeypatch.setattr(sync_current, "get_connection", lambda *a, **k: _ConnContext())
+
+        input_file = tmp_path / "hook.json"
+        input_file.write_text(json.dumps({"session_id": VALID_SYNC_UUID}), encoding="utf-8")
+        captured = io.StringIO()
+        with patch("sys.stdout", captured):
+            sync_current.run(input_file=input_file)
+
+        assert json.loads(captured.getvalue()) == {"continue": True}
+        assert seen_settings == [settings]
+
+
+class TestSyncCurrentCompletionLogging:
+    """sync_current.run() logs an INFO 'sync complete' line with
+    file_size and duration_s after every sync."""
+
+    def test_logs_file_size_and_duration_on_success(self, tmp_path, monkeypatch, caplog):
+        projects_dir = tmp_path / "projects"
+        project_dir = projects_dir / "project-a"
+        session_file = project_dir / f"{VALID_SYNC_UUID}.jsonl"
+        session_file.parent.mkdir(parents=True)
+        session_content = b'{"some": "transcript content"}'
+        session_file.write_bytes(session_content)
+
+        monkeypatch.setattr("ccrecall.config.pid_file_path", lambda key: tmp_path / f".pid-{key}")
+        monkeypatch.setattr(sync_current, "DEFAULT_PROJECTS_DIR", projects_dir)
+        monkeypatch.setattr(sync_current, "remove_pid_file", lambda key: None)
+        monkeypatch.setattr(sync_current, "load_settings", lambda: {"exclude_projects": [], "logging_enabled": True})
+        # Use the real "ccrecall" logger object (no file handlers attached) so
+        # caplog — which attaches its own handler to that logger name — can
+        # observe the emitted record without touching the real RUNTIME_DIR.
+        monkeypatch.setattr(sync_current, "setup_logging", lambda *_a, **_k: logging.getLogger("ccrecall"))
+        monkeypatch.setattr(sync_current, "_warn_cold_model", lambda: None)
+        monkeypatch.setattr(sync_current, "record_embedding_failure", lambda *a, **k: None)
+        monkeypatch.setattr(sync_current, "clear_embedding_failure", lambda: None)
+        monkeypatch.setattr(sync_current, "get_session_file", lambda *a, **k: session_file)
+        monkeypatch.setattr(sync_current, "chunk_vec_queryable", lambda conn: True)
+        monkeypatch.setattr(sync_current, "sync_session", lambda *a, **k: 0)
+
+        class _ConnContext:
+            def __enter__(self):
+                return MagicMock()
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        monkeypatch.setattr(sync_current, "get_connection", lambda *a, **k: _ConnContext())
+
+        input_file = tmp_path / "hook.json"
+        input_file.write_text(json.dumps({"session_id": VALID_SYNC_UUID}), encoding="utf-8")
+        captured = io.StringIO()
+        with caplog.at_level(logging.INFO, logger="ccrecall"), patch("sys.stdout", captured):
+            sync_current.run(input_file=input_file)
+
+        assert json.loads(captured.getvalue()) == {"continue": True}
+
+        complete_records = [r for r in caplog.records if r.message == "sync complete"]
+        assert complete_records, "sync_current.run() must log an INFO 'sync complete' record"
+        record = complete_records[0]
+        assert record.levelno == logging.INFO
+        assert record.file_size == len(session_content)
+        assert isinstance(record.duration_s, float)
+        assert record.duration_s >= 0
+
+    def test_stat_failure_is_caught_and_logged_not_propagated(self, tmp_path, monkeypatch, caplog):
+        """Code review MEDIUM: session_file.stat() (new in this task) must be inside
+        the existing try/except so a vanished-file race (e.g. a concurrent
+        `ccrecall clear`) is caught, logged, and reported via the continue
+        payload — not left to propagate uncaught out of a detached, DEVNULL'd
+        process where it would otherwise be a silent, unobservable sync loss."""
+        projects_dir = tmp_path / "projects"
+        project_dir = projects_dir / "project-a"
+        session_file = project_dir / f"{VALID_SYNC_UUID}.jsonl"
+        session_file.parent.mkdir(parents=True)
+        session_file.write_bytes(b'{"some": "transcript content"}')
+
+        original_stat = Path.stat
+
+        def raising_stat(self, *args, **kwargs):
+            if self == session_file:
+                raise OSError("session file vanished")
+            return original_stat(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "stat", raising_stat)
+        monkeypatch.setattr("ccrecall.config.pid_file_path", lambda key: tmp_path / f".pid-{key}")
+        monkeypatch.setattr(sync_current, "DEFAULT_PROJECTS_DIR", projects_dir)
+        monkeypatch.setattr(sync_current, "remove_pid_file", lambda key: None)
+        monkeypatch.setattr(sync_current, "load_settings", lambda: {"exclude_projects": [], "logging_enabled": True})
+        monkeypatch.setattr(sync_current, "setup_logging", lambda *_a, **_k: logging.getLogger("ccrecall"))
+        monkeypatch.setattr(sync_current, "_warn_cold_model", lambda: None)
+        monkeypatch.setattr(sync_current, "get_session_file", lambda *a, **k: session_file)
+
+        input_file = tmp_path / "hook.json"
+        input_file.write_text(json.dumps({"session_id": VALID_SYNC_UUID}), encoding="utf-8")
+        captured = io.StringIO()
+        with (
+            caplog.at_level(logging.ERROR, logger="ccrecall"),
+            patch("sys.stdout", captured),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            sync_current.run(input_file=input_file)
+
+        assert exc_info.value.code == 0
+        assert json.loads(captured.getvalue()) == {"continue": True}
+        error_records = [r for r in caplog.records if r.levelno == logging.ERROR]
+        assert error_records, "the OSError from stat() must be caught and logged, not propagate uncaught"

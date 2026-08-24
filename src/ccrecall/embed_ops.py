@@ -10,9 +10,11 @@ import logging
 import sqlite3
 
 from ccrecall.db_vec import write_chunk_embedding
-from ccrecall.embeddings import EMBEDDING_MODEL, EMBEDDING_VERSION, cap_for_embedding, embed_batch
+from ccrecall.embeddings import EMBEDDING_MODEL, EMBEDDING_VERSION, MODEL_TOKEN_LIMIT, cap_for_embedding, embed_batch
 from ccrecall.models import LOGGER_NAME
 from ccrecall.summarizer import SUMMARY_VERSION, build_exchange_pairs, compute_context_summary
+
+log = logging.getLogger(LOGGER_NAME)
 
 # Maximum number of exchanges embedded per sync on the write path. Version-stale
 # chunks (those only needing an EMBEDDING_VERSION bump) are deliberately left to
@@ -20,6 +22,19 @@ from ccrecall.summarizer import SUMMARY_VERSION, build_exchange_pairs, compute_c
 # here. This cap bounds the detached sync-current process's worst case even for a
 # first-sync of a long imported session or a rewind with many fresh exchanges.
 MAX_WRITE_PATH_EMBEDS_PER_SYNC = 8
+
+
+def effective_cap_tokens(cap_tokens: int | None) -> int:
+    """Resolve a chunk's stored cap_tokens to a comparable int.
+
+    A NULL cap_tokens means the chunk was embedded before this column existed
+    (or under no cap), which is equivalent to the model's own hard limit.
+    Every comparison site must go through this helper instead of comparing
+    cap_tokens directly, to avoid TypeError on `None < int`.
+    """
+    if cap_tokens is None:
+        return MODEL_TOKEN_LIMIT
+    return cap_tokens
 
 
 def write_branch_summary(cursor: sqlite3.Cursor, branch_db_id: int) -> str | None:
@@ -51,7 +66,7 @@ def write_branch_summary(cursor: sqlite3.Cursor, branch_db_id: int) -> str | Non
         # outer handler in the import loop). The branch stays eligible for
         # backfill, and the failure is observable in the log instead of being
         # silently swallowed.
-        logging.getLogger(LOGGER_NAME).exception("sync: summary write failed for branch %s", branch_db_id)
+        log.exception("sync: summary write failed for branch %s", branch_db_id)
         summary_md = None
     return summary_md
 
@@ -69,48 +84,73 @@ def _stamp_branch_watermark(cursor: sqlite3.Cursor, branch_db_id: int) -> None:
     )
 
 
-def _prepare_exchange_data(exchanges: list[dict]) -> list[dict]:
+def _prepare_exchange_data(exchanges: list[dict], cap_limit: int = MODEL_TOKEN_LIMIT) -> list[dict]:
     """Step 3 — compute embedded text, content hash, and bounded display text per exchange.
 
-    Display columns use the same head+tail cap per turn so the shown excerpt aligns
-    with the embedded region (design.md challenge M14).
+    ``content_hash`` is derived from the raw, uncapped ``combined`` text — not
+    from the post-cap output — so content identity is stable across cap tiers
+    (sync at 4096 vs backfill at 8192). Hashing the capped text would make the
+    same exchange hash differently depending on which path embedded it,
+    causing sync/backfill to ping-pong re-embedding each other's work forever.
+    See design/specs/015.
+
+    Display columns use the same head+tail cap per turn (at ``cap_limit``) so
+    the shown excerpt aligns with the embedded region (design.md challenge M14).
     """
     exchange_data = []
     for ex in exchanges:
         user = ex.get("user") or ""
         assistant = ex.get("assistant") or ""
         combined = f"{user}\n\n{assistant}"
-        text, was_capped = cap_for_embedding(combined)
-        content_hash = hashlib.sha256(text.encode()).hexdigest()
-        user_text, _ = cap_for_embedding(user)
-        assistant_text, _ = cap_for_embedding(assistant)
+        content_hash = hashlib.sha256(combined.encode()).hexdigest()
+        text, was_capped = cap_for_embedding(combined, max_tokens=cap_limit)
+        user_text, _ = cap_for_embedding(user, max_tokens=cap_limit)
+        assistant_text, _ = cap_for_embedding(assistant, max_tokens=cap_limit)
         exchange_data.append(
             {
                 "index": ex["index"],
                 "text": text,
-                "was_capped": was_capped,
                 "content_hash": content_hash,
                 "timestamp": ex.get("timestamp"),
                 "first_message_uuid": ex.get("first_message_uuid"),
                 "user_text": user_text,
                 "assistant_text": assistant_text,
+                # NULL unless the text was actually truncated — an untruncated
+                # exchange is full-quality regardless of which cap was applied.
+                # See design/specs/015 (Edge Cases).
+                "cap_tokens": cap_limit if was_capped else None,
             }
         )
     return exchange_data
 
 
-def _diff_exchanges(exchange_data: list[dict], existing_chunks: dict[int, dict]) -> tuple[list[dict], set[int]]:
-    """Step 5 — diff: eligible = no chunk row OR content_hash changed.
+def _diff_exchanges(
+    exchange_data: list[dict], existing_chunks: dict[int, dict], target_cap: int = MODEL_TOKEN_LIMIT
+) -> tuple[list[dict], set[int]]:
+    """Step 5 — diff: eligible = no chunk row, content_hash changed, OR cap-tokens upgrade needed.
 
     Version-stale (embedding_version < EMBEDDING_VERSION) but content-unchanged
     chunks are deliberately excluded — those are backfill's job (design H6).
+
+    A chunk is also flagged when its stored cap_tokens is below ``target_cap``,
+    even if content_hash matches — this is how backfill detects draft-quality
+    chunks needing an upgrade. ``target_cap`` is the
+    caller's own token limit (SYNC_PATH_TOKEN_LIMIT on sync, MODEL_TOKEN_LIMIT
+    on backfill), so the sync path never flags a chunk already embedded at a
+    higher backfill cap for downgrade. Cap-tokens upgrades are never added to
+    indices_to_prune — pruning is only for exchange indices that no longer
+    exist.
     """
     current_indices = {ed["index"] for ed in exchange_data}
-    needing_embed = [
-        ed
-        for ed in exchange_data
-        if ed["index"] not in existing_chunks or existing_chunks[ed["index"]]["content_hash"] != ed["content_hash"]
-    ]
+    needing_embed = []
+    for ed in exchange_data:
+        existing = existing_chunks.get(ed["index"])
+        if (
+            existing is None
+            or existing["content_hash"] != ed["content_hash"]
+            or effective_cap_tokens(existing.get("cap_tokens")) < target_cap
+        ):
+            needing_embed.append(ed)
     indices_to_prune = set(existing_chunks) - current_indices
     return needing_embed, indices_to_prune
 
@@ -131,7 +171,7 @@ def _write_embedded_chunks(cursor: sqlite3.Cursor, branch_db_id: int, needing_em
             """
             INSERT INTO chunks (
                 branch_id, exchange_index, content_hash, first_message_uuid,
-                timestamp, user_text, assistant_text, was_capped,
+                timestamp, user_text, assistant_text, cap_tokens,
                 embedding_version, embedding_model
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, NULL)
             """,
@@ -143,7 +183,7 @@ def _write_embedded_chunks(cursor: sqlite3.Cursor, branch_db_id: int, needing_em
                 ed["timestamp"],
                 ed["user_text"],
                 ed["assistant_text"],
-                int(ed["was_capped"]),
+                ed["cap_tokens"],
             ),
         )
         chunk_id = cursor.lastrowid
@@ -168,20 +208,30 @@ def _prune_stale_chunks(cursor: sqlite3.Cursor, branch_db_id: int, indices_to_pr
 def _should_stamp_watermark(
     exchange_data: list[dict], embedded_indices: set[int], existing_chunks: dict[int, dict]
 ) -> bool:
-    """Step 8 — every exchange now has a current-version chunk with the correct content_hash?
+    """Step 8 — every exchange now has a current-version, full-quality chunk with the correct content_hash?
 
-    Checks both version AND content_hash so that content-changed exchanges
-    beyond the cap (left for backfill) don't falsely satisfy the predicate.
+    Checks version, content_hash, AND cap_tokens so that content-changed
+    exchanges beyond the cap (left for backfill) or draft-quality chunks
+    (cap_tokens < MODEL_TOKEN_LIMIT) don't falsely
+    satisfy the predicate. The withhold-until-full-quality check applies to
+    freshly-embedded chunks too: `idx in embedded_indices` alone does not
+    prove full quality, so it must not bypass the per-exchange cap_tokens
+    check via ed["cap_tokens"] (the value _prepare_exchange_data just wrote —
+    NOT the caller's raw cap_limit, which would incorrectly treat every
+    untruncated exchange embedded at a lower cap as draft quality).
     """
     for ed in exchange_data:
         idx = ed["index"]
         if idx in embedded_indices:
-            continue  # just embedded at EMBEDDING_VERSION with correct content_hash
+            if effective_cap_tokens(ed.get("cap_tokens")) < MODEL_TOKEN_LIMIT:
+                return False
+            continue  # just embedded at EMBEDDING_VERSION, correct content_hash, full quality
         existing = existing_chunks.get(idx)
         if (
             existing is None
             or existing["embedding_version"] != EMBEDDING_VERSION
             or existing["content_hash"] != ed["content_hash"]
+            or effective_cap_tokens(existing.get("cap_tokens")) < MODEL_TOKEN_LIMIT
         ):
             return False
     return True
@@ -194,6 +244,7 @@ def embed_branch_chunks(
     is_active: bool,
     vec_writable: bool,
     max_embeds: int | None = MAX_WRITE_PATH_EMBEDS_PER_SYNC,
+    cap_limit: int = MODEL_TOKEN_LIMIT,
 ) -> int:
     """Embed per-exchange chunks for an active-leaf branch (incremental write path).
 
@@ -205,6 +256,12 @@ def embed_branch_chunks(
     ``max_embeds`` bounds per-call inference cost (defaults to
     MAX_WRITE_PATH_EMBEDS_PER_SYNC for the write path; backfill passes None so a
     single call fully embeds a branch, avoiding backfill's no-progress guard).
+
+    ``cap_limit`` bounds the per-exchange token cap (see ``cap_for_embedding``)
+    and the batch attention budget (see ``embed_batch``). Defaults to
+    MODEL_TOKEN_LIMIT (8192, backfill quality); the sync path passes the
+    configured SYNC_PATH_TOKEN_LIMIT (4096) via ``sync_branch``. See
+    design/specs/015.
 
     Returns the inference count (exchanges embedded). Raises on failure — callers
     (sync_branch) must wrap in contextlib.suppress(Exception). Does not commit; the
@@ -221,18 +278,31 @@ def embed_branch_chunks(
         _stamp_branch_watermark(cursor, branch_db_id)
         return 0
 
-    exchange_data = _prepare_exchange_data(exchanges)
+    exchange_data = _prepare_exchange_data(exchanges, cap_limit=cap_limit)
 
     cursor.execute(
-        "SELECT exchange_index, content_hash, embedding_version, embedding_model FROM chunks WHERE branch_id = ?",
+        """
+        SELECT exchange_index, content_hash, embedding_version, embedding_model, cap_tokens
+        FROM chunks WHERE branch_id = ?
+        """,
         (branch_db_id,),
     )
     existing_chunks: dict[int, dict] = {
-        row[0]: {"content_hash": row[1], "embedding_version": row[2], "embedding_model": row[3]}
+        row[0]: {"content_hash": row[1], "embedding_version": row[2], "embedding_model": row[3], "cap_tokens": row[4]}
         for row in cursor.fetchall()
     }
 
-    needing_embed_full, indices_to_prune = _diff_exchanges(exchange_data, existing_chunks)
+    needing_embed_full, indices_to_prune = _diff_exchanges(exchange_data, existing_chunks, target_cap=cap_limit)
+
+    # Path-aware cap-exceeded warning: cap_tokens is non-None when
+    # cap_for_embedding actually truncated this exchange's text at cap_limit.
+    # Scoped to exchanges actually selected for (re-)embedding this call
+    # (needing_embed_full), not the whole branch history — an exchange that was
+    # capped once but is already embedded and unchanged must not re-warn on
+    # every subsequent sync.
+    for ed in needing_embed_full:
+        if ed["cap_tokens"] is not None:
+            log.warning("exchange truncated for embedding", extra={"cap": cap_limit})
 
     if not needing_embed_full and not indices_to_prune:
         # Idempotent watermark repair: repairs a prior failed step 8.
@@ -251,7 +321,7 @@ def embed_branch_chunks(
     # Embed-before-write (step 6): batch-embed all texts BEFORE any DB write,
     # so a failed embed_batch call leaves every existing chunk row/vector intact.
     texts = [ed["text"] for ed in needing_embed]
-    vecs = embed_batch(texts)
+    vecs = embed_batch(texts, max_token_cap=cap_limit)
 
     _write_embedded_chunks(cursor, branch_db_id, needing_embed, vecs)
     _prune_stale_chunks(cursor, branch_db_id, indices_to_prune)

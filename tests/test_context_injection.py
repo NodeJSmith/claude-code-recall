@@ -933,7 +933,7 @@ class TestProactiveAlerts:
                 imported.add(node.module.split(".")[0])
 
         for lib in ("fastembed", "onnxruntime", "sqlite_vec"):
-            assert lib not in imported, f"health.py imports {lib} — violates AC#10 hot-path invariant"
+            assert lib not in imported, f"health.py imports {lib} — violates hot-path invariant"
 
     def test_ac1_dir_unwritable_no_sessions(self, tmp_path):
         """With dir unwritable, proactive block fires even when there are no sessions.

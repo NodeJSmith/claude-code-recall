@@ -12,8 +12,8 @@ import sqlite3
 
 import sqlite_vec
 
-from ccrecall.db import CHUNK_EMBEDDABLE_BRANCH_FILTER
-from ccrecall.embeddings import EMBEDDING_DIM, EMBEDDING_MODEL, EMBEDDING_VERSION
+from ccrecall.db import CHUNK_DRAFT_QUALITY_FILTER, CHUNK_EMBEDDABLE_BRANCH_FILTER
+from ccrecall.embeddings import EMBEDDING_DIM, EMBEDDING_MODEL, EMBEDDING_VERSION, MODEL_TOKEN_LIMIT
 from ccrecall.models import LOGGER_NAME
 
 log = logging.getLogger(LOGGER_NAME)
@@ -198,15 +198,27 @@ def ensure_vec(conn: sqlite3.Connection) -> bool:
     return False
 
 
-def branch_embedding_coverage(conn: sqlite3.Connection) -> tuple[int, int]:
-    """Return (embedded, total) embeddable branches by watermark.
+def branch_embedding_coverage(conn: sqlite3.Connection) -> tuple[int, int, int]:
+    """Return (embedded_full, embedded_draft, total) embeddable branches.
 
-    `total` is every CHUNK_EMBEDDABLE branch; `embedded` is those whose
-    watermark (embedding_version/embedding_model) is at the current version and
-    model. Vec-free — reads only the branches table, whose embedding columns
-    live in the base schema — so coverage reports work even where sqlite-vec
-    can't load. Shared by `ccrecall status` and search's `print_status` so the
-    two surfaces can't drift (see CHUNK_EMBEDDABLE_BRANCH_FILTER).
+    `total` is every CHUNK_EMBEDDABLE branch. `embedded_full` is those whose
+    watermark (embedding_version/embedding_model) is at the current version
+    and model — the write path's clear-first/set-last protocol
+    (embed_ops.py:_should_stamp_watermark) deliberately withholds that
+    watermark from a branch that still carries a draft-quality (capped) chunk
+    so a branch never reaches embedded_full while
+    any of its chunks are below FULL_QUALITY_TOKEN_LIMIT. `embedded_draft` is
+    the remainder of the non-full branches that DO have at least one chunk —
+    i.e. searchable now, just not at full fidelity; a branch that has neither
+    a current watermark nor any capped chunk (no chunk at all yet) counts in
+    neither embedded_full nor embedded_draft.
+
+    Vec-free — reads only the branches/chunks tables so coverage reports work
+    even where sqlite-vec can't load. The ``cap_tokens`` column (v8 migration)
+    may be absent on a read-only connection that skips migrations; when missing,
+    ``embedded_draft`` is reported as 0. Shared by ``ccrecall status``,
+    ``compute_caveat``, and search's ``print_status`` so the surfaces can't
+    drift (see CHUNK_EMBEDDABLE_BRANCH_FILTER).
 
     This is the watermark view. `backfill embeddings --status` reports a
     stricter, heal-aware count (its eligible set also flags watermark-current
@@ -214,9 +226,20 @@ def branch_embedding_coverage(conn: sqlite3.Connection) -> tuple[int, int]:
     surface can show slightly fewer embedded branches than this one.
     """
     total = conn.execute(f"SELECT COUNT(*) FROM branches WHERE {CHUNK_EMBEDDABLE_BRANCH_FILTER}").fetchone()[0]
-    embedded = conn.execute(
+    embedded_full = conn.execute(
         f"SELECT COUNT(*) FROM branches WHERE {CHUNK_EMBEDDABLE_BRANCH_FILTER} "
         "AND embedding_version = ? AND embedding_model = ?",
         (EMBEDDING_VERSION, EMBEDDING_MODEL),
     ).fetchone()[0]
-    return embedded, total
+    has_cap_tokens = any(row[1] == "cap_tokens" for row in conn.execute("PRAGMA table_info(chunks)"))
+    if has_cap_tokens:
+        embedded_draft = conn.execute(
+            f"SELECT COUNT(*) FROM branches WHERE {CHUNK_EMBEDDABLE_BRANCH_FILTER} "
+            "AND NOT (embedding_version = ? AND embedding_model = ?) "
+            "AND EXISTS (SELECT 1 FROM chunks WHERE chunks.branch_id = branches.id "
+            f"AND {CHUNK_DRAFT_QUALITY_FILTER})",
+            (EMBEDDING_VERSION, EMBEDDING_MODEL, MODEL_TOKEN_LIMIT),
+        ).fetchone()[0]
+    else:
+        embedded_draft = 0
+    return embedded_full, embedded_draft, total

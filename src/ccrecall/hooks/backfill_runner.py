@@ -39,9 +39,8 @@ def run_batch_loop(
       caller-side `--limit` remainder). An empty return ends the loop.
     - `is_limit_reached()` is checked before every `select_batch()` call.
     - `process_batch(rows)` runs the per-item work for one batch. It owns its
-      own exception handling and must commit before returning False (mirrors
-      the callers' `except Exception: ...; conn.commit(); return
-      EXIT_ABORT` path) — this driver does not commit on that path.
+      own exception handling and must rollback or commit before returning
+      False — this driver does not touch the connection on that path.
     - `on_stuck(current_ids)` runs when the same batch is re-selected
       (`current_ids == last_batch_ids`). Return True to abort the whole run,
       False to continue — the caller is responsible for changing its own
