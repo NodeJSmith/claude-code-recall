@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.24.1](https://github.com/NodeJSmith/claude-code-recall/compare/v0.24.0...v0.24.1) (2026-09-03)
+
+### Hooks
+
+* fix the SessionStart hook loading the full embedding stack (numpy/fastembed/onnxruntime) just to check background-job status, adding unnecessary startup latency (#200)
+
+### Backfill
+
+* fix summary backfill getting stuck retrying the same bad conversation branch forever instead of skipping it (#202)
+* fix embeddings backfill getting stuck on one bad conversation branch, blocking every branch behind it from ever being embedded (#204)
+
+### Bug Fixes
+
+* fix a crash in task/teammate-notification detection when a transcript message's `text` field was present but null (#198)
+* fix a false-positive "unresolved question" alert triggered by a system-generated notice that happened to quote a command tag (#198)
+* fix import silently reporting success while a disk or database error caused it to skip every remaining file in a project (#198)
+* fix a race between a manual backfill and the automatic sync that could hide a real "embeddings unavailable" alert (#198)
+* correct PyPI package metadata to list only the platforms ccrecall actually supports (Linux, macOS) (#198)
+
 ## [0.24.0](https://github.com/NodeJSmith/claude-code-recall/compare/v0.23.0...v0.24.0) (2026-09-03)
 
 ### Search
