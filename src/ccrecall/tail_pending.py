@@ -66,6 +66,24 @@ def typed_instruction(entry: dict) -> str | None:
     return text
 
 
+def _is_command_wrapper(entry: dict) -> bool:
+    """True if this main-chain user entry is a slash-command invocation.
+
+    A slash-command turn's raw content is entirely <command-name>/<command-args>
+    markup, which extract_text_content strips to empty text — so
+    typed_instruction returns None for it and the pending-question detector
+    below would otherwise treat the user as never having moved on. Checked
+    against the raw (pre-strip) content deliberately, so this stays scoped to
+    tail_pending.py rather than teaching content.py a new concept.
+    """
+    if entry.get("type") != "user":
+        return False
+    content = entry.get("message", {}).get("content")
+    if is_tool_result(content) or is_task_notification(content) or is_teammate_message(content):
+        return False
+    return isinstance(content, str) and "<command-name>" in content
+
+
 def find_pending_question(entries: list[dict]) -> dict | None:
     """The last main-chain AskUserQuestion with no genuine answer, or None.
 
@@ -111,8 +129,10 @@ def find_pending_question(entries: list[dict]) -> dict | None:
     if result_is_error.get(tool_id) is False:
         return None
     # No result or is_error=true — only pending if the user didn't move on.
+    # Moving on via a slash command counts too: _is_command_wrapper covers the
+    # entries typed_instruction alone can't see.
     tail = entries[last_entry_idx + 1 :]
-    if any(typed_instruction(e) for e in tail if _is_main_chain(e)):
+    if any((typed_instruction(e) or _is_command_wrapper(e)) for e in tail if _is_main_chain(e)):
         return None
     return payload
 
