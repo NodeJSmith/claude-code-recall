@@ -62,7 +62,7 @@ def _main(*, verbose: bool = False, db: Path = DEFAULT_DB_PATH) -> int:
         with get_connection(settings) as conn:
             cursor = conn.cursor()
 
-            def select_batch_cb() -> list[tuple]:
+            def select_batch() -> list[tuple]:
                 cursor.execute(
                     """
                     SELECT id FROM branches
@@ -128,7 +128,7 @@ def _main(*, verbose: bool = False, db: Path = DEFAULT_DB_PATH) -> int:
                 conn.commit()
 
             if not run_batch_loop(
-                select_batch=select_batch_cb,
+                select_batch=select_batch,
                 is_limit_reached=lambda: False,  # no --limit flag on this auto-spawned backfill
                 process_batch=process_batch,
                 on_stuck=on_stuck,
