@@ -38,6 +38,13 @@ from ccrecall.transcript_sources import discover_session_transcript_files
 
 _UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE)
 
+# Reasons a vec-ok clear here may erase. Scoped to what this hook's own
+# structural check (chunk_vec_queryable) actually verifies — REASON_VEC_UNAVAILABLE
+# and the no-reason/malformed-record case (None) — so a REASON_MODEL_UNAVAILABLE
+# record written by backfill (an orthogonal, unverified-here failure mode)
+# survives instead of being silently clobbered (#164).
+_VEC_OK_CLEAR_REASONS: set[str | None] = {None, REASON_VEC_UNAVAILABLE}
+
 # PID-file concurrency guard: at most one sync-current at a time.
 # Skip (not queue) if another is running — recovered on the next Stop.
 PID_KEY = "ccrecall-sync-current"
@@ -217,9 +224,12 @@ def run(input_file: Path | None = None) -> None:
             # Clear the embedding failure sidecar on a clean sync pass.
             # Only when vec was available — if it wasn't, we already recorded above
             # and must not clear until the next run where embedding can actually run.
+            # Scoped to _VEC_OK_CLEAR_REASONS: this check only verifies sqlite-vec,
+            # not the embedding model, so a model_unavailable record from backfill
+            # must not be erased here (#164).
             if vec_ok:
                 with contextlib.suppress(Exception):  # best-effort; must not affect hook behavior
-                    clear_embedding_failure()
+                    clear_embedding_failure(reasons=_VEC_OK_CLEAR_REASONS)
 
             # Output for hook (continue = True means don't block)
             output = {"continue": True}
