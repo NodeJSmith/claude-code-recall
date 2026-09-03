@@ -241,18 +241,17 @@ def run(
                             print(f"{_PRINT_PREFIX}: {msg}", file=sys.stderr)
                             last_progress = total_processed
                 except Exception:
-                    # Batch-level abort: sqlite3.Error/OSError re-raised by
-                    # _embed_one_branch (its content-vs-infra split — see that
-                    # function's docstring), or any other unexpected failure
-                    # from the bookkeeping code above (progress formatting,
-                    # logging). Per-row content errors never reach here —
-                    # _embed_one_branch marks the sentinel and returns a
-                    # result instead of raising. Rolling back discards the
-                    # entire current batch — both the failed branch's partial
-                    # state and any earlier branches whose SAVEPOINTs were
-                    # released but not yet committed. All are re-selected
-                    # cleanly on the next run. Prior batches (committed by
-                    # after_batch) are unaffected.
+                    # Batch-level abort: an infra error re-raised by
+                    # _embed_one_branch (see its docstring), or any other
+                    # unexpected failure from the bookkeeping code above
+                    # (progress formatting, logging) — never a per-row content
+                    # error, which _embed_one_branch marks and absorbs
+                    # internally. Rolling back discards the entire current
+                    # batch — both the failed branch's partial state and any
+                    # earlier branches whose SAVEPOINTs were released but not
+                    # yet committed. All are re-selected cleanly on the next
+                    # run. Prior batches (committed by after_batch) are
+                    # unaffected.
                     logger.exception("%s: session failure, aborting", _LOG_PREFIX)
                     conn.rollback()
                     return False
