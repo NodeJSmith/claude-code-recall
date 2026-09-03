@@ -14,6 +14,7 @@ import argparse
 import re
 import subprocess
 import sys
+from dataclasses import dataclass, field
 
 OWNER_EMAILS = frozenset(
     {
@@ -92,9 +93,15 @@ def contributor_key(name: str, email: str) -> str:
     return f"name:{name}"
 
 
-def find_external_contributors(from_ref: str, to_ref: str) -> dict[str, dict[str, object]]:
+@dataclass
+class ContributorGroup:
+    name: str
+    entries: list[dict[str, str]] = field(default_factory=list)
+
+
+def find_external_contributors(from_ref: str, to_ref: str) -> dict[str, ContributorGroup]:
     commits = get_commits(from_ref, to_ref)
-    contributors: dict[str, dict[str, object]] = {}
+    contributors: dict[str, ContributorGroup] = {}
 
     for commit in commits:
         if not is_external(commit["name"], commit["email"]):
@@ -104,14 +111,14 @@ def find_external_contributors(from_ref: str, to_ref: str) -> dict[str, dict[str
         entry = {"subject": commit["subject"], "email": commit["email"]}
 
         if key not in contributors:
-            contributors[key] = {"name": commit["name"], "entries": []}
-        contributors[key]["entries"].append(entry)
+            contributors[key] = ContributorGroup(name=commit["name"])
+        contributors[key].entries.append(entry)
 
     return contributors
 
 
 def print_contributors(
-    contributors: dict[str, dict[str, object]],
+    contributors: dict[str, ContributorGroup],
     from_ref: str,
     to_ref: str,
 ) -> None:
@@ -120,17 +127,16 @@ def print_contributors(
         return
 
     print(f"External contributors in {from_ref}..{to_ref}:\n")
-    for _key, contributor in sorted(contributors.items(), key=lambda kv: kv[1]["name"]):
-        entries = contributor["entries"]
+    for _key, contributor in sorted(contributors.items(), key=lambda kv: kv[1].name):
         username = None
-        for entry in entries:
+        for entry in contributor.entries:
             username = parse_github_username(entry["email"])
             if username:
                 break
 
-        display = f"@{username}" if username else contributor["name"]
+        display = f"@{username}" if username else contributor.name
         print(f"  {display}")
-        for entry in entries:
+        for entry in contributor.entries:
             print(f"    - {entry['subject']}")
         print()
 
