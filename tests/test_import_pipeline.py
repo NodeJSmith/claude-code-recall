@@ -683,6 +683,98 @@ class TestImportProject:
         assert cursor.execute("SELECT COUNT(*) FROM import_log").fetchone()[0] == 0
 
 
+class TestImportPoisonContainment:
+    """Issue #170 — one raising transcript file must not wedge the whole batch.
+
+    Before the fix, a single file that raised during import_session propagated
+    straight out of import_project (and _run), killing the detached import
+    process before any later file in the same directory (or any later
+    project) got a chance to import, and before the crash was logged anywhere.
+    """
+
+    def test_poison_file_does_not_block_sibling_files_in_same_project(self, memory_db, tmp_path, caplog, monkeypatch):
+        """A raising file must be skipped (and logged) while its siblings still import."""
+        project_dir = tmp_path / "-Users-sam-project"
+        project_dir.mkdir()
+
+        # "aaa-poison" sorts before "zzz-good" alphabetically, matching the
+        # real-world failure mode: everything that sorts after the poison
+        # file in projects_dir.iterdir()/glob order never gets a chance.
+        poison_file = project_dir / "aaa-poison.jsonl"
+        good_file = project_dir / "zzz-good.jsonl"
+        shutil.copy(FIXTURE_DIR / "linear_3_exchange.jsonl", poison_file)
+        shutil.copy(FIXTURE_DIR / "linear_3_exchange.jsonl", good_file)
+
+        real_import_session = import_session
+
+        def _raise_on_poison(conn, filepath, project_id, *, force=False):
+            if filepath == poison_file:
+                raise RuntimeError("simulated poison transcript")
+            return real_import_session(conn, filepath, project_id, force=force)
+
+        monkeypatch.setattr("ccrecall.hooks.import_conversations.import_session", _raise_on_poison)
+
+        with caplog.at_level(logging.ERROR, logger="ccrecall"):
+            sessions, _messages, skipped = import_project(memory_db, project_dir)
+
+        # The good file must still have been imported despite the poison file
+        # raising — this is the core containment guarantee.
+        assert sessions > 0 or skipped > 0, "the non-poison file must still be processed"
+
+        cursor = memory_db.cursor()
+        cursor.execute("SELECT COUNT(*) FROM import_log WHERE file_path = ?", (str(good_file),))
+        assert cursor.fetchone()[0] == 1, "the good file must have an import_log entry"
+
+        cursor.execute("SELECT COUNT(*) FROM import_log WHERE file_path = ?", (str(poison_file),))
+        assert cursor.fetchone()[0] == 0, "the poison file must be left unwritten so it retries next run"
+
+        # The crash must be logged with a traceback, not silently discarded.
+        assert any(
+            "poison" in record.message.lower() or "aaa-poison" in record.message
+            for record in caplog.records
+            if record.levelno >= logging.ERROR
+        ), "the poison-file crash must be logged at ERROR level"
+        assert any(record.exc_info for record in caplog.records if record.levelno >= logging.ERROR), (
+            "the logged crash must include a traceback (logger.exception)"
+        )
+
+    def test_poison_file_does_not_corrupt_sibling_transaction(self, memory_db, tmp_path, monkeypatch):
+        """A poison file's partial writes must not leak into the shared connection's
+        uncommitted transaction alongside a sibling file's real work."""
+        project_dir = tmp_path / "-Users-sam-project"
+        project_dir.mkdir()
+
+        poison_file = project_dir / "aaa-poison.jsonl"
+        good_file = project_dir / "zzz-good.jsonl"
+        shutil.copy(FIXTURE_DIR / "linear_3_exchange.jsonl", poison_file)
+        shutil.copy(FIXTURE_DIR / "linear_3_exchange.jsonl", good_file)
+
+        real_import_session = import_session
+
+        def _raise_after_partial_write(conn, filepath, project_id, *, force=False):
+            if filepath == poison_file:
+                # Simulate partial work happening before the crash: write a row,
+                # then raise before it would ever be committed or logged to
+                # import_log by the real import_session.
+                conn.execute(
+                    "INSERT INTO projects (path, key, name) VALUES (?, ?, ?)",
+                    ("/poison/partial", "-poison-partial", "poison_partial"),
+                )
+                raise RuntimeError("simulated poison transcript after partial write")
+            return real_import_session(conn, filepath, project_id, force=force)
+
+        monkeypatch.setattr("ccrecall.hooks.import_conversations.import_session", _raise_after_partial_write)
+
+        import_project(memory_db, project_dir)
+
+        cursor = memory_db.cursor()
+        cursor.execute("SELECT COUNT(*) FROM projects WHERE key = ?", ("-poison-partial",))
+        assert cursor.fetchone()[0] == 0, "partial writes from the poison file must be rolled back, not leaked"
+
+        cursor.execute("SELECT COUNT(*) FROM import_log WHERE file_path = ?", (str(good_file),))
+        assert cursor.fetchone()[0] == 1, "the good file's real work must survive the poison file's rollback"
+
+
 class TestImportRunPathSafety:
     """Test --project path safety checks in the import hook."""
 
