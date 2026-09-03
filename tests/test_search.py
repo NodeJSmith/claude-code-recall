@@ -21,7 +21,7 @@ from ccrecall.formatting import apply_scores, format_snippet_json, format_snippe
 from ccrecall.fusion import rrf_scored
 from ccrecall.recent_chats import get_recent_sessions
 from ccrecall.schema import SCHEMA, SCHEMA_CORE, detect_fts_support
-from ccrecall.search_cli import format_markdown, print_status, run, run_messages
+from ccrecall.search_cli import MAX_SEARCH_RESULTS, format_markdown, print_status, run, run_messages
 from ccrecall.search_conversations import OVERFETCH_FLOOR, compute_caveat, search_messages, search_sessions
 from ccrecall.search_hydrate import dedup_by_session, hydrate_cards
 from ccrecall.search_query import ScopeFilter
@@ -2689,3 +2689,63 @@ class TestSearchInvalidDateRejected:
         envelope = json.loads(capsys.readouterr().err)
         assert envelope["code"] == "invalid_date"
         assert "--after" in envelope["error"]
+
+
+class TestMaxResultsCap:
+    """MAX_SEARCH_RESULTS is single-sourced in search_cli.py at 20; run()/run_messages()
+    each clamp their max_results backstop against it — this pins that clamp so the
+    constant and the two backstops can't silently drift apart.
+    """
+
+    def test_max_search_results_is_20(self):
+        assert MAX_SEARCH_RESULTS == 20
+
+    def test_run_accepts_max_results_of_20(self, tmp_path):
+        db_path = tmp_path / "test.db"
+        c = sqlite3.connect(str(db_path))
+        c.executescript(SCHEMA_CORE)
+        c.commit()
+        c.close()
+
+        with patch("ccrecall.search_cli.search_sessions", return_value=([], False)) as mock_search:
+            run(query="test", max_results=20, db=db_path)
+
+        assert mock_search.call_args.kwargs["max_results"] == 20
+
+    def test_run_clamps_above_20_to_20(self, tmp_path):
+        """Backstop for direct (non-CLI) callers -- the CLI validator rejects values
+        above MAX_SEARCH_RESULTS before reaching run(), but run() clamps too."""
+        db_path = tmp_path / "test.db"
+        c = sqlite3.connect(str(db_path))
+        c.executescript(SCHEMA_CORE)
+        c.commit()
+        c.close()
+
+        with patch("ccrecall.search_cli.search_sessions", return_value=([], False)) as mock_search:
+            run(query="test", max_results=999, db=db_path)
+
+        assert mock_search.call_args.kwargs["max_results"] == 20
+
+    def test_run_messages_accepts_max_results_of_20(self, tmp_path):
+        db_path = tmp_path / "test.db"
+        c = sqlite3.connect(str(db_path))
+        c.executescript(SCHEMA_CORE)
+        c.commit()
+        c.close()
+
+        with patch("ccrecall.search_cli.search_messages", return_value=([], False)) as mock_search:
+            run_messages(query="test", max_results=20, db=db_path)
+
+        assert mock_search.call_args.kwargs["max_results"] == 20
+
+    def test_run_messages_clamps_above_20_to_20(self, tmp_path):
+        db_path = tmp_path / "test.db"
+        c = sqlite3.connect(str(db_path))
+        c.executescript(SCHEMA_CORE)
+        c.commit()
+        c.close()
+
+        with patch("ccrecall.search_cli.search_messages", return_value=([], False)) as mock_search:
+            run_messages(query="test", max_results=999, db=db_path)
+
+        assert mock_search.call_args.kwargs["max_results"] == 20

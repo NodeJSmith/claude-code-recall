@@ -9,7 +9,9 @@ test_backfill_embeddings.py and is not repeated here.
 from unittest.mock import patch
 
 import pytest
+from cyclopts.exceptions import ValidationError
 
+from ccrecall.cli import app
 from ccrecall.cli.commands import (
     cmd_backfill_summaries,
     cmd_backfill_tool_content,
@@ -161,6 +163,71 @@ class TestCmdSearch:
             db=DEFAULT_DB_PATH,
         )
 
+    def test_positional_query_resolves_identically_to_flag(self):
+        """`cmd_search("q")` (positional) must dispatch the same query as `-q`."""
+        with patch("ccrecall.cli.commands.search_mod.run") as mock_run:
+            cmd_search(
+                "test query",
+                status=False,
+                keyword_only=False,
+                max_results=5,
+                session=None,
+                project=None,
+                path=None,
+                before=None,
+                after=None,
+                verbose=False,
+                include_notifications=False,
+                db=DEFAULT_DB_PATH,
+                ctx=DEFAULT_CLI_CONTEXT,
+            )
+        mock_run.assert_called_once_with(
+            query="test query",
+            status=False,
+            keyword_only=False,
+            max_results=5,
+            session=None,
+            project=None,
+            path=None,
+            before=None,
+            after=None,
+            output_format="markdown",
+            verbose=False,
+            include_notifications=False,
+            db=DEFAULT_DB_PATH,
+        )
+
+    def test_app_accepts_positional_query(self):
+        """End-to-end: `ccrecall search "q"` parses and dispatches like `-q "q"`."""
+        with patch("ccrecall.cli.commands.search_mod.run") as mock_run, pytest.raises(SystemExit) as exc_info:
+            app(["search", "auth bug"], exit_on_error=False, print_error=False)
+        assert exc_info.value.code == 0
+        assert mock_run.call_args.kwargs["query"] == "auth bug"
+
+    def test_app_accepts_flagged_query(self):
+        with patch("ccrecall.cli.commands.search_mod.run") as mock_run, pytest.raises(SystemExit) as exc_info:
+            app(["search", "-q", "auth bug"], exit_on_error=False, print_error=False)
+        assert exc_info.value.code == 0
+        assert mock_run.call_args.kwargs["query"] == "auth bug"
+
+    def test_app_rejects_both_positional_and_flag(self):
+        with pytest.raises(ValidationError, match="cannot both be given"):
+            app(["search", "positional query", "-q", "flagged query"], exit_on_error=False, print_error=False)
+
+    def test_app_rejects_no_query_and_no_status(self):
+        with pytest.raises(ValidationError, match="a query is required"):
+            app(["search"], exit_on_error=False, print_error=False)
+
+    def test_app_accepts_max_results_of_20(self):
+        with patch("ccrecall.cli.commands.search_mod.run") as mock_run, pytest.raises(SystemExit) as exc_info:
+            app(["search", "-q", "test", "-n", "20"], exit_on_error=False, print_error=False)
+        assert exc_info.value.code == 0
+        assert mock_run.call_args.kwargs["max_results"] == 20
+
+    def test_app_rejects_max_results_above_20(self):
+        with pytest.raises(ValidationError):
+            app(["search", "-q", "test", "-n", "21"], exit_on_error=False, print_error=False)
+
 
 class TestCmdSearchMessages:
     def test_calls_run_messages_with_parsed_arguments(self):
@@ -191,6 +258,59 @@ class TestCmdSearchMessages:
             include_notifications=False,
             db=DEFAULT_DB_PATH,
         )
+
+    def test_positional_query_resolves_identically_to_flag(self):
+        with patch("ccrecall.cli.commands.search_mod.run_messages") as mock_run:
+            cmd_search_messages(
+                "test query",
+                max_results=5,
+                session=None,
+                project=None,
+                path=None,
+                before=None,
+                after=None,
+                verbose=False,
+                include_notifications=False,
+                db=DEFAULT_DB_PATH,
+                ctx=DEFAULT_CLI_CONTEXT,
+            )
+        mock_run.assert_called_once_with(
+            query="test query",
+            max_results=5,
+            session=None,
+            project=None,
+            path=None,
+            before=None,
+            after=None,
+            output_format="markdown",
+            verbose=False,
+            include_notifications=False,
+            db=DEFAULT_DB_PATH,
+        )
+
+    def test_app_accepts_positional_query(self):
+        with patch("ccrecall.cli.commands.search_mod.run_messages") as mock_run, pytest.raises(SystemExit) as exc_info:
+            app(["search-messages", "auth bug"], exit_on_error=False, print_error=False)
+        assert exc_info.value.code == 0
+        assert mock_run.call_args.kwargs["query"] == "auth bug"
+
+    def test_app_accepts_flagged_query(self):
+        with patch("ccrecall.cli.commands.search_mod.run_messages") as mock_run, pytest.raises(SystemExit) as exc_info:
+            app(["search-messages", "-q", "auth bug"], exit_on_error=False, print_error=False)
+        assert exc_info.value.code == 0
+        assert mock_run.call_args.kwargs["query"] == "auth bug"
+
+    def test_app_rejects_both_positional_and_flag(self):
+        with pytest.raises(ValidationError, match="cannot both be given"):
+            app(
+                ["search-messages", "positional query", "-q", "flagged query"],
+                exit_on_error=False,
+                print_error=False,
+            )
+
+    def test_app_rejects_no_query(self):
+        with pytest.raises(ValidationError, match="a query is required"):
+            app(["search-messages"], exit_on_error=False, print_error=False)
 
 
 class TestCmdTail:

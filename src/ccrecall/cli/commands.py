@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 from typing import Annotated, Literal
 
-from cyclopts import App, ArgumentCollection, Group, Parameter
+from cyclopts import App, Argument, ArgumentCollection, Group, Parameter
 from cyclopts.validators import Number
 
 from ccrecall import health
@@ -36,8 +36,23 @@ from ccrecall.hooks import sync_current as sync_current_mod
 _FLAG = Parameter(negative=[])
 
 
+# Friendly labels for the query-mode conflict/missing-arg messages below —
+# keyed by each argument's cyclopts-assigned name (the positional query's
+# Parameter(name="QUERY") and the --query/-q and --status flag names).
+_SEARCH_MODE_LABELS = {
+    "QUERY": "a positional query argument",
+    "--query": "--query/-q",
+    "--status": "--status",
+}
+
+
+def _search_mode_conflict_message(provided: list[Argument]) -> str:
+    labels = " and ".join(_SEARCH_MODE_LABELS.get(arg.name, arg.name) for arg in provided)
+    return f"{labels} cannot both be given — provide the query once, positionally or via --query/-q."
+
+
 def _exactly_one_query_or_status(arguments: ArgumentCollection) -> None:
-    """Group validator: search needs exactly one of --query / --status.
+    """Group validator: search needs exactly one of positional query / --query / --status.
 
     Runs at parse time so the message renders in cyclopts' boxed error style
     (and exits 2 via the entry-point wrapper), matching every other usage error.
@@ -46,14 +61,29 @@ def _exactly_one_query_or_status(arguments: ArgumentCollection) -> None:
     # arg.tokens is non-empty only when that argument was supplied on the CLI.
     provided = [arg for arg in arguments if arg.tokens]
     if not provided:
-        raise ValueError("one of --query/-q or --status is required")
+        raise ValueError("a query is required: provide it positionally, via --query/-q, or pass --status.")
     if len(provided) > 1:
-        raise ValueError("--query and --status are mutually exclusive")
+        raise ValueError(_search_mode_conflict_message(provided))
 
 
-# Membership in this group (query + status below) is what triggers the
-# exactly-one validator at parse time — the flags carry no logic themselves.
+# Membership in this group (positional query + --query + --status below) is
+# what triggers the exactly-one validator at parse time — the flags carry no
+# logic themselves.
 _SEARCH_MODE = Group("Search mode", validator=_exactly_one_query_or_status)
+
+
+def _exactly_one_query(arguments: ArgumentCollection) -> None:
+    """Group validator: search-messages needs exactly one of positional query / --query."""
+    provided = [arg for arg in arguments if arg.tokens]
+    if not provided:
+        raise ValueError("a query is required: provide it positionally or via --query/-q.")
+    if len(provided) > 1:
+        raise ValueError(_search_mode_conflict_message(provided))
+
+
+# Membership in this group (positional query + --query below) triggers the
+# exactly-one validator for search-messages, which has no --status mode.
+_QUERY_MODE = Group("Search mode", validator=_exactly_one_query)
 
 
 # Output format is global: the meta launcher's --json fills ctx.json_mode, which
@@ -345,6 +375,11 @@ def cmd_recent(
 
 @app.command(name="search")
 def cmd_search(
+    query_positional: Annotated[
+        str | None,
+        Parameter(name="QUERY", group=_SEARCH_MODE, help="Search keywords (positional form of --query/-q)."),
+    ] = None,
+    /,
     *,
     query: Annotated[str | None, Parameter(name=["--query", "-q"], group=_SEARCH_MODE, help="Search keywords.")] = None,
     status: Annotated[bool, _FLAG, Parameter(group=_SEARCH_MODE, help="Print diagnostic status and exit.")] = False,
@@ -369,12 +404,17 @@ def cmd_search(
 ) -> None:
     """Search conversation sessions (keyword + vector fusion).
 
-    Date filters (--before/--after) are branch-level (session start time).
+    Accepts the query positionally (``ccrecall search "auth bug"``) or via
+    --query/-q — not both. Date filters (--before/--after) are branch-level
+    (session start time).
 
     With --json: {query, ranked, count, results: [{score, session_uuid, handle, project, git_branch, topic, ...}]}
     """
+    # _SEARCH_MODE's group validator already guarantees exactly one of
+    # query_positional / query / status was supplied.
+    resolved_query = query_positional if query_positional is not None else query
     search_mod.run(
-        query=query,
+        query=resolved_query,
         status=status,
         keyword_only=keyword_only,
         max_results=max_results,
@@ -392,8 +432,13 @@ def cmd_search(
 
 @app.command(name="search-messages")
 def cmd_search_messages(
+    query_positional: Annotated[
+        str | None,
+        Parameter(name="QUERY", group=_QUERY_MODE, help="Search query (positional form of --query/-q)."),
+    ] = None,
+    /,
     *,
-    query: Annotated[str, Parameter(name=["--query", "-q"], help="Search query (required).")],
+    query: Annotated[str | None, Parameter(name=["--query", "-q"], group=_QUERY_MODE, help="Search query.")] = None,
     max_results: Annotated[
         int,
         Parameter(
@@ -414,16 +459,22 @@ def cmd_search_messages(
 ) -> None:
     """Search matched exchanges by semantic similarity (chunk-KNN, Entrypoint B).
 
-    Returns matched exchanges ranked by chunk distance — not rolled up to session,
-    so multiple matches within one session all appear as separate results.
+    Accepts the query positionally (``ccrecall search-messages "auth bug"``) or
+    via --query/-q — not both. Returns matched exchanges ranked by chunk
+    distance — not rolled up to session, so multiple matches within one
+    session all appear as separate results.
 
     Date filters (--before/--after) are branch-level (the exchange's session
     start time), not per-exchange, matching search and recent-chats.
 
     With --json: {query, ranked, count, results: [{score, session_uuid, handle, exchange_index, user, assistant, ...}]}
     """
+    # _QUERY_MODE's group validator already guarantees exactly one of
+    # query_positional / query was supplied.
+    resolved_query = query_positional if query_positional is not None else query
+    assert resolved_query is not None  # noqa: S101 — type-checker narrowing; the real guard is the group validator
     search_mod.run_messages(
-        query=query,
+        query=resolved_query,
         max_results=max_results,
         session=session,
         project=project,
