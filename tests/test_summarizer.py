@@ -249,6 +249,10 @@ class TestBuildContextSummaryJson:
         assert result["metadata"]["git_branch"] == "main"
         assert result["metadata"]["files_modified"] == ["src/main.py"]
         assert result["metadata"]["tool_counts"] == {"Read": 5}
+        # exchange_count (3, transcript-derived) disagrees with the actual
+        # stored/paired exchange count (2) here — rendered_exchange_count
+        # always tracks len(exchanges), independent of the transcript count.
+        assert result["metadata"]["rendered_exchange_count"] == 2
 
     def test_empty_messages(self):
         branch_row = {"started_at": None, "ended_at": None}
@@ -357,6 +361,7 @@ class TestRenderContextSummary:
             ],
             "metadata": {
                 "exchange_count": 2,
+                "rendered_exchange_count": 2,
                 "started_at": "2025-01-15T10:00:00Z",
                 "ended_at": "2025-01-15T10:30:00Z",
                 "git_branch": "main",
@@ -401,6 +406,7 @@ class TestRenderContextSummary:
             ],
             "metadata": {
                 "exchange_count": 12,
+                "rendered_exchange_count": 12,
                 "started_at": "2025-01-15T10:00:00Z",
                 "ended_at": "2025-01-15T11:00:00Z",
                 "git_branch": "feat/x",
@@ -453,6 +459,71 @@ class TestRenderContextSummary:
     def test_empty_summary(self):
         assert render_context_summary({}) == ""
         assert render_context_summary({"first_exchanges": []}) == ""
+
+    def test_exchange_count_divergence_no_duplicate_no_phantom_gap(self):
+        """Regression for #174: exchange_count (transcript-derived) disagreeing
+        with the stored/paired exchange count must not duplicate exchange text
+        or report a phantom gap. 7 stored exchanges, exchange_count=9 (two
+        slash-command turns inflate the transcript count without a stored
+        message row) — build_context_summary_json splits 2 first + 7 last
+        (<=8 rule: all exchanges), so the layout must render all 7 once, not
+        take the >8 branch (which would render the 7 again as "first_exchanges").
+        """
+        messages = []
+        for i in range(7):
+            messages.append({"role": "user", "content": f"user question {i}", "timestamp": f"t{i}"})
+            messages.append({"role": "assistant", "content": f"assistant answer {i}", "timestamp": f"t{i}"})
+        branch_row = {
+            "exchange_count": 9,
+            "started_at": "2025-01-15T10:00:00Z",
+            "ended_at": "2025-01-15T11:00:00Z",
+        }
+
+        summary_json = build_context_summary_json(branch_row, messages)
+        assert summary_json["metadata"]["rendered_exchange_count"] == 7
+
+        result = render_context_summary(summary_json)
+
+        assert "### Conversation" in result
+        assert "### Where We Left Off" not in result
+        assert "### Earlier in This Session" not in result
+        assert "earlier exchanges" not in result  # no phantom gap line
+        # No exchange block renders twice. Match the rendered "**User:**\ntext"
+        # pairing rather than bare substrings — the topic line and the footer
+        # both legitimately echo exchange 0's user text once each outside any
+        # exchange block, which a bare substring count would misread as a dup.
+        for i in range(7):
+            assert result.count(f"User:**\nuser question {i}") == 1
+            assert result.count(f"Assistant:**\nassistant answer {i}") == 1
+
+    def test_exchange_count_divergence_opposite_direction_no_dropped_exchanges(self):
+        """Opposite divergence: exchange_count (5) understates the real 10
+        stored exchanges, so exchange_count <= SHORT_SESSION_MAX_EXCHANGES (8)
+        is true while len(exchanges) > 8 — keying the layout off exchange_count
+        would silently drop the first exchanges into the "all in one block"
+        layout instead of the correct first/last split."""
+        messages = []
+        for i in range(10):
+            messages.append({"role": "user", "content": f"user question {i}", "timestamp": f"t{i}"})
+            messages.append({"role": "assistant", "content": f"assistant answer {i}", "timestamp": f"t{i}"})
+        branch_row = {
+            "exchange_count": 5,  # understates the real 10 stored exchanges
+            "started_at": "2025-01-15T10:00:00Z",
+            "ended_at": "2025-01-15T11:00:00Z",
+        }
+
+        summary_json = build_context_summary_json(branch_row, messages)
+        assert summary_json["metadata"]["rendered_exchange_count"] == 10
+
+        result = render_context_summary(summary_json)
+
+        assert "### Where We Left Off" in result
+        assert "### Earlier in This Session" in result
+        assert "user question 0" in result
+        assert "user question 1" in result
+        # Gap line, if present, must reflect actually-omitted exchanges (10 - 2 - 6 = 2), not
+        # be suppressed or report a count derived from the wrong (understated) exchange_count.
+        assert "[... 2 earlier exchanges" in result
 
 
 class TestComputeContextSummary:
