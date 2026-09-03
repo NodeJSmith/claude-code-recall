@@ -33,7 +33,8 @@ distinguishes "this branch's content broke the model" from "the model/session
 itself is broken" — both surface as ordinary `Exception` subclasses. So the
 distinction above is enforced with a live re-probe rather than exception-type
 classification: when `_embed_one_branch`'s catch-all clause fires, it calls
-`_model_still_healthy()`, which retries the model on a trivial fixed string.
+`_model_still_healthy()`, which re-runs `embed_batch` — the same call
+`embed_branch_chunks` uses for real branches — on a trivial fixed string.
 If the probe succeeds, the failure was specific to that branch's content —
 mark the sentinel and continue as before. If the probe also raises, the
 model/session is the thing that broke; the caught exception is re-raised
@@ -77,7 +78,7 @@ from ccrecall.embeddings import (
     EMBEDDING_MODEL,
     EMBEDDING_VERSION,
     MODEL_TOKEN_LIMIT,
-    embed_text,
+    embed_batch,
     model_available,
 )
 from ccrecall.health import (
@@ -341,14 +342,18 @@ def _model_still_healthy(logger: logging.Logger) -> bool:
     per-row content error from a broken model/session.
 
     Called only after `_embed_one_branch` catches an exception that isn't
-    sqlite3.Error/OSError. If the model can still embed a trivial string,
-    the failure was specific to that branch's content — safe to mark and
-    continue. If the probe itself fails, the model/session is broken and
-    the caller re-raises to abort the run instead of marking every
-    subsequent branch as an unrecoverable content error.
+    sqlite3.Error/OSError. Probes via `embed_batch` — the same function
+    `embed_branch_chunks` uses to embed real branches — rather than
+    `embed_text`, which bypasses `embed_batch`'s token-counting and explicit
+    batch-size machinery and so can't detect a failure specific to that path.
+    If the probe still succeeds, the failure was specific to that branch's
+    content — safe to mark and continue. If the probe itself fails, the
+    model/session is broken and the caller re-raises to abort the run
+    instead of marking every subsequent branch as an unrecoverable content
+    error.
     """
     try:
-        embed_text("healthcheck")
+        embed_batch(["healthcheck"])
         return True
     except Exception:
         logger.exception("%s: model health probe failed", _LOG_PREFIX)

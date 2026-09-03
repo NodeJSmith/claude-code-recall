@@ -609,7 +609,7 @@ class TestBackfillFailureModes:
         assert _chunk_count(conn) == 0
 
     def test_single_bad_embed_marks_only_itself(self):
-        """One branch whose embed_text raises marks only that branch -1; rest succeed."""
+        """One branch whose embed_batch raises marks only that branch -1; rest succeed."""
         conn = make_vec_conn()
         good_id1 = _insert_branch_with_messages(conn)
         bad_id = _insert_branch_with_messages(conn)
@@ -627,7 +627,7 @@ class TestBackfillFailureModes:
         with (
             patch("ccrecall.hooks.backfill_embeddings.model_available", return_value=True),
             patch("ccrecall.embed_ops.embed_batch", side_effect=counting_embed),
-            patch("ccrecall.hooks.backfill_embeddings.embed_text", return_value=_FIXED_VEC),
+            patch("ccrecall.hooks.backfill_embeddings.embed_batch", return_value=[_FIXED_VEC]),
             patch("ccrecall.hooks.backfill_embeddings.get_connection", return_value=_NoCloseConn(conn)),
             patch("ccrecall.hooks.backfill_embeddings.load_settings_for_db", return_value={}),
             patch("ccrecall.hooks.backfill_embeddings.time.sleep"),
@@ -645,7 +645,7 @@ class TestBackfillFailureModes:
         assert _branch_has_chunk_vecs(conn, good_id2)
 
     def test_infra_failure_marks_no_rows(self):
-        """OSError from embed_text (infra failure) → zero rows marked -1, all stay eligible."""
+        """OSError from embed_batch (infra failure) → zero rows marked -1, all stay eligible."""
         conn = make_vec_conn()
         ids = [_insert_branch_with_messages(conn) for _ in range(3)]
 
@@ -693,7 +693,7 @@ class TestBackfillFailureModes:
         with (
             patch("ccrecall.hooks.backfill_embeddings.model_available", return_value=True),
             patch("ccrecall.embed_ops.embed_batch", side_effect=counting_embed),
-            patch("ccrecall.hooks.backfill_embeddings.embed_text", return_value=_FIXED_VEC),
+            patch("ccrecall.hooks.backfill_embeddings.embed_batch", return_value=[_FIXED_VEC]),
             patch("ccrecall.hooks.backfill_embeddings.get_connection", return_value=_NoCloseConn(conn)),
             patch("ccrecall.hooks.backfill_embeddings.load_settings_for_db", return_value={}),
             patch("ccrecall.hooks.backfill_embeddings.time.sleep"),
@@ -721,7 +721,7 @@ class TestBackfillFailureModes:
             patch("ccrecall.hooks.backfill_embeddings.model_available", return_value=True),
             patch("ccrecall.embed_ops.embed_batch", side_effect=failing_embed),
             patch(
-                "ccrecall.hooks.backfill_embeddings.embed_text",
+                "ccrecall.hooks.backfill_embeddings.embed_batch",
                 side_effect=RuntimeError("model session broke mid-inference"),
             ),
             patch("ccrecall.hooks.backfill_embeddings.get_connection", return_value=_NoCloseConn(conn)),
