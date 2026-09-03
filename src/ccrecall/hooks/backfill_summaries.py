@@ -1,8 +1,26 @@
 """Backfill context summaries for existing branches.
 
 Runs as a background process spawned by memory-setup.py on SessionStart.
-Processes branches in batches, commits between batches, and marks errors
-with summary_version = -1 to avoid infinite retry.
+Processes branches in batches via the shared outer batch-loop scaffolding
+(`backfill_runner.run_batch_loop`, also used by `backfill_embeddings.py` and
+`backfill_tool_content.py`), commits between batches, and marks content
+errors with summary_version = -1 (`CONTENT_ERROR_VERSION`) to avoid infinite
+retry.
+
+Exception taxonomy is catch-all-then-filter-infra: any exception raised while
+summarizing one branch is a content error for that row (mark the sentinel,
+continue) unless it's a `sqlite3.Error`/`OSError` — an infra/DB failure,
+which propagates to abort the batch without poisoning the row, leaving it
+eligible for the next run. A narrow content-error allow-list would let an
+unanticipated exception type fall through to the infra path unmarked; since
+this backfill respawns on every SessionStart, an unmarked row wedges every
+session indefinitely (issue #178).
+
+This is the opposite taxonomy from `backfill_embeddings.py`/`backfill_tool_content.py`
+(narrow content-error allow-list, everything else treated as infra) — deliberately,
+not drift: those two are opt-in/manual, so a wedged branch just sits until someone
+reruns the command, while this one respawns unattended every session. Keep the
+taxonomies distinct rather than "fixing" one to match the other.
 """
 
 import sqlite3
@@ -11,25 +29,27 @@ from pathlib import Path
 from ccrecall.config import DEFAULT_DB_PATH, load_settings_for_db, remove_pid_file, setup_logging
 from ccrecall.config import PID_KEY_BACKFILL_SUMMARIES as PID_KEY
 from ccrecall.db import CONTENT_ERROR_VERSION, get_connection
+from ccrecall.hooks.backfill_query import EXIT_ABORT, EXIT_OK
+from ccrecall.hooks.backfill_runner import run_batch_loop
 from ccrecall.summarizer import SUMMARY_VERSION, compute_context_summary
 
 BATCH_SIZE = 50
 
 
-def run(*, verbose: bool = False, db: Path = DEFAULT_DB_PATH) -> None:
+def run(*, verbose: bool = False, db: Path = DEFAULT_DB_PATH) -> int:
     """Backfill context summaries for branches that lack a current one.
 
     Wraps the ``_main()`` work in PID-file cleanup. ``_main()`` is kept separate
     so tests can exercise the backfill logic without the PID-file lifecycle.
     """
     try:
-        _main(verbose=verbose, db=db)
+        return _main(verbose=verbose, db=db)
     finally:
         # Delete PID file so _spawn_background can spawn again next session
         remove_pid_file(PID_KEY)
 
 
-def _main(*, verbose: bool = False, db: Path = DEFAULT_DB_PATH) -> None:
+def _main(*, verbose: bool = False, db: Path = DEFAULT_DB_PATH) -> int:
     settings = load_settings_for_db(db)
     logger = setup_logging(settings, process_name="backfill-summary", verbose=verbose)
 
@@ -39,21 +59,33 @@ def _main(*, verbose: bool = False, db: Path = DEFAULT_DB_PATH) -> None:
         with get_connection(settings) as conn:
             cursor = conn.cursor()
 
-            while True:
+            def select_batch() -> list[tuple]:
                 cursor.execute(
                     """
                     SELECT id FROM branches
                     WHERE summary_version IS NULL
                        OR (summary_version < ? AND summary_version != ?)
+                    ORDER BY id
                     LIMIT ?
-                """,
+                    """,
                     (SUMMARY_VERSION, CONTENT_ERROR_VERSION, BATCH_SIZE),
                 )
-                rows = cursor.fetchall()
+                return cursor.fetchall()
 
-                if not rows:
-                    break
+            def on_stuck(current_ids: list[int]) -> bool:
+                # Every row processed above either updates summary_version or marks
+                # CONTENT_ERROR_VERSION, so a genuinely re-selected batch means no
+                # per-row progress is possible — abort outright rather than
+                # excluding-and-continuing (unlike backfill_tool_content.py, whose
+                # eligibility predicate can't see every skip reason).
+                logger.error(
+                    "Backfill: no progress — same batch re-selected (branch ids: %s); aborting to avoid infinite loop",
+                    current_ids,
+                )
+                return True
 
+            def process_batch(rows: list[tuple]) -> bool:
+                nonlocal total_updated
                 try:
                     for (branch_id,) in rows:
                         try:
@@ -66,25 +98,43 @@ def _main(*, verbose: bool = False, db: Path = DEFAULT_DB_PATH) -> None:
                                 (summary_md, summary_json, SUMMARY_VERSION, branch_id),
                             )
                             total_updated += 1
-                        except (ValueError, TypeError, KeyError) as e:  # noqa: PERF203 — per-row error isolation; one malformed branch must not abort the batch
-                            # Per-row content error (malformed summary data): mark the
-                            # sentinel so it isn't retried forever. Infra errors fall
-                            # through to the outer handler instead of poisoning the row.
+                        except (sqlite3.Error, OSError):  # noqa: PERF203 — per-row error isolation; one malformed branch must not abort the batch
+                            # sqlite3.Error/OSError are themselves Exception subclasses,
+                            # so this clause exists only to shadow the broader `except
+                            # Exception` below: re-raise so the outer handler treats this
+                            # as an infra failure instead of poisoning the row.
+                            raise
+                        except Exception:
+                            # Anything else is a per-row content error (malformed
+                            # summary data): mark the sentinel so it isn't retried
+                            # forever.
                             cursor.execute(
                                 "UPDATE branches SET summary_version = ? WHERE id = ?",
                                 (CONTENT_ERROR_VERSION, branch_id),
                             )
-                            logger.error("Backfill: branch %s content error: %s", branch_id, e)
-                except Exception as e:
+                            logger.exception("Backfill: branch %s content error", branch_id)
+                except (sqlite3.Error, OSError):
                     # Infra/session failure (locked DB, I/O): abort without marking
                     # further rows — they stay eligible next run. Commit prior batches.
-                    logger.error("Backfill: session failure, aborting: %s", e)
+                    logger.exception("Backfill: session failure, aborting")
                     conn.commit()
-                    return
+                    return False
+                return True
 
+            def after_batch(_rows: list[tuple]) -> None:
                 conn.commit()
-    except (sqlite3.Error, OSError) as e:
-        logger.error("Backfill: failed to connect to DB: %s", e)
-        return
+
+            if not run_batch_loop(
+                select_batch=select_batch,
+                is_limit_reached=lambda: False,  # no --limit flag on this auto-spawned backfill
+                process_batch=process_batch,
+                on_stuck=on_stuck,
+                after_batch=after_batch,
+            ):
+                return EXIT_ABORT
+    except (sqlite3.Error, OSError):
+        logger.exception("Backfill: failed to connect to DB")
+        return EXIT_ABORT
 
     logger.info("Backfill complete: %s branches summarized", total_updated)
+    return EXIT_OK

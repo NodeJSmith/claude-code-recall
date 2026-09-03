@@ -67,9 +67,13 @@ class TestCmdStatus:
 
 
 class TestCmdBackfillSummaries:
-    def test_calls_run_with_verbose(self):
-        with patch("ccrecall.cli.commands.backfill_summaries_mod.run") as mock_run:
+    def test_calls_run_with_verbose_and_exits_with_return_code(self):
+        with (
+            patch("ccrecall.cli.commands.backfill_summaries_mod.run", return_value=0) as mock_run,
+            pytest.raises(SystemExit) as exc_info,
+        ):
             cmd_backfill_summaries(ctx=DEFAULT_CLI_CONTEXT)
+        assert exc_info.value.code == 0
         mock_run.assert_called_once_with(verbose=False, db=DEFAULT_DB_PATH)
 
 

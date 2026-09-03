@@ -819,6 +819,21 @@ class TestBackfillErrorHandling:
         self._run_with_raise(db, monkeypatch, sqlite3.OperationalError("database is locked"))
         assert self._version(db) == self.STARTING_VERSION  # unchanged — still eligible
 
+    def test_unanticipated_exception_type_marks_sentinel_not_wedge(self, tmp_path, monkeypatch):
+        """An exception type outside any hardcoded content-error allow-list still
+        marks the sentinel instead of falling through to the infra-abort path.
+
+        Regression (#178): the old taxonomy allow-listed only
+        (ValueError, TypeError, KeyError) as content errors, so any other
+        exception type (e.g. AttributeError from malformed branch data) fell
+        through to the infra handler, left the row unmarked, and — since this
+        backfill respawns on every SessionStart — wedged that row forever.
+        """
+        db = tmp_path / "c.db"
+        self._seed(db)
+        self._run_with_raise(db, monkeypatch, AttributeError("'NoneType' object has no attribute 'foo'"))
+        assert self._version(db) == CONTENT_ERROR_VERSION
+
 
 class TestSummaryMaintenance:
     def test_backfill_summaries_marks_content_error_version(self, tmp_path, monkeypatch):
