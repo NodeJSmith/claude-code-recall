@@ -104,7 +104,11 @@ def extract_text_content(content) -> tuple[str, bool, bool, str | None, str]:
             if isinstance(item, dict):
                 item_type = item.get("type", "")
                 if item_type == "text":
-                    texts.append(item.get("text", ""))
+                    # "text" key present with a null value (probe-confirmed malformed
+                    # shape, #171) must not flow through — `or ""` catches both the
+                    # missing-key and explicit-null cases so the "\n".join below never
+                    # sees a None, preserving the module's never-raises contract.
+                    texts.append(item.get("text") or "")
                 elif item_type == "tool_use":
                     has_tool_use = True
                     tool_name = item.get("name", "")

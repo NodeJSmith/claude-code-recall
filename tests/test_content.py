@@ -135,6 +135,26 @@ class TestExtractTextContent:
         assert summary is None
         assert tool_content == ""
 
+    def test_null_text_field_does_not_raise(self):
+        # {"type": "text", "text": null} is a probe-confirmed malformed shape
+        # (issue #171) — must never raise, per the module's never-raises contract.
+        content = [{"type": "text", "text": None}]
+        text, has_tool, has_think, summary, tool_content = extract_text_content(content)
+        assert text == ""
+        assert has_tool is False
+        assert has_think is False
+        assert summary is None
+        assert tool_content == ""
+
+    def test_null_text_field_mixed_with_valid_text(self):
+        content = [
+            {"type": "text", "text": "Hello"},
+            {"type": "text", "text": None},
+            {"type": "text", "text": "World"},
+        ]
+        text, _has_tool, _has_think, _summary, _tool_content = extract_text_content(content)
+        assert text == "Hello\n\nWorld"
+
 
 # extract_text_content — tool_content extraction (generic field-join)
 

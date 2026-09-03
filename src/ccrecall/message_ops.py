@@ -21,7 +21,10 @@ def message_content_parts(entry: dict) -> tuple[str, bool, str] | None:
     """Return content fields for entries that should have a messages row."""
     if not is_insertable_message(entry):
         return None
-    content = entry.get("message", {}).get("content", "")
+    # `.get("message", {})` only supplies the {} default when the key is missing;
+    # a present-but-null "message" (rejected at the parse boundary but reachable
+    # if this is called directly, #171) returns None and crashes the .get below.
+    content = (entry.get("message") or {}).get("content", "")
     if entry.get("type") == "user" and is_tool_result(content):
         return None
     text, _has_tool_use, has_thinking, _tool_summary, tool_content = extract_text_content(content)
@@ -71,7 +74,10 @@ def build_message_row(
     if not uuid or uuid not in valid_branch_uuids or uuid in existing_uuids:
         return None
     text, has_thinking, tool_content = parts
-    content = entry.get("message", {}).get("content", "")
+    # `.get("message", {})` only supplies the {} default when the key is missing;
+    # a present-but-null "message" (rejected at the parse boundary but reachable
+    # if this is called directly, #171) returns None and crashes the .get below.
+    content = (entry.get("message") or {}).get("content", "")
     entry_type = entry.get("type")
     is_notification = entry_type == "user" and (is_task_notification(content) or is_teammate_message(content))
     return (
@@ -139,7 +145,10 @@ def update_missing_tool_content(
         uuid = entry.get("uuid")
         if not uuid or uuid not in existing_uuids:
             continue
-        content = entry.get("message", {}).get("content", "")
+        # `.get("message", {})` only supplies the {} default when the key is missing;
+        # a present-but-null "message" (rejected at the parse boundary but reachable
+        # if this is called directly, #171) returns None and crashes the .get below.
+        content = (entry.get("message") or {}).get("content", "")
         _text, _has_tool_use, _has_thinking, _tool_summary, tool_content = extract_text_content(content)
         cursor.execute(
             "UPDATE messages SET tool_content = ? WHERE session_id = ? AND uuid = ? AND tool_content IS NULL",
