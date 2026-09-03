@@ -250,7 +250,25 @@ def import_project(
         )
         targets = [target for target in targets if target not in processed]
         for target in targets:
-            branches_count, msg_count = import_session(conn, target, project_id, force=repair_group)
+            # Per-file containment (#170): one poison transcript must not wedge the
+            # whole batch. A SAVEPOINT bounds the containment to exactly this
+            # file's writes — the surrounding connection's transaction still spans
+            # the whole project (committed once, in _run, after import_project
+            # returns), so rolling back to the savepoint discards only this
+            # file's partial work without touching already-imported siblings.
+            conn.execute("SAVEPOINT import_file")
+            try:
+                branches_count, msg_count = import_session(conn, target, project_id, force=repair_group)
+            except Exception:
+                conn.execute("ROLLBACK TO SAVEPOINT import_file")
+                conn.execute("RELEASE SAVEPOINT import_file")
+                # Deliberately leave import_log unwritten for this file: it will
+                # be retried on every future run, which is cheap once a single
+                # bad file can no longer take the whole batch down.
+                log.exception("Skipping poison transcript file %s — import_session raised", target)
+                processed.add(target)
+                continue
+            conn.execute("RELEASE SAVEPOINT import_file")
             processed.add(target)
             if branches_count == -1:
                 sessions_skipped += 1
@@ -282,6 +300,18 @@ def run(
     """Import Claude Code conversations into the memory DB."""
     try:
         _run(db=db, projects_dir=projects_dir, project=project, verbose=verbose)
+    except Exception:
+        # Top-level catch (#170): this process is detached and spawned with
+        # stdout/stderr redirected to DEVNULL (see memory_setup._spawn_background),
+        # so an exception reaching here would otherwise exit the process with
+        # no trace anywhere. Per-file containment in import_project/import_session
+        # is the primary defense; this is the backstop for anything outside that
+        # loop (e.g. a failure setting up the connection or scanning projects_dir).
+        # log uses LOGGER_NAME, the same logger _run's setup_logging() call
+        # already attached the ccrecall-import.log rotating handler to, so this
+        # still lands in the log even though _run itself failed.
+        log.exception("Import process failed with an uncaught exception")
+        raise
     finally:
         # Delete PID file so _spawn_background can spawn again next session
         remove_pid_file(PID_KEY)
