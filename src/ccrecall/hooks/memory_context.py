@@ -16,12 +16,14 @@ Output: JSON with hookSpecificOutput for context injection
 
 import contextlib
 import json
+import logging
 import sys
 from typing import TYPE_CHECKING
 
 from pydantic import ValidationError
 
 from ccrecall.config import (
+    DEFAULT_SETTINGS,
     get_db_path,
     load_settings,
     log_hook_exception,
@@ -36,7 +38,7 @@ from ccrecall.hooks.context_rendering import (
     pending_question_block,
 )
 from ccrecall.hooks.session_selection import select_sessions
-from ccrecall.models import HookInput
+from ccrecall.models import LOGGER_NAME, HookInput
 
 if TYPE_CHECKING:
     import sqlite3
@@ -73,8 +75,24 @@ def _emit_with_proactive(proactive_block: str) -> None:
 
 
 def main():
-    settings = load_settings()
-    logger = setup_logging(settings, process_name="context")
+    settings = None
+    try:
+        settings = load_settings()
+        logger = setup_logging(settings, process_name="context")
+    except Exception:
+        # Logging setup is best-effort: a bad log path (unwritable ~/.ccrecall,
+        # disk full) must not crash the hook before it ever reads stdin or
+        # evaluates proactive_alert_block — that fault is exactly the
+        # ALERT_CANT_PERSIST condition this hook exists to report. Fall back to
+        # the bare named logger — with no handler attached it can't raise on
+        # .warning()/.exception() calls (stdlib routes WARNING+ through
+        # logging.lastResort to stderr instead) — and to default settings if
+        # load_settings() itself failed, so the settings.get(...) calls below
+        # still have a dict to work with. Mirrors memory_setup.main()'s guard.
+        log_hook_exception("context")
+        logger = logging.getLogger(LOGGER_NAME)
+        if settings is None:
+            settings = DEFAULT_SETTINGS.copy()
 
     raw = sys.stdin.read()
     try:
