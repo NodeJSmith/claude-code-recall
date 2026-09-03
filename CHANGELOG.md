@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.24.0](https://github.com/NodeJSmith/claude-code-recall/compare/v0.23.0...v0.24.0) (2026-09-03)
+
+
+### Features
+
+* accept positional query on search commands and raise --max-results cap ([#191](https://github.com/NodeJSmith/claude-code-recall/issues/191)) ([a5cd9d2](https://github.com/NodeJSmith/claude-code-recall/commit/a5cd9d2d5c20e78450158e918c2fafc2e4cbc7f9)), closes [#68](https://github.com/NodeJSmith/claude-code-recall/issues/68) [#67](https://github.com/NodeJSmith/claude-code-recall/issues/67)
+
+
+### Bug Fixes
+
+* contain per-file import crashes so one poison transcript cannot wedge the batch ([#194](https://github.com/NodeJSmith/claude-code-recall/issues/194)) ([9e3e45e](https://github.com/NodeJSmith/claude-code-recall/commit/9e3e45e4861210564d3e748395125798e0cb87a2)), closes [#170](https://github.com/NodeJSmith/claude-code-recall/issues/170)
+* emit envelope and can't-persist alert when ~/.ccrecall is unwritable ([#187](https://github.com/NodeJSmith/claude-code-recall/issues/187)) ([6738b99](https://github.com/NodeJSmith/claude-code-recall/commit/6738b99b8703fe7ad73c3741197783cf9badfbe3)), closes [#175](https://github.com/NodeJSmith/claude-code-recall/issues/175)
+* key context-summary layout off the rendered exchange count ([#189](https://github.com/NodeJSmith/claude-code-recall/issues/189)) ([5508ee3](https://github.com/NodeJSmith/claude-code-recall/commit/5508ee37340d7a2769e6b7510c869aab25d8b9ae)), closes [#174](https://github.com/NodeJSmith/claude-code-recall/issues/174)
+* recent --sort-order asc returns oldest sessions instead of recent-oldest-first ([#185](https://github.com/NodeJSmith/claude-code-recall/issues/185)) ([82f2517](https://github.com/NodeJSmith/claude-code-recall/commit/82f25177986fb3084ed1a6754af7debefe7910d5)), closes [#176](https://github.com/NodeJSmith/claude-code-recall/issues/176)
+* reject null message at the parse boundary and harden extract_text_content against null text ([#193](https://github.com/NodeJSmith/claude-code-recall/issues/193)) ([709fb73](https://github.com/NodeJSmith/claude-code-recall/commit/709fb73f806731590a8b8fdc94076c589613a18f)), closes [#171](https://github.com/NodeJSmith/claude-code-recall/issues/171)
+* scope sync-current sidecar clear so model-unavailable alerts survive ([#186](https://github.com/NodeJSmith/claude-code-recall/issues/186)) ([b8413ef](https://github.com/NodeJSmith/claude-code-recall/commit/b8413ef8d786600fa1528d1aea0bf06d8a00ee91)), closes [#164](https://github.com/NodeJSmith/claude-code-recall/issues/164)
+* surface branch_messages constraint violations instead of INSERT OR IGNORE ([#188](https://github.com/NodeJSmith/claude-code-recall/issues/188)) ([5c46b40](https://github.com/NodeJSmith/claude-code-recall/commit/5c46b400793afa6a2dc4814436be35c7a5a99755)), closes [#158](https://github.com/NodeJSmith/claude-code-recall/issues/158)
+* treat a slash-command turn as moving on from a rejected question ([#192](https://github.com/NodeJSmith/claude-code-recall/issues/192)) ([9949a47](https://github.com/NodeJSmith/claude-code-recall/commit/9949a47908932358120c292bce678aaa25f97233)), closes [#180](https://github.com/NodeJSmith/claude-code-recall/issues/180)
+
+
+### Performance Improvements
+
+* gate the tool-content repair loop on the pending-NULL set ([#190](https://github.com/NodeJSmith/claude-code-recall/issues/190)) ([1706524](https://github.com/NodeJSmith/claude-code-recall/commit/1706524aed06530dc49725e6b66b560a907a2b3a)), closes [#179](https://github.com/NodeJSmith/claude-code-recall/issues/179)
+
 ## [0.23.0](https://github.com/NodeJSmith/claude-code-recall/compare/v0.22.1...v0.23.0) (2026-08-24)
 
 
