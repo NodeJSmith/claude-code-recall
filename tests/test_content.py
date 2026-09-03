@@ -8,6 +8,7 @@ from ccrecall.content import (
     TOOL_FIELD_CAP,
     extract_commits,
     extract_files_modified,
+    extract_plain_text,
     extract_text_content,
     is_task_notification,
     is_teammate_message,
@@ -502,6 +503,29 @@ class TestIsTaskNotification:
     def test_partial_match(self):
         content = "I received a <task-notification> in the middle"
         assert is_task_notification(content) is False
+
+    def test_null_text_field_does_not_raise(self):
+        # {"type": "text", "text": null} (issue #171) previously reached extract_plain_text's
+        # "\n".join unguarded and raised TypeError before extract_text_content's own
+        # null-text normalization ever got a chance to run.
+        content = [{"type": "text", "text": None}]
+        assert is_task_notification(content) is False
+
+
+# extract_plain_text
+
+
+class TestExtractPlainText:
+    def test_null_text_field_does_not_raise(self):
+        content = [{"type": "text", "text": None}]
+        assert extract_plain_text(content) == ""
+
+    def test_null_text_field_mixed_with_valid_text(self):
+        content = [
+            {"type": "text", "text": "Hello"},
+            {"type": "text", "text": None},
+        ]
+        assert extract_plain_text(content) == "Hello"
 
 
 # is_teammate_message

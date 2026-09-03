@@ -131,7 +131,8 @@ Probe-confirmed: with `exchange_count=9` and 7 stored exchanges, the JSON puts a
 | F11 — per-sync re-extraction of tool content for all messages | MED-LOW | [#179](https://github.com/NodeJSmith/claude-code-recall/issues/179) |
 | F12 — stale "Unresolved Decision" after slash-command move-on | LOW-MED | [#180](https://github.com/NodeJSmith/claude-code-recall/issues/180) |
 | F13 — core/retrieval LOW cluster (7 items) | LOW | [#181](https://github.com/NodeJSmith/claude-code-recall/issues/181) |
-| F14 — backfill/status LOW cluster (3 items) | LOW | [#182](https://github.com/NodeJSmith/claude-code-recall/issues/182) |
+| F14 — status writable connection, backfillable over-count, `--limit` semantics (3 items) | LOW | [#182](https://github.com/NodeJSmith/claude-code-recall/issues/182) |
+| F14 — `backfill summaries` exits 0 on failure | LOW | folded into [#178](https://github.com/NodeJSmith/claude-code-recall/issues/178) |
 | F14 — `--json tail`, `--progress-every` validator | LOW | comment on [#146](https://github.com/NodeJSmith/claude-code-recall/issues/146) |
 
 ## Observations (not defects)
@@ -156,7 +157,7 @@ Probe-confirmed: with `exchange_count=9` and 7 stored exchanges, the JSON puts a
 - **`session_selection.py`**: `is_active = 1` everywhere; worktree-normalized handoff matching; cwd-mismatch preserves the handoff for its rightful claimant.
 - **health.py**: hot-path invariant honored (empirically import-clean); atomic sidecar writes; lock-contention-as-success in `probe_db`.
 - Upsert/dedup core: `upsert_branch` vs `UNIQUE(session_id)` interplay safe post-v1 (all rows active, `find_all_branches` returns exactly one active branch); import_log NULL-hash asymmetry preserved; tool-content repair self-heals.
-- **Backfill machinery**: `run_batch_loop` stuck detection sound for both consumers (deterministic selection, exclusion set chunked under the 900-param limit, no re-select-forever path — the empty-exchange-branch livelock hypothesis was chased and closed by the trivially-true watermark stamp); cap_tokens upgrade logic has no evasion and no ping-pong; savepoint/transaction boundaries correct and correctly different per backfill; `try_acquire_pid_file` itself is exemplary (F5 is about the callers that bypass it); ETA/progress arithmetic division-guarded; ingestion fingerprint TOCTOU direction conservative.
+- **Backfill machinery**: `run_batch_loop` stuck detection sound for both consumers (deterministic selection, exclusion set chunked under the 900-param limit, no re-select-forever path — the empty-exchange-branch livelock hypothesis was chased and closed by the trivially-true watermark stamp); cap_tokens upgrade logic has no evasion and no ping-pong; savepoint/transaction boundaries correct and correctly different per backfill; `try_acquire_pid_file`'s write-before-link acquisition ordering (the specific mechanism the empty-marker race in F5 item 2 shows a caller bypassing) is exemplary — the function's own PID-reuse and probe-then-unlink windows are separately tracked as F5 items 1 and 3, not clean; ETA/progress arithmetic division-guarded; ingestion fingerprint TOCTOU direction conservative.
 
 ## Cross-checked, not re-reported
 

@@ -79,3 +79,4 @@ uv build                      # build sdist + wheel
 ## Gotchas
 
 - Skills under `skills/` are bundled into the plugin; their `references/` subdirs are loaded on demand by the skill, not eagerly.
+- **Windows is explicitly not supported** (README: "Supported platforms: Linux (including WSL2) and macOS. Windows is not supported."). Don't design around cross-platform (POSIX + Windows) concerns — e.g. a `fcntl.flock`-based lock is a complete fix, not a partial one requiring a `msvcrt` fallback. `pyproject.toml`'s classifiers list Linux/macOS only. `hooks/subprocess_utils.py`'s `sys.platform == "win32"` branch predates this policy and shouldn't be read as evidence of Windows support.

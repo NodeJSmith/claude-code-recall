@@ -11,16 +11,19 @@ sqlite_vec — it only ever reads the embedding-status sidecar, never probes
 embedding capability inline.
 """
 
+import contextlib
+import fcntl
 import json
 import logging
 import os
 import sqlite3
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
 from whenever import Instant
 
-from ccrecall.config import PID_FILE_MODE, RUNTIME_DIR, atomic_write_json
+from ccrecall.config import PID_FILE_MODE, RUNTIME_DIR, atomic_write_json, ensure_parent_dir
 from ccrecall.models import LOGGER_NAME
 
 # ── Sidecar paths ──────────────────────────────────────────────────────────────
@@ -168,18 +171,43 @@ def read_embedding_status(path: Path | None = None) -> dict | None:
         return None
 
 
+@contextlib.contextmanager
+def _locked_status_file(path: Path) -> Iterator[None]:
+    """Exclusive advisory lock guarding read-modify-write access to ``path``.
+
+    Both writers of the embedding-status sidecar — the Stop-hook-spawned
+    sync-current process and a manually- or scheduler-invoked backfill run —
+    use different PID guards, so both can be alive at once. Without a shared
+    lock, ``clear_embedding_failure``'s read-then-conditional-unlink is a
+    TOCTOU race: a clear can read one writer's record, then unlink a second
+    writer's fresher record written in between (#197). ``fcntl.flock`` is
+    POSIX-only, which is fine — ccrecall does not support Windows (README).
+    """
+    lock_path = path.with_name(path.name + ".lock")
+    ensure_parent_dir(lock_path)
+    with open(lock_path, "w") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
+
+
 def record_embedding_failure(reason: str, path: Path | None = None) -> None:
     """Write an embedding-capability-failure record to the sidecar.
 
     Written by the detached embedding process on structural failure.
     Uses an atomic write to avoid partial reads by the SessionStart hook.
+    Holds the same lock ``clear_embedding_failure`` does, so a concurrent
+    clear can't unlink this write out from under it (#197).
 
     ``path`` resolves to ``EMBEDDING_STATUS_PATH`` at call time — see the
     "Sidecar paths" comment above for why this isn't a signature default.
     """
     if path is None:
         path = EMBEDDING_STATUS_PATH
-    atomic_write_json(path, {"reason": reason, "since": Instant.now().format_iso()})
+    with _locked_status_file(path):
+        atomic_write_json(path, {"reason": reason, "since": Instant.now().format_iso()})
 
 
 def clear_embedding_failure(path: Path | None = None, reasons: set[str | None] | None = None) -> None:
@@ -218,16 +246,21 @@ def clear_embedding_failure(path: Path | None = None, reasons: set[str | None] |
     ALERT_EMBEDDINGS_FAILING until the next SessionStart hook runs) is
     self-healing, not a stuck state.
 
+    Holds the same lock ``record_embedding_failure`` does around the read and
+    the unlink, so a concurrent writer's fresher record can't be read here and
+    then unlinked after the writer replaces it (#197).
+
     ``path`` resolves to ``EMBEDDING_STATUS_PATH`` at call time — see the
     "Sidecar paths" comment above for why this isn't a signature default.
     """
     if path is None:
         path = EMBEDDING_STATUS_PATH
-    if reasons is not None:
-        current = read_embedding_status(path=path)
-        if current is not None and current.get("reason") not in reasons:
-            return
-    path.unlink(missing_ok=True)
+    with _locked_status_file(path):
+        if reasons is not None:
+            current = read_embedding_status(path=path)
+            if current is not None and current.get("reason") not in reasons:
+                return
+        path.unlink(missing_ok=True)
 
 
 # ── Backfill schedule marker ───────────────────────────────────────────────────

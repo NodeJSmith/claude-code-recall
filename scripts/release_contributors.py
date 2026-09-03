@@ -14,6 +14,7 @@ import argparse
 import re
 import subprocess
 import sys
+from dataclasses import dataclass, field
 
 OWNER_EMAILS = frozenset(
     {
@@ -75,26 +76,49 @@ def parse_github_username(email: str) -> str | None:
     return m.group(1) if m else None
 
 
-def find_external_contributors(from_ref: str, to_ref: str) -> dict[str, list[dict[str, str]]]:
+def contributor_key(name: str, email: str) -> str:
+    """Stable identity for grouping commits by contributor.
+
+    Two different people can share a display name (`commit["name"]`), so
+    grouping by name alone can merge their commits into one entry and
+    attribute all of them to whichever noreply username happens to match
+    first. Prefer the parsed GitHub noreply username (stable across name
+    changes), then the raw email, then the display name as a last resort.
+    """
+    username = parse_github_username(email)
+    if username:
+        return f"gh:{username}"
+    if email:
+        return f"email:{email}"
+    return f"name:{name}"
+
+
+@dataclass
+class ContributorGroup:
+    name: str
+    entries: list[dict[str, str]] = field(default_factory=list)
+
+
+def find_external_contributors(from_ref: str, to_ref: str) -> dict[str, ContributorGroup]:
     commits = get_commits(from_ref, to_ref)
-    contributors: dict[str, list[dict[str, str]]] = {}
+    contributors: dict[str, ContributorGroup] = {}
 
     for commit in commits:
         if not is_external(commit["name"], commit["email"]):
             continue
 
-        name = commit["name"]
+        key = contributor_key(commit["name"], commit["email"])
         entry = {"subject": commit["subject"], "email": commit["email"]}
 
-        if name not in contributors:
-            contributors[name] = []
-        contributors[name].append(entry)
+        if key not in contributors:
+            contributors[key] = ContributorGroup(name=commit["name"])
+        contributors[key].entries.append(entry)
 
     return contributors
 
 
 def print_contributors(
-    contributors: dict[str, list[dict[str, str]]],
+    contributors: dict[str, ContributorGroup],
     from_ref: str,
     to_ref: str,
 ) -> None:
@@ -103,16 +127,16 @@ def print_contributors(
         return
 
     print(f"External contributors in {from_ref}..{to_ref}:\n")
-    for name, entries in sorted(contributors.items()):
+    for _key, contributor in sorted(contributors.items(), key=lambda kv: kv[1].name):
         username = None
-        for entry in entries:
+        for entry in contributor.entries:
             username = parse_github_username(entry["email"])
             if username:
                 break
 
-        display = f"@{username}" if username else name
+        display = f"@{username}" if username else contributor.name
         print(f"  {display}")
-        for entry in entries:
+        for entry in contributor.entries:
             print(f"    - {entry['subject']}")
         print()
 

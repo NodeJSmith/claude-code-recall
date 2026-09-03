@@ -210,6 +210,16 @@ def import_project(
     """
     cursor = conn.cursor()
 
+    # A pure-SELECT upsert_project (already-known project, unchanged path) never
+    # triggers sqlite3's implicit BEGIN, which only fires on INSERT/UPDATE/DELETE.
+    # Without an explicit transaction already open here, the per-file SAVEPOINT
+    # below becomes its own top-level transaction and commits on RELEASE — the
+    # first file's writes go durable immediately instead of waiting for _run's
+    # single per-project conn.commit(), breaking the "transaction spans the whole
+    # project" invariant the SAVEPOINT/ROLLBACK containment below depends on.
+    if not conn.in_transaction:
+        conn.execute("BEGIN")
+
     project_key = normalize_project_key(project_dir.name)
 
     # Upsert project using the JSONL-probe strategy for accurate path derivation
@@ -259,6 +269,16 @@ def import_project(
             conn.execute("SAVEPOINT import_file")
             try:
                 branches_count, msg_count = import_session(conn, target, project_id, force=repair_group)
+            except sqlite3.OperationalError:
+                # Infrastructure failure (full disk, corrupt DB, incompatible schema) —
+                # not a poison transcript. Treating it as one would repeat the same
+                # failure for every remaining file while _run still commits and reports
+                # success. Roll back this file's partial work and let it propagate so
+                # the batch actually stops and the failure surfaces.
+                conn.execute("ROLLBACK TO SAVEPOINT import_file")
+                conn.execute("RELEASE SAVEPOINT import_file")
+                log.exception("Database-level failure importing %s — aborting run", target)
+                raise
             except Exception:
                 conn.execute("ROLLBACK TO SAVEPOINT import_file")
                 conn.execute("RELEASE SAVEPOINT import_file")

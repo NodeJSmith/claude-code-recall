@@ -794,6 +794,61 @@ class TestImportPoisonContainment:
             "an uncaught exception in run() must be logged with a traceback before the process exits"
         )
 
+    def test_operational_error_propagates_instead_of_being_swallowed(self, memory_db, tmp_path, caplog, monkeypatch):
+        """A database-level failure (full disk, corrupt DB, incompatible schema) must
+        not be treated as a poison transcript — that would repeat the same failure
+        for every remaining file while the caller still reports success."""
+        project_dir = tmp_path / "-Users-sam-project"
+        project_dir.mkdir()
+        bad_file = project_dir / "aaa-bad.jsonl"
+        shutil.copy(FIXTURE_DIR / "linear_3_exchange.jsonl", bad_file)
+
+        def _raise_operational_error(conn, filepath, project_id, *, force=False):
+            raise sqlite3.OperationalError("simulated disk I/O error")
+
+        monkeypatch.setattr("ccrecall.hooks.import_conversations.import_session", _raise_operational_error)
+
+        with (
+            caplog.at_level(logging.ERROR, logger="ccrecall"),
+            pytest.raises(sqlite3.OperationalError, match="simulated disk I/O error"),
+        ):
+            import_project(memory_db, project_dir)
+
+        cursor = memory_db.cursor()
+        cursor.execute("SELECT COUNT(*) FROM import_log WHERE file_path = ?", (str(bad_file),))
+        assert cursor.fetchone()[0] == 0, "the failed file must not appear to have imported successfully"
+
+    def test_transaction_spans_whole_project_even_when_project_row_is_unchanged(self, memory_db, tmp_path):
+        """The per-project transaction must cover every file's writes even when
+        upsert_project performs only a SELECT (an already-known project whose
+        derived path is unchanged) — that SELECT never triggers sqlite3's implicit
+        BEGIN, so without an explicit one the first file's SAVEPOINT/RELEASE would
+        become its own top-level transaction and commit early, defeating a caller
+        rollback."""
+        project_dir = tmp_path / "-Users-sam-project"
+        project_dir.mkdir()
+        shutil.copy(FIXTURE_DIR / "linear_3_exchange.jsonl", project_dir / "aaa-seed.jsonl")
+
+        # First call establishes the project row for real; commit it so the project
+        # is genuinely "already known" going into the second call.
+        import_project(memory_db, project_dir)
+        memory_db.commit()
+
+        # Two brand-new files in the same (unchanged-path) project — never before
+        # imported, so their writes are fresh inserts, not idempotent re-imports.
+        shutil.copy(FIXTURE_DIR / "linear_3_exchange.jsonl", project_dir / "bbb-new.jsonl")
+        shutil.copy(FIXTURE_DIR / "linear_3_exchange.jsonl", project_dir / "ccc-new.jsonl")
+
+        import_project(memory_db, project_dir)
+        memory_db.rollback()
+
+        cursor = memory_db.cursor()
+        cursor.execute("SELECT COUNT(*) FROM import_log WHERE file_path LIKE '%bbb-new%' OR file_path LIKE '%ccc-new%'")
+        assert cursor.fetchone()[0] == 0, (
+            "rollback after the second import_project call must undo both new files' writes — "
+            "a partial commit here means the per-project transaction boundary leaked"
+        )
+
 
 class TestImportRunPathSafety:
     """Test --project path safety checks in the import hook."""
