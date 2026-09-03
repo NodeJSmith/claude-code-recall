@@ -609,7 +609,7 @@ class TestBackfillFailureModes:
         assert _chunk_count(conn) == 0
 
     def test_single_bad_embed_marks_only_itself(self):
-        """One branch whose embed_text raises marks only that branch -1; rest succeed."""
+        """One branch whose embed_batch raises marks only that branch -1; rest succeed."""
         conn = make_vec_conn()
         good_id1 = _insert_branch_with_messages(conn)
         bad_id = _insert_branch_with_messages(conn)
@@ -627,6 +627,7 @@ class TestBackfillFailureModes:
         with (
             patch("ccrecall.hooks.backfill_embeddings.model_available", return_value=True),
             patch("ccrecall.embed_ops.embed_batch", side_effect=counting_embed),
+            patch("ccrecall.hooks.backfill_embeddings.embed_batch", return_value=[_FIXED_VEC]),
             patch("ccrecall.hooks.backfill_embeddings.get_connection", return_value=_NoCloseConn(conn)),
             patch("ccrecall.hooks.backfill_embeddings.load_settings_for_db", return_value={}),
             patch("ccrecall.hooks.backfill_embeddings.time.sleep"),
@@ -644,12 +645,12 @@ class TestBackfillFailureModes:
         assert _branch_has_chunk_vecs(conn, good_id2)
 
     def test_infra_failure_marks_no_rows(self):
-        """RuntimeError from embed_text (infra failure) → zero rows marked -1, all stay eligible."""
+        """OSError from embed_batch (infra failure) → zero rows marked -1, all stay eligible."""
         conn = make_vec_conn()
         ids = [_insert_branch_with_messages(conn) for _ in range(3)]
 
-        def infra_fail(texts: list[str]) -> list[list[float]]:
-            raise RuntimeError("ONNX session crashed")
+        def infra_fail(texts: list[str], **kwargs) -> list[list[float]]:
+            raise OSError("disk I/O error loading model weights")
 
         with (
             patch("ccrecall.hooks.backfill_embeddings.model_available", return_value=True),
@@ -664,6 +665,84 @@ class TestBackfillFailureModes:
             ev = _branch_embedding_version(conn, bid)
             assert ev != CONTENT_ERROR_VERSION, f"branch {bid} should not be marked -1 on infra failure"
         assert _chunk_count(conn) == 0
+
+    def test_unanticipated_exception_type_marks_sentinel_not_wedge(self):
+        """An exception type outside any hardcoded content-error allow-list still
+        marks the sentinel instead of falling through to the infra-abort path.
+
+        Regression (#201, mirroring #178): the old taxonomy allow-listed only
+        (ValueError, OverflowError, UnicodeError) as content errors, so any
+        other exception type (e.g. a RuntimeError from an ONNX inference
+        failure specific to one branch's text) fell through to the infra
+        handler, left the row unmarked, and — since this backfill is run
+        unattended on a recurring schedule — wedged that row (and every
+        branch behind it) forever.
+        """
+        conn = make_vec_conn()
+        bad_id = _insert_branch_with_messages(conn)
+        good_id = _insert_branch_with_messages(conn)
+
+        call_no = [0]
+
+        def counting_embed(texts: list[str], **kwargs) -> list[list[float]]:
+            call_no[0] += 1
+            if call_no[0] == 1:
+                raise RuntimeError("unexpected inference failure for this branch's text")
+            return [_FIXED_VEC] * len(texts)
+
+        with (
+            patch("ccrecall.hooks.backfill_embeddings.model_available", return_value=True),
+            patch("ccrecall.embed_ops.embed_batch", side_effect=counting_embed),
+            patch("ccrecall.hooks.backfill_embeddings.embed_batch", return_value=[_FIXED_VEC]),
+            patch("ccrecall.hooks.backfill_embeddings.get_connection", return_value=_NoCloseConn(conn)),
+            patch("ccrecall.hooks.backfill_embeddings.load_settings_for_db", return_value={}),
+            patch("ccrecall.hooks.backfill_embeddings.time.sleep"),
+        ):
+            run()
+
+        assert _branch_embedding_version(conn, bad_id) == CONTENT_ERROR_VERSION
+        assert _branch_embedding_version(conn, good_id) == EMBEDDING_VERSION
+
+    def test_model_session_failure_aborts_without_marking(self):
+        """When the model health probe also fails after a branch's embed
+        raises, the failure is a model/session break, not a per-row content
+        error: the failing branch must NOT be marked CONTENT_ERROR_VERSION,
+        the run must abort (EXIT_ABORT), and branches later in the batch
+        must not be processed at all.
+        """
+        conn = make_vec_conn()
+        bad_id = _insert_branch_with_messages(conn)
+        later_id = _insert_branch_with_messages(conn)
+
+        def failing_embed(texts: list[str], **kwargs) -> list[list[float]]:
+            raise RuntimeError("model session broke mid-inference")
+
+        with (
+            patch("ccrecall.hooks.backfill_embeddings.model_available", return_value=True),
+            patch("ccrecall.embed_ops.embed_batch", side_effect=failing_embed),
+            patch(
+                "ccrecall.hooks.backfill_embeddings.embed_batch",
+                side_effect=RuntimeError("model session broke mid-inference"),
+            ),
+            patch("ccrecall.hooks.backfill_embeddings.get_connection", return_value=_NoCloseConn(conn)),
+            patch("ccrecall.hooks.backfill_embeddings.load_settings_for_db", return_value={}),
+            patch("ccrecall.hooks.backfill_embeddings.time.sleep"),
+        ):
+            exit_code = run()
+
+        assert exit_code == EXIT_ABORT
+        # The failing branch is untouched — not marked CONTENT_ERROR_VERSION,
+        # still eligible for retry on the next run.
+        bad_ev = _branch_embedding_version(conn, bad_id)
+        assert bad_ev != CONTENT_ERROR_VERSION
+        assert bad_ev != EMBEDDING_VERSION
+        # The batch aborted before reaching the later branch — proves the
+        # run stopped rather than continuing past the broken model.
+        later_ev = _branch_embedding_version(conn, later_id)
+        assert later_ev != CONTENT_ERROR_VERSION
+        assert later_ev != EMBEDDING_VERSION
+        assert not _branch_has_chunk_vecs(conn, bad_id)
+        assert not _branch_has_chunk_vecs(conn, later_id)
 
     def test_sentinel_row_not_reprocessed(self):
         """A branch with embedding_version=-1 is excluded from the selection predicate."""

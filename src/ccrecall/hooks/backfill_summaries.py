@@ -16,11 +16,13 @@ unanticipated exception type fall through to the infra path unmarked; since
 this backfill respawns on every SessionStart, an unmarked row wedges every
 session indefinitely (issue #178).
 
-This is the opposite taxonomy from `backfill_embeddings.py`/`backfill_tool_content.py`
-(narrow content-error allow-list, everything else treated as infra) — deliberately,
-not drift: those two are opt-in/manual, so a wedged branch just sits until someone
-reruns the command, while this one respawns unattended every session. Keep the
-taxonomies distinct rather than "fixing" one to match the other.
+`backfill_embeddings.py` now shares this same catch-all-then-filter-infra taxonomy
+(issue #201) — it's also built to run unattended on a recurring schedule, so the
+same wedge risk applied there. `backfill_tool_content.py` is the one exception left
+on the narrow content-error allow-list: it's a genuinely one-off manual migration
+command with no scheduler-oriented design, so a wedged row there just sits idle
+until someone reruns it by hand — keep its taxonomy distinct rather than "fixing"
+it to match the other two.
 """
 
 import sqlite3
@@ -34,6 +36,7 @@ from ccrecall.hooks.backfill_runner import run_batch_loop
 from ccrecall.summarizer import SUMMARY_VERSION, compute_context_summary
 
 BATCH_SIZE = 50
+_LOG_PREFIX = "Backfill summaries"
 
 
 def run(*, verbose: bool = False, db: Path = DEFAULT_DB_PATH) -> int:
@@ -79,7 +82,8 @@ def _main(*, verbose: bool = False, db: Path = DEFAULT_DB_PATH) -> int:
                 # excluding-and-continuing (unlike backfill_tool_content.py, whose
                 # eligibility predicate can't see every skip reason).
                 logger.error(
-                    "Backfill: no progress — same batch re-selected (branch ids: %s); aborting to avoid infinite loop",
+                    "%s: no progress — same batch re-selected (branch ids: %s); aborting to avoid infinite loop",
+                    _LOG_PREFIX,
                     current_ids,
                 )
                 return True
@@ -99,10 +103,8 @@ def _main(*, verbose: bool = False, db: Path = DEFAULT_DB_PATH) -> int:
                             )
                             total_updated += 1
                         except (sqlite3.Error, OSError):  # noqa: PERF203 — per-row error isolation; one malformed branch must not abort the batch
-                            # sqlite3.Error/OSError are themselves Exception subclasses,
-                            # so this clause exists only to shadow the broader `except
-                            # Exception` below: re-raise so the outer handler treats this
-                            # as an infra failure instead of poisoning the row.
+                            # Shadows the broader `except Exception` below — see
+                            # this module's docstring for why the split exists.
                             raise
                         except Exception:
                             # Anything else is a per-row content error (malformed
@@ -112,11 +114,11 @@ def _main(*, verbose: bool = False, db: Path = DEFAULT_DB_PATH) -> int:
                                 "UPDATE branches SET summary_version = ? WHERE id = ?",
                                 (CONTENT_ERROR_VERSION, branch_id),
                             )
-                            logger.exception("Backfill: branch %s content error", branch_id)
+                            logger.exception("%s: branch %s content error", _LOG_PREFIX, branch_id)
                 except (sqlite3.Error, OSError):
                     # Infra/session failure (locked DB, I/O): abort without marking
                     # further rows — they stay eligible next run. Commit prior batches.
-                    logger.exception("Backfill: session failure, aborting")
+                    logger.exception("%s: session failure, aborting", _LOG_PREFIX)
                     conn.commit()
                     return False
                 return True
@@ -133,8 +135,8 @@ def _main(*, verbose: bool = False, db: Path = DEFAULT_DB_PATH) -> int:
             ):
                 return EXIT_ABORT
     except (sqlite3.Error, OSError):
-        logger.exception("Backfill: failed to connect to DB")
+        logger.exception("%s: failed to connect to DB", _LOG_PREFIX)
         return EXIT_ABORT
 
-    logger.info("Backfill complete: %s branches summarized", total_updated)
+    logger.info("%s complete: %s branches summarized", _LOG_PREFIX, total_updated)
     return EXIT_OK
