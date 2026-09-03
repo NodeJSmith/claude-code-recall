@@ -55,7 +55,8 @@ def typed_instruction(entry: dict) -> str | None:
     if entry.get("type") != "user":
         return None
     # `.get("message", {})` only supplies the {} default when the key is missing;
-    # a present-but-null "message" (#171) returns None and crashes the .get below.
+    # a present-but-null "message" (#171) returns None and crashes the .get below
+    # (same shape as content.py's extract_plain_text null-text fix, #193).
     content = (entry.get("message") or {}).get("content")
     if is_tool_result(content) or is_task_notification(content) or is_teammate_message(content):
         return None
