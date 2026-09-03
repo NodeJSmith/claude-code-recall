@@ -56,6 +56,15 @@ LOG_BACKUP_COUNT = 2
 # PID sentinel file permissions: owner read/write only.
 PID_FILE_MODE = 0o600
 
+# Background-job PID keys, centralized here (not in the owning hook module) so
+# memory_setup.py's spawn-if-needed logic can reference them without importing
+# a module that transitively pulls in the heavy fastembed/onnxruntime/sqlite_vec
+# stack (see TestTransitiveImportIsolation in test_db.py). Each owning module
+# still imports its own key from here for its remove_pid_file() call on exit.
+PID_KEY_IMPORT = "ccrecall-import"
+PID_KEY_BACKFILL_SUMMARIES = "ccrecall-backfill-summaries"
+PID_KEY_WARM_MODEL = "ccrecall-warm-model"
+
 
 def ensure_parent_dir(path: Path) -> None:
     """Create ``path``'s parent directory (idempotent) before writing to it.

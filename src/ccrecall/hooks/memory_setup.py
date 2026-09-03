@@ -13,6 +13,9 @@ from pathlib import Path
 from ccrecall.config import (
     DEFAULT_DB_PATH,
     PID_FILE_MODE,
+    PID_KEY_BACKFILL_SUMMARIES,
+    PID_KEY_IMPORT,
+    PID_KEY_WARM_MODEL,
     SYNC_TEMP_PREFIX,
     ensure_parent_dir,
     load_settings,
@@ -21,9 +24,7 @@ from ccrecall.config import (
     setup_logging,
 )
 from ccrecall.db import CONTENT_ERROR_VERSION, get_connection
-from ccrecall.hooks import backfill_summaries, import_conversations
 from ccrecall.hooks.subprocess_utils import detached_popen_kwargs
-from ccrecall.hooks.warm_model import PID_KEY as WARM_MODEL_PID_KEY
 from ccrecall.models import LOGGER_NAME
 from ccrecall.summarizer import SUMMARY_VERSION
 
@@ -153,10 +154,10 @@ def main():
         db_absent = not DEFAULT_DB_PATH.exists()
 
         if db_absent or _needs_reimport(settings, logger):
-            _spawn_background(["ccrecall", "import"], import_conversations.PID_KEY, logger)
+            _spawn_background(["ccrecall", "import"], PID_KEY_IMPORT, logger)
 
         if _needs_backfill(settings, logger):
-            _spawn_background(["ccrecall", "backfill", "summaries"], backfill_summaries.PID_KEY, logger)
+            _spawn_background(["ccrecall", "backfill", "summaries"], PID_KEY_BACKFILL_SUMMARIES, logger)
 
         # Note: embedding backfill is NOT auto-spawned. Embeddings are filled
         # forward by embed-on-write (active leaves only); historical seeding is
@@ -168,7 +169,7 @@ def main():
         # (O_CREAT|O_EXCL): at most one concurrent warm runs at a time.
         # Runs on every SessionStart; fast no-op after the first download since the
         # model is already cached on disk.
-        _spawn_background(["ccrecall-warm-model"], WARM_MODEL_PID_KEY, logger)
+        _spawn_background(["ccrecall-warm-model"], PID_KEY_WARM_MODEL, logger)
     except Exception:
         # Top-level hook guard: must never crash the session start. Log
         # best-effort (no-op unless logging_enabled) so the failure isn't silent.

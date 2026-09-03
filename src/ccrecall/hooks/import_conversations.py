@@ -14,6 +14,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from ccrecall.config import DEFAULT_DB_PATH, get_db_path, load_settings, remove_pid_file, setup_logging
+from ccrecall.config import PID_KEY_IMPORT as PID_KEY
 from ccrecall.db import DEFAULT_PROJECTS_DIR, get_connection
 from ccrecall.db_vec import TRIGGER_CHUNKS_VEC_AD, vec_available
 from ccrecall.file_hashing import transcript_file_hash
@@ -30,9 +31,6 @@ BYTES_PER_MB = 1024 * 1024
 KB_PER_MB = 1024
 
 log = logging.getLogger(LOGGER_NAME)
-
-# PID key — must stay in sync with the spawn in memory_setup (`ccrecall import`).
-PID_KEY = "ccrecall-import"
 
 
 def _rss_mb() -> float:

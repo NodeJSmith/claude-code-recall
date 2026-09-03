@@ -9,14 +9,11 @@ import sqlite3
 from pathlib import Path
 
 from ccrecall.config import DEFAULT_DB_PATH, load_settings_for_db, remove_pid_file, setup_logging
+from ccrecall.config import PID_KEY_BACKFILL_SUMMARIES as PID_KEY
 from ccrecall.db import CONTENT_ERROR_VERSION, get_connection
 from ccrecall.summarizer import SUMMARY_VERSION, compute_context_summary
 
 BATCH_SIZE = 50
-
-# PID key — must stay in sync with the spawn in memory_setup
-# (`ccrecall backfill summaries`).
-PID_KEY = "ccrecall-backfill-summaries"
 
 
 def run(*, verbose: bool = False, db: Path = DEFAULT_DB_PATH) -> None:
