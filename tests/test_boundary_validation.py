@@ -43,6 +43,24 @@ class TestTranscriptValidation:
     def test_rejects_scalar_content(self):
         assert not is_valid_entry({"uuid": "u1", "type": "user", "message": {"content": 42}})
 
+    def test_rejects_null_message_on_user_entry(self):
+        # message: null (key present) is exactly what crashed compute_branch_metadata
+        # via entry.get("message", {}) returning None instead of the {} default (#171).
+        assert not is_valid_entry({"uuid": "u1", "type": "user", "message": None})
+
+    def test_rejects_null_message_on_assistant_entry(self):
+        assert not is_valid_entry({"uuid": "u1", "type": "assistant", "message": None})
+
+    def test_null_message_does_not_crash_compute_branch_metadata(self):
+        # Even if a null-message entry somehow reached compute_branch_metadata,
+        # it must not raise (defense-in-depth alongside the validator rejection).
+        entries = [{"type": "user", "uuid": "u1", "message": None}]
+        count, files, commits, tools = compute_branch_metadata(entries)
+        assert count == 1
+        assert files == []
+        assert commits == []
+        assert tools == {}
+
     def test_parse_jsonl_skips_malformed_keeps_valid(self, tmp_path):
         path = tmp_path / "mixed.jsonl"
         path.write_text(
