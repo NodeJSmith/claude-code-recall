@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 from uuid import uuid4
 
+from ccrecall.config import DEFAULT_SETTINGS
 from ccrecall.health import (
     ALERT_CANT_PERSIST,
     ALERT_EMBEDDINGS_FAILING,
@@ -1273,3 +1274,51 @@ class TestMemoryContextMalformedInput:
             "Malformed input has no session_id/cwd, so the full context-injection "
             "path (which always includes this directive) must not run"
         )
+
+
+class TestMemoryContextUnwritableRuntimeDir:
+    """Issue #175 regression: an unwritable ~/.ccrecall must not crash main()
+    before proactive_alert_block runs. ALERT_CANT_PERSIST is deliberately
+    evaluated before every early-return gate so it fires even when everything
+    else is broken — including load_settings()/setup_logging() themselves,
+    which previously crashed main() during setup, before stdin was even read.
+    """
+
+    def test_setup_logging_failure_still_emits_envelope_and_cant_persist_alert(self, tmp_path):
+        # A read-only runtime dir reproduces the real fault: setup_logging's
+        # RotatingFileHandler can't open its log file there (simulated directly
+        # via a monkeypatched raise, since the exact raise site doesn't matter
+        # to this test), and probe_filesystem's write probe genuinely fails
+        # against it — the autouse _isolated_runtime_dir fixture already points
+        # health.py's marker path at this directory, so no extra patching is
+        # needed for the alert to fire for real.
+        runtime_dir = tmp_path / "ccrecall-runtime"
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+        runtime_dir.chmod(0o555)
+
+        fake_settings = {
+            **DEFAULT_SETTINGS,
+            "db_path": str(tmp_path / "elsewhere" / "conversations.db"),
+        }
+        stdin_data = json.dumps({"session_id": "sess-1", "cwd": str(tmp_path), "source": "startup"})
+        stdout_capture = io.StringIO()
+
+        def _boom(*_args, **_kwargs):
+            raise PermissionError("simulated unwritable ~/.ccrecall")
+
+        try:
+            with (
+                patch.object(sys, "stdin", io.StringIO(stdin_data)),
+                patch.object(sys, "stdout", stdout_capture),
+                patch.object(memory_context, "load_settings", return_value=fake_settings),
+                patch.object(memory_context, "setup_logging", side_effect=_boom),
+            ):
+                memory_context.main()
+        finally:
+            runtime_dir.chmod(0o755)
+
+        output = stdout_capture.getvalue()
+        parsed = json.loads(output)  # must be valid JSON — proves no crash / no garbage stdout
+        additional_context = parsed.get("hookSpecificOutput", {}).get("additionalContext", "")
+        assert "## ⚠" in additional_context, "Can't-persist alert must fire despite setup_logging failure"
+        assert "persist" in additional_context.lower() or "write" in additional_context.lower()
