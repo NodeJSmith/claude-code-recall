@@ -14,7 +14,7 @@ import sqlite_vec
 from conftest import FIXTURE_DIR, VEC_SKIP, make_vec_conn
 
 from ccrecall.embeddings import EMBEDDING_DIM
-from ccrecall.hooks.import_conversations import _run, import_project, import_session
+from ccrecall.hooks.import_conversations import _run, import_project, import_session, run
 
 _STALE_IMPORT_LOG_SQL = (
     "UPDATE import_log SET file_hash = 'stale', file_size = NULL, file_mtime = NULL WHERE file_path = ?"
@@ -773,6 +773,26 @@ class TestImportPoisonContainment:
 
         cursor.execute("SELECT COUNT(*) FROM import_log WHERE file_path = ?", (str(good_file),))
         assert cursor.fetchone()[0] == 1, "the good file's real work must survive the poison file's rollback"
+
+    def test_run_logs_uncaught_exceptions_before_exiting(self, tmp_path, caplog, monkeypatch):
+        """An exception that reaches run() (outside the per-file loop entirely) must
+        still be logged before the detached process exits — the top-level backstop."""
+
+        def _raise(**_kwargs):
+            raise RuntimeError("simulated catastrophic failure outside the per-file loop")
+
+        monkeypatch.setattr("ccrecall.hooks.import_conversations._run", _raise)
+        monkeypatch.setattr("ccrecall.hooks.import_conversations.remove_pid_file", lambda _key: None)
+
+        with (
+            caplog.at_level(logging.ERROR, logger="ccrecall"),
+            pytest.raises(RuntimeError, match="simulated catastrophic failure"),
+        ):
+            run(db=tmp_path / "memory.db", projects_dir=tmp_path)
+
+        assert any(record.exc_info for record in caplog.records if record.levelno >= logging.ERROR), (
+            "an uncaught exception in run() must be logged with a traceback before the process exits"
+        )
 
 
 class TestImportRunPathSafety:
