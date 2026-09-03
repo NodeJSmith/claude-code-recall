@@ -488,16 +488,20 @@ class TestRenderContextSummary:
         assert "### Where We Left Off" not in result
         assert "### Earlier in This Session" not in result
         assert "earlier exchanges" not in result  # no phantom gap line
-        # No exchange text renders twice.
+        # No exchange block renders twice. Match the rendered "**User:**\ntext"
+        # pairing rather than bare substrings — the topic line and the footer
+        # both legitimately echo exchange 0's user text once each outside any
+        # exchange block, which a bare substring count would misread as a dup.
         for i in range(7):
-            assert result.count(f"user question {i}") == 1
-            assert result.count(f"assistant answer {i}") == 1
+            assert result.count(f"User:**\nuser question {i}") == 1
+            assert result.count(f"Assistant:**\nassistant answer {i}") == 1
 
     def test_exchange_count_divergence_opposite_direction_no_dropped_exchanges(self):
-        """Opposite divergence: exchange_count (9) <= SHORT_SESSION_MAX_EXCHANGES
-        (8) is false here on purpose to also exercise len(exchanges) > 8 while
-        exchange_count reports fewer — this must not silently drop the first
-        exchanges (the pre-fix behavior when keyed off exchange_count)."""
+        """Opposite divergence: exchange_count (5) understates the real 10
+        stored exchanges, so exchange_count <= SHORT_SESSION_MAX_EXCHANGES (8)
+        is true while len(exchanges) > 8 — keying the layout off exchange_count
+        would silently drop the first exchanges into the "all in one block"
+        layout instead of the correct first/last split."""
         messages = []
         for i in range(10):
             messages.append({"role": "user", "content": f"user question {i}", "timestamp": f"t{i}"})
