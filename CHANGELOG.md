@@ -2,13 +2,22 @@
 
 ## [0.24.1](https://github.com/NodeJSmith/claude-code-recall/compare/v0.24.0...v0.24.1) (2026-09-03)
 
+### Hooks
+
+* fix the SessionStart hook loading the full embedding stack (numpy/fastembed/onnxruntime) just to check background-job status, adding unnecessary startup latency (#200)
+
+### Backfill
+
+* fix summary backfill getting stuck retrying the same bad conversation branch forever instead of skipping it (#202)
+* fix embeddings backfill getting stuck on one bad conversation branch, blocking every branch behind it from ever being embedded (#204)
 
 ### Bug Fixes
 
-* harden message parsing, import transactions, and pending-question detection against edge cases ([#198](https://github.com/NodeJSmith/claude-code-recall/issues/198)) ([b218e67](https://github.com/NodeJSmith/claude-code-recall/commit/b218e67d144b2ddaa6918801a1f6565606c74291))
-* stop embeddings backfill wedging forever on one bad row ([#204](https://github.com/NodeJSmith/claude-code-recall/issues/204)) ([71a1fb2](https://github.com/NodeJSmith/claude-code-recall/commit/71a1fb221b1768de44cfe8fbc705c59c571d1517)), closes [#201](https://github.com/NodeJSmith/claude-code-recall/issues/201)
-* stop loading the embedding stack in the SessionStart setup hook ([#200](https://github.com/NodeJSmith/claude-code-recall/issues/200)) ([1242c69](https://github.com/NodeJSmith/claude-code-recall/commit/1242c69cf554fc2467d02a561e7c68f0997ea82c)), closes [#169](https://github.com/NodeJSmith/claude-code-recall/issues/169)
-* stop summary backfill wedging forever on one bad row ([#202](https://github.com/NodeJSmith/claude-code-recall/issues/202)) ([2b71ab3](https://github.com/NodeJSmith/claude-code-recall/commit/2b71ab3a824159f867bcd9cf8dedc16fa6c63ce9)), closes [#178](https://github.com/NodeJSmith/claude-code-recall/issues/178)
+* fix a crash in task/teammate-notification detection when a transcript message's `text` field was present but null (#198)
+* fix a false-positive "unresolved question" alert triggered by a system-generated notice that happened to quote a command tag (#198)
+* fix import silently reporting success while a disk or database error caused it to skip every remaining file in a project (#198)
+* fix a race between a manual backfill and the automatic sync that could hide a real "embeddings unavailable" alert (#198)
+* correct PyPI package metadata to list only the platforms ccrecall actually supports (Linux, macOS) (#198)
 
 ## [0.24.0](https://github.com/NodeJSmith/claude-code-recall/compare/v0.23.0...v0.24.0) (2026-09-03)
 
