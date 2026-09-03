@@ -292,7 +292,10 @@ def compute_branch_metadata(
         if entry_type not in ("user", "assistant"):
             continue
 
-        message = entry.get("message", {})
+        # `entry.get("message", {})` only supplies the {} default when the key is
+        # missing; a validator-rejected-but-still-possible `"message": null` would
+        # return None and crash the .get below (#171) — `or {}` covers both.
+        message = entry.get("message") or {}
         content = message.get("content", "")
 
         if entry_type == "user" and is_tool_result(content):

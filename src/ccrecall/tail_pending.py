@@ -54,7 +54,9 @@ def typed_instruction(entry: dict) -> str | None:
     """
     if entry.get("type") != "user":
         return None
-    content = entry.get("message", {}).get("content")
+    # `.get("message", {})` only supplies the {} default when the key is missing;
+    # a present-but-null "message" (#171) returns None and crashes the .get below.
+    content = (entry.get("message") or {}).get("content")
     if is_tool_result(content) or is_task_notification(content) or is_teammate_message(content):
         return None
     text, _, _, _, _ = extract_text_content(content)
@@ -81,7 +83,7 @@ def find_pending_question(entries: list[dict]) -> dict | None:
     for entry in entries:
         if entry.get("type") != "user":
             continue
-        content = entry.get("message", {}).get("content")
+        content = (entry.get("message") or {}).get("content")
         if not isinstance(content, list):
             continue
         for block in content:
@@ -95,7 +97,7 @@ def find_pending_question(entries: list[dict]) -> dict | None:
     for i, entry in enumerate(entries):
         if not _is_main_chain(entry) or entry.get("type") != "assistant":
             continue
-        content = entry.get("message", {}).get("content")
+        content = (entry.get("message") or {}).get("content")
         if not isinstance(content, list):
             continue
         for block in content:

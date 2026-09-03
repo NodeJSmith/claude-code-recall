@@ -9,7 +9,7 @@ mid-import AttributeError. They stay permissive on unknown fields
 
 import logging
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 # The single logger name setup_logging() configures. Shared so boundary skip-logs
 # and hook exceptions reach the same rotating file as the rest of the app; a module
@@ -66,6 +66,21 @@ class TranscriptEntry(BaseModel):
     is_meta: bool | None = Field(default=None, alias="isMeta")
     session_id: str | None = Field(default=None, alias="sessionId")
     message: EntryMessage | None = None
+
+    @model_validator(mode="after")
+    def _reject_null_message_on_turns(self) -> "TranscriptEntry":
+        """Reject an explicit ``"message": null`` on a user/assistant entry.
+
+        A missing ``message`` key is fine (non-turn entry types like
+        ``summary`` carry none — see ``EntryMessage``'s docstring). But a
+        user/assistant entry with ``message`` explicitly null passes the
+        ``EntryMessage | None`` type as-is and then crashes downstream
+        dereferences (``entry.get("message", {}).get("content")``) that
+        assume a missing key, not a present-but-null one.
+        """
+        if self.type in ("user", "assistant") and "message" in self.model_fields_set and self.message is None:
+            raise ValueError("message must not be null on a user/assistant entry")
+        return self
 
 
 class HookInput(BaseModel):

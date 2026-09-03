@@ -74,7 +74,10 @@ def last_typed_instruction(entries: list[dict]) -> str | None:
 def last_assistant_text(entries: list[dict]) -> str | None:
     for entry in reversed(entries):
         if entry.get("type") == "assistant":
-            text, _, _, _, _ = extract_text_content(entry.get("message", {}).get("content"))
+            # `.get("message", {})` only supplies the {} default when the key is
+            # missing; a present-but-null "message" (#171) returns None and
+            # crashes the .get below.
+            text, _, _, _, _ = extract_text_content((entry.get("message") or {}).get("content"))
             if text:
                 return text
     return None
@@ -129,7 +132,7 @@ def build_tail(entries: list[dict], k: int) -> list[tuple[str, str]]:
         if not _is_main_chain(entry):
             continue
         kind = entry.get("type")
-        content = entry.get("message", {}).get("content")
+        content = (entry.get("message") or {}).get("content")
         if kind == "user":
             text = typed_instruction(entry)
             if text:
