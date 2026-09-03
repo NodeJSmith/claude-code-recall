@@ -627,6 +627,7 @@ class TestBackfillFailureModes:
         with (
             patch("ccrecall.hooks.backfill_embeddings.model_available", return_value=True),
             patch("ccrecall.embed_ops.embed_batch", side_effect=counting_embed),
+            patch("ccrecall.hooks.backfill_embeddings.embed_text", return_value=_FIXED_VEC),
             patch("ccrecall.hooks.backfill_embeddings.get_connection", return_value=_NoCloseConn(conn)),
             patch("ccrecall.hooks.backfill_embeddings.load_settings_for_db", return_value={}),
             patch("ccrecall.hooks.backfill_embeddings.time.sleep"),
@@ -692,6 +693,7 @@ class TestBackfillFailureModes:
         with (
             patch("ccrecall.hooks.backfill_embeddings.model_available", return_value=True),
             patch("ccrecall.embed_ops.embed_batch", side_effect=counting_embed),
+            patch("ccrecall.hooks.backfill_embeddings.embed_text", return_value=_FIXED_VEC),
             patch("ccrecall.hooks.backfill_embeddings.get_connection", return_value=_NoCloseConn(conn)),
             patch("ccrecall.hooks.backfill_embeddings.load_settings_for_db", return_value={}),
             patch("ccrecall.hooks.backfill_embeddings.time.sleep"),
@@ -700,6 +702,47 @@ class TestBackfillFailureModes:
 
         assert _branch_embedding_version(conn, bad_id) == CONTENT_ERROR_VERSION
         assert _branch_embedding_version(conn, good_id) == EMBEDDING_VERSION
+
+    def test_model_session_failure_aborts_without_marking(self):
+        """When the model health probe also fails after a branch's embed
+        raises, the failure is a model/session break, not a per-row content
+        error: the failing branch must NOT be marked CONTENT_ERROR_VERSION,
+        the run must abort (EXIT_ABORT), and branches later in the batch
+        must not be processed at all.
+        """
+        conn = make_vec_conn()
+        bad_id = _insert_branch_with_messages(conn)
+        later_id = _insert_branch_with_messages(conn)
+
+        def failing_embed(texts: list[str], **kwargs) -> list[list[float]]:
+            raise RuntimeError("model session broke mid-inference")
+
+        with (
+            patch("ccrecall.hooks.backfill_embeddings.model_available", return_value=True),
+            patch("ccrecall.embed_ops.embed_batch", side_effect=failing_embed),
+            patch(
+                "ccrecall.hooks.backfill_embeddings.embed_text",
+                side_effect=RuntimeError("model session broke mid-inference"),
+            ),
+            patch("ccrecall.hooks.backfill_embeddings.get_connection", return_value=_NoCloseConn(conn)),
+            patch("ccrecall.hooks.backfill_embeddings.load_settings_for_db", return_value={}),
+            patch("ccrecall.hooks.backfill_embeddings.time.sleep"),
+        ):
+            exit_code = run()
+
+        assert exit_code == EXIT_ABORT
+        # The failing branch is untouched — not marked CONTENT_ERROR_VERSION,
+        # still eligible for retry on the next run.
+        bad_ev = _branch_embedding_version(conn, bad_id)
+        assert bad_ev != CONTENT_ERROR_VERSION
+        assert bad_ev != EMBEDDING_VERSION
+        # The batch aborted before reaching the later branch — proves the
+        # run stopped rather than continuing past the broken model.
+        later_ev = _branch_embedding_version(conn, later_id)
+        assert later_ev != CONTENT_ERROR_VERSION
+        assert later_ev != EMBEDDING_VERSION
+        assert not _branch_has_chunk_vecs(conn, bad_id)
+        assert not _branch_has_chunk_vecs(conn, later_id)
 
     def test_sentinel_row_not_reprocessed(self):
         """A branch with embedding_version=-1 is excluded from the selection predicate."""

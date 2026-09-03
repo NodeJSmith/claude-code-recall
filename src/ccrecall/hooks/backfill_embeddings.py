@@ -28,6 +28,21 @@ Two-level failure distinction:
     other unanticipated exception): mark that row embedding_version = -1 and
     continue.
 
+fastembed/onnxruntime don't expose a narrow, stable exception type that
+distinguishes "this branch's content broke the model" from "the model/session
+itself is broken" — both surface as ordinary `Exception` subclasses. So the
+distinction above is enforced with a live re-probe rather than exception-type
+classification: when `_embed_one_branch`'s catch-all clause fires, it calls
+`_model_still_healthy()`, which retries the model on a trivial fixed string.
+If the probe succeeds, the failure was specific to that branch's content —
+mark the sentinel and continue as before. If the probe also raises, the
+model/session is the thing that broke; the caught exception is re-raised
+instead of marking the row, so it flows through the same infra-abort path as
+a `sqlite3.Error`/`OSError` (batch rollback, `run()` returns `EXIT_ABORT`).
+This bounds worst-case poisoning to the current, uncommitted batch — batches
+already committed earlier in the run are unaffected, and the row that
+triggered the failure stays eligible for retry on the next run.
+
 Built to run unattended (systemd timer): `--status [--json]` reports progress
 without embedding, progress lines carry elapsed/ETA, and abort paths exit
 non-zero so the scheduler sees the failure.
@@ -62,6 +77,7 @@ from ccrecall.embeddings import (
     EMBEDDING_MODEL,
     EMBEDDING_VERSION,
     MODEL_TOKEN_LIMIT,
+    embed_text,
     model_available,
 )
 from ccrecall.health import (
@@ -320,6 +336,25 @@ class _EmbedResult(NamedTuple):
     inferences: int
 
 
+def _model_still_healthy(logger: logging.Logger) -> bool:
+    """Probe the embedding model with a trivial input to distinguish a
+    per-row content error from a broken model/session.
+
+    Called only after `_embed_one_branch` catches an exception that isn't
+    sqlite3.Error/OSError. If the model can still embed a trivial string,
+    the failure was specific to that branch's content — safe to mark and
+    continue. If the probe itself fails, the model/session is broken and
+    the caller re-raises to abort the run instead of marking every
+    subsequent branch as an unrecoverable content error.
+    """
+    try:
+        embed_text("healthcheck")
+        return True
+    except Exception:
+        logger.exception("%s: model health probe failed", _LOG_PREFIX)
+        return False
+
+
 def _embed_one_branch(
     cursor: sqlite3.Cursor,
     branch_id: int,
@@ -385,12 +420,22 @@ def _embed_one_branch(
     except Exception:
         cursor.execute(f"ROLLBACK TO SAVEPOINT {_SAVEPOINT_NAME}")
         cursor.execute(f"RELEASE SAVEPOINT {_SAVEPOINT_NAME}")
+        logger.exception("%s: branch %s failed", _LOG_PREFIX, branch_id)
+        if not _model_still_healthy(logger):
+            # Model/session failure, not a content error: don't poison this
+            # row — re-raise so the caller's batch-abort handler rolls back
+            # instead of marking every subsequent branch unrecoverable.
+            logger.error(
+                "%s: model health probe failed after branch %s, aborting without marking",
+                _LOG_PREFIX,
+                branch_id,
+            )
+            raise
         # Per-row content error: mark sentinel so this row is skipped next run.
         cursor.execute(
             "UPDATE branches SET embedding_version = ? WHERE id = ?",
             (CONTENT_ERROR_VERSION, branch_id),
         )
-        logger.exception("%s: branch %s failed", _LOG_PREFIX, branch_id)
         return _EmbedResult(message_count=len(branch_msgs), updated=0, inferences=0)
 
 
