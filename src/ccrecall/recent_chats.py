@@ -48,12 +48,17 @@ def get_recent_sessions(
     scope_sql, params = scope_filter_clause(scope)
     sql += scope_sql
 
-    order = "DESC" if sort_order == "desc" else "ASC"
-    sql += f" ORDER BY b.ended_at {order} LIMIT ?"
+    # Always select the most-recent-N set first; `sort_order` is a
+    # presentation order over that set, applied after fetch (see below),
+    # not a different selection criterion. Selecting with ORDER BY ... ASC
+    # LIMIT n would instead return the oldest n sessions in the whole DB.
+    sql += " ORDER BY b.ended_at DESC LIMIT ?"
     params.append(n)
 
     cursor.execute(sql, params)
     sessions = cursor.fetchall()
+    if sort_order == "asc":
+        sessions = list(reversed(sessions))
 
     results = []
 

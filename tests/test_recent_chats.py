@@ -131,6 +131,24 @@ class TestRecentChatsInvariant:
         # ended_at should be in descending order
         assert ended_ats == sorted(ended_ats, reverse=True)
 
+    def test_recent_chats_asc_returns_same_set_as_desc_reversed(self, memory_db):
+        """asc is a presentation order over the most-recent-N set, not a select-the-oldest-N query.
+
+        Regression for #176: sorting was applied before the LIMIT, so
+        `sort_order="asc"` returned the oldest N sessions in the whole DB
+        instead of the most recent N sessions, oldest-first.
+        """
+        _seed_sessions(memory_db)
+
+        desc_results = get_recent_sessions(memory_db, n=2, sort_order="desc")
+        asc_results = get_recent_sessions(memory_db, n=2, sort_order="asc")
+
+        desc_uuids = [r["uuid"] for r in desc_results]
+        asc_uuids = [r["uuid"] for r in asc_results]
+
+        assert asc_uuids == list(reversed(desc_uuids))
+        assert set(asc_uuids) == set(desc_uuids)
+
     def test_recent_chats_messages_unaffected(self, memory_db):
         """Messages are loaded correctly regardless of embedding columns on branches."""
         _seed_sessions(memory_db)
