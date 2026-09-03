@@ -66,6 +66,7 @@ import time
 from enum import Enum, auto
 from pathlib import Path
 
+from ccrecall.branch_ops import insert_branch_message_links
 from ccrecall.config import DEFAULT_DB_PATH, load_settings_for_db, setup_logging
 from ccrecall.content import extract_text_content
 from ccrecall.db import get_connection
@@ -532,13 +533,8 @@ def backfill_session(cursor: sqlite3.Cursor, session_id: int, filepaths: list[Pa
                 (session_id, *chunk),
             )
             uuid_to_msg_id.update({row[1]: row[0] for row in cursor.fetchall()})
-        for uuid in new_uuids:
-            msg_id = uuid_to_msg_id.get(uuid)
-            if msg_id:
-                cursor.execute(
-                    "INSERT OR IGNORE INTO branch_messages (branch_id, message_id) VALUES (?, ?)",
-                    (branch_db_id, msg_id),
-                )
+        link_ids = {msg_id for uuid in new_uuids if (msg_id := uuid_to_msg_id.get(uuid))}
+        insert_branch_message_links(cursor, branch_db_id, link_ids)
 
     # Rebuild aggregated_content from the branch's existing files/commits
     # metadata (unchanged by this backfill) plus the newly-populated tool

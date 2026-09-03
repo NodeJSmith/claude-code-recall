@@ -185,9 +185,43 @@ def diff_branch_messages(
             (branch_db_id, *to_remove),
         )
     if to_add:
-        cursor.executemany(
-            "INSERT OR IGNORE INTO branch_messages (branch_id, message_id) VALUES (?, ?)",
-            [(branch_db_id, mid) for mid in to_add],
+        insert_branch_message_links(cursor, branch_db_id, to_add)
+
+
+def insert_branch_message_links(
+    cursor: sqlite3.Cursor,
+    branch_db_id: int,
+    message_ids: set[int],
+) -> None:
+    """Link messages to a branch with a plain INSERT, absorbing only duplicates.
+
+    INSERT OR IGNORE would also swallow NOT NULL/FK/CHECK violations — schema
+    drift then drops every link silently while the suite stays green (#155).
+    Callers pre-compute the missing set, so a duplicate link can only come
+    from a concurrent writer; that one case is logged and absorbed, every
+    other constraint violation raises at the point of damage.
+    """
+    for message_id in message_ids:
+        insert_branch_message_link(cursor, branch_db_id, message_id)
+
+
+def insert_branch_message_link(
+    cursor: sqlite3.Cursor,
+    branch_db_id: int,
+    message_id: int,
+) -> None:
+    """Insert one branch_messages link; absorb a duplicate, raise anything else."""
+    try:
+        cursor.execute(
+            "INSERT INTO branch_messages (branch_id, message_id) VALUES (?, ?)",
+            (branch_db_id, message_id),
+        )
+    except sqlite3.IntegrityError as exc:
+        if "UNIQUE constraint failed" not in str(exc):
+            raise
+        log.warning(
+            "duplicate branch_messages link absorbed",
+            extra={"branch_id": branch_db_id, "message_id": message_id},
         )
 
 
