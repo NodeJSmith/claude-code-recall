@@ -34,7 +34,7 @@ log = logging.getLogger(LOGGER_NAME)
 
 # Upper bound on --max-results, single-sourced here and referenced by the CLI
 # validator (cli/commands.py) so the clamp and the validator can't drift apart.
-MAX_SEARCH_RESULTS = 10
+MAX_SEARCH_RESULTS = 20
 
 
 def format_markdown(cards: list[dict], query: str, ranked: bool, verbose: bool = False) -> str:

@@ -218,6 +218,16 @@ class TestCmdSearch:
         with pytest.raises(ValidationError, match="a query is required"):
             app(["search"], exit_on_error=False, print_error=False)
 
+    def test_app_accepts_max_results_of_20(self):
+        with patch("ccrecall.cli.commands.search_mod.run") as mock_run, pytest.raises(SystemExit) as exc_info:
+            app(["search", "-q", "test", "-n", "20"], exit_on_error=False, print_error=False)
+        assert exc_info.value.code == 0
+        assert mock_run.call_args.kwargs["max_results"] == 20
+
+    def test_app_rejects_max_results_above_20(self):
+        with pytest.raises(ValidationError):
+            app(["search", "-q", "test", "-n", "21"], exit_on_error=False, print_error=False)
+
 
 class TestCmdSearchMessages:
     def test_calls_run_messages_with_parsed_arguments(self):
