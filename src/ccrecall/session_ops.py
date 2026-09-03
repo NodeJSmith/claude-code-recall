@@ -28,7 +28,7 @@ from pathlib import Path
 from ccrecall.branch_ops import sync_branch
 from ccrecall.db_vec import chunk_vec_queryable
 from ccrecall.formatting import normalize_project_key
-from ccrecall.import_log_ops import import_log_skip_check, upsert_import_log
+from ccrecall.import_log_ops import import_log_skip_check, pending_tool_content_uuids, upsert_import_log
 from ccrecall.message_ops import insert_new_messages, update_missing_tool_content, upsert_session
 from ccrecall.models import LOGGER_NAME
 from ccrecall.parsing import extract_session_metadata, extract_session_uuid, find_all_branches, parse_all_with_uuids
@@ -127,7 +127,17 @@ def sync_session(
     )
     existing_uuids = {row[0] for row in cursor.fetchall()}
 
-    repaired_tool_content = update_missing_tool_content(cursor, session_id, messages, existing_uuids)
+    # The repair loop is only needed for pre-v4 rows whose tool_content is still
+    # NULL. Query the pending set first (cheap — hits idx_messages_tool_content_null)
+    # so the steady state (every session created post-v4) skips the per-message
+    # extract_text_content + UPDATE work entirely instead of paying for it, at
+    # rowcount 0, on every sync.
+    pending_uuids = pending_tool_content_uuids(cursor, session_uuid)
+    if pending_uuids:
+        pending_messages = [e for e in messages if e.get("uuid") in pending_uuids]
+        repaired_tool_content = update_missing_tool_content(cursor, session_id, pending_messages, existing_uuids)
+    else:
+        repaired_tool_content = 0
     new_count = insert_new_messages(cursor, session_id, messages, valid_branch_uuids, existing_uuids)
 
     # all_entries is no longer needed past this point — messages have been
