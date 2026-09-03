@@ -176,7 +176,34 @@ class TestSyncSessionCreatesBranches:
         assert repaired, "re-sync should repair NULL tool_content without waiting for backfill"
 
 
-class TestSyncSessionWritesNullHashImportLog:
+class TestResyncSkipsRepairLoopWhenNoPendingToolContent:
+    """A session with zero NULL tool_content rows must not pay for the repair loop.
+
+    ``update_missing_tool_content`` iterates messages and runs
+    ``extract_text_content`` + a per-row UPDATE for every already-stored message,
+    even though normal (post-v4) rows always have a non-NULL tool_content and the
+    UPDATE is a guaranteed rowcount-0 no-op. The repair loop should be gated on
+    the pending-NULL set (``pending_tool_content_uuids``) so the steady state
+    (every session synced again after its first sync) skips it entirely.
+    """
+
+    def test_second_sync_does_not_call_repair_loop(self, memory_db):
+        fixture_path = FIXTURE_DIR / "tool_heavy.jsonl"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project_dir = Path(tmpdir)
+            sync_session(memory_db, fixture_path, project_dir)
+            memory_db.commit()
+
+            # First sync must have populated tool_content for every row — no NULLs left.
+            cursor = memory_db.cursor()
+            cursor.execute("SELECT COUNT(*) FROM messages WHERE tool_content IS NULL")
+            assert cursor.fetchone()[0] == 0, "Setup: first sync should leave no NULL tool_content rows"
+
+            with patch("ccrecall.session_ops.update_missing_tool_content") as mock_repair:
+                sync_session(memory_db, fixture_path, project_dir)
+
+            mock_repair.assert_not_called()
+
     """Verify sync path writes import_log with file_hash = NULL."""
 
     def test_sync_session_writes_null_hash_import_log(self, memory_db):
