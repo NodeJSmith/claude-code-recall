@@ -2256,10 +2256,10 @@ assert not found, f'Heavy modules loaded: {{found}}'
         assert result.returncode == 0, result.stderr
 
     def test_memory_setup_does_not_import_heavy_deps(self):
-        """memory_setup.py must not import the LLM summarizer boundary."""
-        code = "import ccrecall.hooks.memory_setup\nimport sys\nassert 'ccrecall.llm_summarizer' not in sys.modules\n"
-        result = _run_subprocess_probe(code)
-        assert result.returncode == 0, result.stderr
+        """memory_setup.py's PID keys must come from config.py, not from importing
+        import_conversations.py (-> db_vec) or warm_model.py (-> embeddings) just
+        to read their PID_KEY constant (#169)."""
+        self._assert_no_heavy_imports("ccrecall.hooks.memory_setup")
 
     def test_clear_handoff_does_not_import_heavy_deps(self):
         """clear_handoff.py imports only from config.py."""

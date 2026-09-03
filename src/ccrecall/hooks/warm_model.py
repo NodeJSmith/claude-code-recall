@@ -10,12 +10,9 @@ there is no hot-path concern — but keeping it a direct entry point is consiste
 and avoids coupling the warm to the CLI command lifecycle.
 """
 
+from ccrecall.config import PID_KEY_WARM_MODEL as PID_KEY
 from ccrecall.config import load_settings, remove_pid_file, setup_logging
 from ccrecall.embeddings import model_available
-
-# PID key written by _spawn_background in memory_setup (imported there as WARM_MODEL_PID_KEY)
-# and removed by main() here.
-PID_KEY = "ccrecall-warm-model"
 
 
 def main() -> None:
