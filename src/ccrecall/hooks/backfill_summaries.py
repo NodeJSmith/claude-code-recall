@@ -16,11 +16,13 @@ unanticipated exception type fall through to the infra path unmarked; since
 this backfill respawns on every SessionStart, an unmarked row wedges every
 session indefinitely (issue #178).
 
-This is the opposite taxonomy from `backfill_embeddings.py`/`backfill_tool_content.py`
-(narrow content-error allow-list, everything else treated as infra) — deliberately,
-not drift: those two are opt-in/manual, so a wedged branch just sits until someone
-reruns the command, while this one respawns unattended every session. Keep the
-taxonomies distinct rather than "fixing" one to match the other.
+`backfill_embeddings.py` now shares this same catch-all-then-filter-infra taxonomy
+(issue #201) — it's also built to run unattended on a recurring schedule, so the
+same wedge risk applied there. `backfill_tool_content.py` is the one exception left
+on the narrow content-error allow-list: it's a genuinely one-off manual migration
+command with no scheduler-oriented design, so a wedged row there just sits idle
+until someone reruns it by hand — keep its taxonomy distinct rather than "fixing"
+it to match the other two.
 """
 
 import sqlite3

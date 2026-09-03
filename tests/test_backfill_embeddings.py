@@ -644,12 +644,12 @@ class TestBackfillFailureModes:
         assert _branch_has_chunk_vecs(conn, good_id2)
 
     def test_infra_failure_marks_no_rows(self):
-        """RuntimeError from embed_text (infra failure) → zero rows marked -1, all stay eligible."""
+        """OSError from embed_text (infra failure) → zero rows marked -1, all stay eligible."""
         conn = make_vec_conn()
         ids = [_insert_branch_with_messages(conn) for _ in range(3)]
 
-        def infra_fail(texts: list[str]) -> list[list[float]]:
-            raise RuntimeError("ONNX session crashed")
+        def infra_fail(texts: list[str], **kwargs) -> list[list[float]]:
+            raise OSError("disk I/O error loading model weights")
 
         with (
             patch("ccrecall.hooks.backfill_embeddings.model_available", return_value=True),
@@ -664,6 +664,42 @@ class TestBackfillFailureModes:
             ev = _branch_embedding_version(conn, bid)
             assert ev != CONTENT_ERROR_VERSION, f"branch {bid} should not be marked -1 on infra failure"
         assert _chunk_count(conn) == 0
+
+    def test_unanticipated_exception_type_marks_sentinel_not_wedge(self):
+        """An exception type outside any hardcoded content-error allow-list still
+        marks the sentinel instead of falling through to the infra-abort path.
+
+        Regression (#201, mirroring #178): the old taxonomy allow-listed only
+        (ValueError, OverflowError, UnicodeError) as content errors, so any
+        other exception type (e.g. a RuntimeError from an ONNX inference
+        failure specific to one branch's text) fell through to the infra
+        handler, left the row unmarked, and — since this backfill is run
+        unattended on a recurring schedule — wedged that row (and every
+        branch behind it) forever.
+        """
+        conn = make_vec_conn()
+        bad_id = _insert_branch_with_messages(conn)
+        good_id = _insert_branch_with_messages(conn)
+
+        call_no = [0]
+
+        def counting_embed(texts: list[str], **kwargs) -> list[list[float]]:
+            call_no[0] += 1
+            if call_no[0] == 1:
+                raise RuntimeError("unexpected inference failure for this branch's text")
+            return [_FIXED_VEC] * len(texts)
+
+        with (
+            patch("ccrecall.hooks.backfill_embeddings.model_available", return_value=True),
+            patch("ccrecall.embed_ops.embed_batch", side_effect=counting_embed),
+            patch("ccrecall.hooks.backfill_embeddings.get_connection", return_value=_NoCloseConn(conn)),
+            patch("ccrecall.hooks.backfill_embeddings.load_settings_for_db", return_value={}),
+            patch("ccrecall.hooks.backfill_embeddings.time.sleep"),
+        ):
+            run()
+
+        assert _branch_embedding_version(conn, bad_id) == CONTENT_ERROR_VERSION
+        assert _branch_embedding_version(conn, good_id) == EMBEDDING_VERSION
 
     def test_sentinel_row_not_reprocessed(self):
         """A branch with embedding_version=-1 is excluded from the selection predicate."""

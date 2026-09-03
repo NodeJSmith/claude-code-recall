@@ -6,10 +6,27 @@ forward coverage comes from embed-on-write instead.
 Processes branches in batches, commits between batches, and marks per-row
 content errors with embedding_version = -1 to avoid infinite retry.
 
+Exception taxonomy is catch-all-then-filter-infra, matching
+`backfill_summaries.py`: any exception raised while embedding one branch is a
+content error for that row (mark the sentinel, continue) unless it's a
+`sqlite3.Error`/`OSError` — an infra/DB failure, which propagates to abort the
+batch without poisoning the row. A narrow content-error allow-list would let
+an unanticipated exception type fall through to the infra path unmarked, and
+since this backfill is built to run unattended on a recurring schedule (see
+below), an unmarked row wedges every scheduled run indefinitely: the run
+aborts on that same row every time, blocking every branch behind it in `id`
+order from ever being embedded — the same failure mode as issue #178, fixed
+here as issue #201.
+
+`backfill_tool_content.py` keeps the older narrow-allow-list taxonomy
+deliberately: it's a one-off migration command with no scheduler-oriented
+design, so a wedged row there just sits idle until someone reruns it by hand.
+
 Two-level failure distinction:
   - Model/session failure: abort the whole run, mark NOTHING.
-  - Per-row content error (tokenizer overflow, malformed content): mark that
-    row embedding_version = -1 and continue.
+  - Per-row content error (tokenizer overflow, malformed content, or any
+    other unanticipated exception): mark that row embedding_version = -1 and
+    continue.
 
 Built to run unattended (systemd timer): `--status [--json]` reports progress
 without embedding, progress lines carry elapsed/ETA, and abort paths exit
@@ -224,13 +241,18 @@ def run(
                             print(f"{_PRINT_PREFIX}: {msg}", file=sys.stderr)
                             last_progress = total_processed
                 except Exception:
-                    # Infra/session failure (e.g. ONNX session crash, sqlite3.Error on
-                    # fetch_branch_messages, OOM): abort without marking the content-error
-                    # sentinel. Rolling back discards the entire current batch — both the
-                    # failed branch's partial state and any earlier branches whose
-                    # SAVEPOINTs were released but not yet committed. All are re-selected
-                    # cleanly on the next run. Prior batches (committed by after_batch)
-                    # are unaffected.
+                    # Batch-level abort: sqlite3.Error/OSError re-raised by
+                    # _embed_one_branch (its content-vs-infra split — see that
+                    # function's docstring), or any other unexpected failure
+                    # from the bookkeeping code above (progress formatting,
+                    # logging). Per-row content errors never reach here —
+                    # _embed_one_branch marks the sentinel and returns a
+                    # result instead of raising. Rolling back discards the
+                    # entire current batch — both the failed branch's partial
+                    # state and any earlier branches whose SAVEPOINTs were
+                    # released but not yet committed. All are re-selected
+                    # cleanly on the next run. Prior batches (committed by
+                    # after_batch) are unaffected.
                     logger.exception("%s: session failure, aborting", _LOG_PREFIX)
                     conn.rollback()
                     return False
@@ -306,9 +328,9 @@ def _embed_one_branch(
 ) -> _EmbedResult:
     """Fetch and embed one branch inside a SAVEPOINT.
 
-    Infra errors (e.g. sqlite3.Error from fetch_branch_messages, a
-    non-content exception from embed_branch_chunks) propagate to the
-    caller's batch-abort handler.
+    Implements the content-vs-infra split described in this module's
+    docstring: infra errors propagate to the caller's batch-abort handler,
+    everything else marks the row's content-error sentinel and returns.
     """
     # Fetch messages BEFORE the SAVEPOINT: a sqlite3.Error here is a
     # batch-abort (infra failure), NOT a per-row content error. It propagates
@@ -337,15 +359,13 @@ def _embed_one_branch(
             """,
             (branch_id, EMBEDDING_VERSION, EMBEDDING_MODEL),
         )
-        # embed_branch_chunks RAISES on failure — content errors
-        # (ValueError/OverflowError/UnicodeError) are caught below and marked
-        # once; infra errors propagate to the outer except. max_embeds=None:
-        # backfill is off the hot path and must fully embed each branch in
-        # one pass. With the write-path cap, a branch longer than the cap
-        # would stay eligible and trip the no-progress guard on re-selection.
-        # The return value is the actual inference count (exchanges
-        # embedded), so total_inferences excludes already-current chunks the
-        # pre-delete preserved.
+        # embed_branch_chunks RAISES on failure. max_embeds=None: backfill is
+        # off the hot path and must fully embed each branch in one pass. With
+        # the write-path cap, a branch longer than the cap would stay
+        # eligible and trip the no-progress guard on re-selection. The return
+        # value is the actual inference count (exchanges embedded), so
+        # total_inferences excludes already-current chunks the pre-delete
+        # preserved.
         embedded = embed_branch_chunks(
             cursor,
             branch_id,
@@ -357,7 +377,13 @@ def _embed_one_branch(
         )
         cursor.execute(f"RELEASE SAVEPOINT {_SAVEPOINT_NAME}")
         return _EmbedResult(message_count=len(branch_msgs), updated=1, inferences=embedded)
-    except (ValueError, OverflowError, UnicodeError):
+    except (sqlite3.Error, OSError):
+        # sqlite3.Error/OSError are themselves Exception subclasses, so this
+        # clause exists only to shadow the broader `except Exception` below:
+        # re-raise so the caller's batch-abort handler treats this as an
+        # infra failure instead of poisoning the row.
+        raise
+    except Exception:
         cursor.execute(f"ROLLBACK TO SAVEPOINT {_SAVEPOINT_NAME}")
         cursor.execute(f"RELEASE SAVEPOINT {_SAVEPOINT_NAME}")
         # Per-row content error: mark sentinel so this row is skipped next run.
