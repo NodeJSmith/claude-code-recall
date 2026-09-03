@@ -4,6 +4,11 @@ on:
     push:
         branches: [main]
     workflow_dispatch:
+        inputs:
+            tag_name:
+                description: "Release tag to publish (e.g. v0.24.0). Skips release-please and publishes directly."
+                required: true
+                type: string
 
 # release-please opens/updates the release PR and, when that PR merges, creates
 # the GitHub release + tag and bumps the version in pyproject.toml. It authenticates
@@ -22,6 +27,13 @@ on:
 # version would otherwise stay stale until a contributor's next `uv sync`, surfacing
 # as a spurious lockfile diff. The sync-lockfile job below closes that gap by
 # re-locking on the release PR branch so the bump lands in the same PR.
+#
+# The sync-release-notes job replaces release-please's auto-generated GitHub
+# Release notes with the curated CHANGELOG.md section (see
+# .claude/rules/changelog-quality.md and .claude/commands/changelog-review.md).
+# workflow_dispatch.tag_name lets both that job and publish-pypi be re-run
+# manually against an already-tagged release, without going through
+# release-please again.
 permissions:
     contents: write
     pull-requests: write
@@ -31,7 +43,11 @@ concurrency:
     cancel-in-progress: false
 
 jobs:
+    # Skipped on workflow_dispatch — that path skips release-please entirely and
+    # publishes an already-tagged release directly (see the manual-publish/recovery
+    # steps in .claude/rules/changelog-quality.md).
     release-please:
+        if: github.event_name == 'push'
         runs-on: ubuntu-latest
         timeout-minutes: 15
         outputs:
@@ -117,9 +133,79 @@ jobs:
                   git commit -m "chore: sync uv.lock to release version"
                   git push "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" "HEAD:${PR_BRANCH}"
 
+    # After a release is created, replace the auto-generated GitHub Release notes
+    # with the curated section from CHANGELOG.md (edited on the release-please
+    # branch before merging — see .claude/commands/changelog-review.md). The
+    # auto-generated notes are release-please's raw PR list; the curated version
+    # groups by topic, removes internal entries, and adds contributor attribution.
+    sync-release-notes:
+        needs: release-please
+        # always() lets this run when release-please is skipped (the workflow_dispatch
+        # path). It's safe on the push path too: release_created only comes from
+        # release-please-action's single step, so a failed release-please job and a
+        # true release_created output can't both happen.
+        if: >-
+            always()
+            && (
+              (github.event_name == 'push' && needs.release-please.outputs.release_created == 'true')
+              || github.event_name == 'workflow_dispatch'
+            )
+        runs-on: ubuntu-latest
+        timeout-minutes: 5
+        permissions:
+            contents: write
+        steps:
+            - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+              with:
+                  ref: ${{ needs.release-please.outputs.tag_name || inputs.tag_name }}
+                  persist-credentials: false
+
+            # github.token (not the app token) is sufficient here: we only need
+            # contents:write to edit the release body, and unlike sync-lockfile's
+            # git push, this doesn't need to re-trigger downstream workflows.
+            - name: Extract and sync release notes
+              env:
+                  GH_TOKEN: ${{ github.token }}
+                  TAG_NAME: ${{ needs.release-please.outputs.tag_name || inputs.tag_name }}
+              run: |
+                  set -euo pipefail
+
+                  version="${TAG_NAME#v}"
+
+                  # Extract the section for this version from CHANGELOG.md.
+                  # Captures everything between "## [<version>]" and the next "## [" heading.
+                  notes=$(awk -v ver="$version" '
+                    /^## \[/ {
+                      if (found) exit
+                      if (index($0, "## [" ver "]")) found=1
+                      next
+                    }
+                    found { print }
+                  ' CHANGELOG.md)
+
+                  if [ -z "$notes" ]; then
+                      echo "::warning::No CHANGELOG.md section found for version ${version} — skipping release notes sync"
+                      exit 0
+                  fi
+
+                  echo "Syncing $(echo "$notes" | wc -l) lines of curated notes to GitHub Release ${TAG_NAME}"
+                  notes_file=$(mktemp)
+                  printf '%s\n' "$notes" > "$notes_file"
+                  gh release edit "$TAG_NAME" --notes-file "$notes_file"
+                  rm -f "$notes_file"
+
     publish-pypi:
         needs: release-please
-        if: needs.release-please.outputs.release_created == 'true'
+        # always() lets this run when release-please is skipped (the workflow_dispatch
+        # path). It's safe on the push path too: release_created only comes from
+        # release-please-action's single step, so a failed release-please job and a
+        # true release_created output can't both happen.
+        if: >-
+            always()
+            && (
+              (github.event_name == 'push' && needs.release-please.outputs.release_created == 'true')
+              || github.event_name == 'workflow_dispatch'
+            )
         runs-on: ubuntu-latest
         timeout-minutes: 15
         # Trusted Publishing exchanges this OIDC token for a short-lived PyPI
@@ -135,7 +221,7 @@ jobs:
             - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
               with:
                   persist-credentials: false
-                  ref: ${{ needs.release-please.outputs.tag_name }}
+                  ref: ${{ needs.release-please.outputs.tag_name || inputs.tag_name }}
 
             - name: Install uv
               uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
