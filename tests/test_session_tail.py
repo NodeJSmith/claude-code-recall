@@ -194,6 +194,18 @@ class TestFindPendingQuestion:
         ]
         assert find_pending_question(entries) is not None
 
+    def test_rejected_then_slash_command_is_not_pending(self):
+        # A slash command user entry is entirely <command-name>/<command-args>
+        # wrapper text, which typed_instruction strips to empty — but the user
+        # visibly moved on, so this must not still be treated as pending.
+        entries = [
+            ask_question("t1", "proceed?", OPTS),
+            user_tool_result("t1", REJECTED, is_error=True),
+            user_text("<command-message>ship</command-message><command-name>/mine-ship</command-name>"),
+            assistant_text("Shipping now."),
+        ]
+        assert find_pending_question(entries) is None
+
 
 class TestTypedInstruction:
     def test_real_text(self):
