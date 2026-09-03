@@ -182,11 +182,28 @@ def record_embedding_failure(reason: str, path: Path | None = None) -> None:
     atomic_write_json(path, {"reason": reason, "since": Instant.now().format_iso()})
 
 
-def clear_embedding_failure(path: Path | None = None) -> None:
+def clear_embedding_failure(path: Path | None = None, reasons: set[str | None] | None = None) -> None:
     """Remove the embedding-capability-failure sidecar.
 
-    Called by the embedding process on a successful embed run. No-op if the
-    sidecar is already absent.
+    Called by the embedding process on a successful embed run (backfill) or a
+    successful structural check (sync-current). No-op if the sidecar is
+    already absent.
+
+    ``reasons`` scopes the clear to records whose "reason" field is in the
+    given set — a no-op (record left in place) when the current record's
+    reason is outside that scope. Default (None) clears unconditionally,
+    regardless of reason — this is what backfill wants, since it re-verifies
+    both the vec extension and the model.
+
+    This scoping exists because sync-current's vec-ok clear only proves
+    sqlite-vec is queryable, not that the embedding model itself is healthy —
+    a REASON_MODEL_UNAVAILABLE record written by backfill must survive a
+    vec-ok clear from sync-current, since sync-current never re-verified the
+    model (#164). sync-current passes ``reasons={None, REASON_VEC_UNAVAILABLE}``
+    so it only clears reasons its own check can actually vouch for; None is
+    included so a record with no/malformed "reason" field (which should never
+    happen given record_embedding_failure always writes one, but costs
+    nothing to tolerate) doesn't get stuck forever.
 
     Deliberately does NOT touch the snooze ledger — the ledger is written only
     by SessionStart hooks (design/specs/002-ccrecall-surfacing-model/design.md
@@ -206,6 +223,10 @@ def clear_embedding_failure(path: Path | None = None) -> None:
     """
     if path is None:
         path = EMBEDDING_STATUS_PATH
+    if reasons is not None:
+        current = read_embedding_status(path=path)
+        if current is not None and current.get("reason") not in reasons:
+            return
     path.unlink(missing_ok=True)
 
 

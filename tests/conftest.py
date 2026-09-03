@@ -67,8 +67,12 @@ def patched_record(sidecar: Path):
 
 
 def patched_clear(sidecar: Path):
-    """side_effect redirecting clear_embedding_failure to a tmp sidecar path."""
-    return lambda: clear_embedding_failure(path=sidecar)
+    """side_effect redirecting clear_embedding_failure to a tmp sidecar path.
+
+    Forwards any kwargs (e.g. `reasons=`) so callers that scope the clear —
+    sync_current's vec-ok clear (#164) — still redirect to the tmp sidecar.
+    """
+    return lambda **kwargs: clear_embedding_failure(path=sidecar, **kwargs)
 
 
 def vec_available_in_env() -> bool:
