@@ -78,7 +78,7 @@ def _is_command_wrapper(entry: dict) -> bool:
     """
     if entry.get("type") != "user":
         return False
-    content = entry.get("message", {}).get("content")
+    content = (entry.get("message") or {}).get("content")
     if is_tool_result(content) or is_task_notification(content) or is_teammate_message(content):
         return False
     return isinstance(content, str) and "<command-name>" in content
