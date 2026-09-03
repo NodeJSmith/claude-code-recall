@@ -1,5 +1,7 @@
 """Tests for search_conversations.py and recent_chats.py — search and retrieval."""
 
+import contextlib
+import functools
 import json
 import sqlite3
 from unittest.mock import MagicMock, patch
@@ -24,6 +26,13 @@ from ccrecall.search_conversations import OVERFETCH_FLOOR, compute_caveat, searc
 from ccrecall.search_hydrate import dedup_by_session, hydrate_cards
 from ccrecall.search_query import ScopeFilter
 from ccrecall.search_vector import execute_chunk_knn, get_vec_chunk_ids
+
+
+@functools.cache
+def _vec_available() -> bool:
+    """Memoized sqlite-vec probe for skipif markers — opens one connection, checks, closes it."""
+    with contextlib.closing(sqlite3.connect(":memory:")) as conn:
+        return vec_available(conn)
 
 
 @pytest.fixture
@@ -798,7 +807,7 @@ class TestStaleVersionExclusion:
         return vec_conn, current_branch_id, stale_branch_id
 
     @pytest.mark.skipif(
-        not vec_available(sqlite3.connect(":memory:")),
+        not _vec_available(),
         reason="sqlite-vec not available",
     )
     def test_stale_chunk_excluded_from_vec_candidates(self, stale_db):
@@ -812,7 +821,7 @@ class TestStaleVersionExclusion:
         assert current_id in branch_ids, "Current-version chunk must appear in chunk-KNN candidates"
 
     @pytest.mark.skipif(
-        not vec_available(sqlite3.connect(":memory:")),
+        not _vec_available(),
         reason="sqlite-vec not available",
     )
     def test_stale_branch_reachable_via_fts_not_vec(self, stale_db):
@@ -843,7 +852,7 @@ class TestAdaptiveChunkKnn:
     """Adaptive retry, lazy count, and narrow-error coverage for execute_chunk_knn."""
 
     @pytest.mark.skipif(
-        not vec_available(sqlite3.connect(":memory:")),
+        not _vec_available(),
         reason="sqlite-vec not available",
     )
     def test_retry_recovers_farther_current_active_chunk(self):
@@ -888,7 +897,7 @@ class TestAdaptiveChunkKnn:
         conn.close()
 
     @pytest.mark.skipif(
-        not vec_available(sqlite3.connect(":memory:")),
+        not _vec_available(),
         reason="sqlite-vec not available",
     )
     def test_unfiltered_filled_query_skips_count_queries(self):
@@ -909,7 +918,7 @@ class TestAdaptiveChunkKnn:
         conn.close()
 
     @pytest.mark.skipif(
-        not vec_available(sqlite3.connect(":memory:")),
+        not _vec_available(),
         reason="sqlite-vec not available",
     )
     def test_count_query_sqlite_error_returns_empty(self):
@@ -938,7 +947,7 @@ class TestAdaptiveChunkKnn:
         conn.close()
 
     @pytest.mark.skipif(
-        not vec_available(sqlite3.connect(":memory:")),
+        not _vec_available(),
         reason="sqlite-vec not available",
     )
     def test_relational_filter_sqlite_error_returns_empty(self):
@@ -960,7 +969,7 @@ class TestAdaptiveChunkKnn:
         conn.close()
 
     @pytest.mark.skipif(
-        not vec_available(sqlite3.connect(":memory:")),
+        not _vec_available(),
         reason="sqlite-vec not available",
     )
     def test_count_query_non_db_error_propagates(self):
@@ -990,7 +999,7 @@ class TestAdaptiveChunkKnn:
         conn.close()
 
     @pytest.mark.skipif(
-        not vec_available(sqlite3.connect(":memory:")),
+        not _vec_available(),
         reason="sqlite-vec not available",
     )
     def test_filter_chunk_knn_rows_batches_large_candidate_sets(self, monkeypatch):
@@ -1026,7 +1035,7 @@ class TestAdaptiveChunkKnn:
         conn.close()
 
     @pytest.mark.skipif(
-        not vec_available(sqlite3.connect(":memory:")),
+        not _vec_available(),
         reason="sqlite-vec not available",
     )
     def test_filter_chunk_knn_rows_returns_empty_when_scope_params_exhaust_budget(self, monkeypatch):
@@ -1073,7 +1082,7 @@ class TestAdaptiveChunkKnnScopes:
     """Scoped vector regressions recover farther in-scope rows beyond the initial KNN window."""
 
     @pytest.mark.skipif(
-        not vec_available(sqlite3.connect(":memory:")),
+        not _vec_available(),
         reason="sqlite-vec not available",
     )
     def test_retry_recovers_farther_project_scoped_chunk(self):
@@ -1126,7 +1135,7 @@ class TestAdaptiveChunkKnnScopes:
         conn.close()
 
     @pytest.mark.skipif(
-        not vec_available(sqlite3.connect(":memory:")),
+        not _vec_available(),
         reason="sqlite-vec not available",
     )
     def test_retry_recovers_farther_session_prefix_chunk_with_escaped_like(self):
@@ -1153,7 +1162,7 @@ class TestAdaptiveChunkKnnScopes:
         conn.close()
 
     @pytest.mark.skipif(
-        not vec_available(sqlite3.connect(":memory:")),
+        not _vec_available(),
         reason="sqlite-vec not available",
     )
     def test_retry_recovers_farther_path_substring_chunk_with_escaped_like(self):
@@ -1182,7 +1191,7 @@ class TestAdaptiveChunkKnnScopes:
         conn.close()
 
     @pytest.mark.skipif(
-        not vec_available(sqlite3.connect(":memory:")),
+        not _vec_available(),
         reason="sqlite-vec not available",
     )
     def test_retry_recovers_farther_before_filtered_chunk(self):
@@ -1218,7 +1227,7 @@ class TestAdaptiveChunkKnnScopes:
         conn.close()
 
     @pytest.mark.skipif(
-        not vec_available(sqlite3.connect(":memory:")),
+        not _vec_available(),
         reason="sqlite-vec not available",
     )
     def test_retry_recovers_farther_after_filtered_chunk(self):
@@ -1254,7 +1263,7 @@ class TestAdaptiveChunkKnnScopes:
         conn.close()
 
     @pytest.mark.skipif(
-        not vec_available(sqlite3.connect(":memory:")),
+        not _vec_available(),
         reason="sqlite-vec not available",
     )
     def test_retry_recovers_farther_combined_session_prefix_and_before_chunk(self):
@@ -1299,7 +1308,7 @@ class TestSearchSessionsFusionScopeRetry:
     """Track A regression: scoped vector hits still surface through fusion into cards."""
 
     @pytest.mark.skipif(
-        not vec_available(sqlite3.connect(":memory:")),
+        not _vec_available(),
         reason="sqlite-vec not available",
     )
     def test_search_sessions_returns_scoped_card_beyond_initial_chunk_window(self):
@@ -1452,7 +1461,7 @@ class TestSessionDedup:
         assert result == [bx, by], "Different sessions should both be kept"
 
     @pytest.mark.skipif(
-        not vec_available(sqlite3.connect(":memory:")),
+        not _vec_available(),
         reason="sqlite-vec not available",
     )
     def test_duplicate_session_via_search(self):
@@ -1767,7 +1776,7 @@ class TestMidSessionRecall:
     """In a session with many exchanges, a query matching exchange 5 finds the session via chunk-KNN."""
 
     @pytest.mark.skipif(
-        not vec_available(sqlite3.connect(":memory:")),
+        not _vec_available(),
         reason="sqlite-vec not available",
     )
     def test_mid_session_chunk_found_by_knn(self):
@@ -1881,7 +1890,7 @@ class TestCappedChunkRetrieval:
     cap-produces-a-vector unit test."""
 
     @pytest.mark.skipif(
-        not vec_available(sqlite3.connect(":memory:")),
+        not _vec_available(),
         reason="sqlite-vec not available",
     )
     def test_capped_chunk_is_retrievable_by_knn(self):
@@ -1969,7 +1978,7 @@ class TestPostTeardownWritePath:
     """After branch_vec teardown, chunk embedding writes must still work (regression guard)."""
 
     @pytest.mark.skipif(
-        not vec_available(sqlite3.connect(":memory:")),
+        not _vec_available(),
         reason="sqlite-vec not available",
     )
     def test_write_chunk_embedding_works_after_teardown(self):
@@ -2104,7 +2113,7 @@ class TestSearchMessages:
         conn.close()
 
     @pytest.mark.skipif(
-        not vec_available(sqlite3.connect(":memory:")),
+        not _vec_available(),
         reason="sqlite-vec not available",
     )
     def test_filtered_retry_preserves_distance_order_and_caps_max_results(self):
@@ -2156,7 +2165,7 @@ class TestSearchMessages:
         conn.close()
 
     @pytest.mark.skipif(
-        not vec_available(sqlite3.connect(":memory:")),
+        not _vec_available(),
         reason="sqlite-vec not available",
     )
     def test_not_rolled_up_two_matches_same_session(self):
@@ -2180,7 +2189,7 @@ class TestSearchMessages:
         conn.close()
 
     @pytest.mark.skipif(
-        not vec_available(sqlite3.connect(":memory:")),
+        not _vec_available(),
         reason="sqlite-vec not available",
     )
     def test_locator_fields_present(self):
@@ -2205,7 +2214,7 @@ class TestSearchMessages:
         conn.close()
 
     @pytest.mark.skipif(
-        not vec_available(sqlite3.connect(":memory:")),
+        not _vec_available(),
         reason="sqlite-vec not available",
     )
     def test_bounded_excerpt_used(self):
@@ -2262,7 +2271,7 @@ class TestSearchMessages:
         assert data["count"] == 0
 
     @pytest.mark.skipif(
-        not vec_available(sqlite3.connect(":memory:")),
+        not _vec_available(),
         reason="sqlite-vec not available",
     )
     def test_snippet_json_contract_parity(self):
@@ -2311,7 +2320,7 @@ class TestSearchMessages:
         conn.close()
 
     @pytest.mark.skipif(
-        not vec_available(sqlite3.connect(":memory:")),
+        not _vec_available(),
         reason="sqlite-vec not available",
     )
     def test_snippet_markdown_contract_parity(self):
@@ -2611,7 +2620,7 @@ class TestSearchMessagesDateFilters:
     """search_messages' --before/--after (threaded through execute_chunk_knn)."""
 
     @pytest.mark.skipif(
-        not vec_available(sqlite3.connect(":memory:")),
+        not _vec_available(),
         reason="sqlite-vec not available",
     )
     def test_before_excludes_chunk_from_later_branch(self):
