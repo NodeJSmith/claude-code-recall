@@ -16,6 +16,7 @@ from ccrecall.health import (
     ALERT_EMBEDDINGS_FAILING,
     REASON_MODEL_UNAVAILABLE,
     REASON_VEC_UNAVAILABLE,
+    ProbeResult,
     clear_embedding_failure,
     probe_db,
     record_embedding_failure,
@@ -1284,17 +1285,21 @@ class TestMemoryContextUnwritableRuntimeDir:
     which previously crashed main() during setup, before stdin was even read.
     """
 
-    def test_setup_logging_failure_still_emits_envelope_and_cant_persist_alert(self, tmp_path):
-        # A read-only runtime dir reproduces the real fault: setup_logging's
-        # RotatingFileHandler can't open its log file there (simulated directly
-        # via a monkeypatched raise, since the exact raise site doesn't matter
-        # to this test), and probe_filesystem's write probe genuinely fails
-        # against it — the autouse _isolated_runtime_dir fixture already points
-        # health.py's marker path at this directory, so no extra patching is
-        # needed for the alert to fire for real.
+    def test_setup_logging_failure_still_emits_envelope_and_cant_persist_alert(self, monkeypatch, tmp_path):
+        # setup_logging's RotatingFileHandler failing to open its log file is
+        # simulated directly via a monkeypatched raise, since the exact raise
+        # site doesn't matter to this test. probe_filesystem's write probe is
+        # mocked to fail rather than simulated via chmod(0o555): a real
+        # permission-bit probe is a no-op under root (root bypasses the write
+        # restriction, common in containerized CI/dev environments), which
+        # would make the probe silently succeed and this regression test fail
+        # to reproduce the alert at all.
         runtime_dir = tmp_path / "ccrecall-runtime"
         runtime_dir.mkdir(parents=True, exist_ok=True)
-        runtime_dir.chmod(0o555)
+        monkeypatch.setattr(
+            "ccrecall.hooks.context_alerts.probe_filesystem",
+            lambda *_args, **_kwargs: ProbeResult.fault("simulated unwritable ~/.ccrecall"),
+        )
 
         fake_settings = {
             **DEFAULT_SETTINGS,
@@ -1306,16 +1311,13 @@ class TestMemoryContextUnwritableRuntimeDir:
         def _boom(*_args, **_kwargs):
             raise PermissionError("simulated unwritable ~/.ccrecall")
 
-        try:
-            with (
-                patch.object(sys, "stdin", io.StringIO(stdin_data)),
-                patch.object(sys, "stdout", stdout_capture),
-                patch.object(memory_context, "load_settings", return_value=fake_settings),
-                patch.object(memory_context, "setup_logging", side_effect=_boom),
-            ):
-                memory_context.main()
-        finally:
-            runtime_dir.chmod(0o755)
+        with (
+            patch.object(sys, "stdin", io.StringIO(stdin_data)),
+            patch.object(sys, "stdout", stdout_capture),
+            patch.object(memory_context, "load_settings", return_value=fake_settings),
+            patch.object(memory_context, "setup_logging", side_effect=_boom),
+        ):
+            memory_context.main()
 
         output = stdout_capture.getvalue()
         parsed = json.loads(output)  # must be valid JSON — proves no crash / no garbage stdout
