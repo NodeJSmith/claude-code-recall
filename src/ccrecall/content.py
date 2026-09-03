@@ -142,7 +142,9 @@ def parse_origin(entry: dict) -> str | None:
 def extract_plain_text(content) -> str | None:
     """Join text blocks (or a bare string) into stripped plain text; None if neither shape."""
     if isinstance(content, list):
-        texts = [item.get("text", "") for item in content if isinstance(item, dict) and item.get("type") == "text"]
+        # `.get("text", "")` only supplies the default when the key is missing; a
+        # present-but-null "text" (#171 shape) returns None and crashes the join below.
+        texts = [item.get("text") or "" for item in content if isinstance(item, dict) and item.get("type") == "text"]
         return "\n".join(texts).strip()
     if isinstance(content, str):
         return content.strip()
