@@ -204,6 +204,8 @@ class TestResyncSkipsRepairLoopWhenNoPendingToolContent:
 
             mock_repair.assert_not_called()
 
+
+class TestSyncSessionWritesNullHashImportLog:
     """Verify sync path writes import_log with file_hash = NULL."""
 
     def test_sync_session_writes_null_hash_import_log(self, memory_db):
