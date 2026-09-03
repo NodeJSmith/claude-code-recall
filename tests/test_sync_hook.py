@@ -16,7 +16,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from conftest import FIXTURE_DIR, patched_clear, patched_record
 
-from ccrecall.health import REASON_VEC_UNAVAILABLE
+from ccrecall.health import REASON_MODEL_UNAVAILABLE, REASON_VEC_UNAVAILABLE
 from ccrecall.hooks import memory_setup, memory_sync, sync_current
 from ccrecall.hooks.sync_current import sync_session, validate_session_id
 from ccrecall.recent_chats import run as recent_chats_run
@@ -1073,6 +1073,33 @@ class TestSyncEmbeddingStatusRecording:
 
         assert clear_calls == [], "clear must not be called when vec is unavailable"
         assert sidecar.exists(), "pre-seeded sidecar should remain when vec is unavailable"
+
+    def test_vec_ok_clear_does_not_erase_model_unavailable_reason(self, tmp_path, monkeypatch):
+        """Regression for #164: a vec-ok clear must not erase a model_unavailable record.
+
+        Scenario: backfill detects a broken fastembed install and records
+        REASON_MODEL_UNAVAILABLE. The next Stop hook's sync-current finds vec
+        queryable (an orthogonal check — sync-current never re-verifies the
+        model itself; embed failures there are swallowed by branch_ops and
+        never call record_embedding_failure). sync-current's clear must only
+        clear reasons its own vec check can actually verify, so the
+        model_unavailable record must survive.
+        """
+        sidecar = tmp_path / "embedding-status.json"
+        sidecar.write_text(json.dumps({"reason": REASON_MODEL_UNAVAILABLE, "since": "2026-01-01T00:00:00Z"}))
+
+        self._run_with_mock_conn(
+            tmp_path,
+            monkeypatch,
+            vec_queryable=True,
+            extra_patches={
+                "clear_embedding_failure": patched_clear(sidecar),
+            },
+        )
+
+        assert sidecar.exists(), "model_unavailable record must survive a vec-ok clear (#164)"
+        data = json.loads(sidecar.read_text())
+        assert data["reason"] == REASON_MODEL_UNAVAILABLE
 
     def test_recording_failure_does_not_break_hook(self, tmp_path, monkeypatch):
         """A sidecar write failure must not affect the hook's continue=true output."""
