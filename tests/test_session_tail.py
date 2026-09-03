@@ -206,6 +206,20 @@ class TestFindPendingQuestion:
         ]
         assert find_pending_question(entries) is None
 
+    def test_rejected_then_system_reminder_mentioning_command_name_is_still_pending(self):
+        # A noise entry (e.g. a <system-reminder>) whose body happens to quote or
+        # document the "<command-name>" tag as text must not be mistaken for a real
+        # slash-command invocation — the user never actually moved on.
+        entries = [
+            ask_question("t1", "proceed?", OPTS),
+            user_tool_result("t1", REJECTED, is_error=True),
+            user_text(
+                "<system-reminder>Reminder: a skill invocation looks like "
+                "<command-name>/foo</command-name> in the raw transcript.</system-reminder>"
+            ),
+        ]
+        assert find_pending_question(entries) is not None
+
 
 class TestTypedInstruction:
     def test_real_text(self):

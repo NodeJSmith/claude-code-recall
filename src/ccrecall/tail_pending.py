@@ -77,13 +77,24 @@ def _is_command_wrapper(entry: dict) -> bool:
     below would otherwise treat the user as never having moved on. Checked
     against the raw (pre-strip) content deliberately, so this stays scoped to
     tail_pending.py rather than teaching content.py a new concept.
+
+    Real command-wrapper tag order varies (``<command-message>`` can precede
+    ``<command-name>``), so this can't anchor on where the tag sits — it applies
+    the same noise-prefix filter as typed_instruction instead. Without it, a
+    noise entry (e.g. a <system-reminder> whose body quotes or documents the
+    "<command-name>" tag) would false-positive as a real command invocation and
+    hide a genuinely-unresolved question.
     """
     if entry.get("type") != "user":
         return False
     content = (entry.get("message") or {}).get("content")
     if is_tool_result(content) or is_task_notification(content) or is_teammate_message(content):
         return False
-    return isinstance(content, str) and "<command-name>" in content
+    if not isinstance(content, str):
+        return False
+    if content.lstrip().lower().startswith(_NOISE_PREFIXES):
+        return False
+    return "<command-name>" in content
 
 
 def find_pending_question(entries: list[dict]) -> dict | None:
