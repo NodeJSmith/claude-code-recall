@@ -160,7 +160,8 @@ def cmd_backfill_summaries(
     ctx: CLIContextParam = DEFAULT_CLI_CONTEXT,
 ) -> None:
     """Backfill context summaries for branches that lack a current one."""
-    backfill_summaries_mod.run(verbose=ctx.debug, db=db)
+    code = backfill_summaries_mod.run(verbose=ctx.debug, db=db)
+    raise SystemExit(code)
 
 
 schedule_app = App(
