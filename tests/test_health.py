@@ -2,6 +2,7 @@
 
 import json
 import sqlite3
+import threading
 
 from whenever import Instant
 
@@ -228,6 +229,80 @@ class TestEmbeddingStatus:
 
         clear_embedding_failure()
         assert not patched.exists()
+
+
+class TestEmbeddingStatusLocking:
+    """Regression for #197: record_embedding_failure and clear_embedding_failure
+    must serialize through a shared lock, or a concurrent clear's read-then-unlink
+    can drop a writer's fresher record written in between."""
+
+    def test_locked_status_file_serializes_concurrent_callers(self, tmp_path):
+        """Prove the lock itself provides real mutual exclusion (via actual flock
+        across threads/fds), not just that call order happens to work out."""
+        path = tmp_path / "embedding-status.json"
+        events: list[str] = []
+        holder_acquired = threading.Event()
+        release_holder = threading.Event()
+
+        def holder():
+            with health._locked_status_file(path):
+                events.append("holder-acquired")
+                holder_acquired.set()
+                release_holder.wait(timeout=2)
+                events.append("holder-released")
+
+        t = threading.Thread(target=holder)
+        t.start()
+        assert holder_acquired.wait(timeout=2), "holder thread must acquire the lock"
+
+        # This blocks until the holder thread releases — flock is exclusive.
+        with health._locked_status_file(path):
+            events.append("main-acquired")
+        release_holder.set()
+        t.join(timeout=2)
+
+        assert events == ["holder-acquired", "holder-released", "main-acquired"], (
+            "the main thread must not acquire the lock until the holder releases it"
+        )
+
+    def test_clear_cannot_lose_a_concurrent_writers_fresher_record(self, tmp_path, monkeypatch):
+        """The exact #197 race: a clear's read-then-unlink must be atomic against a
+        concurrent record_embedding_failure — the writer must block until the
+        clear's whole critical section finishes, so its fresher record survives."""
+        path = tmp_path / "embedding-status.json"
+        record_embedding_failure("vec_unavailable", path=path)
+
+        reading_started = threading.Event()
+        release_reader = threading.Event()
+        real_read = health.read_embedding_status
+
+        def slow_read(path=None):
+            result = real_read(path=path)
+            reading_started.set()
+            release_reader.wait(timeout=2)
+            return result
+
+        monkeypatch.setattr(health, "read_embedding_status", slow_read)
+
+        def clearer():
+            clear_embedding_failure(path=path, reasons={None, "vec_unavailable"})
+
+        t_clear = threading.Thread(target=clearer)
+        t_clear.start()
+        assert reading_started.wait(timeout=2), "clear must have started its read"
+
+        t_writer = threading.Thread(target=lambda: record_embedding_failure("model_unavailable", path=path))
+        t_writer.start()
+        t_writer.join(timeout=0.3)
+        assert t_writer.is_alive(), "the writer must block until the clear's critical section releases the lock"
+
+        release_reader.set()
+        t_clear.join(timeout=2)
+        t_writer.join(timeout=2)
+
+        data = read_embedding_status(path=path)
+        assert data is not None
+        assert data["reason"] == "model_unavailable", "the writer's record must not be lost to the earlier clear"
 
 
 class TestClearEmbeddingFailureLeavesLedgerAlone:
