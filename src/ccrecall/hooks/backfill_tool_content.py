@@ -90,7 +90,12 @@ from ccrecall.parsing import (
     is_insertable_message,
     parse_all_with_uuids,
 )
-from ccrecall.tool_content_status import count_eligible, count_pending_missing_jsonl, count_total_sessions
+from ccrecall.tool_content_status import (
+    EMPTY_CLASSIFICATION,
+    classify_pending_sessions,
+    count_eligible,
+    count_total_sessions,
+)
 
 _PRINT_PREFIX = "ccrecall backfill tool-content"
 _LOG_PREFIX = "Backfill tool-content"
@@ -594,7 +599,9 @@ def run_tool_content_status(
         with get_connection(settings, load_vec=False) as conn:
             cursor = conn.cursor()
             pending = count_eligible(cursor, days)
-            pending_missing = count_pending_missing_jsonl(cursor, days) if pending else 0
+            classification = classify_pending_sessions(cursor, days) if pending else EMPTY_CLASSIFICATION
+            pending_missing = classification["missing"]
+            pending_no_usable_branch = classification["no_usable_branch"]
             total = count_total_sessions(cursor, days)
     except (sqlite3.Error, OSError) as e:
         logger.exception("%s: status aborted", _LOG_PREFIX)
@@ -602,7 +609,7 @@ def run_tool_content_status(
         return EXIT_ABORT
 
     done = total - pending
-    pending_backfillable = pending - pending_missing
+    pending_backfillable = pending - pending_missing - pending_no_usable_branch
     if json_mode:
         print(
             json.dumps(
@@ -611,6 +618,7 @@ def run_tool_content_status(
                     "pending_sessions": pending,
                     "pending_backfillable_sessions": pending_backfillable,
                     "pending_missing_jsonl_sessions": pending_missing,
+                    "pending_no_usable_branch_sessions": pending_no_usable_branch,
                     "done_sessions": done,
                     "days": days,
                 }
@@ -627,4 +635,6 @@ def run_tool_content_status(
         print(f"  backfillable: {pending_backfillable} sessions")
     if pending_missing:
         print(f"  missing JSONL: {pending_missing} sessions  (some or all source files missing)")
+    if pending_no_usable_branch:
+        print(f"  no usable branch: {pending_no_usable_branch} sessions  (JSONL present but parses to nothing usable)")
     return EXIT_OK

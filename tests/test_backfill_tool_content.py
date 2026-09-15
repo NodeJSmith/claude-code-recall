@@ -398,6 +398,10 @@ class TestBackfillEmptyEntries:
         status = json.loads(capsys.readouterr().out)
         assert status["pending_sessions"] == 1, "--status must keep reporting this session as pending"
         assert status["done_sessions"] == 0
+        assert status["pending_no_usable_branch_sessions"] == 1, (
+            "a JSONL that exists but parses to no usable branch must not be counted as backfillable"
+        )
+        assert status["pending_backfillable_sessions"] == 0
 
 
 # --limit caps sessions processed per run
@@ -493,7 +497,34 @@ class TestBackfillStatus:
         assert data["pending_sessions"] == 1
         assert data["pending_backfillable_sessions"] == 1
         assert data["pending_missing_jsonl_sessions"] == 0
+        assert data["pending_no_usable_branch_sessions"] == 0
         assert data["done_sessions"] == 0
+
+    def test_status_splits_pending_no_usable_branch(self, tmp_path, capsys, memory_db):
+        """A JSONL that survives on disk but parses to no usable branch is its
+        own bucket, not lumped into pending_backfillable_sessions — regression
+        test for the status/actual-run mismatch reported against production data."""
+        conn = memory_db
+        empty_path = tmp_path / "sess-empty.jsonl"
+        empty_path.write_text("\n")
+        _seed_session(
+            conn,
+            filepath=empty_path,
+            existing_messages=[("u1", "user", "hi", "2026-01-01T10:00:00Z")],
+        )
+
+        with (
+            patch("ccrecall.hooks.backfill_tool_content.get_connection", return_value=NoCloseConn(conn)),
+            patch("ccrecall.hooks.backfill_tool_content.load_settings_for_db", return_value={}),
+        ):
+            code = run(status=True, json_mode=True)
+        assert code == EXIT_OK
+
+        data = json.loads(capsys.readouterr().out)
+        assert data["pending_sessions"] == 1
+        assert data["pending_backfillable_sessions"] == 0
+        assert data["pending_missing_jsonl_sessions"] == 0
+        assert data["pending_no_usable_branch_sessions"] == 1
 
     def test_status_splits_pending_missing_jsonl(self, tmp_path, capsys, memory_db):
         conn = memory_db
@@ -515,6 +546,7 @@ class TestBackfillStatus:
         assert data["pending_sessions"] == 1
         assert data["pending_backfillable_sessions"] == 0
         assert data["pending_missing_jsonl_sessions"] == 1
+        assert data["pending_no_usable_branch_sessions"] == 0
         assert data["done_sessions"] == 0
 
     def test_status_does_not_write(self, tmp_path, memory_db):

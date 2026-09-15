@@ -18,8 +18,8 @@ from ccrecall.hooks.backfill_status import count_status as count_embedding_statu
 from ccrecall.import_log_ops import import_log_source_index
 from ccrecall.ingestion_status import summarize_ingestion
 from ccrecall.models import LOGGER_NAME
+from ccrecall.tool_content_status import EMPTY_CLASSIFICATION, classify_pending_sessions
 from ccrecall.tool_content_status import count_eligible as count_tool_content_pending
-from ccrecall.tool_content_status import count_pending_missing_jsonl
 from ccrecall.tool_content_status import count_total_sessions as count_tool_content_total
 
 log = logging.getLogger(LOGGER_NAME)
@@ -96,6 +96,7 @@ def collect_status(*, db: Path = DEFAULT_DB_PATH, days: int | None = None, check
                     "pending_sessions": None,
                     "pending_backfillable_sessions": None,
                     "pending_missing_jsonl_sessions": None,
+                    "pending_no_usable_branch_sessions": None,
                 },
                 "embeddings": {
                     "watermark": {"embedded_branches": None, "draft_branches": None, "total_branches": None},
@@ -110,7 +111,11 @@ def collect_status(*, db: Path = DEFAULT_DB_PATH, days: int | None = None, check
 
         tool_pending = count_tool_content_pending(cursor, days)
         source_index = import_log_source_index(cursor) if tool_pending else None
-        tool_missing = count_pending_missing_jsonl(cursor, days, source_index) if tool_pending else 0
+        tool_classification = (
+            classify_pending_sessions(cursor, days, source_index) if tool_pending else EMPTY_CLASSIFICATION
+        )
+        tool_missing = tool_classification["missing"]
+        tool_no_usable_branch = tool_classification["no_usable_branch"]
         tool_total = count_tool_content_total(cursor, days)
         embedded_watermark, draft_watermark, embeddable_watermark = branch_embedding_coverage(conn)
 
@@ -160,8 +165,9 @@ def collect_status(*, db: Path = DEFAULT_DB_PATH, days: int | None = None, check
             "total_sessions": tool_total,
             "done_sessions": tool_total - tool_pending,
             "pending_sessions": tool_pending,
-            "pending_backfillable_sessions": tool_pending - tool_missing,
+            "pending_backfillable_sessions": tool_pending - tool_missing - tool_no_usable_branch,
             "pending_missing_jsonl_sessions": tool_missing,
+            "pending_no_usable_branch_sessions": tool_no_usable_branch,
         },
         "embeddings": {
             "watermark": {
@@ -215,7 +221,8 @@ def print_status_report(status: dict) -> None:
     print(
         f"  remaining: {tool['pending_sessions']} sessions; "
         f"backfillable: {tool['pending_backfillable_sessions']}; "
-        f"missing JSONL: {tool['pending_missing_jsonl_sessions']}"
+        f"missing JSONL: {tool['pending_missing_jsonl_sessions']}; "
+        f"no usable branch: {tool['pending_no_usable_branch_sessions']}"
     )
 
     embeddings = status["embeddings"]
