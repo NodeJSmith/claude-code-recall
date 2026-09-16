@@ -4,7 +4,14 @@ import logging
 import sqlite3
 
 import pytest
-from conftest import age_past_grace_window, delete_message, make_jsonl_entry, write_four_turns, write_jsonl
+from conftest import (
+    age_past_grace_window,
+    delete_message,
+    make_jsonl_entry,
+    seed_stale_tail_session,
+    write_four_turns,
+    write_jsonl,
+)
 
 from ccrecall import ingestion_status
 from ccrecall.hooks import import_conversations, import_repair
@@ -57,15 +64,7 @@ def _stale_tail_candidates(memory_db) -> list:
 
 def test_repair_stale_tail_session_recovers_missing_message(memory_db, project_id, tmp_path):
     filepath = tmp_path / "sess-stale.jsonl"
-    write_four_turns(filepath)
-
-    import_conversations.import_session(memory_db, filepath, project_id)
-    memory_db.commit()
-
-    session_id = memory_db.execute("SELECT id FROM sessions WHERE uuid = ?", ("sess-stale",)).fetchone()[0]
-    delete_message(memory_db, session_id, "a2")
-    memory_db.commit()
-    age_past_grace_window(filepath)
+    session_id = seed_stale_tail_session(memory_db, project_id, filepath, uuid="sess-stale")
 
     candidates = _stale_tail_candidates(memory_db)
     assert [c[0] for c in candidates] == ["sess-stale"]
@@ -83,15 +82,7 @@ def test_repair_stale_tail_session_recovers_missing_message(memory_db, project_i
 
 def test_repair_rerun_on_already_fixed_session_is_idempotent(memory_db, project_id, tmp_path):
     filepath = tmp_path / "sess-stale.jsonl"
-    write_four_turns(filepath)
-
-    import_conversations.import_session(memory_db, filepath, project_id)
-    memory_db.commit()
-
-    session_id = memory_db.execute("SELECT id FROM sessions WHERE uuid = ?", ("sess-stale",)).fetchone()[0]
-    delete_message(memory_db, session_id, "a2")
-    memory_db.commit()
-    age_past_grace_window(filepath)
+    session_id = seed_stale_tail_session(memory_db, project_id, filepath, uuid="sess-stale")
 
     candidates = _stale_tail_candidates(memory_db)
     first = repair_sessions(memory_db, candidates)
@@ -127,15 +118,7 @@ def test_unrepairable_candidate_is_not_counted_as_repaired(memory_db, project_id
     reclassify_session's return value isolates exactly that handling logic.
     """
     filepath = tmp_path / "sess-unrepairable.jsonl"
-    write_four_turns(filepath)
-
-    import_conversations.import_session(memory_db, filepath, project_id)
-    memory_db.commit()
-
-    session_id = memory_db.execute("SELECT id FROM sessions WHERE uuid = ?", ("sess-unrepairable",)).fetchone()[0]
-    delete_message(memory_db, session_id, "a2")
-    memory_db.commit()
-    age_past_grace_window(filepath)
+    seed_stale_tail_session(memory_db, project_id, filepath, uuid="sess-unrepairable")
 
     candidates = _stale_tail_candidates(memory_db)
     assert [c[0] for c in candidates] == ["sess-unrepairable"]
@@ -152,16 +135,9 @@ def test_poison_file_candidate_is_counted_failed_and_batch_continues(
 ):
     poison_path = tmp_path / "sess-poison.jsonl"
     good_path = tmp_path / "sess-good.jsonl"
-    write_four_turns(poison_path)
-    write_four_turns(good_path)
 
     for filepath, uuid in ((poison_path, "sess-poison"), (good_path, "sess-good")):
-        import_conversations.import_session(memory_db, filepath, project_id)
-        memory_db.commit()
-        session_id = memory_db.execute("SELECT id FROM sessions WHERE uuid = ?", (uuid,)).fetchone()[0]
-        delete_message(memory_db, session_id, "a2")
-        memory_db.commit()
-        age_past_grace_window(filepath)
+        seed_stale_tail_session(memory_db, project_id, filepath, uuid=uuid)
 
     candidates = _stale_tail_candidates(memory_db)
     assert {c[0] for c in candidates} == {"sess-poison", "sess-good"}
@@ -320,16 +296,9 @@ def test_savepoint_release_failure_counts_as_failed_and_batch_continues(memory_d
     propagate and abort the whole remaining batch."""
     first_path = tmp_path / "sess-first-savepoint.jsonl"
     second_path = tmp_path / "sess-second-savepoint.jsonl"
-    write_four_turns(first_path)
-    write_four_turns(second_path)
 
     for filepath, uuid in ((first_path, "sess-first-savepoint"), (second_path, "sess-second-savepoint")):
-        import_conversations.import_session(memory_db, filepath, project_id)
-        memory_db.commit()
-        session_id = memory_db.execute("SELECT id FROM sessions WHERE uuid = ?", (uuid,)).fetchone()[0]
-        delete_message(memory_db, session_id, "a2")
-        memory_db.commit()
-        age_past_grace_window(filepath)
+        seed_stale_tail_session(memory_db, project_id, filepath, uuid=uuid)
 
     candidates = _stale_tail_candidates(memory_db)
     assert {c[0] for c in candidates} == {"sess-first-savepoint", "sess-second-savepoint"}

@@ -9,6 +9,7 @@ import sqlite3
 from collections.abc import Iterator
 from pathlib import Path
 from sqlite3 import Connection
+from typing import Literal
 
 from whenever import Instant
 
@@ -20,6 +21,8 @@ from ccrecall.parsing import parse_all_with_uuids, select_active_leaf_entry
 log = logging.getLogger(LOGGER_NAME)
 
 STALE_TAIL_SECONDS = 15 * 60
+
+SessionCategory = Literal["ok", "pending_tail", "stale_tail", "ingestion_gap", "missing_source"]
 
 
 def _entry_expects_message(entry: dict) -> bool:
@@ -138,7 +141,7 @@ def classify_sessions(
     sources: dict[str, dict[str, list[Path]]],
     now: Instant,
     stale_tail_seconds: int,
-) -> Iterator[tuple[str, str, int, list[int]]]:
+) -> Iterator[tuple[str, SessionCategory, int, list[int]]]:
     """Yield (session_uuid, category, session_id, missing_indices) for each session with a verdict.
 
     category is one of "ok", "pending_tail", "stale_tail", "ingestion_gap", or
@@ -301,7 +304,7 @@ def reclassify_session(
     filepaths: list[Path],
     *,
     stale_tail_seconds: int = STALE_TAIL_SECONDS,
-) -> str:
+) -> SessionCategory:
     """Return the current classification ("ok", "pending_tail", "stale_tail",
     "ingestion_gap", or "missing_source" for the rare no-session-row race) for
     one session, given its known-existing filepaths.

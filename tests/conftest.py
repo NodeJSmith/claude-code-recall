@@ -14,10 +14,15 @@ import ccrecall.health as health
 import ccrecall.hooks.sync_current as sync_current
 from ccrecall.db_vec import _ensure_vec_schema
 from ccrecall.health import clear_embedding_failure, record_embedding_failure
+from ccrecall.hooks import import_conversations
 from ccrecall.ingestion_status import STALE_TAIL_SECONDS
 from ccrecall.schema import SCHEMA
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures"
+
+# Margin added past STALE_TAIL_SECONDS in age_past_grace_window() so backdated
+# fixtures land comfortably inside stale-tail territory, not right at the edge.
+GRACE_MARGIN_SECONDS = 3600
 
 
 @pytest.fixture(autouse=True)
@@ -168,7 +173,7 @@ def write_four_turns(filepath: Path) -> None:
 
 def age_past_grace_window(filepath: Path) -> None:
     """Backdate a file's mtime past STALE_TAIL_SECONDS so it qualifies as a stale tail."""
-    old = time.time() - (STALE_TAIL_SECONDS + 3600)
+    old = time.time() - (STALE_TAIL_SECONDS + GRACE_MARGIN_SECONDS)
     os.utime(filepath, (old, old))
 
 
@@ -179,6 +184,33 @@ def delete_message(conn: sqlite3.Connection, session_id: int, uuid: str) -> None
         (session_id, uuid),
     )
     conn.execute("DELETE FROM messages WHERE session_id = ? AND uuid = ?", (session_id, uuid))
+
+
+def seed_stale_tail_session(
+    conn: sqlite3.Connection,
+    project_id: int,
+    filepath: Path,
+    *,
+    uuid: str,
+    drop_uuid: str = "a2",
+) -> int:
+    """Import a four-turn session, then delete one message and backdate the
+    file past the grace window so it classifies as a stale tail.
+
+    Shared setup for the repair-gap tests in test_import_pipeline.py and
+    test_import_repair.py, which all need a session that already looks
+    stale-tail before exercising repair_sessions()/--repair-gaps.
+    """
+    write_four_turns(filepath)
+    import_conversations.import_session(conn, filepath, project_id)
+    conn.commit()
+
+    session_id = conn.execute("SELECT id FROM sessions WHERE uuid = ?", (uuid,)).fetchone()[0]
+    delete_message(conn, session_id, drop_uuid)
+    conn.commit()
+    age_past_grace_window(filepath)
+
+    return session_id
 
 
 class NoCloseConn:
