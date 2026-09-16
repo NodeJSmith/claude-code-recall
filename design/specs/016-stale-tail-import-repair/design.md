@@ -74,3 +74,10 @@ Using a scratch/dev DB (`--db /tmp/ccrecall-repair-smoke.db`):
 - **modify** `tests/test_import_pipeline.py` — end-to-end `--repair-gaps` tests (AC#1, AC#2, AC#5, AC#6, AC#7, AC#8); also updates `TestImportRunPathSafety::test_run_rejects_symlink_project_dir`'s output assertion and its direct `_run(...)` call to pass `repair_gaps=False`, since the `if project:` restructuring (FR#6) changes what that existing test observes.
 
 ## Addendum
+
+### 2026-09-16: `repair_sessions()` savepoint-failure handling and PID guard timing diverge from the Approach section
+
+The Approach section's description of `repair_sessions()`'s error handling and of when `_run()` acquires the PID guard doesn't match what shipped:
+
+- **Savepoint-recovery failures also abort the batch, not just force-reimport failures.** The Approach section says an `OperationalError` at SAVEPOINT acquisition, the force-reimport call, or RELEASE is treated uniformly as a per-candidate failure that continues the batch. What shipped re-raises (aborting the whole remaining batch) for two distinct cases: an `OperationalError` from the force-reimport call itself, and an `OperationalError` from the RELEASE-SAVEPOINT recovery attempt (the nested `ROLLBACK TO SAVEPOINT` + `RELEASE SAVEPOINT` retry) when that recovery itself fails. Only a failed initial SAVEPOINT acquisition, or a failed RELEASE whose recovery retry succeeds, stays contained to that one candidate. See `repair_sessions()` in `src/ccrecall/hooks/import_repair.py`.
+- **The PID guard is acquired before the per-project import loop, not after it.** The Approach section describes `_run()` acquiring the PID guard "after the existing per-project import loop." What shipped acquires it first, before either the single-`--project` branch or the DB-wide `for project_dir in sorted(projects_dir.iterdir())` loop runs, so it covers the whole invocation rather than just the repair step. See `_run()` in `src/ccrecall/hooks/import_conversations.py`.
