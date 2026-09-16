@@ -1,7 +1,7 @@
 ---
 task_id: "T01"
 title: "Extract per-session classifier from summarize_ingestion and add find_repairable_sessions"
-status: "planned"
+status: "done"
 depends_on: []
 implements: ["FR#1", "FR#3", "FR#4", "FR#8", "AC#3", "AC#4"]
 ---

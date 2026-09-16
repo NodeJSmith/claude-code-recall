@@ -9,7 +9,8 @@ from conftest import make_jsonl_entry as _entry
 from conftest import write_jsonl as _write_jsonl
 
 from ccrecall import parsing
-from ccrecall.ingestion_status import summarize_ingestion
+from ccrecall.import_log_ops import import_log_source_index
+from ccrecall.ingestion_status import find_repairable_sessions, reclassify_session, summarize_ingestion
 
 
 def _seed_session(memory_db, filepath: Path, db_uuids: list[str]) -> None:
@@ -394,3 +395,68 @@ def test_partial_multifile_source_loss_stays_missing_source_after_prior_ok_cache
     assert second["sessions_checked"] == 1
     assert second["missing_source_sessions"] == 1
     assert second["ok_sessions"] == 0
+
+
+def test_find_repairable_sessions_excludes_pending_tail(memory_db, tmp_path):
+    filepath = tmp_path / "sess-tail.jsonl"
+    _write_four_turns(filepath)
+    _seed_session(memory_db, filepath, ["u1", "a1"])
+
+    candidates = find_repairable_sessions(memory_db)
+
+    assert candidates == []
+
+
+def test_find_repairable_sessions_matches_stale_tail_and_ingestion_gap_only(memory_db, tmp_path):
+    ok_path = tmp_path / "sess-ok.jsonl"
+    _write_four_turns(ok_path)
+    _seed_session(memory_db, ok_path, ["u1", "a1", "u2", "a2"])
+
+    pending_path = tmp_path / "sess-pending.jsonl"
+    _write_four_turns(pending_path)
+    _seed_session(memory_db, pending_path, ["u1", "a1"])
+
+    stale_path = tmp_path / "sess-stale.jsonl"
+    _write_four_turns(stale_path)
+    old = time.time() - 3600
+    os.utime(stale_path, (old, old))
+    _seed_session(memory_db, stale_path, ["u1", "a1"])
+
+    gap_path = tmp_path / "sess-gap.jsonl"
+    _write_four_turns(gap_path)
+    _seed_session(memory_db, gap_path, ["u1", "u2", "a2"])
+
+    cursor = memory_db.cursor()
+    sources = import_log_source_index(cursor)
+
+    candidates = find_repairable_sessions(memory_db, sources=sources)
+    candidate_uuids = {uuid for uuid, _session_id, _project_id, _filepaths in candidates}
+
+    assert candidate_uuids == {"sess-stale", "sess-gap"}
+
+    status = summarize_ingestion(memory_db, sources=sources)
+    assert status["stale_tail_sessions"] + status["ingestion_gap_sessions"] == len(candidates)
+
+
+def test_reclassify_session_reflects_db_catch_up(memory_db, tmp_path):
+    filepath = tmp_path / "sess-reclassify.jsonl"
+    _write_four_turns(filepath)
+    old = time.time() - 3600
+    os.utime(filepath, (old, old))
+    _seed_session(memory_db, filepath, ["u1", "a1"])
+
+    cursor = memory_db.cursor()
+    sources = import_log_source_index(cursor)
+    filepaths = sources["sess-reclassify"]["existing"]
+
+    assert reclassify_session(memory_db, "sess-reclassify", filepaths) == "stale_tail"
+
+    session_id = memory_db.execute("SELECT id FROM sessions WHERE uuid = ?", ("sess-reclassify",)).fetchone()[0]
+    for uuid in ("u2", "a2"):
+        memory_db.execute(
+            "INSERT INTO messages (session_id, uuid, role, content, tool_content) VALUES (?, ?, 'user', 'x', '')",
+            (session_id, uuid),
+        )
+    memory_db.commit()
+
+    assert reclassify_session(memory_db, "sess-reclassify", filepaths) == "ok"
