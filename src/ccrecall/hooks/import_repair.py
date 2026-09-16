@@ -33,7 +33,6 @@ from pathlib import Path
 from ccrecall import ingestion_status
 from ccrecall.hooks import import_conversations
 from ccrecall.models import LOGGER_NAME
-from ccrecall.parsing import sort_session_files
 
 log = logging.getLogger(LOGGER_NAME)
 
@@ -137,7 +136,6 @@ def repair_sessions(
 
         candidate_failed = False
         count_before = conn.execute("SELECT COUNT(*) FROM messages WHERE session_id = ?", (session_id,)).fetchone()[0]
-        ordered = sort_session_files(filepaths)
 
         try:
             conn.execute("SAVEPOINT import_candidate")
@@ -152,10 +150,10 @@ def repair_sessions(
             continue
 
         try:
-            if len(ordered) == 1:
-                import_conversations.import_session(conn, ordered[0], project_id, force=True)
+            if len(filepaths) == 1:
+                import_conversations.import_session(conn, filepaths[0], project_id, force=True)
             else:
-                import_conversations.import_session_group(conn, ordered, project_id)
+                import_conversations.import_session_group(conn, filepaths, project_id)
         except sqlite3.OperationalError:
             conn.execute("ROLLBACK TO SAVEPOINT import_candidate")
             conn.execute("RELEASE SAVEPOINT import_candidate")
