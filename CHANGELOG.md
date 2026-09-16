@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.24.2](https://github.com/NodeJSmith/claude-code-recall/compare/v0.24.1...v0.24.2) (2026-09-16)
+
+
+### Bug Fixes
+
+* tool-content status no longer overcounts backfillable sessions ([#207](https://github.com/NodeJSmith/claude-code-recall/issues/207)) ([eb2687c](https://github.com/NodeJSmith/claude-code-recall/commit/eb2687cf610717dad692fa78ca0b0366b5579f6f))
+
 ## [0.24.1](https://github.com/NodeJSmith/claude-code-recall/compare/v0.24.0...v0.24.1) (2026-09-03)
 
 ### Hooks
