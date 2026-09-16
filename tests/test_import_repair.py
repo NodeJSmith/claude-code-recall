@@ -1,14 +1,10 @@
 """Tests for hooks/import_repair.py's repair_sessions() execution loop."""
 
 import logging
-import os
 import sqlite3
-import time
-from pathlib import Path
 
 import pytest
-from conftest import make_jsonl_entry as _entry
-from conftest import write_jsonl as _write_jsonl
+from conftest import age_past_grace_window, delete_message, make_jsonl_entry, write_four_turns, write_jsonl
 
 from ccrecall import ingestion_status
 from ccrecall.hooks import import_conversations, import_repair
@@ -53,49 +49,23 @@ def project_id(memory_db):
     return cursor.lastrowid
 
 
-def _write_four_turns(filepath: Path) -> None:
-    _write_jsonl(
-        filepath,
-        [
-            _entry("u1", None, "2026-01-01T10:00:00Z", "user", "first"),
-            _entry("a1", "u1", "2026-01-01T10:00:01Z", "assistant", "answer"),
-            _entry("u2", "a1", "2026-01-01T10:00:02Z", "user", "second"),
-            _entry("a2", "u2", "2026-01-01T10:00:03Z", "assistant", "answer"),
-        ],
-    )
-
-
-def _age_past_grace_window(filepath: Path) -> None:
-    old = time.time() - 3600
-    os.utime(filepath, (old, old))
-
-
 def _stale_tail_candidates(memory_db) -> list:
     cursor = memory_db.cursor()
     sources = import_log_source_index(cursor)
     return find_repairable_sessions(memory_db, sources=sources)
 
 
-def _delete_message(memory_db, session_id: int, uuid: str) -> None:
-    """Delete one messages row, clearing its branch_messages FK references first."""
-    memory_db.execute(
-        "DELETE FROM branch_messages WHERE message_id IN (SELECT id FROM messages WHERE session_id = ? AND uuid = ?)",
-        (session_id, uuid),
-    )
-    memory_db.execute("DELETE FROM messages WHERE session_id = ? AND uuid = ?", (session_id, uuid))
-
-
 def test_repair_stale_tail_session_recovers_missing_message(memory_db, project_id, tmp_path):
     filepath = tmp_path / "sess-stale.jsonl"
-    _write_four_turns(filepath)
+    write_four_turns(filepath)
 
     import_conversations.import_session(memory_db, filepath, project_id)
     memory_db.commit()
 
     session_id = memory_db.execute("SELECT id FROM sessions WHERE uuid = ?", ("sess-stale",)).fetchone()[0]
-    _delete_message(memory_db, session_id, "a2")
+    delete_message(memory_db, session_id, "a2")
     memory_db.commit()
-    _age_past_grace_window(filepath)
+    age_past_grace_window(filepath)
 
     candidates = _stale_tail_candidates(memory_db)
     assert [c[0] for c in candidates] == ["sess-stale"]
@@ -113,15 +83,15 @@ def test_repair_stale_tail_session_recovers_missing_message(memory_db, project_i
 
 def test_repair_rerun_on_already_fixed_session_is_idempotent(memory_db, project_id, tmp_path):
     filepath = tmp_path / "sess-stale.jsonl"
-    _write_four_turns(filepath)
+    write_four_turns(filepath)
 
     import_conversations.import_session(memory_db, filepath, project_id)
     memory_db.commit()
 
     session_id = memory_db.execute("SELECT id FROM sessions WHERE uuid = ?", ("sess-stale",)).fetchone()[0]
-    _delete_message(memory_db, session_id, "a2")
+    delete_message(memory_db, session_id, "a2")
     memory_db.commit()
-    _age_past_grace_window(filepath)
+    age_past_grace_window(filepath)
 
     candidates = _stale_tail_candidates(memory_db)
     first = repair_sessions(memory_db, candidates)
@@ -157,15 +127,15 @@ def test_unrepairable_candidate_is_not_counted_as_repaired(memory_db, project_id
     reclassify_session's return value isolates exactly that handling logic.
     """
     filepath = tmp_path / "sess-unrepairable.jsonl"
-    _write_four_turns(filepath)
+    write_four_turns(filepath)
 
     import_conversations.import_session(memory_db, filepath, project_id)
     memory_db.commit()
 
     session_id = memory_db.execute("SELECT id FROM sessions WHERE uuid = ?", ("sess-unrepairable",)).fetchone()[0]
-    _delete_message(memory_db, session_id, "a2")
+    delete_message(memory_db, session_id, "a2")
     memory_db.commit()
-    _age_past_grace_window(filepath)
+    age_past_grace_window(filepath)
 
     candidates = _stale_tail_candidates(memory_db)
     assert [c[0] for c in candidates] == ["sess-unrepairable"]
@@ -182,16 +152,16 @@ def test_poison_file_candidate_is_counted_failed_and_batch_continues(
 ):
     poison_path = tmp_path / "sess-poison.jsonl"
     good_path = tmp_path / "sess-good.jsonl"
-    _write_four_turns(poison_path)
-    _write_four_turns(good_path)
+    write_four_turns(poison_path)
+    write_four_turns(good_path)
 
     for filepath, uuid in ((poison_path, "sess-poison"), (good_path, "sess-good")):
         import_conversations.import_session(memory_db, filepath, project_id)
         memory_db.commit()
         session_id = memory_db.execute("SELECT id FROM sessions WHERE uuid = ?", (uuid,)).fetchone()[0]
-        _delete_message(memory_db, session_id, "a2")
+        delete_message(memory_db, session_id, "a2")
         memory_db.commit()
-        _age_past_grace_window(filepath)
+        age_past_grace_window(filepath)
 
     candidates = _stale_tail_candidates(memory_db)
     assert {c[0] for c in candidates} == {"sess-poison", "sess-good"}
@@ -240,18 +210,18 @@ def test_multifile_candidate_repair_preserves_cross_file_link(memory_db, project
     """
     parent = tmp_path / "sess-crosslink.jsonl"
     agent = tmp_path / "agent-sess-crosslink.jsonl"
-    _write_jsonl(
+    write_jsonl(
         parent,
         [
-            _entry("u1", None, "2026-01-01T10:00:00Z", "user", "first"),
-            _entry("a1", "u1", "2026-01-01T10:00:01Z", "assistant", "answer"),
+            make_jsonl_entry("u1", None, "2026-01-01T10:00:00Z", "user", "first"),
+            make_jsonl_entry("a1", "u1", "2026-01-01T10:00:01Z", "assistant", "answer"),
         ],
     )
-    _write_jsonl(
+    write_jsonl(
         agent,
         [
-            _entry("u2", "a1", "2026-01-01T10:00:02Z", "user", "second"),
-            _entry("a2", "u2", "2026-01-01T10:00:03Z", "assistant", "answer"),
+            make_jsonl_entry("u2", "a1", "2026-01-01T10:00:02Z", "user", "second"),
+            make_jsonl_entry("a2", "u2", "2026-01-01T10:00:03Z", "assistant", "answer"),
         ],
     )
 
@@ -275,10 +245,10 @@ def test_multifile_candidate_repair_preserves_cross_file_link(memory_db, project
     # Simulate a stale tail: drop only a2 (file 2's own last message), age
     # both files past the grace window so find_repairable_sessions classifies
     # this as a repairable gap.
-    _delete_message(memory_db, session_id, "a2")
+    delete_message(memory_db, session_id, "a2")
     memory_db.commit()
-    _age_past_grace_window(parent)
-    _age_past_grace_window(agent)
+    age_past_grace_window(parent)
+    age_past_grace_window(agent)
 
     candidates = _stale_tail_candidates(memory_db)
     assert [c[0] for c in candidates] == ["sess-crosslink"]
@@ -300,18 +270,18 @@ def test_multifile_candidate_failure_rolls_back_atomically(memory_db, project_id
     case, since there is no longer a per-file loop to partially complete."""
     parent = tmp_path / "sess-multi.jsonl"
     agent = tmp_path / "agent-sess-multi.jsonl"
-    _write_jsonl(
+    write_jsonl(
         parent,
         [
-            _entry("u1", None, "2026-01-01T10:00:00Z", "user", "first"),
-            _entry("a1", "u1", "2026-01-01T10:00:01Z", "assistant", "answer"),
+            make_jsonl_entry("u1", None, "2026-01-01T10:00:00Z", "user", "first"),
+            make_jsonl_entry("a1", "u1", "2026-01-01T10:00:01Z", "assistant", "answer"),
         ],
     )
-    _write_jsonl(
+    write_jsonl(
         agent,
         [
-            _entry("u2", "a1", "2026-01-01T10:00:02Z", "user", "second"),
-            _entry("a2", "u2", "2026-01-01T10:00:03Z", "assistant", "answer"),
+            make_jsonl_entry("u2", "a1", "2026-01-01T10:00:02Z", "user", "second"),
+            make_jsonl_entry("a2", "u2", "2026-01-01T10:00:03Z", "assistant", "answer"),
         ],
     )
 
@@ -319,11 +289,11 @@ def test_multifile_candidate_failure_rolls_back_atomically(memory_db, project_id
     memory_db.commit()
 
     session_id = memory_db.execute("SELECT id FROM sessions WHERE uuid = ?", ("sess-multi",)).fetchone()[0]
-    _delete_message(memory_db, session_id, "a1")
-    _delete_message(memory_db, session_id, "a2")
+    delete_message(memory_db, session_id, "a1")
+    delete_message(memory_db, session_id, "a2")
     memory_db.commit()
-    _age_past_grace_window(parent)
-    _age_past_grace_window(agent)
+    age_past_grace_window(parent)
+    age_past_grace_window(agent)
 
     candidates = _stale_tail_candidates(memory_db)
     assert [c[0] for c in candidates] == ["sess-multi"]
@@ -350,16 +320,16 @@ def test_savepoint_release_failure_counts_as_failed_and_batch_continues(memory_d
     propagate and abort the whole remaining batch."""
     first_path = tmp_path / "sess-first-savepoint.jsonl"
     second_path = tmp_path / "sess-second-savepoint.jsonl"
-    _write_four_turns(first_path)
-    _write_four_turns(second_path)
+    write_four_turns(first_path)
+    write_four_turns(second_path)
 
     for filepath, uuid in ((first_path, "sess-first-savepoint"), (second_path, "sess-second-savepoint")):
         import_conversations.import_session(memory_db, filepath, project_id)
         memory_db.commit()
         session_id = memory_db.execute("SELECT id FROM sessions WHERE uuid = ?", (uuid,)).fetchone()[0]
-        _delete_message(memory_db, session_id, "a2")
+        delete_message(memory_db, session_id, "a2")
         memory_db.commit()
-        _age_past_grace_window(filepath)
+        age_past_grace_window(filepath)
 
     candidates = _stale_tail_candidates(memory_db)
     assert {c[0] for c in candidates} == {"sess-first-savepoint", "sess-second-savepoint"}
@@ -382,7 +352,7 @@ def test_project_id_none_candidate_is_unrepairable_not_failed(memory_db, project
     retry), so it must be counted under sessions_unrepairable, not
     sessions_failed."""
     filepath = tmp_path / "sess-no-project.jsonl"
-    _write_four_turns(filepath)
+    write_four_turns(filepath)
 
     candidates = [("sess-no-project", 999999, None, [filepath])]
 
@@ -405,7 +375,7 @@ def test_session_id_churn_still_counts_recovered_messages(memory_db, project_id,
     reads as 0 messages recovered.
     """
     filepath = tmp_path / "sess-churn.jsonl"
-    _write_four_turns(filepath)
+    write_four_turns(filepath)
 
     # A sessions row already exists under the real current id, with zero
     # messages (simulating "an earlier all-filtered-out import already
@@ -436,21 +406,21 @@ def test_repair_sessions_logs_periodic_progress(memory_db, project_id, tmp_path,
     uuids = ["sess-progress-1", "sess-progress-2", "sess-progress-3"]
     for i, uuid in enumerate(uuids):
         filepath = tmp_path / f"{uuid}.jsonl"
-        _write_jsonl(
+        write_jsonl(
             filepath,
             [
-                _entry(f"u{i}a", None, f"2026-01-01T10:0{i}:00Z", "user", "first"),
-                _entry(f"a{i}a", f"u{i}a", f"2026-01-01T10:0{i}:01Z", "assistant", "answer"),
-                _entry(f"u{i}b", f"a{i}a", f"2026-01-01T10:0{i}:02Z", "user", "second"),
-                _entry(f"a{i}b", f"u{i}b", f"2026-01-01T10:0{i}:03Z", "assistant", "answer"),
+                make_jsonl_entry(f"u{i}a", None, f"2026-01-01T10:0{i}:00Z", "user", "first"),
+                make_jsonl_entry(f"a{i}a", f"u{i}a", f"2026-01-01T10:0{i}:01Z", "assistant", "answer"),
+                make_jsonl_entry(f"u{i}b", f"a{i}a", f"2026-01-01T10:0{i}:02Z", "user", "second"),
+                make_jsonl_entry(f"a{i}b", f"u{i}b", f"2026-01-01T10:0{i}:03Z", "assistant", "answer"),
             ],
         )
         import_conversations.import_session(memory_db, filepath, project_id)
         memory_db.commit()
         session_id = memory_db.execute("SELECT id FROM sessions WHERE uuid = ?", (uuid,)).fetchone()[0]
-        _delete_message(memory_db, session_id, f"a{i}b")
+        delete_message(memory_db, session_id, f"a{i}b")
         memory_db.commit()
-        _age_past_grace_window(filepath)
+        age_past_grace_window(filepath)
 
     candidates = _stale_tail_candidates(memory_db)
     assert len(candidates) == 3

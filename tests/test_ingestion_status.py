@@ -1,12 +1,10 @@
 """Tests for transcript-vs-DB ingestion diagnostics."""
 
 import os
-import time
 from pathlib import Path
 from unittest.mock import patch
 
-from conftest import make_jsonl_entry as _entry
-from conftest import write_jsonl as _write_jsonl
+from conftest import age_past_grace_window, make_jsonl_entry, write_four_turns, write_jsonl
 
 from ccrecall import parsing
 from ccrecall.import_log_ops import import_log_source_index
@@ -48,21 +46,9 @@ def _cache_row(memory_db, session_uuid: str) -> tuple[str, str, str, str] | None
     ).fetchone()
 
 
-def _write_four_turns(filepath: Path) -> None:
-    _write_jsonl(
-        filepath,
-        [
-            _entry("u1", None, "2026-01-01T10:00:00Z", "user", "first"),
-            _entry("a1", "u1", "2026-01-01T10:00:01Z", "assistant", "answer"),
-            _entry("u2", "a1", "2026-01-01T10:00:02Z", "user", "second"),
-            _entry("a2", "u2", "2026-01-01T10:00:03Z", "assistant", "answer"),
-        ],
-    )
-
-
 def test_pending_tail_for_recent_contiguous_suffix(memory_db, tmp_path):
     filepath = tmp_path / "sess-tail.jsonl"
-    _write_four_turns(filepath)
+    write_four_turns(filepath)
     _seed_session(memory_db, filepath, ["u1", "a1"])
 
     status = summarize_ingestion(memory_db)
@@ -74,9 +60,8 @@ def test_pending_tail_for_recent_contiguous_suffix(memory_db, tmp_path):
 
 def test_stale_tail_for_old_contiguous_suffix(memory_db, tmp_path):
     filepath = tmp_path / "sess-stale.jsonl"
-    _write_four_turns(filepath)
-    old = time.time() - 3600
-    os.utime(filepath, (old, old))
+    write_four_turns(filepath)
+    age_past_grace_window(filepath)
     _seed_session(memory_db, filepath, ["u1", "a1"])
 
     status = summarize_ingestion(memory_db)
@@ -88,7 +73,7 @@ def test_stale_tail_for_old_contiguous_suffix(memory_db, tmp_path):
 
 def test_middle_missing_uuid_is_ingestion_gap(memory_db, tmp_path):
     filepath = tmp_path / "sess-gap.jsonl"
-    _write_four_turns(filepath)
+    write_four_turns(filepath)
     _seed_session(memory_db, filepath, ["u1", "u2", "a2"])
 
     status = summarize_ingestion(memory_db)
@@ -110,7 +95,7 @@ def test_missing_source_when_no_transcript_survives(memory_db, tmp_path):
 
 def test_complete_session_is_ok(memory_db, tmp_path):
     filepath = tmp_path / "sess-ok.jsonl"
-    _write_four_turns(filepath)
+    write_four_turns(filepath)
     _seed_session(memory_db, filepath, ["u1", "a1", "u2", "a2"])
 
     status = summarize_ingestion(memory_db)
@@ -122,7 +107,7 @@ def test_complete_session_is_ok(memory_db, tmp_path):
 
 def test_ok_session_records_cache_and_unchanged_second_run_skips_parsing(memory_db, tmp_path):
     filepath = tmp_path / "sess-cache.jsonl"
-    _write_four_turns(filepath)
+    write_four_turns(filepath)
     _seed_session(memory_db, filepath, ["u1", "a1", "u2", "a2"])
 
     first = summarize_ingestion(memory_db)
@@ -144,20 +129,20 @@ def test_ok_session_records_cache_and_unchanged_second_run_skips_parsing(memory_
 
 def test_transcript_change_invalidates_cache_and_reparses(memory_db, tmp_path):
     filepath = tmp_path / "sess-cache-change.jsonl"
-    _write_four_turns(filepath)
+    write_four_turns(filepath)
     _seed_session(memory_db, filepath, ["u1", "a1", "u2", "a2"])
 
     summarize_ingestion(memory_db)
     first_cache = _cache_row(memory_db, "sess-cache-change")
     assert first_cache is not None
 
-    _write_jsonl(
+    write_jsonl(
         filepath,
         [
-            _entry("u1", None, "2026-01-01T10:00:00Z", "user", "first"),
-            _entry("a1", "u1", "2026-01-01T10:00:01Z", "assistant", "answer"),
-            _entry("u2", "a1", "2026-01-01T10:00:02Z", "user", "second updated"),
-            _entry("a2", "u2", "2026-01-01T10:00:03Z", "assistant", "answer"),
+            make_jsonl_entry("u1", None, "2026-01-01T10:00:00Z", "user", "first"),
+            make_jsonl_entry("a1", "u1", "2026-01-01T10:00:01Z", "assistant", "answer"),
+            make_jsonl_entry("u2", "a1", "2026-01-01T10:00:02Z", "user", "second updated"),
+            make_jsonl_entry("a2", "u2", "2026-01-01T10:00:03Z", "assistant", "answer"),
         ],
     )
 
@@ -171,7 +156,7 @@ def test_transcript_change_invalidates_cache_and_reparses(memory_db, tmp_path):
 
 def test_mtime_only_change_invalidates_cache_and_reparses(memory_db, tmp_path):
     filepath = tmp_path / "sess-cache-mtime.jsonl"
-    _write_four_turns(filepath)
+    write_four_turns(filepath)
     _seed_session(memory_db, filepath, ["u1", "a1", "u2", "a2"])
 
     summarize_ingestion(memory_db)
@@ -191,7 +176,7 @@ def test_mtime_only_change_invalidates_cache_and_reparses(memory_db, tmp_path):
 
 def test_deleted_db_message_invalidates_ok_cache_and_reports_gap(memory_db, tmp_path):
     filepath = tmp_path / "sess-cache-db-gap.jsonl"
-    _write_four_turns(filepath)
+    write_four_turns(filepath)
     _seed_session(memory_db, filepath, ["u1", "a1", "u2", "a2"])
 
     first = summarize_ingestion(memory_db)
@@ -218,7 +203,7 @@ def test_deleted_db_message_invalidates_ok_cache_and_reports_gap(memory_db, tmp_
 
 def test_changed_db_uuid_membership_invalidates_ok_cache_and_reports_gap(memory_db, tmp_path):
     filepath = tmp_path / "sess-cache-db-membership.jsonl"
-    _write_four_turns(filepath)
+    write_four_turns(filepath)
     _seed_session(memory_db, filepath, ["u1", "a1", "u2", "a2"])
 
     first = summarize_ingestion(memory_db)
@@ -249,7 +234,7 @@ def test_changed_db_uuid_membership_invalidates_ok_cache_and_reports_gap(memory_
 
 def test_problem_session_is_not_cached_and_is_reparsed(memory_db, tmp_path):
     filepath = tmp_path / "sess-problem.jsonl"
-    _write_four_turns(filepath)
+    write_four_turns(filepath)
     _seed_session(memory_db, filepath, ["u1", "a1"])
 
     first = summarize_ingestion(memory_db)
@@ -268,18 +253,18 @@ def test_problem_session_is_not_cached_and_is_reparsed(memory_db, tmp_path):
 def test_multifile_session_uses_parent_chain_not_import_log_order(memory_db, tmp_path):
     parent = tmp_path / "sess-multi.jsonl"
     agent = tmp_path / "agent-sess-multi.jsonl"
-    _write_jsonl(
+    write_jsonl(
         parent,
         [
-            _entry("u1", None, "2026-01-01T10:00:00Z", "user", "first"),
-            _entry("a1", "u1", "2026-01-01T10:00:01Z", "assistant", "answer"),
+            make_jsonl_entry("u1", None, "2026-01-01T10:00:00Z", "user", "first"),
+            make_jsonl_entry("a1", "u1", "2026-01-01T10:00:01Z", "assistant", "answer"),
         ],
     )
-    _write_jsonl(
+    write_jsonl(
         agent,
         [
-            _entry("u2", "a1", "2026-01-01T10:00:02Z", "user", "second"),
-            _entry("a2", "u2", "2026-01-01T10:00:03Z", "assistant", "answer"),
+            make_jsonl_entry("u2", "a1", "2026-01-01T10:00:02Z", "user", "second"),
+            make_jsonl_entry("a2", "u2", "2026-01-01T10:00:03Z", "assistant", "answer"),
         ],
     )
     memory_db.execute("INSERT INTO sessions (uuid) VALUES ('sess-multi')")
@@ -303,14 +288,14 @@ def test_multifile_equal_timestamp_prefers_deeper_agent_leaf(memory_db, tmp_path
     parent = tmp_path / "sess-equal.jsonl"
     agent = tmp_path / "agent-sess-equal.jsonl"
     shared_ts = "2026-01-01T10:00:01Z"
-    _write_jsonl(
+    write_jsonl(
         parent,
         [
-            _entry("u1", None, "2026-01-01T10:00:00Z", "user", "first"),
-            _entry("a1", "u1", shared_ts, "assistant", "answer"),
+            make_jsonl_entry("u1", None, "2026-01-01T10:00:00Z", "user", "first"),
+            make_jsonl_entry("a1", "u1", shared_ts, "assistant", "answer"),
         ],
     )
-    _write_jsonl(agent, [_entry("a2", "a1", shared_ts, "assistant", "agent follow-up")])
+    write_jsonl(agent, [make_jsonl_entry("a2", "a1", shared_ts, "assistant", "agent follow-up")])
     memory_db.execute("INSERT INTO sessions (uuid) VALUES ('sess-equal')")
     session_id = memory_db.execute("SELECT last_insert_rowid()").fetchone()[0]
     for uuid in ["u1", "a1"]:
@@ -341,7 +326,7 @@ def test_import_log_only_session_is_not_counted(memory_db, tmp_path):
 def test_partial_multifile_source_loss_counts_as_missing_source(memory_db, tmp_path):
     parent = tmp_path / "sess-partial.jsonl"
     missing_agent = tmp_path / "agent-sess-partial.jsonl"
-    _write_jsonl(parent, [_entry("u1", None, "2026-01-01T10:00:00Z", "user", "first")])
+    write_jsonl(parent, [make_jsonl_entry("u1", None, "2026-01-01T10:00:00Z", "user", "first")])
     _seed_session(memory_db, parent, ["u1"])
     _insert_import_log(memory_db, missing_agent, 0)
 
@@ -355,18 +340,18 @@ def test_partial_multifile_source_loss_counts_as_missing_source(memory_db, tmp_p
 def test_partial_multifile_source_loss_stays_missing_source_after_prior_ok_cache(memory_db, tmp_path):
     parent = tmp_path / "sess-partial-cache.jsonl"
     agent = tmp_path / "agent-sess-partial-cache.jsonl"
-    _write_jsonl(
+    write_jsonl(
         parent,
         [
-            _entry("u1", None, "2026-01-01T10:00:00Z", "user", "first"),
-            _entry("a1", "u1", "2026-01-01T10:00:01Z", "assistant", "answer"),
+            make_jsonl_entry("u1", None, "2026-01-01T10:00:00Z", "user", "first"),
+            make_jsonl_entry("a1", "u1", "2026-01-01T10:00:01Z", "assistant", "answer"),
         ],
     )
-    _write_jsonl(
+    write_jsonl(
         agent,
         [
-            _entry("u2", "a1", "2026-01-01T10:00:02Z", "user", "second"),
-            _entry("a2", "u2", "2026-01-01T10:00:03Z", "assistant", "answer"),
+            make_jsonl_entry("u2", "a1", "2026-01-01T10:00:02Z", "user", "second"),
+            make_jsonl_entry("a2", "u2", "2026-01-01T10:00:03Z", "assistant", "answer"),
         ],
     )
     memory_db.execute("INSERT INTO sessions (uuid) VALUES ('sess-partial-cache')")
@@ -399,7 +384,7 @@ def test_partial_multifile_source_loss_stays_missing_source_after_prior_ok_cache
 
 def test_find_repairable_sessions_excludes_pending_tail(memory_db, tmp_path):
     filepath = tmp_path / "sess-tail.jsonl"
-    _write_four_turns(filepath)
+    write_four_turns(filepath)
     _seed_session(memory_db, filepath, ["u1", "a1"])
 
     candidates = find_repairable_sessions(memory_db)
@@ -409,21 +394,20 @@ def test_find_repairable_sessions_excludes_pending_tail(memory_db, tmp_path):
 
 def test_find_repairable_sessions_matches_stale_tail_and_ingestion_gap_only(memory_db, tmp_path):
     ok_path = tmp_path / "sess-ok.jsonl"
-    _write_four_turns(ok_path)
+    write_four_turns(ok_path)
     _seed_session(memory_db, ok_path, ["u1", "a1", "u2", "a2"])
 
     pending_path = tmp_path / "sess-pending.jsonl"
-    _write_four_turns(pending_path)
+    write_four_turns(pending_path)
     _seed_session(memory_db, pending_path, ["u1", "a1"])
 
     stale_path = tmp_path / "sess-stale.jsonl"
-    _write_four_turns(stale_path)
-    old = time.time() - 3600
-    os.utime(stale_path, (old, old))
+    write_four_turns(stale_path)
+    age_past_grace_window(stale_path)
     _seed_session(memory_db, stale_path, ["u1", "a1"])
 
     gap_path = tmp_path / "sess-gap.jsonl"
-    _write_four_turns(gap_path)
+    write_four_turns(gap_path)
     _seed_session(memory_db, gap_path, ["u1", "u2", "a2"])
 
     cursor = memory_db.cursor()
@@ -440,9 +424,8 @@ def test_find_repairable_sessions_matches_stale_tail_and_ingestion_gap_only(memo
 
 def test_reclassify_session_reflects_db_catch_up(memory_db, tmp_path):
     filepath = tmp_path / "sess-reclassify.jsonl"
-    _write_four_turns(filepath)
-    old = time.time() - 3600
-    os.utime(filepath, (old, old))
+    write_four_turns(filepath)
+    age_past_grace_window(filepath)
     _seed_session(memory_db, filepath, ["u1", "a1"])
 
     cursor = memory_db.cursor()

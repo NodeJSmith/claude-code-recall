@@ -5,6 +5,7 @@ deep-check runs skip reparsing unchanged transcript sources.
 """
 
 import logging
+import sqlite3
 from collections.abc import Iterator
 from pathlib import Path
 from sqlite3 import Connection
@@ -71,7 +72,7 @@ def _source_fingerprint(filepaths: list[Path]) -> str | None:
     return "\n".join(parts)
 
 
-def _db_coverage_fingerprint(cursor, session_id: int) -> str:
+def _db_coverage_fingerprint(cursor: sqlite3.Cursor, session_id: int) -> str:
     """Return a token combining message-UUID membership and branch_messages
     linkage, for cache validation.
 
@@ -108,7 +109,7 @@ def _db_coverage_fingerprint(cursor, session_id: int) -> str:
     return message_part + "\x00" + link_part
 
 
-def _cached_ok_fingerprint(cursor, session_uuid: str) -> tuple[str, str] | None:
+def _cached_ok_fingerprint(cursor: sqlite3.Cursor, session_uuid: str) -> tuple[str, str] | None:
     row = cursor.execute(
         "SELECT source_fingerprint, db_coverage_fingerprint FROM ingestion_check_cache WHERE session_uuid = ?",
         (session_uuid,),
@@ -117,7 +118,7 @@ def _cached_ok_fingerprint(cursor, session_uuid: str) -> tuple[str, str] | None:
 
 
 def _record_ok_fingerprint(
-    cursor,
+    cursor: sqlite3.Cursor,
     session_uuid: str,
     source_fingerprint: str,
     db_coverage_fingerprint: str,

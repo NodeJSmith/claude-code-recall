@@ -1,7 +1,9 @@
 """Shared fixtures for ccrecall tests."""
 
 import json
+import os
 import sqlite3
+import time
 from pathlib import Path
 
 import pytest
@@ -12,6 +14,7 @@ import ccrecall.health as health
 import ccrecall.hooks.sync_current as sync_current
 from ccrecall.db_vec import _ensure_vec_schema
 from ccrecall.health import clear_embedding_failure, record_embedding_failure
+from ccrecall.ingestion_status import STALE_TAIL_SECONDS
 from ccrecall.schema import SCHEMA
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures"
@@ -142,6 +145,40 @@ def make_jsonl_entry(uuid: str, parent_uuid: str | None, ts: str, role: str, con
 
 def write_jsonl(path: Path, lines: list[dict]) -> None:
     path.write_text("\n".join(json.dumps(line) for line in lines) + "\n")
+
+
+def write_four_turns(filepath: Path) -> None:
+    """Write a minimal user/assistant/user/assistant JSONL transcript.
+
+    Shared by the stale-tail and ingestion-gap repair tests
+    (test_import_pipeline, test_import_repair, test_ingestion_status), which
+    all need the same four-turn fixture to exercise partial-message-loss
+    scenarios.
+    """
+    write_jsonl(
+        filepath,
+        [
+            make_jsonl_entry("u1", None, "2026-01-01T10:00:00Z", "user", "first"),
+            make_jsonl_entry("a1", "u1", "2026-01-01T10:00:01Z", "assistant", "answer"),
+            make_jsonl_entry("u2", "a1", "2026-01-01T10:00:02Z", "user", "second"),
+            make_jsonl_entry("a2", "u2", "2026-01-01T10:00:03Z", "assistant", "answer"),
+        ],
+    )
+
+
+def age_past_grace_window(filepath: Path) -> None:
+    """Backdate a file's mtime past STALE_TAIL_SECONDS so it qualifies as a stale tail."""
+    old = time.time() - (STALE_TAIL_SECONDS + 3600)
+    os.utime(filepath, (old, old))
+
+
+def delete_message(conn: sqlite3.Connection, session_id: int, uuid: str) -> None:
+    """Delete one messages row, clearing its branch_messages FK references first."""
+    conn.execute(
+        "DELETE FROM branch_messages WHERE message_id IN (SELECT id FROM messages WHERE session_id = ? AND uuid = ?)",
+        (session_id, uuid),
+    )
+    conn.execute("DELETE FROM messages WHERE session_id = ? AND uuid = ?", (session_id, uuid))
 
 
 class NoCloseConn:

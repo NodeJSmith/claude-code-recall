@@ -1,7 +1,7 @@
 # Design: Repair stale-tail / ingestion-gap sessions via `ccrecall import --repair-gaps`
 
 **Date:** 2026-09-16
-**Status:** draft
+**Status:** archived
 **Mode:** sketch
 
 ## Problem
