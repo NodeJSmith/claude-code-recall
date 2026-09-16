@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 from unittest.mock import patch
 
-from conftest import age_past_grace_window, make_jsonl_entry, write_four_turns, write_jsonl
+from conftest import age_past_grace_window, delete_message, make_jsonl_entry, write_four_turns, write_jsonl
 
 from ccrecall import ingestion_status, parsing
 from ccrecall.import_log_ops import import_log_source_index
@@ -16,7 +16,44 @@ from ccrecall.ingestion_status import (
 )
 
 
-def _seed_session(memory_db, filepath: Path, db_uuids: list[str]) -> None:
+def _link_messages_to_branch(memory_db, session_id: int, branch_id: int, uuids: list[str]) -> None:
+    """Link each message identified by uuid (for this session) to branch_id."""
+    for uuid in uuids:
+        message_id = memory_db.execute(
+            "SELECT id FROM messages WHERE session_id = ? AND uuid = ?", (session_id, uuid)
+        ).fetchone()[0]
+        memory_db.execute(
+            "INSERT INTO branch_messages (branch_id, message_id) VALUES (?, ?)",
+            (branch_id, message_id),
+        )
+
+
+def _link_active_branch(memory_db, session_id: int, leaf_uuid: str, uuids: list[str]) -> int:
+    """Create one new active branch for session_id and link it to each
+    message identified by uuid. Returns the new branch's id."""
+    memory_db.execute(
+        "INSERT INTO branches (session_id, leaf_uuid, is_active) VALUES (?, ?, 1)",
+        (session_id, leaf_uuid),
+    )
+    branch_id = memory_db.execute("SELECT last_insert_rowid()").fetchone()[0]
+    _link_messages_to_branch(memory_db, session_id, branch_id, uuids)
+    return branch_id
+
+
+def _seed_session(memory_db, filepath: Path, db_uuids: list[str], *, link_active_branch: bool = True) -> None:
+    """Insert a session with the given message UUIDs.
+
+    By default all seeded messages are linked to one new active branch —
+    matching real ingestion's invariant that a message row is reachable from
+    the active branch, not just present in `messages`. classify_sessions()
+    checks active-branch linkage (not bare row existence), so a message
+    inserted here but left unlinked would silently count as missing rather
+    than present.
+
+    Pass link_active_branch=False for tests that construct their own branch
+    topology (e.g. partial linkage, multiple branches) to avoid a conflicting
+    auto-created branch.
+    """
     session_uuid = filepath.stem.removeprefix("agent-")
     memory_db.execute("INSERT INTO sessions (uuid) VALUES (?)", (session_uuid,))
     session_id = memory_db.execute("SELECT last_insert_rowid()").fetchone()[0]
@@ -25,6 +62,8 @@ def _seed_session(memory_db, filepath: Path, db_uuids: list[str]) -> None:
             "INSERT INTO messages (session_id, uuid, role, content, tool_content) VALUES (?, ?, 'user', 'x', '')",
             (session_id, uuid),
         )
+    if link_active_branch and db_uuids:
+        _link_active_branch(memory_db, session_id, db_uuids[-1], db_uuids)
     memory_db.execute(
         "INSERT INTO import_log (file_path, file_hash, messages_imported) VALUES (?, 'hash', ?)",
         (str(filepath), len(db_uuids)),
@@ -190,10 +229,8 @@ def test_deleted_db_message_invalidates_ok_cache_and_reports_gap(memory_db, tmp_
     first_cache = _cache_row(memory_db, "sess-cache-db-gap")
     assert first_cache is not None
 
-    memory_db.execute(
-        "DELETE FROM messages WHERE session_id = (SELECT id FROM sessions WHERE uuid = ?) AND uuid = ?",
-        ("sess-cache-db-gap", "a1"),
-    )
+    session_id = memory_db.execute("SELECT id FROM sessions WHERE uuid = ?", ("sess-cache-db-gap",)).fetchone()[0]
+    delete_message(memory_db, session_id, "a1")
     memory_db.commit()
 
     with patch("ccrecall.ingestion_status.parse_all_with_uuids", wraps=parsing.parse_all_with_uuids) as parse_all:
@@ -220,7 +257,7 @@ def test_changed_db_uuid_membership_invalidates_ok_cache_and_reports_gap(memory_
     session_id = memory_db.execute("SELECT id FROM sessions WHERE uuid = ?", ("sess-cache-db-membership",)).fetchone()[
         0
     ]
-    memory_db.execute("DELETE FROM messages WHERE session_id = ? AND uuid = ?", (session_id, "a1"))
+    delete_message(memory_db, session_id, "a1")
     memory_db.execute(
         "INSERT INTO messages (session_id, uuid, role, content, tool_content) VALUES (?, 'bogus', 'user', 'x', '')",
         (session_id,),
@@ -237,13 +274,47 @@ def test_changed_db_uuid_membership_invalidates_ok_cache_and_reports_gap(memory_
     assert _cache_row(memory_db, "sess-cache-db-membership") == first_cache
 
 
+def test_present_but_unlinked_message_is_not_counted_as_ok(memory_db, tmp_path):
+    """A message row that survives in `messages` but whose branch_messages
+    link to the active branch was dropped must classify as a real gap, not
+    ok — a row-existence-only check (the codex-flagged bug) is blind to this
+    exact scenario, the same class of corruption the coverage fingerprint
+    exists to catch (Finding 1/6)."""
+    filepath = tmp_path / "sess-unlinked-message.jsonl"
+    write_four_turns(filepath)
+    _seed_session(memory_db, filepath, ["u1", "a1", "u2", "a2"], link_active_branch=False)
+
+    session_id = memory_db.execute("SELECT id FROM sessions WHERE uuid = ?", ("sess-unlinked-message",)).fetchone()[0]
+    memory_db.execute("INSERT INTO branches (session_id, leaf_uuid, is_active) VALUES (?, 'a2', 1)", (session_id,))
+    branch_id = memory_db.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+    # Link every expected message EXCEPT u1 — its row still exists in
+    # `messages`, but it's unreachable from the active branch, exactly like a
+    # dropped branch_messages link would leave it.
+    for uuid in ("a1", "u2", "a2"):
+        message_id = memory_db.execute(
+            "SELECT id FROM messages WHERE session_id = ? AND uuid = ?", (session_id, uuid)
+        ).fetchone()[0]
+        memory_db.execute(
+            "INSERT INTO branch_messages (branch_id, message_id) VALUES (?, ?)",
+            (branch_id, message_id),
+        )
+    memory_db.commit()
+
+    status = summarize_ingestion(memory_db)
+
+    assert status["ok_sessions"] == 0
+    assert status["ingestion_gap_sessions"] == 1
+    assert status["ingestion_gap_turns"] == 1
+
+
 def test_same_count_link_substitution_changes_db_coverage_fingerprint(memory_db, tmp_path):
     """A branch losing one branch_messages link and gaining a different one
     (net per-branch link count unchanged) must still change the fingerprint —
     a bare COUNT(*) per branch can't see this, only membership can."""
     filepath = tmp_path / "sess-link-substitution.jsonl"
     write_four_turns(filepath)
-    _seed_session(memory_db, filepath, ["u1", "a1", "u2", "a2"])
+    _seed_session(memory_db, filepath, ["u1", "a1", "u2", "a2"], link_active_branch=False)
 
     session_id = memory_db.execute("SELECT id FROM sessions WHERE uuid = ?", ("sess-link-substitution",)).fetchone()[0]
     memory_db.execute("INSERT INTO branches (session_id, leaf_uuid, is_active) VALUES (?, 'a2', 1)", (session_id,))
@@ -287,7 +358,7 @@ def test_new_zero_link_active_branch_changes_db_coverage_fingerprint(memory_db, 
     visible, independent of whether it has any links."""
     filepath = tmp_path / "sess-new-zero-link-branch.jsonl"
     write_four_turns(filepath)
-    _seed_session(memory_db, filepath, ["u1", "a1", "u2", "a2"])
+    _seed_session(memory_db, filepath, ["u1", "a1", "u2", "a2"], link_active_branch=False)
 
     session_id = memory_db.execute("SELECT id FROM sessions WHERE uuid = ?", ("sess-new-zero-link-branch",)).fetchone()[
         0
@@ -307,16 +378,28 @@ def test_new_zero_link_active_branch_changes_db_coverage_fingerprint(memory_db, 
 
 
 def test_branch_link_substitution_invalidates_ok_cache(memory_db, tmp_path):
-    """End-to-end version of the same-count substitution: the ok-cache from a
-    prior run must not survive a link swap that leaves per-branch counts
-    unchanged, or a genuinely reparse-worthy session would be skipped."""
+    """End-to-end version of the same-count substitution: after a link swap
+    that leaves the branch's total link count unchanged but drops a message
+    that's actually on the expected active path, the session must not stay
+    cached as ok — the corrupted state must be reclassified and reported as
+    a real gap on reparse, not silently trusted forever."""
     filepath = tmp_path / "sess-cache-link-substitution.jsonl"
     write_four_turns(filepath)
-    _seed_session(memory_db, filepath, ["u1", "a1", "u2", "a2"])
+    _seed_session(memory_db, filepath, ["u1", "a1", "u2", "a2"], link_active_branch=False)
 
     session_id = memory_db.execute(
         "SELECT id FROM sessions WHERE uuid = ?", ("sess-cache-link-substitution",)
     ).fetchone()[0]
+
+    # x1: a message row that exists for this session but isn't on the
+    # expected active path (e.g. it belongs to an inactive/historical
+    # branch) — present in `messages`, but must never count toward active
+    # coverage.
+    memory_db.execute(
+        "INSERT INTO messages (session_id, uuid, role, content, tool_content) VALUES (?, 'x1', 'user', 'x', '')",
+        (session_id,),
+    )
+
     memory_db.execute("INSERT INTO branches (session_id, leaf_uuid, is_active) VALUES (?, 'a2', 1)", (session_id,))
     branch_id = memory_db.execute("SELECT last_insert_rowid()").fetchone()[0]
 
@@ -325,10 +408,11 @@ def test_branch_link_substitution_invalidates_ok_cache(memory_db, tmp_path):
             "SELECT id FROM messages WHERE session_id = ? AND uuid = ?", (session_id, uuid)
         ).fetchone()[0]
 
-    memory_db.execute(
-        "INSERT INTO branch_messages (branch_id, message_id) VALUES (?, ?)",
-        (branch_id, _message_id("u1")),
-    )
+    for uuid in ("u1", "a1", "u2", "a2"):
+        memory_db.execute(
+            "INSERT INTO branch_messages (branch_id, message_id) VALUES (?, ?)",
+            (branch_id, _message_id(uuid)),
+        )
     memory_db.commit()
 
     first = summarize_ingestion(memory_db)
@@ -336,16 +420,17 @@ def test_branch_link_substitution_invalidates_ok_cache(memory_db, tmp_path):
     first_cache = _cache_row(memory_db, "sess-cache-link-substitution")
     assert first_cache is not None
 
-    # same-count substitution: delete the link to u1, add a link to a1 —
-    # branch_id's total link count is still 1, so a COUNT(*)-based
-    # fingerprint would not change.
+    # same-count substitution: drop the link to u1 (on the expected active
+    # path), add a link to x1 (not on it) instead — branch_id's total link
+    # count is still 4, so a COUNT(*)-based fingerprint wouldn't change, but
+    # the active branch's real expected-message coverage now has a gap.
     memory_db.execute(
         "DELETE FROM branch_messages WHERE branch_id = ? AND message_id = ?",
         (branch_id, _message_id("u1")),
     )
     memory_db.execute(
         "INSERT INTO branch_messages (branch_id, message_id) VALUES (?, ?)",
-        (branch_id, _message_id("a1")),
+        (branch_id, _message_id("x1")),
     )
     memory_db.commit()
 
@@ -353,8 +438,13 @@ def test_branch_link_substitution_invalidates_ok_cache(memory_db, tmp_path):
         second = summarize_ingestion(memory_db)
 
     assert parse_all.call_count == 1
-    assert second["ok_sessions"] == 1
-    assert _cache_row(memory_db, "sess-cache-link-substitution")[2] != first_cache[2]
+    assert second["ok_sessions"] == 0
+    assert second["ingestion_gap_sessions"] == 1
+    # summarize_ingestion only (re-)writes ingestion_check_cache for an "ok"
+    # verdict — the corrupted session is no longer "ok", so the cache is left
+    # untouched rather than being overwritten with a false "ok" of the
+    # corrupted state.
+    assert _cache_row(memory_db, "sess-cache-link-substitution") == first_cache
 
 
 def test_problem_session_is_not_cached_and_is_reparsed(memory_db, tmp_path):
@@ -399,6 +489,7 @@ def test_multifile_session_uses_parent_chain_not_import_log_order(memory_db, tmp
             "INSERT INTO messages (session_id, uuid, role, content, tool_content) VALUES (?, ?, 'user', 'x', '')",
             (session_id, uuid),
         )
+    _link_active_branch(memory_db, session_id, "a1", ["u1", "a1"])
     _insert_import_log(memory_db, agent, 0)
     _insert_import_log(memory_db, parent, 2)
 
@@ -428,6 +519,7 @@ def test_multifile_equal_timestamp_prefers_deeper_agent_leaf(memory_db, tmp_path
             "INSERT INTO messages (session_id, uuid, role, content, tool_content) VALUES (?, ?, 'user', 'x', '')",
             (session_id, uuid),
         )
+    _link_active_branch(memory_db, session_id, "a1", ["u1", "a1"])
     _insert_import_log(memory_db, agent, 1)
     _insert_import_log(memory_db, parent, 2)
 
@@ -486,6 +578,7 @@ def test_partial_multifile_source_loss_stays_missing_source_after_prior_ok_cache
             "INSERT INTO messages (session_id, uuid, role, content, tool_content) VALUES (?, ?, 'user', 'x', '')",
             (session_id, uuid),
         )
+    _link_active_branch(memory_db, session_id, "a2", ["u1", "a1", "u2", "a2"])
     _insert_import_log(memory_db, parent, 2)
     _insert_import_log(memory_db, agent, 2)
 
@@ -565,6 +658,10 @@ def test_reclassify_session_reflects_db_catch_up(memory_db, tmp_path):
             "INSERT INTO messages (session_id, uuid, role, content, tool_content) VALUES (?, ?, 'user', 'x', '')",
             (session_id, uuid),
         )
+    branch_id = memory_db.execute(
+        "SELECT id FROM branches WHERE session_id = ? AND is_active = 1", (session_id,)
+    ).fetchone()[0]
+    _link_messages_to_branch(memory_db, session_id, branch_id, ["u2", "a2"])
     memory_db.commit()
 
     assert reclassify_session(memory_db, "sess-reclassify", filepaths) == "ok"

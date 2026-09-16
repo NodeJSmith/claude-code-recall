@@ -192,10 +192,24 @@ def classify_sessions(
             yield session_uuid, "ok", session_id, []
             continue
 
+        # Scoped to the active branch's branch_messages links, not just "any
+        # message row exists for this session" — a message row can survive
+        # while its link to the active branch is dropped or substituted
+        # (design/specs/016-stale-tail-import-repair Finding 1/6), and a
+        # row-existence check alone is blind to that: the UUID is still
+        # "present" in messages even though it's no longer reachable from the
+        # active branch, so a link corruption would classify as "ok" and be
+        # re-cached that way, forever hiding it from find_repairable_sessions.
         existing_msg_uuids = {
             row[0]
             for row in cursor.execute(
-                "SELECT uuid FROM messages WHERE session_id = ? AND uuid IS NOT NULL",
+                """
+                SELECT m.uuid
+                FROM branch_messages bm
+                JOIN branches b ON b.id = bm.branch_id
+                JOIN messages m ON m.id = bm.message_id
+                WHERE b.session_id = ? AND b.is_active = 1 AND m.uuid IS NOT NULL
+                """,
                 (session_id,),
             ).fetchall()
         }
