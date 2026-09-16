@@ -74,7 +74,12 @@ def repair_sessions(
     transient, candidate-local problem, not evidence the DB is broken) is
     treated like any other per-candidate failure instead — logged, counted,
     and the batch continues — rather than propagating and aborting every
-    remaining candidate.
+    remaining candidate. A failed RELEASE is recovered by explicitly rolling
+    back to and releasing the same savepoint, so the connection returns to a
+    known, zero-depth state before the next candidate starts; if that
+    recovery itself fails, the connection's savepoint stack can no longer be
+    trusted, and the failure escalates to the same abort-the-batch handling
+    as a genuine force-reimport infrastructure failure.
 
     After a candidate's files are processed (and none raised), the session's
     classification is re-checked via ingestion_status.reclassify_session:
@@ -171,6 +176,30 @@ def repair_sessions(
             try:
                 conn.execute("RELEASE SAVEPOINT import_candidate")
             except sqlite3.OperationalError:
+                # A failed RELEASE leaves the savepoint open on the connection's
+                # stack instead of discarding it — left alone, the next
+                # candidate's SAVEPOINT nests inside this "failed" one instead
+                # of starting its own independent, durably-committing
+                # transaction (see the module docstring's durability model).
+                # Roll back the candidate's writes and release the savepoint
+                # explicitly so the connection returns to a clean, zero-depth
+                # state before the next candidate starts.
+                try:
+                    conn.execute("ROLLBACK TO SAVEPOINT import_candidate")
+                    conn.execute("RELEASE SAVEPOINT import_candidate")
+                except sqlite3.OperationalError:
+                    # The recovery itself failed under the same transient
+                    # condition — the connection's savepoint stack can no
+                    # longer be trusted to be at a known depth, so this is a
+                    # genuine infrastructure failure, not a candidate-local
+                    # one. Abort the whole batch rather than let subsequent
+                    # candidates nest inside an unknown state, matching the
+                    # force-reimport OperationalError branch above.
+                    log.exception(
+                        "Failed to recover from RELEASE SAVEPOINT failure while repairing session %s — aborting run",
+                        session_uuid,
+                    )
+                    raise
                 log.exception(
                     "Failed to RELEASE SAVEPOINT while repairing session %s — counting as failed, continuing batch",
                     session_uuid,

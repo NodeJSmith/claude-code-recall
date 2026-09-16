@@ -26,18 +26,30 @@ class _SavepointFailingConn:
     to simulate an OperationalError on the SAVEPOINT/RELEASE statements
     themselves (Finding 4), which cannot be reproduced by monkeypatching a
     real sqlite3.Connection instance directly (its methods are read-only
-    slot descriptors)."""
+    slot descriptors). With ``fail_forever=True``, every occurrence from
+    ``fail_on_occurrence`` onward raises instead of just the one — used to
+    simulate a persistent (not transient) failure, e.g. the RELEASE-recovery
+    RELEASE call failing the same way the original RELEASE did."""
 
-    def __init__(self, real: sqlite3.Connection, fail_sql: str, fail_on_occurrence: int = 1) -> None:
+    def __init__(
+        self,
+        real: sqlite3.Connection,
+        fail_sql: str,
+        fail_on_occurrence: int = 1,
+        fail_forever: bool = False,
+    ) -> None:
         self._real = real
         self._fail_sql = fail_sql
         self._fail_on_occurrence = fail_on_occurrence
+        self._fail_forever = fail_forever
         self._occurrences = 0
 
     def execute(self, sql, *args, **kwargs):
         if sql == self._fail_sql:
             self._occurrences += 1
-            if self._occurrences == self._fail_on_occurrence:
+            if self._occurrences == self._fail_on_occurrence or (
+                self._fail_forever and self._occurrences > self._fail_on_occurrence
+            ):
                 raise sqlite3.OperationalError(f"simulated failure on: {sql}")
         return self._real.execute(sql, *args, **kwargs)
 
@@ -313,6 +325,39 @@ def test_savepoint_release_failure_counts_as_failed_and_batch_continues(memory_d
     assert sessions_failed == 1, "the candidate whose RELEASE failed must count as failed"
     assert sessions_repaired == 1, "the other candidate must still be repaired — the batch must continue"
     assert sessions_unrepairable == 0
+    assert not memory_db.in_transaction, (
+        "a failed RELEASE must roll back and release its own savepoint instead of leaving it "
+        "open — otherwise the next candidate's SAVEPOINT nests inside it instead of committing "
+        "independently, breaking the durability model documented in the module docstring"
+    )
+
+
+def test_savepoint_recovery_failure_aborts_the_batch(memory_db, project_id, tmp_path):
+    """If the RELEASE-failure recovery (ROLLBACK TO SAVEPOINT + RELEASE) also
+    fails — a persistent, not transient, problem — the connection's savepoint
+    stack can no longer be trusted at a known depth. This must escalate to
+    the same abort-the-batch handling as a genuine force-reimport
+    infrastructure failure, not silently continue with an unhandled
+    exception, and not keep counting the batch as merely per-candidate
+    failures."""
+    first_path = tmp_path / "sess-first-savepoint.jsonl"
+    second_path = tmp_path / "sess-second-savepoint.jsonl"
+
+    for filepath, uuid in ((first_path, "sess-first-savepoint"), (second_path, "sess-second-savepoint")):
+        seed_stale_tail_session(memory_db, project_id, filepath, uuid=uuid)
+
+    candidates = _stale_tail_candidates(memory_db)
+    assert {c[0] for c in candidates} == {"sess-first-savepoint", "sess-second-savepoint"}
+
+    # Fail RELEASE SAVEPOINT on its first occurrence and every occurrence
+    # after — the original RELEASE and the recovery RELEASE both fail,
+    # simulating a persistent (not transient) problem with the connection.
+    fake_conn = _SavepointFailingConn(
+        memory_db, "RELEASE SAVEPOINT import_candidate", fail_on_occurrence=1, fail_forever=True
+    )
+
+    with pytest.raises(sqlite3.OperationalError):
+        repair_sessions(fake_conn, candidates)
 
 
 def test_project_id_none_candidate_is_unrepairable_not_failed(memory_db, project_id, tmp_path):
