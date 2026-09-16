@@ -1,7 +1,7 @@
 ---
 task_id: "T02"
 title: "Add hooks/import_repair.py with repair_sessions() execution loop"
-status: "planned"
+status: "done"
 depends_on: ["T01"]
 implements: ["FR#2", "FR#5", "FR#8", "AC#5", "AC#8"]
 ---
