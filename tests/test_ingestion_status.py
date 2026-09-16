@@ -6,9 +6,14 @@ from unittest.mock import patch
 
 from conftest import age_past_grace_window, make_jsonl_entry, write_four_turns, write_jsonl
 
-from ccrecall import parsing
+from ccrecall import ingestion_status, parsing
 from ccrecall.import_log_ops import import_log_source_index
-from ccrecall.ingestion_status import find_repairable_sessions, reclassify_session, summarize_ingestion
+from ccrecall.ingestion_status import (
+    _db_coverage_fingerprint,
+    find_repairable_sessions,
+    reclassify_session,
+    summarize_ingestion,
+)
 
 
 def _seed_session(memory_db, filepath: Path, db_uuids: list[str]) -> None:
@@ -232,6 +237,126 @@ def test_changed_db_uuid_membership_invalidates_ok_cache_and_reports_gap(memory_
     assert _cache_row(memory_db, "sess-cache-db-membership") == first_cache
 
 
+def test_same_count_link_substitution_changes_db_coverage_fingerprint(memory_db, tmp_path):
+    """A branch losing one branch_messages link and gaining a different one
+    (net per-branch link count unchanged) must still change the fingerprint —
+    a bare COUNT(*) per branch can't see this, only membership can."""
+    filepath = tmp_path / "sess-link-substitution.jsonl"
+    write_four_turns(filepath)
+    _seed_session(memory_db, filepath, ["u1", "a1", "u2", "a2"])
+
+    session_id = memory_db.execute("SELECT id FROM sessions WHERE uuid = ?", ("sess-link-substitution",)).fetchone()[0]
+    memory_db.execute("INSERT INTO branches (session_id, leaf_uuid, is_active) VALUES (?, 'a2', 1)", (session_id,))
+    branch_id = memory_db.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+    def _message_id(uuid: str) -> int:
+        return memory_db.execute(
+            "SELECT id FROM messages WHERE session_id = ? AND uuid = ?", (session_id, uuid)
+        ).fetchone()[0]
+
+    memory_db.execute(
+        "INSERT INTO branch_messages (branch_id, message_id) VALUES (?, ?)",
+        (branch_id, _message_id("u1")),
+    )
+    memory_db.commit()
+
+    cursor = memory_db.cursor()
+    before = _db_coverage_fingerprint(cursor, session_id)
+
+    memory_db.execute(
+        "DELETE FROM branch_messages WHERE branch_id = ? AND message_id = ?",
+        (branch_id, _message_id("u1")),
+    )
+    memory_db.execute(
+        "INSERT INTO branch_messages (branch_id, message_id) VALUES (?, ?)",
+        (branch_id, _message_id("a1")),
+    )
+    memory_db.commit()
+
+    after = _db_coverage_fingerprint(cursor, session_id)
+
+    assert before != after
+
+
+def test_new_zero_link_active_branch_changes_db_coverage_fingerprint(memory_db, tmp_path):
+    """A newly created active branch with no branch_messages links yet must
+    still change the fingerprint. link_part's query is an INNER JOIN starting
+    from branch_messages, so a zero-link branch contributes no row there —
+    indistinguishable from the branch not existing at all. branch_part (a
+    plain active-branches SELECT) is what makes the branch's existence itself
+    visible, independent of whether it has any links."""
+    filepath = tmp_path / "sess-new-zero-link-branch.jsonl"
+    write_four_turns(filepath)
+    _seed_session(memory_db, filepath, ["u1", "a1", "u2", "a2"])
+
+    session_id = memory_db.execute("SELECT id FROM sessions WHERE uuid = ?", ("sess-new-zero-link-branch",)).fetchone()[
+        0
+    ]
+
+    cursor = memory_db.cursor()
+    before = _db_coverage_fingerprint(cursor, session_id)
+
+    # A new active branch appears with no branch_messages links at all — no
+    # message rows change, so message_part alone can't see this either.
+    memory_db.execute("INSERT INTO branches (session_id, leaf_uuid, is_active) VALUES (?, 'a2', 1)", (session_id,))
+    memory_db.commit()
+
+    after = _db_coverage_fingerprint(cursor, session_id)
+
+    assert before != after
+
+
+def test_branch_link_substitution_invalidates_ok_cache(memory_db, tmp_path):
+    """End-to-end version of the same-count substitution: the ok-cache from a
+    prior run must not survive a link swap that leaves per-branch counts
+    unchanged, or a genuinely reparse-worthy session would be skipped."""
+    filepath = tmp_path / "sess-cache-link-substitution.jsonl"
+    write_four_turns(filepath)
+    _seed_session(memory_db, filepath, ["u1", "a1", "u2", "a2"])
+
+    session_id = memory_db.execute(
+        "SELECT id FROM sessions WHERE uuid = ?", ("sess-cache-link-substitution",)
+    ).fetchone()[0]
+    memory_db.execute("INSERT INTO branches (session_id, leaf_uuid, is_active) VALUES (?, 'a2', 1)", (session_id,))
+    branch_id = memory_db.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+    def _message_id(uuid: str) -> int:
+        return memory_db.execute(
+            "SELECT id FROM messages WHERE session_id = ? AND uuid = ?", (session_id, uuid)
+        ).fetchone()[0]
+
+    memory_db.execute(
+        "INSERT INTO branch_messages (branch_id, message_id) VALUES (?, ?)",
+        (branch_id, _message_id("u1")),
+    )
+    memory_db.commit()
+
+    first = summarize_ingestion(memory_db)
+    assert first["ok_sessions"] == 1
+    first_cache = _cache_row(memory_db, "sess-cache-link-substitution")
+    assert first_cache is not None
+
+    # same-count substitution: delete the link to u1, add a link to a1 —
+    # branch_id's total link count is still 1, so a COUNT(*)-based
+    # fingerprint would not change.
+    memory_db.execute(
+        "DELETE FROM branch_messages WHERE branch_id = ? AND message_id = ?",
+        (branch_id, _message_id("u1")),
+    )
+    memory_db.execute(
+        "INSERT INTO branch_messages (branch_id, message_id) VALUES (?, ?)",
+        (branch_id, _message_id("a1")),
+    )
+    memory_db.commit()
+
+    with patch("ccrecall.ingestion_status.parse_all_with_uuids", wraps=parsing.parse_all_with_uuids) as parse_all:
+        second = summarize_ingestion(memory_db)
+
+    assert parse_all.call_count == 1
+    assert second["ok_sessions"] == 1
+    assert _cache_row(memory_db, "sess-cache-link-substitution")[2] != first_cache[2]
+
+
 def test_problem_session_is_not_cached_and_is_reparsed(memory_db, tmp_path):
     filepath = tmp_path / "sess-problem.jsonl"
     write_four_turns(filepath)
@@ -443,3 +568,57 @@ def test_reclassify_session_reflects_db_catch_up(memory_db, tmp_path):
     memory_db.commit()
 
     assert reclassify_session(memory_db, "sess-reclassify", filepaths) == "ok"
+
+
+def test_toctou_deleted_file_during_expected_uuids_yields_missing_source_and_continues(memory_db, tmp_path):
+    """A file that vanishes between the initial _source_fingerprint() stat and
+    the later _expected_uuids() read (a TOCTOU race — e.g. a concurrent import
+    or a user deleting old transcripts) must be contained to that one session's
+    classify_sessions() iteration, not raise out of the generator and abort
+    classification for every other session too."""
+    ok_path = tmp_path / "sess-ok.jsonl"
+    write_four_turns(ok_path)
+    _seed_session(memory_db, ok_path, ["u1", "a1", "u2", "a2"])
+
+    race_path = tmp_path / "sess-race.jsonl"
+    write_four_turns(race_path)
+    _seed_session(memory_db, race_path, ["u1", "a1"])
+
+    real_expected_uuids = ingestion_status._expected_uuids
+
+    def flaky_expected_uuids(filepaths):
+        if filepaths == [race_path]:
+            raise FileNotFoundError(2, "No such file or directory", str(race_path))
+        return real_expected_uuids(filepaths)
+
+    with patch("ccrecall.ingestion_status._expected_uuids", side_effect=flaky_expected_uuids):
+        status = summarize_ingestion(memory_db)
+
+    assert status["sessions_checked"] == 2
+    assert status["missing_source_sessions"] == 1
+    assert status["ok_sessions"] == 1
+
+
+def test_toctou_deleted_file_during_mtime_stat_yields_missing_source(memory_db, tmp_path):
+    """Same TOCTOU race, but hitting the contiguous-suffix branch's
+    ``path.stat()`` call (used to compute the newest mtime for pending/stale
+    tail classification) rather than the _expected_uuids() read — the second
+    unguarded read site the same try/except must also cover."""
+    race_path = tmp_path / "sess-race-stat.jsonl"
+    write_four_turns(race_path)
+    _seed_session(memory_db, race_path, ["u1", "a1"])  # contiguous missing suffix -> reaches the stat() branch
+
+    real_expected_uuids = ingestion_status._expected_uuids
+
+    def delete_after_read(filepaths):
+        result = real_expected_uuids(filepaths)
+        for path in filepaths:
+            path.unlink(missing_ok=True)
+        return result
+
+    with patch("ccrecall.ingestion_status._expected_uuids", side_effect=delete_after_read):
+        status = summarize_ingestion(memory_db)
+
+    assert status["missing_source_sessions"] == 1
+    assert status["pending_tail_sessions"] == 0
+    assert status["stale_tail_sessions"] == 0

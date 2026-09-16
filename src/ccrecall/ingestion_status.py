@@ -83,9 +83,13 @@ def _db_coverage_fingerprint(cursor: sqlite3.Cursor, session_id: int) -> str:
     regression: a message row can exist while its branch_messages link was
     dropped by a buggy diff (design/specs/016-stale-tail-import-repair
     Finding 1/6), and that leaves the message row itself, and therefore the
-    UUID-only fingerprint, unchanged. Folding in a per-active-branch linked
-    message count makes that class of regression invalidate the
-    ingestion_check_cache the same way a content regression already does.
+    UUID-only fingerprint, unchanged. Folding in per-active-branch linked
+    message *membership* (not just a count) makes that class of regression
+    invalidate the ingestion_check_cache the same way a content regression
+    already does. A bare per-branch count would miss a same-count
+    substitution — one link removed and a different one added, net count for
+    that branch unchanged — so the fingerprint lists which messages (by
+    stable UUID, not the internal messages.id) are linked to each branch.
     """
     message_rows = cursor.execute(
         """
@@ -96,20 +100,34 @@ def _db_coverage_fingerprint(cursor: sqlite3.Cursor, session_id: int) -> str:
         """,
         (session_id,),
     ).fetchall()
+    branch_rows = cursor.execute(
+        """
+        SELECT id
+        FROM branches
+        WHERE session_id = ? AND is_active = 1
+        ORDER BY id
+        """,
+        (session_id,),
+    ).fetchall()
     link_rows = cursor.execute(
         """
-        SELECT b.id, COUNT(bm.message_id)
-        FROM branches b
-        LEFT JOIN branch_messages bm ON bm.branch_id = b.id
+        SELECT bm.branch_id, m.uuid
+        FROM branch_messages bm
+        JOIN branches b ON b.id = bm.branch_id
+        JOIN messages m ON m.id = bm.message_id
         WHERE b.session_id = ? AND b.is_active = 1
-        GROUP BY b.id
-        ORDER BY b.id
+        ORDER BY bm.branch_id, m.uuid
         """,
         (session_id,),
     ).fetchall()
     message_part = "\n".join(row[0] for row in message_rows)
-    link_part = "\n".join(f"{branch_id}:{count}" for branch_id, count in link_rows)
-    return message_part + "\x00" + link_part
+    # branch_part records active-branch existence independently of link_part
+    # (an INNER JOIN starting from branch_messages is otherwise blind to a
+    # branch with zero links — the all-links-dropped limit of the same
+    # substitution bug link_part exists to catch).
+    branch_part = "\n".join(str(row[0]) for row in branch_rows)
+    link_part = "\n".join(f"{branch_id}:{uuid}" for branch_id, uuid in link_rows)
+    return message_part + "\x00" + branch_part + "\x00" + link_part
 
 
 def _cached_ok_fingerprint(cursor: sqlite3.Cursor, session_uuid: str) -> tuple[str, str] | None:
@@ -182,20 +200,28 @@ def classify_sessions(
             ).fetchall()
         }
 
-        expected = _expected_uuids(filepaths)
-        missing_indices = [i for i, uuid in enumerate(expected) if uuid not in existing_msg_uuids]
-        if not missing_indices:
-            yield session_uuid, "ok", session_id, []
-            continue
+        try:
+            expected = _expected_uuids(filepaths)
+            missing_indices = [i for i, uuid in enumerate(expected) if uuid not in existing_msg_uuids]
+            if not missing_indices:
+                yield session_uuid, "ok", session_id, []
+                continue
 
-        if _is_contiguous_suffix(missing_indices, len(expected)):
-            newest_mtime = max(Instant.from_timestamp(path.stat().st_mtime) for path in filepaths)
-            if (now - newest_mtime).total("seconds") <= stale_tail_seconds:
-                yield session_uuid, "pending_tail", session_id, missing_indices
+            if _is_contiguous_suffix(missing_indices, len(expected)):
+                newest_mtime = max(Instant.from_timestamp(path.stat().st_mtime) for path in filepaths)
+                if (now - newest_mtime).total("seconds") <= stale_tail_seconds:
+                    yield session_uuid, "pending_tail", session_id, missing_indices
+                else:
+                    yield session_uuid, "stale_tail", session_id, missing_indices
             else:
-                yield session_uuid, "stale_tail", session_id, missing_indices
-        else:
-            yield session_uuid, "ingestion_gap", session_id, missing_indices
+                yield session_uuid, "ingestion_gap", session_id, missing_indices
+        except FileNotFoundError as exc:
+            log.warning(
+                "transcript source missing while computing ingestion fingerprint; "
+                "session will be counted as missing_source",
+                extra={"path": str(exc.filename) if exc.filename else None},
+            )
+            yield session_uuid, "missing_source", session_id, []
 
 
 def summarize_ingestion(
