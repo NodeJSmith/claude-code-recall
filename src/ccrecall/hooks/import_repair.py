@@ -17,12 +17,12 @@ an invariant this loop doesn't need.
 
 Multi-file candidates (a parent session plus its agent-*.jsonl subagent
 transcripts) are processed as ONE merged unit via import_conversations.
-import_session_group, not one file at a time — see design/specs/016-stale
--tail-import-repair Finding 1. Reimporting files one at a time computes each
-file's branch_messages diff from that file's own entries in isolation, so a
-later file's diff can silently drop a link that only exists via an earlier
-sibling file. Single-file candidates still go through import_session
-unchanged (there is no cross-file scoping problem to fix for them).
+import_session_group, not one file at a time. Reimporting files one at a
+time computes each file's branch_messages diff from that file's own entries
+in isolation, so a later file's diff can silently drop a link that only
+exists via an earlier sibling file. Single-file candidates still go through
+import_session unchanged (there is no cross-file scoping problem to fix for
+them).
 """
 
 import logging
@@ -62,7 +62,7 @@ def repair_sessions(
     A candidate with exactly one file goes through import_session (force=True)
     unchanged. A candidate with multiple files goes through
     import_session_group instead, which parses and syncs every file's entries
-    in a single pass — see the module docstring and Finding 1.
+    in a single pass — see the module docstring.
 
     Each candidate's SAVEPOINT acquisition, force-reimport, and RELEASE are
     all wrapped by the same try/except: an OperationalError raised by the
@@ -90,6 +90,10 @@ def repair_sessions(
     If any of the candidate's files raised, it counts toward sessions_failed
     instead, and reclassification is skipped for it (a poison-file failure is
     an operational problem, not evidence the source content is missing). A
+    reclassification failure (e.g. the transcript becoming unreadable between
+    import and reclassification) also counts toward sessions_failed; a
+    sqlite3.OperationalError during reclassification aborts the batch, matching
+    the force-reimport's own infrastructure-failure escalation. A
     candidate with no project_id on record is also unrepairable — a missing
     project_id is a permanent data-integrity condition retrying can never
     resolve, unlike a transient operational failure — so it is counted under
@@ -228,7 +232,22 @@ def repair_sessions(
             _log_progress(index, total_candidates, sessions_repaired, sessions_failed, sessions_unrepairable)
             continue
 
-        category = ingestion_status.reclassify_session(conn, session_uuid, filepaths)
+        try:
+            category = ingestion_status.reclassify_session(conn, session_uuid, filepaths)
+        except sqlite3.OperationalError:
+            log.exception(
+                "Database-level failure reclassifying session %s — aborting run",
+                session_uuid,
+            )
+            raise
+        except Exception:
+            log.exception(
+                "Post-repair reclassification failed for session %s",
+                session_uuid,
+            )
+            sessions_failed += 1
+            _log_progress(index, total_candidates, sessions_repaired, sessions_failed, sessions_unrepairable)
+            continue
         if category == "ok":
             sessions_repaired += 1
         else:

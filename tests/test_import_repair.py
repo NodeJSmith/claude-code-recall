@@ -24,7 +24,7 @@ class _SavepointFailingConn:
     """Delegates everything to a real sqlite3.Connection except ``execute``,
     which raises on the Nth occurrence of one specific SQL statement — used
     to simulate an OperationalError on the SAVEPOINT/RELEASE statements
-    themselves (Finding 4), which cannot be reproduced by monkeypatching a
+    themselves, which cannot be reproduced by monkeypatching a
     real sqlite3.Connection instance directly (its methods are read-only
     slot descriptors). With ``fail_forever=True``, every occurrence from
     ``fail_on_occurrence`` onward raises instead of just the one — used to
@@ -183,9 +183,7 @@ def test_poison_file_candidate_is_counted_failed_and_batch_continues(
 
 
 def test_multifile_candidate_repair_preserves_cross_file_link(memory_db, project_id, tmp_path):
-    """Load-bearing regression test for Finding 1.
-
-    A multi-file candidate's branch_messages diff must see every file's
+    """A multi-file candidate's branch_messages diff must see every file's
     entries in one merged pass. Processing files one at a time (the pre-fix
     behavior) computed each file's active-branch membership from that file's
     own entries in isolation: u1's link is only resolvable when file 1's
@@ -251,8 +249,8 @@ def test_multifile_candidate_repair_preserves_cross_file_link(memory_db, project
 
 
 def test_multifile_candidate_failure_rolls_back_atomically(memory_db, project_id, tmp_path, monkeypatch):
-    """After Finding 1, a multi-file candidate is force-reimported as one
-    merged unit (import_session_group) inside a single SAVEPOINT, so a
+    """A multi-file candidate is force-reimported as one merged unit
+    (import_session_group) inside a single SAVEPOINT, so a
     failure anywhere in that unit rolls back the whole candidate — there is
     no more "the parent file's partial progress survives" partial-credit
     case, since there is no longer a per-file loop to partially complete."""
@@ -301,7 +299,7 @@ def test_multifile_candidate_failure_rolls_back_atomically(memory_db, project_id
 
 
 def test_savepoint_release_failure_counts_as_failed_and_batch_continues(memory_db, project_id, tmp_path):
-    """Finding 4: an OperationalError on the RELEASE SAVEPOINT statement
+    """An OperationalError on the RELEASE SAVEPOINT statement
     itself (a transient, candidate-local problem — distinct from an
     OperationalError raised by the force-reimport's own DB work, which still
     aborts the batch) must be treated as a per-candidate failure, not
@@ -360,8 +358,31 @@ def test_savepoint_recovery_failure_aborts_the_batch(memory_db, project_id, tmp_
         repair_sessions(fake_conn, candidates)
 
 
+def test_savepoint_acquisition_failure_counts_as_failed_and_batch_continues(memory_db, project_id, tmp_path):
+    """An OperationalError on the SAVEPOINT statement itself (acquiring,
+    not releasing) must be treated as a per-candidate failure — the batch
+    continues processing remaining candidates."""
+    first_path = tmp_path / "sess-first-sp-acq.jsonl"
+    second_path = tmp_path / "sess-second-sp-acq.jsonl"
+
+    for filepath, uuid in ((first_path, "sess-first-sp-acq"), (second_path, "sess-second-sp-acq")):
+        seed_stale_tail_session(memory_db, project_id, filepath, uuid=uuid)
+
+    candidates = _stale_tail_candidates(memory_db)
+    assert {c[0] for c in candidates} == {"sess-first-sp-acq", "sess-second-sp-acq"}
+
+    fake_conn = _SavepointFailingConn(memory_db, "SAVEPOINT import_candidate", fail_on_occurrence=1)
+
+    result = repair_sessions(fake_conn, candidates)
+
+    sessions_repaired, _messages_recovered, sessions_failed, sessions_unrepairable = result
+    assert sessions_failed == 1, "the candidate whose SAVEPOINT failed must count as failed"
+    assert sessions_repaired == 1, "the other candidate must still be repaired"
+    assert sessions_unrepairable == 0
+
+
 def test_project_id_none_candidate_is_unrepairable_not_failed(memory_db, project_id, tmp_path):
-    """Finding 7: a candidate with no project_id on record is a permanent
+    """A candidate with no project_id on record is a permanent
     data-integrity condition (project_id will never become non-null via
     retry), so it must be counted under sessions_unrepairable, not
     sessions_failed."""
@@ -380,7 +401,7 @@ def test_project_id_none_candidate_is_unrepairable_not_failed(memory_db, project
 
 
 def test_session_id_churn_still_counts_recovered_messages(memory_db, project_id, tmp_path):
-    """Finding 5: the session_id captured before a candidate's force-reimport
+    """The session_id captured before a candidate's force-reimport
     can go stale (import_session deletes an all-filtered-out session's row,
     and a later re-sync for the same uuid gets a new id via upsert_session's
     ON CONFLICT(uuid) DO UPDATE). repair_sessions must re-resolve session_id
@@ -413,7 +434,7 @@ def test_session_id_churn_still_counts_recovered_messages(memory_db, project_id,
 
 
 def test_repair_sessions_logs_periodic_progress(memory_db, project_id, tmp_path, monkeypatch, caplog):
-    """Finding 9: a long-running repair batch must leave a progress trail in
+    """A long-running repair batch must leave a progress trail in
     the log a user can tail, not go silent until the whole batch finishes."""
     monkeypatch.setattr(import_repair, "PROGRESS_LOG_INTERVAL", 2)
 
@@ -447,3 +468,65 @@ def test_repair_sessions_logs_periodic_progress(memory_db, project_id, tmp_path,
     progress_messages = [record.getMessage() for record in caplog.records if "repair progress" in record.message]
     assert any("2/3" in msg for msg in progress_messages), "expected an intermediate progress log at candidate 2"
     assert any("3/3" in msg for msg in progress_messages), "expected a final progress log at candidate 3"
+
+
+def test_reclassify_failure_counts_as_failed_and_batch_continues(memory_db, project_id, tmp_path, monkeypatch):
+    """If reclassify_session raises after a successful import, the candidate
+    counts as failed and remaining candidates still get processed."""
+    sessions = [
+        (
+            "sess-reclass-fail",
+            [
+                ("rf_u1", None, "user"),
+                ("rf_a1", "rf_u1", "assistant"),
+                ("rf_u2", "rf_a1", "user"),
+                ("rf_a2", "rf_u2", "assistant"),
+            ],
+        ),
+        (
+            "sess-reclass-ok",
+            [
+                ("ro_u1", None, "user"),
+                ("ro_a1", "ro_u1", "assistant"),
+                ("ro_u2", "ro_a1", "user"),
+                ("ro_a2", "ro_u2", "assistant"),
+            ],
+        ),
+    ]
+    for uuid, turns in sessions:
+        filepath = tmp_path / f"{uuid}.jsonl"
+        write_jsonl(
+            filepath,
+            [
+                make_jsonl_entry(uid, parent, f"2026-01-01T10:00:0{i}Z", role, "text")
+                for i, (uid, parent, role) in enumerate(turns)
+            ],
+        )
+        import_conversations.import_session(memory_db, filepath, project_id)
+        memory_db.commit()
+        session_id = memory_db.execute("SELECT id FROM sessions WHERE uuid = ?", (uuid,)).fetchone()[0]
+        last_msg_uuid = turns[-1][0]
+        delete_message(memory_db, session_id, last_msg_uuid)
+        memory_db.commit()
+        age_past_grace_window(filepath)
+
+    candidates = _stale_tail_candidates(memory_db)
+    assert len(candidates) == 2
+
+    call_count = 0
+    original = ingestion_status.reclassify_session
+
+    def _exploding_reclassify(conn, session_uuid, filepaths, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise PermissionError("simulated unreadable transcript")
+        return original(conn, session_uuid, filepaths, **kwargs)
+
+    monkeypatch.setattr("ccrecall.ingestion_status.reclassify_session", _exploding_reclassify)
+
+    repaired, _recovered, failed, _unrepairable = repair_sessions(memory_db, candidates)
+
+    assert failed == 1, "the reclassify failure must count as failed"
+    assert repaired == 1, "the second candidate must still get repaired"
+    assert call_count == 2, "both candidates must have been processed"

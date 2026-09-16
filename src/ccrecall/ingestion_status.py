@@ -81,9 +81,8 @@ def _db_coverage_fingerprint(cursor: sqlite3.Cursor, session_id: int) -> str:
 
     UUID membership alone (the original fingerprint) can't see a linking-only
     regression: a message row can exist while its branch_messages link was
-    dropped by a buggy diff (design/specs/016-stale-tail-import-repair
-    Finding 1/6), and that leaves the message row itself, and therefore the
-    UUID-only fingerprint, unchanged. Folding in per-active-branch linked
+    dropped by a buggy diff, and that leaves the message row itself, and therefore
+    the UUID-only fingerprint, unchanged. Folding in per-active-branch linked
     message *membership* (not just a count) makes that class of regression
     invalidate the ingestion_check_cache the same way a content regression
     already does. A bare per-branch count would miss a same-count
@@ -195,7 +194,7 @@ def classify_sessions(
         # Scoped to the active branch's branch_messages links, not just "any
         # message row exists for this session" — a message row can survive
         # while its link to the active branch is dropped or substituted
-        # (design/specs/016-stale-tail-import-repair Finding 1/6), and a
+        # (e.g. by a per-file diff that doesn't see cross-file links), and a
         # row-existence check alone is blind to that: the UUID is still
         # "present" in messages even though it's no longer reachable from the
         # active branch, so a link corruption would classify as "ok" and be

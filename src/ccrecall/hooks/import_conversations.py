@@ -7,6 +7,7 @@ v3 schema: messages stored once per session, branches as separate index.
 """
 
 import logging
+import os
 import resource
 import sqlite3
 import time
@@ -18,6 +19,7 @@ from ccrecall.config import (
     DEFAULT_DB_PATH,
     get_db_path,
     load_settings,
+    pid_file_path,
     remove_pid_file,
     setup_logging,
     try_acquire_pid_file,
@@ -226,8 +228,7 @@ def import_session_group(
     them one at a time via ``import_session`` (as ``hooks/import_repair.py``
     used to) computes each file's branch/message links from that file's own
     entries in isolation, so a later file's ``branch_messages`` diff drops
-    links that only exist via an earlier sibling file — see
-    design/specs/016-stale-tail-import-repair Finding 1. This delegates to
+    links that only exist via an earlier sibling file. This delegates to
     ``session_ops.sync_session_group`` instead, which parses and syncs every
     file's entries in one pass.
 
@@ -437,13 +438,22 @@ def run(
         log.exception("Import process failed with an uncaught exception")
         raise
     finally:
-        # Delete PID file so _spawn_background can spawn again next session —
-        # unless this invocation's --repair-gaps step was denied the lock by a
-        # genuinely live holder (e.g. the background auto-import). In that case
-        # this invocation never acquired PID_KEY, and unconditionally removing
-        # it here would silently un-guard the other, still-running process.
+        # Delete PID file so _spawn_background can spawn again next session,
+        # but only if this process owns it. A concurrent holder (e.g. a
+        # --repair-gaps invocation, or the SessionStart auto-import) wrote
+        # its own PID; deleting their marker would let a third process start
+        # unguarded. When repair_lock_denied is True we already know we don't
+        # own it; otherwise, verify by comparing the file's PID to ours.
         if not repair_lock_denied:
-            remove_pid_file(PID_KEY)
+            marker = pid_file_path(PID_KEY)
+            try:
+                stored_pid = int(marker.read_text().strip())
+            except (OSError, ValueError):
+                # Missing or corrupt marker — nothing to preserve.
+                remove_pid_file(PID_KEY)
+            else:
+                if stored_pid == os.getpid():
+                    remove_pid_file(PID_KEY)
     if repair_failures:
         raise SystemExit(1)
 

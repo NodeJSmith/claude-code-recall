@@ -82,8 +82,7 @@ def _sync_branches_and_messages(
     (multi-file repair candidates) so the ``branch_messages`` diff is defined
     exactly once, over whichever set of entries the caller assembled — the
     union of every file in a multi-file candidate for ``sync_session_group``,
-    or one file's entries for ``sync_session``. See design/specs/016-stale
-    -tail-import-repair Finding 1: a multi-file candidate's
+    or one file's entries for ``sync_session``. A multi-file candidate's
     ``branch_messages`` diff must see every file's entries in a single pass,
     never one file at a time, or a message linked only via a sibling file
     gets silently unlinked.
@@ -204,7 +203,7 @@ def sync_session(
     candidate (a parent session plus its ``agent-*.jsonl`` subagent
     transcripts) whose ``branch_messages`` links must be diffed against the
     union of every file at once, use ``sync_session_group`` instead — see its
-    docstring and design/specs/016-stale-tail-import-repair Finding 1.
+    docstring.
     """
     cursor = conn.cursor()
 
@@ -266,8 +265,7 @@ def sync_session_group(
     the whole candidate at once. Calling ``sync_session`` once per file instead
     (the pre-fix behavior) computes branch membership from each file's
     entries in isolation, so a later file's diff drops links that only
-    exist via an earlier sibling file — see design/specs/016-stale-tail
-    -import-repair Finding 1.
+    exist via an earlier sibling file.
 
     Unlike ``sync_session``, this always force-processes: there is no
     import_log skip-check, matching the ``force=True`` repair use case this

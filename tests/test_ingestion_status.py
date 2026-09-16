@@ -279,7 +279,7 @@ def test_present_but_unlinked_message_is_not_counted_as_ok(memory_db, tmp_path):
     link to the active branch was dropped must classify as a real gap, not
     ok — a row-existence-only check (the codex-flagged bug) is blind to this
     exact scenario, the same class of corruption the coverage fingerprint
-    exists to catch (Finding 1/6)."""
+    exists to catch."""
     filepath = tmp_path / "sess-unlinked-message.jsonl"
     write_four_turns(filepath)
     _seed_session(memory_db, filepath, ["u1", "a1", "u2", "a2"], link_active_branch=False)

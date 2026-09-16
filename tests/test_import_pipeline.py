@@ -1584,6 +1584,36 @@ class TestImportRepairGapsEndToEnd:
         finally:
             remove_pid_file(PID_KEY_IMPORT)
 
+    def test_plain_import_preserves_other_holders_pid_marker(self, memory_db, tmp_path, monkeypatch):
+        """A plain import (repair_gaps=False) must not delete a PID marker
+        it didn't create — e.g. one held by a concurrent --repair-gaps process."""
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        project_dir = projects_dir / "-Users-sam-project"
+        project_dir.mkdir()
+        filepath = project_dir / "sess-pid-test.jsonl"
+        write_jsonl(
+            filepath,
+            [
+                make_jsonl_entry("pu1", None, "2026-01-01T10:00:00Z", "user", "hello"),
+                make_jsonl_entry("pa1", "pu1", "2026-01-01T10:00:01Z", "assistant", "hi"),
+            ],
+        )
+
+        # Write a foreign PID to the marker — simulates a concurrent holder
+        # (repair or auto-import) that is a different process from us.
+        marker = pid_file_path(PID_KEY_IMPORT)
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("999999")
+
+        try:
+            self._run_import(memory_db, monkeypatch, tmp_path, projects_dir, repair_gaps=False)
+
+            assert marker.exists(), "plain import must not delete a PID marker belonging to another process"
+            assert marker.read_text().strip() == "999999", "marker content must be untouched"
+        finally:
+            remove_pid_file(PID_KEY_IMPORT)
+
     def test_repair_gaps_reports_unrepairable_candidate_distinctly(self, memory_db, tmp_path, monkeypatch, capsys):
         """A candidate whose transcript genuinely lacks the expected
         content is reported under a distinct "could not be repaired" count, does
