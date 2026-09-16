@@ -1522,7 +1522,13 @@ class TestImportRepairGapsEndToEnd:
     def test_repair_gaps_skips_when_pid_marker_already_held(self, memory_db, tmp_path, monkeypatch):
         """FR#7/AC#7: --repair-gaps skips (not fails) when PID_KEY_IMPORT is already
         held, without raising, and the other holder's marker survives run()'s own
-        finally cleanup."""
+        finally cleanup.
+
+        Finding 2: the guard now covers the whole invocation, not just the
+        repair step — a brand-new, never-imported session file dropped into
+        the project dir before the guarded run must also NOT get picked up
+        by the ordinary per-project import loop, proving the entire
+        invocation was skipped rather than just the repair step."""
         projects_dir = tmp_path / "projects"
         projects_dir.mkdir()
         project_dir = projects_dir / "-Users-sam-project"
@@ -1537,6 +1543,17 @@ class TestImportRepairGapsEndToEnd:
         memory_db.commit()
         _age_past_grace_window(filepath)
 
+        # A brand-new session file, never imported before — its presence lets
+        # us tell whether the ordinary per-project import loop ran at all.
+        new_filepath = project_dir / "sess-never-imported.jsonl"
+        write_jsonl(
+            new_filepath,
+            [
+                make_jsonl_entry("nu1", None, "2026-01-01T10:00:00Z", "user", "first"),
+                make_jsonl_entry("na1", "nu1", "2026-01-01T10:00:01Z", "assistant", "answer"),
+            ],
+        )
+
         # Simulate a concurrently-running import (e.g. the SessionStart background
         # auto-import) already holding the PID marker.
         assert try_acquire_pid_file(PID_KEY_IMPORT) is True, "test setup: must hold the marker before invoking run()"
@@ -1550,6 +1567,12 @@ class TestImportRepairGapsEndToEnd:
                 ).fetchone()[0]
                 == 0
             ), "repair must have been skipped, not silently no-op'd for an unrelated reason"
+            assert (
+                memory_db.execute("SELECT COUNT(*) FROM sessions WHERE uuid = ?", ("sess-never-imported",)).fetchone()[
+                    0
+                ]
+                == 0
+            ), "the ordinary per-project import loop must also have been skipped, not just the repair step"
             assert pid_file_path(PID_KEY_IMPORT).exists(), (
                 "run() must not delete a PID marker it did not itself acquire"
             )

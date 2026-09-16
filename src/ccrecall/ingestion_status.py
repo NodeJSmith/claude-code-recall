@@ -72,8 +72,18 @@ def _source_fingerprint(filepaths: list[Path]) -> str | None:
 
 
 def _db_coverage_fingerprint(cursor, session_id: int) -> str:
-    """Return the stored UUID membership token for cache validation."""
-    rows = cursor.execute(
+    """Return a token combining message-UUID membership and branch_messages
+    linkage, for cache validation.
+
+    UUID membership alone (the original fingerprint) can't see a linking-only
+    regression: a message row can exist while its branch_messages link was
+    dropped by a buggy diff (design/specs/016-stale-tail-import-repair
+    Finding 1/6), and that leaves the message row itself, and therefore the
+    UUID-only fingerprint, unchanged. Folding in a per-active-branch linked
+    message count makes that class of regression invalidate the
+    ingestion_check_cache the same way a content regression already does.
+    """
+    message_rows = cursor.execute(
         """
         SELECT uuid
         FROM messages
@@ -82,7 +92,20 @@ def _db_coverage_fingerprint(cursor, session_id: int) -> str:
         """,
         (session_id,),
     ).fetchall()
-    return "\n".join(row[0] for row in rows)
+    link_rows = cursor.execute(
+        """
+        SELECT b.id, COUNT(bm.message_id)
+        FROM branches b
+        LEFT JOIN branch_messages bm ON bm.branch_id = b.id
+        WHERE b.session_id = ? AND b.is_active = 1
+        GROUP BY b.id
+        ORDER BY b.id
+        """,
+        (session_id,),
+    ).fetchall()
+    message_part = "\n".join(row[0] for row in message_rows)
+    link_part = "\n".join(f"{branch_id}:{count}" for branch_id, count in link_rows)
+    return message_part + "\x00" + link_part
 
 
 def _cached_ok_fingerprint(cursor, session_uuid: str) -> tuple[str, str] | None:

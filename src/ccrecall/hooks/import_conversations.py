@@ -33,7 +33,7 @@ from ccrecall.import_log_ops import has_pending_tool_content
 from ccrecall.models import LOGGER_NAME
 from ccrecall.parsing import extract_session_uuid, sort_session_files
 from ccrecall.project_ops import key_could_match_excluded, upsert_project
-from ccrecall.session_ops import sync_session
+from ccrecall.session_ops import sync_session, sync_session_group
 from ccrecall.transcript_sources import discover_project_transcript_files, is_safe_project_dir
 
 BYTES_PER_MB = 1024 * 1024
@@ -136,6 +136,31 @@ def import_session(
     # Gather branch and message counts for the return value
     session_uuid = extract_session_uuid(filepath)
 
+    branches_imported, total_messages = _finalize_import(conn, session_uuid)
+    if branches_imported == -1:
+        return -1, 0
+
+    log.debug(
+        "imported %s (%.1f MB): %d branches, %d messages [RSS %.0f MB]",
+        filepath.name,
+        file_size / BYTES_PER_MB,
+        branches_imported,
+        total_messages,
+        _rss_mb(),
+    )
+    return branches_imported, total_messages
+
+
+def _finalize_import(conn: sqlite3.Connection, session_uuid: str) -> tuple[int, int]:
+    """Shared post-sync bookkeeping for import_session/import_session_group.
+
+    Tears down an all-filtered-out session (see the comment this replaces
+    below) and computes ``(branches_imported, total_message_count)``, or
+    ``(-1, 0)`` when there's nothing to report. Factored out so the two
+    call sites (single-file and multi-file force-reimport) can't drift on
+    this cleanup logic.
+    """
+    cursor = conn.cursor()
     cursor.execute("SELECT id FROM sessions WHERE uuid = ?", (session_uuid,))
     session_row = cursor.fetchone()
     if not session_row:
@@ -186,10 +211,61 @@ def import_session(
     if cursor.fetchone()[0] == 0:
         return -1, 0
 
+    return branches_imported, total_messages
+
+
+def import_session_group(
+    conn: sqlite3.Connection,
+    filepaths: list[Path],
+    project_id: int,
+) -> tuple[int, int]:
+    """Force-reimport a multi-file session transcript as one merged unit.
+
+    A parent session's transcript and its ``agent-*.jsonl`` subagent
+    transcripts share one session UUID but are separate files. Reimporting
+    them one at a time via ``import_session`` (as ``hooks/import_repair.py``
+    used to) computes each file's branch/message links from that file's own
+    entries in isolation, so a later file's ``branch_messages`` diff drops
+    links that only exist via an earlier sibling file — see
+    design/specs/016-stale-tail-import-repair Finding 1. This delegates to
+    ``session_ops.sync_session_group`` instead, which parses and syncs every
+    file's entries in one pass.
+
+    Always force-processes (no skip-check — matching ``import_session``'s
+    ``force=True`` mode, which is the only mode this repair-only entry point
+    needs). Mirrors ``import_session``'s return shape and post-processing via
+    the shared ``_finalize_import`` helper. Used by
+    ``import_repair.repair_sessions()`` for multi-file candidates only —
+    single-file candidates still go through ``import_session`` unchanged.
+    """
+    ordered = sort_session_files(filepaths)
+
+    file_hashes: dict[Path, str] = {}
+    file_stats: dict[Path, tuple[int, float]] = {}
+    for target in ordered:
+        st = target.stat()
+        file_stats[target] = (st.st_size, st.st_mtime)
+        file_hashes[target] = get_file_hash(target)
+
+    sync_session_group(
+        conn,
+        ordered,
+        ordered[0].parent,
+        file_hashes=file_hashes,
+        file_stats=file_stats,
+        _project_id=project_id,
+        embed=False,
+    )
+
+    session_uuid = extract_session_uuid(ordered[0])
+    branches_imported, total_messages = _finalize_import(conn, session_uuid)
+    if branches_imported == -1:
+        return -1, 0
+
     log.debug(
-        "imported %s (%.1f MB): %d branches, %d messages [RSS %.0f MB]",
-        filepath.name,
-        file_size / BYTES_PER_MB,
+        "imported %s (group of %d files): %d branches, %d messages [RSS %.0f MB]",
+        ordered[0].name,
+        len(ordered),
         branches_imported,
         total_messages,
         _rss_mb(),
@@ -367,6 +443,20 @@ def _run(
     settings = load_settings()
     logger = setup_logging(settings, process_name="import", verbose=verbose)
 
+    # When repair_gaps is requested, the PID guard is acquired here — before
+    # the per-project/DB-wide import loop below even starts — and held for
+    # the entire invocation (released by run()'s existing finally). This
+    # covers the whole run, not just the repair step: two concurrent
+    # --repair-gaps invocations (or one racing the SessionStart background
+    # auto-import) must not both run the ordinary import loop unguarded and
+    # only collide later at the repair step, which is what happened when the
+    # guard wrapped only that step. repair_gaps=False keeps today's behavior
+    # exactly — no guard at all.
+    if repair_gaps and not try_acquire_pid_file(PID_KEY):
+        print("ccrecall import --repair-gaps: another import is already running — skipping this run")
+        logger.info("Import + --repair-gaps skipped — PID_KEY_IMPORT already held by a live process")
+        return 0, True
+
     if db != DEFAULT_DB_PATH:
         settings["db_path"] = str(db)
     db_path = get_db_path(settings)
@@ -441,25 +531,22 @@ def _run(
             )
 
         repair_failures = 0
-        repair_lock_denied = False
         if repair_gaps:
-            if not try_acquire_pid_file(PID_KEY):
-                print("ccrecall import --repair-gaps: another import is already running — skipping repair")
-                repair_lock_denied = True
-            else:
-                candidates = ingestion_status.find_repairable_sessions(conn)
-                repaired_sessions, repaired_messages, repair_failures, repair_unrepairable = (
-                    import_repair.repair_sessions(conn, candidates, on_reclaim=_reclaim)
+            # The PID guard was already acquired (or this function returned
+            # early) at the top of _run() — no re-check needed here.
+            candidates = ingestion_status.find_repairable_sessions(conn)
+            repaired_sessions, repaired_messages, repair_failures, repair_unrepairable = import_repair.repair_sessions(
+                conn, candidates, on_reclaim=_reclaim
+            )
+            summary = f"Repaired {repaired_sessions} session(s), recovered {repaired_messages} message(s)"
+            if repair_unrepairable:
+                summary += (
+                    f", {repair_unrepairable} could not be repaired "
+                    "(source transcript is missing the required message(s))"
                 )
-                summary = f"Repaired {repaired_sessions} session(s), recovered {repaired_messages} message(s)"
-                if repair_unrepairable:
-                    summary += (
-                        f", {repair_unrepairable} could not be repaired "
-                        "(source transcript is missing the required message(s))"
-                    )
-                if repair_failures:
-                    summary += f", {repair_failures} failed — see ccrecall-import.log"
-                print(summary)
+            if repair_failures:
+                summary += f", {repair_failures} failed — see ccrecall-import.log"
+            print(summary)
 
     t_end = time.monotonic()
     logger.debug("total wall time: %.2fs", t_end - t_start)
@@ -470,4 +557,4 @@ def _run(
         db_size = db_path.stat().st_size
         print(f"Database size: {db_size / BYTES_PER_MB:.2f} MB")
 
-    return repair_failures, repair_lock_denied
+    return repair_failures, False

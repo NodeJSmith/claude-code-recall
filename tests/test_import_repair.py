@@ -2,6 +2,7 @@
 
 import logging
 import os
+import sqlite3
 import time
 from pathlib import Path
 
@@ -14,6 +15,31 @@ from ccrecall.hooks import import_conversations, import_repair
 from ccrecall.hooks.import_repair import repair_sessions
 from ccrecall.import_log_ops import import_log_source_index
 from ccrecall.ingestion_status import find_repairable_sessions
+
+
+class _SavepointFailingConn:
+    """Delegates everything to a real sqlite3.Connection except ``execute``,
+    which raises on the Nth occurrence of one specific SQL statement — used
+    to simulate an OperationalError on the SAVEPOINT/RELEASE statements
+    themselves (Finding 4), which cannot be reproduced by monkeypatching a
+    real sqlite3.Connection instance directly (its methods are read-only
+    slot descriptors)."""
+
+    def __init__(self, real: sqlite3.Connection, fail_sql: str, fail_on_occurrence: int = 1) -> None:
+        self._real = real
+        self._fail_sql = fail_sql
+        self._fail_on_occurrence = fail_on_occurrence
+        self._occurrences = 0
+
+    def execute(self, sql, *args, **kwargs):
+        if sql == self._fail_sql:
+            self._occurrences += 1
+            if self._occurrences == self._fail_on_occurrence:
+                raise sqlite3.OperationalError(f"simulated failure on: {sql}")
+        return self._real.execute(sql, *args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
 
 
 @pytest.fixture
@@ -198,7 +224,80 @@ def test_poison_file_candidate_is_counted_failed_and_batch_continues(
     assert any(record.exc_info for record in caplog.records if record.levelno >= logging.ERROR)
 
 
-def test_multifile_candidate_partial_failure_counts_recovered_and_failed(memory_db, project_id, tmp_path, monkeypatch):
+def test_multifile_candidate_repair_preserves_cross_file_link(memory_db, project_id, tmp_path):
+    """Load-bearing regression test for Finding 1.
+
+    A multi-file candidate's branch_messages diff must see every file's
+    entries in one merged pass. Processing files one at a time (the pre-fix
+    behavior) computed each file's active-branch membership from that file's
+    own entries in isolation: u1's link is only resolvable when file 1's
+    entries (u1, a1) are walked together with file 2's (u2, a2) — processed
+    alone, file 2's local parentUuid chain stops at a1 (a1 has no known
+    parent within file 2) and never reaches u1, so the old per-file repair
+    loop dropped u1's branch_messages link even though its messages row
+    survived untouched. This is the exact "repaired but orphaned" scenario
+    from the challenge finding.
+    """
+    parent = tmp_path / "sess-crosslink.jsonl"
+    agent = tmp_path / "agent-sess-crosslink.jsonl"
+    _write_jsonl(
+        parent,
+        [
+            _entry("u1", None, "2026-01-01T10:00:00Z", "user", "first"),
+            _entry("a1", "u1", "2026-01-01T10:00:01Z", "assistant", "answer"),
+        ],
+    )
+    _write_jsonl(
+        agent,
+        [
+            _entry("u2", "a1", "2026-01-01T10:00:02Z", "user", "second"),
+            _entry("a2", "u2", "2026-01-01T10:00:03Z", "assistant", "answer"),
+        ],
+    )
+
+    # Establish a correctly-linked baseline in one merged pass — matching what
+    # the fixed repair path itself does — so the pre-repair state has all four
+    # messages linked before the gap is introduced.
+    import_conversations.import_session_group(memory_db, [parent, agent], project_id)
+    memory_db.commit()
+
+    session_id = memory_db.execute("SELECT id FROM sessions WHERE uuid = ?", ("sess-crosslink",)).fetchone()[0]
+
+    def _linked_uuids() -> set[str]:
+        rows = memory_db.execute(
+            "SELECT m.uuid FROM branch_messages bm JOIN messages m ON bm.message_id = m.id WHERE m.session_id = ?",
+            (session_id,),
+        ).fetchall()
+        return {row[0] for row in rows}
+
+    assert _linked_uuids() == {"u1", "a1", "u2", "a2"}, "baseline setup: all four must be linked before the gap"
+
+    # Simulate a stale tail: drop only a2 (file 2's own last message), age
+    # both files past the grace window so find_repairable_sessions classifies
+    # this as a repairable gap.
+    _delete_message(memory_db, session_id, "a2")
+    memory_db.commit()
+    _age_past_grace_window(parent)
+    _age_past_grace_window(agent)
+
+    candidates = _stale_tail_candidates(memory_db)
+    assert [c[0] for c in candidates] == ["sess-crosslink"]
+
+    result = repair_sessions(memory_db, candidates)
+
+    assert result == (1, 1, 0, 0), "a2 must be recovered and the session reclassified as repaired"
+    assert _linked_uuids() == {"u1", "a1", "u2", "a2"}, (
+        "u1 (only ever derivable from file 1's own entries) must still be linked after repair — "
+        "a multi-file repair must not drop a sibling file's link"
+    )
+
+
+def test_multifile_candidate_failure_rolls_back_atomically(memory_db, project_id, tmp_path, monkeypatch):
+    """After Finding 1, a multi-file candidate is force-reimported as one
+    merged unit (import_session_group) inside a single SAVEPOINT, so a
+    failure anywhere in that unit rolls back the whole candidate — there is
+    no more "the parent file's partial progress survives" partial-credit
+    case, since there is no longer a per-file loop to partially complete."""
     parent = tmp_path / "sess-multi.jsonl"
     agent = tmp_path / "agent-sess-multi.jsonl"
     _write_jsonl(
@@ -216,9 +315,7 @@ def test_multifile_candidate_partial_failure_counts_recovered_and_failed(memory_
         ],
     )
 
-    import_conversations.import_session(memory_db, parent, project_id)
-    memory_db.commit()
-    import_conversations.import_session(memory_db, agent, project_id)
+    import_conversations.import_session_group(memory_db, [parent, agent], project_id)
     memory_db.commit()
 
     session_id = memory_db.execute("SELECT id FROM sessions WHERE uuid = ?", ("sess-multi",)).fetchone()[0]
@@ -231,14 +328,10 @@ def test_multifile_candidate_partial_failure_counts_recovered_and_failed(memory_
     candidates = _stale_tail_candidates(memory_db)
     assert [c[0] for c in candidates] == ["sess-multi"]
 
-    real_import_session = import_conversations.import_session
+    def _raise(conn, filepaths, project_id):
+        raise RuntimeError("simulated poison transcript")
 
-    def _raise_on_agent(conn, filepath, project_id, *, force=False):
-        if filepath == agent:
-            raise RuntimeError("simulated poison transcript")
-        return real_import_session(conn, filepath, project_id, force=force)
-
-    monkeypatch.setattr(import_repair.import_conversations, "import_session", _raise_on_agent)
+    monkeypatch.setattr(import_repair.import_conversations, "import_session_group", _raise)
 
     result = repair_sessions(memory_db, candidates)
 
@@ -246,4 +339,127 @@ def test_multifile_candidate_partial_failure_counts_recovered_and_failed(memory_
     assert sessions_failed == 1
     assert sessions_repaired == 0
     assert sessions_unrepairable == 0
-    assert messages_recovered >= 1, "the successful parent file's recovered message must still be counted"
+    assert messages_recovered == 0, "a merged multi-file candidate rolls back as one unit — no partial credit"
+
+
+def test_savepoint_release_failure_counts_as_failed_and_batch_continues(memory_db, project_id, tmp_path):
+    """Finding 4: an OperationalError on the RELEASE SAVEPOINT statement
+    itself (a transient, candidate-local problem — distinct from an
+    OperationalError raised by the force-reimport's own DB work, which still
+    aborts the batch) must be treated as a per-candidate failure, not
+    propagate and abort the whole remaining batch."""
+    first_path = tmp_path / "sess-first-savepoint.jsonl"
+    second_path = tmp_path / "sess-second-savepoint.jsonl"
+    _write_four_turns(first_path)
+    _write_four_turns(second_path)
+
+    for filepath, uuid in ((first_path, "sess-first-savepoint"), (second_path, "sess-second-savepoint")):
+        import_conversations.import_session(memory_db, filepath, project_id)
+        memory_db.commit()
+        session_id = memory_db.execute("SELECT id FROM sessions WHERE uuid = ?", (uuid,)).fetchone()[0]
+        _delete_message(memory_db, session_id, "a2")
+        memory_db.commit()
+        _age_past_grace_window(filepath)
+
+    candidates = _stale_tail_candidates(memory_db)
+    assert {c[0] for c in candidates} == {"sess-first-savepoint", "sess-second-savepoint"}
+
+    # Fail RELEASE SAVEPOINT only on its first occurrence (the first
+    # candidate processed); the second candidate's RELEASE succeeds normally.
+    fake_conn = _SavepointFailingConn(memory_db, "RELEASE SAVEPOINT import_candidate", fail_on_occurrence=1)
+
+    result = repair_sessions(fake_conn, candidates)
+
+    sessions_repaired, _messages_recovered, sessions_failed, sessions_unrepairable = result
+    assert sessions_failed == 1, "the candidate whose RELEASE failed must count as failed"
+    assert sessions_repaired == 1, "the other candidate must still be repaired — the batch must continue"
+    assert sessions_unrepairable == 0
+
+
+def test_project_id_none_candidate_is_unrepairable_not_failed(memory_db, project_id, tmp_path):
+    """Finding 7: a candidate with no project_id on record is a permanent
+    data-integrity condition (project_id will never become non-null via
+    retry), so it must be counted under sessions_unrepairable, not
+    sessions_failed."""
+    filepath = tmp_path / "sess-no-project.jsonl"
+    _write_four_turns(filepath)
+
+    candidates = [("sess-no-project", 999999, None, [filepath])]
+
+    result = repair_sessions(memory_db, candidates)
+
+    sessions_repaired, messages_recovered, sessions_failed, sessions_unrepairable = result
+    assert sessions_unrepairable == 1
+    assert sessions_failed == 0
+    assert sessions_repaired == 0
+    assert messages_recovered == 0
+
+
+def test_session_id_churn_still_counts_recovered_messages(memory_db, project_id, tmp_path):
+    """Finding 5: the session_id captured before a candidate's force-reimport
+    can go stale (import_session deletes an all-filtered-out session's row,
+    and a later re-sync for the same uuid gets a new id via upsert_session's
+    ON CONFLICT(uuid) DO UPDATE). repair_sessions must re-resolve session_id
+    from sessions.uuid immediately before computing count_after, not trust
+    the id captured before the file loop ran — otherwise a real recovery
+    reads as 0 messages recovered.
+    """
+    filepath = tmp_path / "sess-churn.jsonl"
+    _write_four_turns(filepath)
+
+    # A sessions row already exists under the real current id, with zero
+    # messages (simulating "an earlier all-filtered-out import already
+    # deleted-and-recreated this uuid's row under a fresh id").
+    cursor = memory_db.cursor()
+    cursor.execute("INSERT INTO sessions (uuid, project_id) VALUES (?, ?)", ("sess-churn", project_id))
+    memory_db.commit()
+    real_session_id = cursor.execute("SELECT id FROM sessions WHERE uuid = ?", ("sess-churn",)).fetchone()[0]
+
+    # The candidate tuple carries a stale session_id (as if captured before
+    # the row above was deleted and recreated) that no longer matches any row.
+    stale_session_id = real_session_id + 12345
+    candidates = [("sess-churn", stale_session_id, project_id, [filepath])]
+
+    result = repair_sessions(memory_db, candidates)
+
+    sessions_repaired, messages_recovered, sessions_failed, _sessions_unrepairable = result
+    assert sessions_failed == 0
+    assert messages_recovered == 4, "recovery must be measured against the re-resolved current session_id"
+    assert sessions_repaired == 1
+
+
+def test_repair_sessions_logs_periodic_progress(memory_db, project_id, tmp_path, monkeypatch, caplog):
+    """Finding 9: a long-running repair batch must leave a progress trail in
+    the log a user can tail, not go silent until the whole batch finishes."""
+    monkeypatch.setattr(import_repair, "PROGRESS_LOG_INTERVAL", 2)
+
+    uuids = ["sess-progress-1", "sess-progress-2", "sess-progress-3"]
+    for i, uuid in enumerate(uuids):
+        filepath = tmp_path / f"{uuid}.jsonl"
+        _write_jsonl(
+            filepath,
+            [
+                _entry(f"u{i}a", None, f"2026-01-01T10:0{i}:00Z", "user", "first"),
+                _entry(f"a{i}a", f"u{i}a", f"2026-01-01T10:0{i}:01Z", "assistant", "answer"),
+                _entry(f"u{i}b", f"a{i}a", f"2026-01-01T10:0{i}:02Z", "user", "second"),
+                _entry(f"a{i}b", f"u{i}b", f"2026-01-01T10:0{i}:03Z", "assistant", "answer"),
+            ],
+        )
+        import_conversations.import_session(memory_db, filepath, project_id)
+        memory_db.commit()
+        session_id = memory_db.execute("SELECT id FROM sessions WHERE uuid = ?", (uuid,)).fetchone()[0]
+        _delete_message(memory_db, session_id, f"a{i}b")
+        memory_db.commit()
+        _age_past_grace_window(filepath)
+
+    candidates = _stale_tail_candidates(memory_db)
+    assert len(candidates) == 3
+
+    with caplog.at_level(logging.INFO, logger="ccrecall"):
+        result = repair_sessions(memory_db, candidates)
+
+    assert result == (3, 3, 0, 0)
+
+    progress_messages = [record.getMessage() for record in caplog.records if "repair progress" in record.message]
+    assert any("2/3" in msg for msg in progress_messages), "expected an intermediate progress log at candidate 2"
+    assert any("3/3" in msg for msg in progress_messages), "expected a final progress log at candidate 3"

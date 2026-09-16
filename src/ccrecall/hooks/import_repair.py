@@ -6,14 +6,23 @@ growing it further — see design/specs/016-stale-tail-import-repair/design.md.
 Durability model (deliberate, not an oversight): unlike import_project, this
 loop never wraps its candidates in an outer transaction. find_repairable_sessions
 is pure-SELECT and the call site runs after _run()'s per-project loop has
-already committed, so each file's SAVEPOINT/RELEASE here commits independently
-and durably the moment it completes. A repair batch has no cross-candidate
-invariant to protect: a run interrupted partway through keeps whatever it
-already fixed, and is safe to resume by re-running --repair-gaps (force=True
-reimports are idempotent — sync_session's UUID-dedup insert is a safe no-op on
-an already-fixed session). Do not add a `BEGIN` guard around the candidate
-loop to make this "more atomic" — that would trade resumability for an
-invariant this loop doesn't need.
+already committed, so each candidate's SAVEPOINT/RELEASE here commits
+independently and durably the moment it completes. A repair batch has no
+cross-candidate invariant to protect: a run interrupted partway through keeps
+whatever it already fixed, and is safe to resume by re-running --repair-gaps
+(force=True reimports are idempotent — sync_session's UUID-dedup insert is a
+safe no-op on an already-fixed session). Do not add a `BEGIN` guard around the
+candidate loop to make this "more atomic" — that would trade resumability for
+an invariant this loop doesn't need.
+
+Multi-file candidates (a parent session plus its agent-*.jsonl subagent
+transcripts) are processed as ONE merged unit via import_conversations.
+import_session_group, not one file at a time — see design/specs/016-stale
+-tail-import-repair Finding 1. Reimporting files one at a time computes each
+file's branch_messages diff from that file's own entries in isolation, so a
+later file's diff can silently drop a link that only exists via an earlier
+sibling file. Single-file candidates still go through import_session
+unchanged (there is no cross-file scoping problem to fix for them).
 """
 
 import logging
@@ -27,6 +36,8 @@ from ccrecall.models import LOGGER_NAME
 from ccrecall.parsing import sort_session_files
 
 log = logging.getLogger(LOGGER_NAME)
+
+PROGRESS_LOG_INTERVAL = 10
 
 
 def _noop() -> None:
@@ -44,9 +55,26 @@ def repair_sessions(
     nullable and unset. Returns (sessions_repaired, messages_recovered,
     sessions_failed, sessions_unrepairable).
 
-    force=True on import_session bypasses the stat/hash skip gates; sync_session's
-    UUID-dedup insert (insert_new_messages) is already idempotent, so re-running
-    this on an already-fixed session is a safe no-op that recovers 0 messages.
+    force=True (via import_session/import_session_group) bypasses the stat/hash
+    skip gates; sync_session's/sync_session_group's UUID-dedup insert
+    (insert_new_messages) is already idempotent, so re-running this on an
+    already-fixed session is a safe no-op that recovers 0 messages.
+
+    A candidate with exactly one file goes through import_session (force=True)
+    unchanged. A candidate with multiple files goes through
+    import_session_group instead, which parses and syncs every file's entries
+    in a single pass — see the module docstring and Finding 1.
+
+    Each candidate's SAVEPOINT acquisition, force-reimport, and RELEASE are
+    all wrapped by the same try/except: an OperationalError raised by the
+    force-reimport itself (a genuine infrastructure failure — full disk,
+    corrupt DB, incompatible schema) still aborts the whole remaining batch
+    by re-raising, matching import_project's existing convention. But an
+    OperationalError on the SAVEPOINT/RELEASE statements themselves (a
+    transient, candidate-local problem, not evidence the DB is broken) is
+    treated like any other per-candidate failure instead — logged, counted,
+    and the batch continues — rather than propagating and aborting every
+    remaining candidate.
 
     After a candidate's files are processed (and none raised), the session's
     classification is re-checked via ingestion_status.reclassify_session:
@@ -57,7 +85,11 @@ def repair_sessions(
         lacks the expected content; reattempting won't help)
     If any of the candidate's files raised, it counts toward sessions_failed
     instead, and reclassification is skipped for it (a poison-file failure is
-    an operational problem, not evidence the source content is missing).
+    an operational problem, not evidence the source content is missing). A
+    candidate with no project_id on record is also unrepairable — a missing
+    project_id is a permanent data-integrity condition retrying can never
+    resolve, unlike a transient operational failure — so it is counted under
+    sessions_unrepairable too, not sessions_failed.
 
     messages_recovered is measured per candidate as the delta in that
     session's total `messages` row count from before its file loop to after
@@ -68,63 +100,105 @@ def repair_sessions(
     multi-file candidate would overcount, and it would never read 0 on an
     idempotent re-run of an already-fixed session even though nothing new was
     inserted. The before/after delta gives the correct "how many messages did
-    this repair actually add" answer in both cases.
+    this repair actually add" answer in both cases. The session_id used for
+    the after-count is re-resolved from sessions.uuid immediately before
+    computing it, not the (possibly stale) id captured before the file loop:
+    import_session can delete a session's row entirely when its message count
+    hits 0, and a later re-sync for the same UUID gets a new id via
+    upsert_session's ON CONFLICT(uuid) DO UPDATE — trusting the pre-loop id
+    would silently report 0 messages recovered for a real recovery if that
+    churn happened mid-candidate.
     """
     sessions_repaired = 0
     messages_recovered = 0
     sessions_failed = 0
     sessions_unrepairable = 0
+    total_candidates = len(candidates)
 
-    for session_uuid, session_id, project_id, filepaths in candidates:
+    for index, (session_uuid, session_id, project_id, filepaths) in enumerate(candidates, start=1):
         if project_id is None:
             # sessions.project_id is nullable; import_session requires a concrete
             # project_id to force-reimport into. A candidate with no project_id
-            # is a data-integrity problem this loop cannot resolve on its own —
-            # treat it the same as a poison file rather than crashing or
-            # silently dropping the candidate.
+            # is a permanent data-integrity condition — project_id will never
+            # become non-null via retry — not a transient operational failure,
+            # so it counts as unrepairable rather than failed.
             log.error(
-                "Skipping repair for session %s — no project_id on record",
+                "Skipping repair for session %s — no project_id on record (unrepairable, not retryable)",
                 session_uuid,
             )
-            sessions_failed += 1
+            sessions_unrepairable += 1
+            _log_progress(index, total_candidates, sessions_repaired, sessions_failed, sessions_unrepairable)
             continue
 
         candidate_failed = False
         count_before = conn.execute("SELECT COUNT(*) FROM messages WHERE session_id = ?", (session_id,)).fetchone()[0]
+        ordered = sort_session_files(filepaths)
 
-        for target in sort_session_files(filepaths):
-            conn.execute("SAVEPOINT import_file")
+        try:
+            conn.execute("SAVEPOINT import_candidate")
+        except sqlite3.OperationalError:
+            log.exception(
+                "Failed to acquire SAVEPOINT while repairing session %s — counting as failed, continuing batch",
+                session_uuid,
+            )
+            sessions_failed += 1
+            on_reclaim()
+            _log_progress(index, total_candidates, sessions_repaired, sessions_failed, sessions_unrepairable)
+            continue
+
+        try:
+            if len(ordered) == 1:
+                import_conversations.import_session(conn, ordered[0], project_id, force=True)
+            else:
+                import_conversations.import_session_group(conn, ordered, project_id)
+        except sqlite3.OperationalError:
+            conn.execute("ROLLBACK TO SAVEPOINT import_candidate")
+            conn.execute("RELEASE SAVEPOINT import_candidate")
+            log.exception(
+                "Database-level failure repairing session %s — aborting run",
+                session_uuid,
+            )
+            raise
+        except Exception:
+            conn.execute("ROLLBACK TO SAVEPOINT import_candidate")
+            conn.execute("RELEASE SAVEPOINT import_candidate")
+            log.exception(
+                "Skipping poison transcript(s) while repairing session %s",
+                session_uuid,
+            )
+            candidate_failed = True
+        else:
             try:
-                import_conversations.import_session(conn, target, project_id, force=True)
+                conn.execute("RELEASE SAVEPOINT import_candidate")
             except sqlite3.OperationalError:
-                conn.execute("ROLLBACK TO SAVEPOINT import_file")
-                conn.execute("RELEASE SAVEPOINT import_file")
                 log.exception(
-                    "Database-level failure repairing %s (session %s) — aborting run",
-                    target,
-                    session_uuid,
-                )
-                raise
-            except Exception:
-                conn.execute("ROLLBACK TO SAVEPOINT import_file")
-                conn.execute("RELEASE SAVEPOINT import_file")
-                log.exception(
-                    "Skipping poison transcript file %s while repairing session %s",
-                    target,
+                    "Failed to RELEASE SAVEPOINT while repairing session %s — counting as failed, continuing batch",
                     session_uuid,
                 )
                 candidate_failed = True
-                on_reclaim()
-                continue
 
-            conn.execute("RELEASE SAVEPOINT import_file")
-            on_reclaim()
+        on_reclaim()
 
-        count_after = conn.execute("SELECT COUNT(*) FROM messages WHERE session_id = ?", (session_id,)).fetchone()[0]
-        messages_recovered += max(count_after - count_before, 0)
+        resolved = conn.execute("SELECT id FROM sessions WHERE uuid = ?", (session_uuid,)).fetchone()
+        if resolved is not None:
+            count_after = conn.execute("SELECT COUNT(*) FROM messages WHERE session_id = ?", (resolved[0],)).fetchone()[
+                0
+            ]
+        else:
+            count_after = 0
+        delta = count_after - count_before
+        if delta < 0:
+            log.warning(
+                "negative message delta while repairing session %s: before=%d after=%d",
+                session_uuid,
+                count_before,
+                count_after,
+            )
+        messages_recovered += max(delta, 0)
 
         if candidate_failed:
             sessions_failed += 1
+            _log_progress(index, total_candidates, sessions_repaired, sessions_failed, sessions_unrepairable)
             continue
 
         category = ingestion_status.reclassify_session(conn, session_uuid, filepaths)
@@ -133,4 +207,21 @@ def repair_sessions(
         else:
             sessions_unrepairable += 1
 
+        _log_progress(index, total_candidates, sessions_repaired, sessions_failed, sessions_unrepairable)
+
     return sessions_repaired, messages_recovered, sessions_failed, sessions_unrepairable
+
+
+def _log_progress(index: int, total: int, repaired: int, failed: int, unrepairable: int) -> None:
+    """Log running totals every PROGRESS_LOG_INTERVAL candidates (and on the
+    final one), so a long-running repair leaves a progress trail in the log a
+    user can tail instead of going silent until the whole batch finishes."""
+    if index % PROGRESS_LOG_INTERVAL == 0 or index == total:
+        log.info(
+            "repair progress: %d/%d candidates processed (repaired=%d, failed=%d, unrepairable=%d)",
+            index,
+            total,
+            repaired,
+            failed,
+            unrepairable,
+        )
