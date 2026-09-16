@@ -322,6 +322,32 @@ def test_missing_and_no_usable_branch_buckets_never_overlap(memory_db, tmp_path)
     )
 
 
+def test_transcript_unreadable_after_index_counts_as_missing(memory_db, tmp_path):
+    """`import_log_source_index()` classifies a path as `existing` via
+    `Path.exists()`; if it vanishes or becomes unopenable before
+    `classify_pending_sessions` reads it (TOCTOU race, permissions change), that
+    must land in `missing` rather than raising `OSError` and aborting the whole
+    status report (#207 review)."""
+    unreadable_path = tmp_path / "sess-unreadable.jsonl"
+    unreadable_path.mkdir()  # exists per Path.exists(), but open() raises IsADirectoryError
+
+    memory_db.execute("INSERT INTO sessions (uuid) VALUES ('sess-unreadable')")
+    session_id = memory_db.execute("SELECT last_insert_rowid()").fetchone()[0]
+    memory_db.execute("INSERT INTO branches (session_id, leaf_uuid, is_active) VALUES (?, 'u1', 1)", (session_id,))
+    memory_db.execute(
+        "INSERT INTO messages (session_id, uuid, role, content, tool_content) VALUES (?, 'u1', 'user', 'x', NULL)",
+        (session_id,),
+    )
+    memory_db.execute(
+        "INSERT INTO import_log (file_path, file_hash, messages_imported) VALUES (?, 'hash', 1)",
+        (str(unreadable_path),),
+    )
+    memory_db.commit()
+
+    result = classify_pending_sessions(memory_db.cursor(), None)
+    assert result == {"missing": 1, "no_usable_branch": 0}
+
+
 class TestRunEmbeddingWatermarkCoverage:
     """`ccrecall status` reports honest branch-grain embedding coverage."""
 
