@@ -1,7 +1,7 @@
 ---
 task_id: "T03"
 title: "Wire --repair-gaps flag through ccrecall import"
-status: "planned"
+status: "done"
 depends_on: ["T01", "T02"]
 implements: ["FR#2", "FR#5", "FR#6", "FR#7", "FR#8", "AC#1", "AC#2", "AC#5", "AC#6", "AC#7", "AC#8"]
 ---

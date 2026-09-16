@@ -13,12 +13,21 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
-from ccrecall.config import DEFAULT_DB_PATH, get_db_path, load_settings, remove_pid_file, setup_logging
+from ccrecall import ingestion_status
+from ccrecall.config import (
+    DEFAULT_DB_PATH,
+    get_db_path,
+    load_settings,
+    remove_pid_file,
+    setup_logging,
+    try_acquire_pid_file,
+)
 from ccrecall.config import PID_KEY_IMPORT as PID_KEY
 from ccrecall.db import DEFAULT_PROJECTS_DIR, get_connection
 from ccrecall.db_vec import TRIGGER_CHUNKS_VEC_AD, vec_available
 from ccrecall.file_hashing import transcript_file_hash
 from ccrecall.formatting import extract_project_name, normalize_project_key
+from ccrecall.hooks import import_repair
 from ccrecall.hooks.subprocess_utils import reclaim_memory, try_load_libc
 from ccrecall.import_log_ops import has_pending_tool_content
 from ccrecall.models import LOGGER_NAME
@@ -314,10 +323,15 @@ def run(
     projects_dir: Path = DEFAULT_PROJECTS_DIR,
     project: str | None = None,
     verbose: bool = False,
+    repair_gaps: bool = False,
 ) -> None:
     """Import Claude Code conversations into the memory DB."""
+    repair_failures = 0
+    repair_lock_denied = False
     try:
-        _run(db=db, projects_dir=projects_dir, project=project, verbose=verbose)
+        repair_failures, repair_lock_denied = _run(
+            db=db, projects_dir=projects_dir, project=project, verbose=verbose, repair_gaps=repair_gaps
+        )
     except Exception:
         # Top-level catch (#170): this process is detached and spawned with
         # stdout/stderr redirected to DEVNULL (see memory_setup._spawn_background),
@@ -331,8 +345,15 @@ def run(
         log.exception("Import process failed with an uncaught exception")
         raise
     finally:
-        # Delete PID file so _spawn_background can spawn again next session
-        remove_pid_file(PID_KEY)
+        # Delete PID file so _spawn_background can spawn again next session —
+        # unless this invocation's --repair-gaps step was denied the lock by a
+        # genuinely live holder (e.g. the background auto-import). In that case
+        # this invocation never acquired PID_KEY, and unconditionally removing
+        # it here would silently un-guard the other, still-running process.
+        if not repair_lock_denied:
+            remove_pid_file(PID_KEY)
+    if repair_failures:
+        raise SystemExit(1)
 
 
 def _run(
@@ -341,7 +362,8 @@ def _run(
     projects_dir: Path,
     project: str | None,
     verbose: bool,
-) -> None:
+    repair_gaps: bool,
+) -> tuple[int, bool]:
     settings = load_settings()
     logger = setup_logging(settings, process_name="import", verbose=verbose)
 
@@ -376,17 +398,15 @@ def _run(
             project_dir = projects_dir / project
             if not project_dir.exists():
                 print(f"Project not found: {project_dir}")
-                return
-            if not is_safe_project_dir(project_dir, projects_dir):
+            elif not is_safe_project_dir(project_dir, projects_dir):
                 print(f"Unsafe project path: {project_dir}")
-                return
-
-            sessions, messages, skipped = import_project(conn, project_dir, exclude_projects, _reclaim)
-            conn.commit()
-            total_sessions += sessions
-            total_messages += messages
-            total_skipped += skipped
-            print(f"Imported {project}: {sessions} branches, {messages} messages")
+            else:
+                sessions, messages, skipped = import_project(conn, project_dir, exclude_projects, _reclaim)
+                conn.commit()
+                total_sessions += sessions
+                total_messages += messages
+                total_skipped += skipped
+                print(f"Imported {project}: {sessions} branches, {messages} messages")
         else:
             t_import_total = 0.0
             t_commit_total = 0.0
@@ -420,6 +440,27 @@ def _run(
                 t_gc_total,
             )
 
+        repair_failures = 0
+        repair_lock_denied = False
+        if repair_gaps:
+            if not try_acquire_pid_file(PID_KEY):
+                print("ccrecall import --repair-gaps: another import is already running — skipping repair")
+                repair_lock_denied = True
+            else:
+                candidates = ingestion_status.find_repairable_sessions(conn)
+                repaired_sessions, repaired_messages, repair_failures, repair_unrepairable = (
+                    import_repair.repair_sessions(conn, candidates, on_reclaim=_reclaim)
+                )
+                summary = f"Repaired {repaired_sessions} session(s), recovered {repaired_messages} message(s)"
+                if repair_unrepairable:
+                    summary += (
+                        f", {repair_unrepairable} could not be repaired "
+                        "(source transcript is missing the required message(s))"
+                    )
+                if repair_failures:
+                    summary += f", {repair_failures} failed — see ccrecall-import.log"
+                print(summary)
+
     t_end = time.monotonic()
     logger.debug("total wall time: %.2fs", t_end - t_start)
     logger.info("Import complete: %s branches, %s messages", total_sessions, total_messages)
@@ -428,3 +469,5 @@ def _run(
     if db_path.exists():
         db_size = db_path.stat().st_size
         print(f"Database size: {db_size / BYTES_PER_MB:.2f} MB")
+
+    return repair_failures, repair_lock_denied

@@ -128,10 +128,17 @@ def cmd_import(
     db: Annotated[Path, Parameter(help="Database path.")] = DEFAULT_DB_PATH,
     projects_dir: Annotated[Path, Parameter(help="Projects directory.")] = DEFAULT_PROJECTS_DIR,
     project: Annotated[str | None, Parameter(help="Import only this project (by directory name).")] = None,
+    repair_gaps: Annotated[
+        bool,
+        _FLAG,
+        Parameter(
+            help="Force-reimport sessions with a stale-tail or ingestion-gap (see `ccrecall status --check-ingestion`)."
+        ),
+    ] = False,
     ctx: CLIContextParam = DEFAULT_CLI_CONTEXT,
 ) -> None:
     """Import Claude Code conversations into the memory DB."""
-    import_mod.run(db=db, projects_dir=projects_dir, project=project, verbose=ctx.debug)
+    import_mod.run(db=db, projects_dir=projects_dir, project=project, verbose=ctx.debug, repair_gaps=repair_gaps)
 
 
 @app.command(name="status")

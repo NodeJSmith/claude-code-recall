@@ -2,19 +2,24 @@
 
 import json
 import logging
+import os
 import shutil
 import sqlite3
 import tempfile
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
 import sqlite_vec
-from conftest import FIXTURE_DIR, VEC_SKIP, make_vec_conn
+from conftest import FIXTURE_DIR, VEC_SKIP, make_jsonl_entry, make_vec_conn, write_jsonl
 
+from ccrecall import ingestion_status
+from ccrecall.config import PID_KEY_IMPORT, pid_file_path, remove_pid_file, try_acquire_pid_file
 from ccrecall.embeddings import EMBEDDING_DIM
 from ccrecall.hooks.import_conversations import _run, import_project, import_session, run
+from ccrecall.import_log_ops import import_log_source_index
 
 _STALE_IMPORT_LOG_SQL = (
     "UPDATE import_log SET file_hash = 'stale', file_size = NULL, file_mtime = NULL WHERE file_path = ?"
@@ -876,9 +881,13 @@ class TestImportRunPathSafety:
         monkeypatch.setattr("ccrecall.hooks.import_conversations.get_db_path", lambda _settings: db_path)
         monkeypatch.setattr("ccrecall.hooks.import_conversations.import_project", import_project_mock)
 
-        _run(db=db_path, projects_dir=projects_dir, project="linked-project", verbose=False)
+        _run(db=db_path, projects_dir=projects_dir, project="linked-project", verbose=False, repair_gaps=False)
 
-        assert capsys.readouterr().out == f"Unsafe project path: {projects_dir / 'linked-project'}\n"
+        assert capsys.readouterr().out == (
+            f"Unsafe project path: {projects_dir / 'linked-project'}\n"
+            "\nTotal: 0 branches, 0 messages imported (0 unchanged)\n"
+            "Database size: 0.00 MB\n"
+        )
         import_project_mock.assert_not_called()
 
 
@@ -1318,3 +1327,261 @@ class TestEmptySessionCascadeRegression:
             == 0
         )
         conn.close()
+
+
+def _write_four_turns(filepath: Path) -> None:
+    write_jsonl(
+        filepath,
+        [
+            make_jsonl_entry("u1", None, "2026-01-01T10:00:00Z", "user", "first"),
+            make_jsonl_entry("a1", "u1", "2026-01-01T10:00:01Z", "assistant", "answer"),
+            make_jsonl_entry("u2", "a1", "2026-01-01T10:00:02Z", "user", "second"),
+            make_jsonl_entry("a2", "u2", "2026-01-01T10:00:03Z", "assistant", "answer"),
+        ],
+    )
+
+
+def _age_past_grace_window(filepath: Path) -> None:
+    old = time.time() - 3600
+    os.utime(filepath, (old, old))
+
+
+def _delete_message(conn: sqlite3.Connection, session_id: int, uuid: str) -> None:
+    """Delete one messages row, clearing its branch_messages FK references first."""
+    conn.execute(
+        "DELETE FROM branch_messages WHERE message_id IN (SELECT id FROM messages WHERE session_id = ? AND uuid = ?)",
+        (session_id, uuid),
+    )
+    conn.execute("DELETE FROM messages WHERE session_id = ? AND uuid = ?", (session_id, uuid))
+
+
+class TestImportRepairGapsEndToEnd:
+    """End-to-end coverage for `ccrecall import --repair-gaps` (016).
+
+    Each test drives the real `run()` entry point with `get_connection` patched
+    to hand back the same in-memory `memory_db` connection across multiple
+    invocations (mirroring a user running `ccrecall import [--repair-gaps]`
+    more than once against the same DB), while load_settings/setup_logging/
+    get_db_path run for real — RUNTIME_DIR/CONFIG_PATH are already isolated to
+    tmp_path by the autouse `_isolated_runtime_dir` fixture in conftest.py, so
+    PID markers and log files never touch a real ~/.ccrecall.
+    """
+
+    def _run_import(
+        self,
+        conn: sqlite3.Connection,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        projects_dir: Path,
+        *,
+        project: str | None = None,
+        repair_gaps: bool,
+    ) -> None:
+        db_path = tmp_path / "memory.db"
+
+        @contextmanager
+        def fake_connection(*_args, **_kwargs):
+            yield conn
+
+        monkeypatch.setattr("ccrecall.hooks.import_conversations.get_connection", fake_connection)
+        run(db=db_path, projects_dir=projects_dir, project=project, verbose=False, repair_gaps=repair_gaps)
+
+    def test_repair_gaps_recovers_stale_tail_and_plain_import_does_not(self, memory_db, tmp_path, monkeypatch):
+        """AC#1: a stale-tail session's missing message is recovered by --repair-gaps
+        and not by plain import, and a post-repair ingestion check no longer counts
+        the session under stale_tail_sessions/ingestion_gap_sessions."""
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        project_dir = projects_dir / "-Users-sam-project"
+        project_dir.mkdir()
+        filepath = project_dir / "sess-stale.jsonl"
+        _write_four_turns(filepath)
+
+        # Seed: a normal import records the import_log stat match.
+        self._run_import(memory_db, monkeypatch, tmp_path, projects_dir, repair_gaps=False)
+
+        session_id = memory_db.execute("SELECT id FROM sessions WHERE uuid = ?", ("sess-stale",)).fetchone()[0]
+        _delete_message(memory_db, session_id, "a2")
+        memory_db.commit()
+        _age_past_grace_window(filepath)
+
+        # A plain import (repair_gaps=False) must NOT recover the missing row —
+        # the on-disk content hash is unchanged, so import_session's skip gate
+        # treats this transcript as already fully imported.
+        self._run_import(memory_db, monkeypatch, tmp_path, projects_dir, repair_gaps=False)
+        assert (
+            memory_db.execute(
+                "SELECT COUNT(*) FROM messages WHERE session_id = ? AND uuid = 'a2'", (session_id,)
+            ).fetchone()[0]
+            == 0
+        )
+
+        # --repair-gaps must recover it.
+        self._run_import(memory_db, monkeypatch, tmp_path, projects_dir, repair_gaps=True)
+        assert (
+            memory_db.execute(
+                "SELECT COUNT(*) FROM messages WHERE session_id = ? AND uuid = 'a2'", (session_id,)
+            ).fetchone()[0]
+            == 1
+        )
+
+        summary = ingestion_status.summarize_ingestion(memory_db, sources=import_log_source_index(memory_db.cursor()))
+        assert summary["stale_tail_sessions"] == 0
+        assert summary["ingestion_gap_sessions"] == 0
+
+    def test_repair_gaps_noop_on_clean_db_reports_zero(self, memory_db, tmp_path, monkeypatch, capsys):
+        """AC#2: a no-op --repair-gaps run on a clean DB reports 0 repaired and exits 0."""
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+
+        self._run_import(memory_db, monkeypatch, tmp_path, projects_dir, repair_gaps=True)
+
+        out = capsys.readouterr().out
+        assert "Repaired 0 session(s), recovered 0 message(s)" in out
+
+    def test_repair_gaps_poison_candidate_exits_nonzero_but_repairs_others(
+        self, memory_db, tmp_path, monkeypatch, capsys
+    ):
+        """FR#5/AC#5: a poison candidate still lets every other candidate repair,
+        reports a nonzero failed count, and run() raises SystemExit(nonzero)."""
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        project_dir = projects_dir / "-Users-sam-project"
+        project_dir.mkdir()
+        good_path = project_dir / "sess-good.jsonl"
+        poison_path = project_dir / "sess-poison.jsonl"
+        _write_four_turns(good_path)
+        _write_four_turns(poison_path)
+
+        self._run_import(memory_db, monkeypatch, tmp_path, projects_dir, repair_gaps=False)
+
+        good_id = memory_db.execute("SELECT id FROM sessions WHERE uuid = ?", ("sess-good",)).fetchone()[0]
+        poison_id = memory_db.execute("SELECT id FROM sessions WHERE uuid = ?", ("sess-poison",)).fetchone()[0]
+        _delete_message(memory_db, good_id, "a2")
+        _delete_message(memory_db, poison_id, "a2")
+        memory_db.commit()
+        _age_past_grace_window(good_path)
+        _age_past_grace_window(poison_path)
+
+        real_import_session = import_session
+
+        def _raise_on_poison(conn, filepath, project_id, *, force=False):
+            if filepath == poison_path:
+                raise RuntimeError("simulated poison transcript")
+            return real_import_session(conn, filepath, project_id, force=force)
+
+        monkeypatch.setattr("ccrecall.hooks.import_conversations.import_session", _raise_on_poison)
+
+        with pytest.raises(SystemExit) as exc_info:
+            self._run_import(memory_db, monkeypatch, tmp_path, projects_dir, repair_gaps=True)
+
+        assert exc_info.value.code != 0
+
+        out = capsys.readouterr().out
+        assert "1 failed" in out
+
+        assert (
+            memory_db.execute(
+                "SELECT COUNT(*) FROM messages WHERE session_id = ? AND uuid = 'a2'", (good_id,)
+            ).fetchone()[0]
+            == 1
+        )
+        assert (
+            memory_db.execute(
+                "SELECT COUNT(*) FROM messages WHERE session_id = ? AND uuid = 'a2'", (poison_id,)
+            ).fetchone()[0]
+            == 0
+        )
+
+    def test_repair_gaps_runs_despite_bad_project_value(self, memory_db, tmp_path, monkeypatch):
+        """FR#6/AC#6: --repair-gaps still repairs a DB-wide session even when
+        --project names a nonexistent directory."""
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        project_dir = projects_dir / "-Users-sam-project"
+        project_dir.mkdir()
+        filepath = project_dir / "sess-stale.jsonl"
+        _write_four_turns(filepath)
+
+        self._run_import(memory_db, monkeypatch, tmp_path, projects_dir, repair_gaps=False)
+
+        session_id = memory_db.execute("SELECT id FROM sessions WHERE uuid = ?", ("sess-stale",)).fetchone()[0]
+        _delete_message(memory_db, session_id, "a2")
+        memory_db.commit()
+        _age_past_grace_window(filepath)
+
+        self._run_import(memory_db, monkeypatch, tmp_path, projects_dir, project="does-not-exist", repair_gaps=True)
+
+        assert (
+            memory_db.execute(
+                "SELECT COUNT(*) FROM messages WHERE session_id = ? AND uuid = 'a2'", (session_id,)
+            ).fetchone()[0]
+            == 1
+        )
+
+    def test_repair_gaps_skips_when_pid_marker_already_held(self, memory_db, tmp_path, monkeypatch):
+        """FR#7/AC#7: --repair-gaps skips (not fails) when PID_KEY_IMPORT is already
+        held, without raising, and the other holder's marker survives run()'s own
+        finally cleanup."""
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        project_dir = projects_dir / "-Users-sam-project"
+        project_dir.mkdir()
+        filepath = project_dir / "sess-stale.jsonl"
+        _write_four_turns(filepath)
+
+        self._run_import(memory_db, monkeypatch, tmp_path, projects_dir, repair_gaps=False)
+
+        session_id = memory_db.execute("SELECT id FROM sessions WHERE uuid = ?", ("sess-stale",)).fetchone()[0]
+        _delete_message(memory_db, session_id, "a2")
+        memory_db.commit()
+        _age_past_grace_window(filepath)
+
+        # Simulate a concurrently-running import (e.g. the SessionStart background
+        # auto-import) already holding the PID marker.
+        assert try_acquire_pid_file(PID_KEY_IMPORT) is True, "test setup: must hold the marker before invoking run()"
+
+        try:
+            self._run_import(memory_db, monkeypatch, tmp_path, projects_dir, repair_gaps=True)
+
+            assert (
+                memory_db.execute(
+                    "SELECT COUNT(*) FROM messages WHERE session_id = ? AND uuid = 'a2'", (session_id,)
+                ).fetchone()[0]
+                == 0
+            ), "repair must have been skipped, not silently no-op'd for an unrelated reason"
+            assert pid_file_path(PID_KEY_IMPORT).exists(), (
+                "run() must not delete a PID marker it did not itself acquire"
+            )
+        finally:
+            remove_pid_file(PID_KEY_IMPORT)
+
+    def test_repair_gaps_reports_unrepairable_candidate_distinctly(self, memory_db, tmp_path, monkeypatch, capsys):
+        """FR#8/AC#8: a candidate whose transcript genuinely lacks the expected
+        content is reported under a distinct "could not be repaired" count, does
+        not raise, and does not trigger a nonzero exit."""
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        project_dir = projects_dir / "-Users-sam-project"
+        project_dir.mkdir()
+        filepath = project_dir / "sess-unrepairable.jsonl"
+        _write_four_turns(filepath)
+
+        self._run_import(memory_db, monkeypatch, tmp_path, projects_dir, repair_gaps=False)
+
+        session_id = memory_db.execute("SELECT id FROM sessions WHERE uuid = ?", ("sess-unrepairable",)).fetchone()[0]
+        _delete_message(memory_db, session_id, "a2")
+        memory_db.commit()
+        _age_past_grace_window(filepath)
+
+        # Force reclassify_session to keep reporting stale_tail regardless of the
+        # real force-reimport outcome — isolates repair_sessions'/run()'s handling
+        # of the unrepairable branch, matching test_import_repair.py's own
+        # unrepairable-candidate test technique.
+        monkeypatch.setattr("ccrecall.ingestion_status.reclassify_session", lambda *a, **k: "stale_tail")
+
+        self._run_import(memory_db, monkeypatch, tmp_path, projects_dir, repair_gaps=True)
+
+        out = capsys.readouterr().out
+        assert "1 could not be repaired" in out
+        assert "1 failed" not in out
