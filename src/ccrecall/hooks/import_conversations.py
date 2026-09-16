@@ -403,7 +403,23 @@ def run(
 ) -> None:
     """Import Claude Code conversations into the memory DB."""
     repair_failures = 0
-    repair_lock_denied = False
+    # Default to "not yet acquired" whenever repair_gaps=True: if _run() raises
+    # before it reaches (or returns from) its own PID_KEY acquisition attempt
+    # (e.g. load_settings()/setup_logging() blow up first), this invocation
+    # never touched the marker, so the finally block below must not delete it —
+    # deleting it would un-guard a genuinely live holder (e.g. the
+    # SessionStart-spawned background import). When repair_gaps=False, _run()
+    # never touches PID_KEY at all, so the default stays False (delete
+    # unconditionally) — unchanged from today's contract with _spawn_background.
+    #
+    # This default also applies (deliberately left unrefined) if _run() DOES
+    # acquire the lock and then raises later — this process's own marker is
+    # then skipped here too, not just another holder's. That's an acceptable
+    # gap, not a live leak: try_acquire_pid_file's liveness probe reaps a dead
+    # PID's stale marker on the next acquisition attempt, so a future
+    # --repair-gaps invocation self-heals past it rather than skipping
+    # forever.
+    repair_lock_denied = repair_gaps
     try:
         repair_failures, repair_lock_denied = _run(
             db=db, projects_dir=projects_dir, project=project, verbose=verbose, repair_gaps=repair_gaps

@@ -1560,6 +1560,30 @@ class TestImportRepairGapsEndToEnd:
         finally:
             remove_pid_file(PID_KEY_IMPORT)
 
+    def test_repair_gaps_preserves_other_holders_marker_on_early_exception(self, tmp_path, monkeypatch):
+        """If _run() raises before it ever reaches its own PID_KEY acquisition
+        attempt (e.g. load_settings() blows up), run()'s finally block must NOT
+        delete a marker this invocation never acquired — otherwise it un-guards
+        a genuinely live holder (e.g. the SessionStart background auto-import)."""
+
+        def _raise_before_acquisition(**_kwargs):
+            raise RuntimeError("simulated load_settings() failure before PID acquisition")
+
+        monkeypatch.setattr("ccrecall.hooks.import_conversations._run", _raise_before_acquisition)
+
+        # Simulate a concurrently-running import already holding the marker.
+        assert try_acquire_pid_file(PID_KEY_IMPORT) is True, "test setup: must hold the marker before invoking run()"
+
+        try:
+            with pytest.raises(RuntimeError, match="simulated load_settings"):
+                run(db=tmp_path / "memory.db", projects_dir=tmp_path, repair_gaps=True)
+
+            assert pid_file_path(PID_KEY_IMPORT).exists(), (
+                "run() must not delete a PID marker it never had the chance to acquire"
+            )
+        finally:
+            remove_pid_file(PID_KEY_IMPORT)
+
     def test_repair_gaps_reports_unrepairable_candidate_distinctly(self, memory_db, tmp_path, monkeypatch, capsys):
         """A candidate whose transcript genuinely lacks the expected
         content is reported under a distinct "could not be repaired" count, does
