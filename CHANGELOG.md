@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.25.0](https://github.com/NodeJSmith/claude-code-recall/compare/v0.24.2...v0.25.0) (2026-09-17)
+
+
+### Features
+
+* add ccrecall import --repair-gaps to fix stale-tail sessions ([#212](https://github.com/NodeJSmith/claude-code-recall/issues/212)) ([6e60dcb](https://github.com/NodeJSmith/claude-code-recall/commit/6e60dcb758fd0232b8afc7a95304feaf96bfa140))
+
 ## [0.24.2](https://github.com/NodeJSmith/claude-code-recall/compare/v0.24.1...v0.24.2) (2026-09-16)
 
 
