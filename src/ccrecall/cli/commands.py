@@ -103,6 +103,11 @@ _DB = Annotated[Path, Parameter(name=["--db"], help="Database path.")]
 # rather than silently comparing wrong.
 _BEFORE = Annotated[str | None, Parameter(help="Sessions started before this date/datetime (ISO).")]
 _AFTER = Annotated[str | None, Parameter(help="Sessions started after this date/datetime (ISO).")]
+# Shared across recent/search/search-messages so filter help text can't drift
+# between commands.
+_SESSION = Annotated[str | None, Parameter(help="Filter by session UUID (prefix match).")]
+_PROJECT = Annotated[str | None, Parameter(help="Filter by project name(s), comma-separated.")]
+_PATH = Annotated[str | None, Parameter(help="Filter by cwd substring (e.g. worktree name).")]
 # Default for `tail -n`, sourced from session_tail so the two never drift.
 _TAIL_DEFAULT_N = session_tail_mod.DEFAULT_TAIL_EVENTS
 # Default result counts for the recent/search commands.
@@ -125,19 +130,26 @@ def cmd_sync_current(
 @app.command(name="import")
 def cmd_import(
     *,
-    db: Annotated[Path, Parameter(help="Database path.")] = DEFAULT_DB_PATH,
+    db: _DB = DEFAULT_DB_PATH,
     projects_dir: Annotated[Path, Parameter(help="Projects directory.")] = DEFAULT_PROJECTS_DIR,
     project: Annotated[str | None, Parameter(help="Import only this project (by directory name).")] = None,
+    repair_gaps: Annotated[
+        bool,
+        _FLAG,
+        Parameter(
+            help="Force-reimport sessions with a stale-tail or ingestion-gap (see `ccrecall status --check-ingestion`)."
+        ),
+    ] = False,
     ctx: CLIContextParam = DEFAULT_CLI_CONTEXT,
 ) -> None:
     """Import Claude Code conversations into the memory DB."""
-    import_mod.run(db=db, projects_dir=projects_dir, project=project, verbose=ctx.debug)
+    import_mod.run(db=db, projects_dir=projects_dir, project=project, verbose=ctx.debug, repair_gaps=repair_gaps)
 
 
 @app.command(name="status")
 def cmd_status(
     *,
-    db: Annotated[Path, Parameter(help="Database path.")] = DEFAULT_DB_PATH,
+    db: _DB = DEFAULT_DB_PATH,
     days: Annotated[
         int | None,
         Parameter(validator=Number(gte=1), help="Only scope tool-content and embedding status to the last N days."),
@@ -346,9 +358,9 @@ def cmd_recent(
     sort_order: Annotated[Literal["desc", "asc"], Parameter(name=["--sort-order"], help="Sort order.")] = "desc",
     before: _BEFORE = None,
     after: _AFTER = None,
-    session: Annotated[str | None, Parameter(help="Filter by session UUID (prefix match).")] = None,
-    project: Annotated[str | None, Parameter(help="Filter by project name(s), comma-separated.")] = None,
-    path: Annotated[str | None, Parameter(help="Filter by cwd substring (e.g. worktree name).")] = None,
+    session: _SESSION = None,
+    project: _PROJECT = None,
+    path: _PATH = None,
     verbose: _VERBOSE = False,
     include_notifications: _NOTIFS = False,
     db: _DB = DEFAULT_DB_PATH,
@@ -393,9 +405,9 @@ def cmd_search(
             help=f"Max sessions (1-{search_mod.MAX_SEARCH_RESULTS}).",
         ),
     ] = _DEFAULT_SEARCH_MAX_RESULTS,
-    session: Annotated[str | None, Parameter(help="Filter by session UUID (prefix match).")] = None,
-    project: Annotated[str | None, Parameter(help="Filter by project name(s), comma-separated.")] = None,
-    path: Annotated[str | None, Parameter(help="Filter by cwd substring (e.g. worktree name).")] = None,
+    session: _SESSION = None,
+    project: _PROJECT = None,
+    path: _PATH = None,
     before: _BEFORE = None,
     after: _AFTER = None,
     verbose: _VERBOSE = False,
@@ -448,9 +460,9 @@ def cmd_search_messages(
             help=f"Max matched exchanges (1-{search_mod.MAX_SEARCH_RESULTS}).",
         ),
     ] = _DEFAULT_SEARCH_MAX_RESULTS,
-    session: Annotated[str | None, Parameter(help="Filter by session UUID (prefix match).")] = None,
-    project: Annotated[str | None, Parameter(help="Filter by project name(s), comma-separated.")] = None,
-    path: Annotated[str | None, Parameter(help="Filter by cwd substring (e.g. worktree name).")] = None,
+    session: _SESSION = None,
+    project: _PROJECT = None,
+    path: _PATH = None,
     before: _BEFORE = None,
     after: _AFTER = None,
     verbose: _VERBOSE = False,

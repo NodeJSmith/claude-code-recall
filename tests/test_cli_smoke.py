@@ -51,6 +51,24 @@ class TestCmdImport:
             projects_dir=DEFAULT_PROJECTS_DIR,
             project=None,
             verbose=False,
+            repair_gaps=False,
+        )
+
+    def test_calls_run_with_repair_gaps(self):
+        with patch("ccrecall.cli.commands.import_mod.run") as mock_run:
+            cmd_import(
+                db=DEFAULT_DB_PATH,
+                projects_dir=DEFAULT_PROJECTS_DIR,
+                project=None,
+                repair_gaps=True,
+                ctx=DEFAULT_CLI_CONTEXT,
+            )
+        mock_run.assert_called_once_with(
+            db=DEFAULT_DB_PATH,
+            projects_dir=DEFAULT_PROJECTS_DIR,
+            project=None,
+            verbose=False,
+            repair_gaps=True,
         )
 
 

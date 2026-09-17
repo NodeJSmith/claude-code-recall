@@ -5,8 +5,11 @@ deep-check runs skip reparsing unchanged transcript sources.
 """
 
 import logging
+import sqlite3
+from collections.abc import Iterator
 from pathlib import Path
 from sqlite3 import Connection
+from typing import Literal
 
 from whenever import Instant
 
@@ -18,6 +21,8 @@ from ccrecall.parsing import parse_all_with_uuids, select_active_leaf_entry
 log = logging.getLogger(LOGGER_NAME)
 
 STALE_TAIL_SECONDS = 15 * 60
+
+SessionCategory = Literal["ok", "pending_tail", "stale_tail", "ingestion_gap", "missing_source"]
 
 
 def _entry_expects_message(entry: dict) -> bool:
@@ -70,9 +75,22 @@ def _source_fingerprint(filepaths: list[Path]) -> str | None:
     return "\n".join(parts)
 
 
-def _db_coverage_fingerprint(cursor, session_id: int) -> str:
-    """Return the stored UUID membership token for cache validation."""
-    rows = cursor.execute(
+def _db_coverage_fingerprint(cursor: sqlite3.Cursor, session_id: int) -> str:
+    """Return a token combining message-UUID membership and branch_messages
+    linkage, for cache validation.
+
+    UUID membership alone (the original fingerprint) can't see a linking-only
+    regression: a message row can exist while its branch_messages link was
+    dropped by a buggy diff, and that leaves the message row itself, and therefore
+    the UUID-only fingerprint, unchanged. Folding in per-active-branch linked
+    message *membership* (not just a count) makes that class of regression
+    invalidate the ingestion_check_cache the same way a content regression
+    already does. A bare per-branch count would miss a same-count
+    substitution — one link removed and a different one added, net count for
+    that branch unchanged — so the fingerprint lists which messages (by
+    stable UUID, not the internal messages.id) are linked to each branch.
+    """
+    message_rows = cursor.execute(
         """
         SELECT uuid
         FROM messages
@@ -81,10 +99,37 @@ def _db_coverage_fingerprint(cursor, session_id: int) -> str:
         """,
         (session_id,),
     ).fetchall()
-    return "\n".join(row[0] for row in rows)
+    branch_rows = cursor.execute(
+        """
+        SELECT id
+        FROM branches
+        WHERE session_id = ? AND is_active = 1
+        ORDER BY id
+        """,
+        (session_id,),
+    ).fetchall()
+    link_rows = cursor.execute(
+        """
+        SELECT bm.branch_id, m.uuid
+        FROM branch_messages bm
+        JOIN branches b ON b.id = bm.branch_id
+        JOIN messages m ON m.id = bm.message_id
+        WHERE b.session_id = ? AND b.is_active = 1
+        ORDER BY bm.branch_id, m.uuid
+        """,
+        (session_id,),
+    ).fetchall()
+    message_part = "\n".join(row[0] for row in message_rows)
+    # branch_part records active-branch existence independently of link_part
+    # (an INNER JOIN starting from branch_messages is otherwise blind to a
+    # branch with zero links — the all-links-dropped limit of the same
+    # substitution bug link_part exists to catch).
+    branch_part = "\n".join(str(row[0]) for row in branch_rows)
+    link_part = "\n".join(f"{branch_id}:{uuid}" for branch_id, uuid in link_rows)
+    return message_part + "\x00" + branch_part + "\x00" + link_part
 
 
-def _cached_ok_fingerprint(cursor, session_uuid: str) -> tuple[str, str] | None:
+def _cached_ok_fingerprint(cursor: sqlite3.Cursor, session_uuid: str) -> tuple[str, str] | None:
     row = cursor.execute(
         "SELECT source_fingerprint, db_coverage_fingerprint FROM ingestion_check_cache WHERE session_uuid = ?",
         (session_uuid,),
@@ -93,7 +138,7 @@ def _cached_ok_fingerprint(cursor, session_uuid: str) -> tuple[str, str] | None:
 
 
 def _record_ok_fingerprint(
-    cursor,
+    cursor: sqlite3.Cursor,
     session_uuid: str,
     source_fingerprint: str,
     db_coverage_fingerprint: str,
@@ -106,6 +151,90 @@ def _record_ok_fingerprint(
         """,
         (session_uuid, source_fingerprint, db_coverage_fingerprint),
     )
+
+
+def classify_sessions(
+    cursor,
+    sources: dict[str, dict[str, list[Path]]],
+    now: Instant,
+    stale_tail_seconds: int,
+) -> Iterator[tuple[str, SessionCategory, int, list[int]]]:
+    """Yield (session_uuid, category, session_id, missing_indices) for each session with a verdict.
+
+    category is one of "ok", "pending_tail", "stale_tail", "ingestion_gap", or
+    "missing_source" (the rare case where a source file that was present when
+    ``sources`` was built has since disappeared — a stat-time TOCTOU race, not
+    the more common paths["missing"] case below).
+    Sessions confirmed via the ok-fingerprint cache are yielded as category "ok"
+    with an empty missing_indices list — same as a freshly-computed zero-gap session.
+    Sessions whose entire source is missing (``paths["missing"]`` non-empty) are
+    NOT yielded here; that classification happens in summarize_ingestion's
+    separate first loop over sessions with no existing files.
+    """
+    for session_uuid, paths in sources.items():
+        if paths["missing"]:
+            continue
+        filepaths = paths["existing"]
+        session_row = cursor.execute("SELECT id FROM sessions WHERE uuid = ?", (session_uuid,)).fetchone()
+        if session_row is None:
+            continue
+        session_id = session_row[0]
+
+        source_fingerprint = _source_fingerprint(filepaths)
+        if source_fingerprint is None:
+            yield session_uuid, "missing_source", session_id, []
+            continue
+
+        db_coverage_fingerprint = _db_coverage_fingerprint(cursor, session_id)
+
+        if _cached_ok_fingerprint(cursor, session_uuid) == (source_fingerprint, db_coverage_fingerprint):
+            yield session_uuid, "ok", session_id, []
+            continue
+
+        # Scoped to the active branch's branch_messages links, not just "any
+        # message row exists for this session" — a message row can survive
+        # while its link to the active branch is dropped or substituted
+        # (e.g. by a per-file diff that doesn't see cross-file links), and a
+        # row-existence check alone is blind to that: the UUID is still
+        # "present" in messages even though it's no longer reachable from the
+        # active branch, so a link corruption would classify as "ok" and be
+        # re-cached that way, forever hiding it from find_repairable_sessions.
+        existing_msg_uuids = {
+            row[0]
+            for row in cursor.execute(
+                """
+                SELECT m.uuid
+                FROM branch_messages bm
+                JOIN branches b ON b.id = bm.branch_id
+                JOIN messages m ON m.id = bm.message_id
+                WHERE b.session_id = ? AND b.is_active = 1 AND m.uuid IS NOT NULL
+                """,
+                (session_id,),
+            ).fetchall()
+        }
+
+        try:
+            expected = _expected_uuids(filepaths)
+            missing_indices = [i for i, uuid in enumerate(expected) if uuid not in existing_msg_uuids]
+            if not missing_indices:
+                yield session_uuid, "ok", session_id, []
+                continue
+
+            if _is_contiguous_suffix(missing_indices, len(expected)):
+                newest_mtime = max(Instant.from_timestamp(path.stat().st_mtime) for path in filepaths)
+                if (now - newest_mtime).total("seconds") <= stale_tail_seconds:
+                    yield session_uuid, "pending_tail", session_id, missing_indices
+                else:
+                    yield session_uuid, "stale_tail", session_id, missing_indices
+            else:
+                yield session_uuid, "ingestion_gap", session_id, missing_indices
+        except FileNotFoundError as exc:
+            log.warning(
+                "transcript source missing while computing ingestion fingerprint; "
+                "session will be counted as missing_source",
+                extra={"path": str(exc.filename) if exc.filename else None},
+            )
+            yield session_uuid, "missing_source", session_id, []
 
 
 def summarize_ingestion(
@@ -148,55 +277,83 @@ def summarize_ingestion(
             summary["missing_source_sessions"] += 1
 
     now = Instant.now()
-    for session_uuid, paths in sources.items():
-        if paths["missing"]:
-            continue
-        filepaths = paths["existing"]
-        session_row = cursor.execute("SELECT id FROM sessions WHERE uuid = ?", (session_uuid,)).fetchone()
-        if session_row is None:
-            continue
+    for session_uuid, category, session_id, missing_indices in classify_sessions(
+        cursor, sources, now, stale_tail_seconds
+    ):
         summary["sessions_checked"] += 1
 
-        source_fingerprint = _source_fingerprint(filepaths)
-        if source_fingerprint is None:
+        if category == "missing_source":
             summary["missing_source_sessions"] += 1
             continue
 
-        db_coverage_fingerprint = _db_coverage_fingerprint(cursor, session_row[0])
-
-        if _cached_ok_fingerprint(cursor, session_uuid) == (source_fingerprint, db_coverage_fingerprint):
+        if category == "ok":
             summary["ok_sessions"] += 1
+            filepaths = sources[session_uuid]["existing"]
+            source_fingerprint = _source_fingerprint(filepaths)
+            if source_fingerprint is not None:
+                db_coverage_fingerprint = _db_coverage_fingerprint(cursor, session_id)
+                if _cached_ok_fingerprint(cursor, session_uuid) != (source_fingerprint, db_coverage_fingerprint):
+                    ok_cache_writes.append((session_uuid, source_fingerprint, db_coverage_fingerprint))
             continue
 
-        session_id = session_row[0]
-        existing_msg_uuids = {
-            row[0]
-            for row in cursor.execute(
-                "SELECT uuid FROM messages WHERE session_id = ? AND uuid IS NOT NULL",
-                (session_id,),
-            ).fetchall()
-        }
-
-        expected = _expected_uuids(filepaths)
-        missing_indices = [i for i, uuid in enumerate(expected) if uuid not in existing_msg_uuids]
-        if not missing_indices:
-            summary["ok_sessions"] += 1
-            ok_cache_writes.append((session_uuid, source_fingerprint, db_coverage_fingerprint))
-            continue
-
-        if _is_contiguous_suffix(missing_indices, len(expected)):
-            newest_mtime = max(Instant.from_timestamp(path.stat().st_mtime) for path in filepaths)
-            if (now - newest_mtime).total("seconds") <= stale_tail_seconds:
-                summary["pending_tail_sessions"] += 1
-                summary["pending_tail_turns"] += len(missing_indices)
-            else:
-                summary["stale_tail_sessions"] += 1
-                summary["stale_tail_turns"] += len(missing_indices)
-        else:
-            summary["ingestion_gap_sessions"] += 1
-            summary["ingestion_gap_turns"] += len(missing_indices)
+        turns = len(missing_indices)
+        summary[f"{category}_sessions"] += 1
+        summary[f"{category}_turns"] += turns
 
     for session_uuid, source_fingerprint, db_coverage_fingerprint in ok_cache_writes:
         _record_ok_fingerprint(cursor, session_uuid, source_fingerprint, db_coverage_fingerprint)
 
     return summary
+
+
+def find_repairable_sessions(
+    conn: Connection,
+    *,
+    stale_tail_seconds: int = STALE_TAIL_SECONDS,
+    sources: dict[str, dict[str, list[Path]]] | None = None,
+) -> list[tuple[str, int, int | None, list[Path]]]:
+    """Return (session_uuid, session_id, project_id, filepaths) for every
+    session classified as stale_tail or ingestion_gap — the categories a
+    force-reimport can actually repair. project_id is None when the session's
+    project_id column is nullable and unset. Excludes pending_tail (likely
+    still being written) and missing_source (no surviving JSONL to reimport
+    from)."""
+    cursor = conn.cursor()
+    if sources is None:
+        sources = import_log_source_index(cursor)
+
+    now = Instant.now()
+    candidates: list[tuple[str, int, int | None, list[Path]]] = []
+    for session_uuid, category, session_id, _missing_indices in classify_sessions(
+        cursor, sources, now, stale_tail_seconds
+    ):
+        if category not in ("stale_tail", "ingestion_gap"):
+            continue
+        project_row = cursor.execute("SELECT project_id FROM sessions WHERE id = ?", (session_id,)).fetchone()
+        project_id = project_row[0] if project_row is not None else None
+        filepaths = sources[session_uuid]["existing"]
+        candidates.append((session_uuid, session_id, project_id, filepaths))
+
+    return candidates
+
+
+def reclassify_session(
+    conn: Connection,
+    session_uuid: str,
+    filepaths: list[Path],
+    *,
+    stale_tail_seconds: int = STALE_TAIL_SECONDS,
+) -> SessionCategory:
+    """Return the current classification ("ok", "pending_tail", "stale_tail",
+    "ingestion_gap", or "missing_source" for the rare no-session-row race) for
+    one session, given its known-existing filepaths.
+
+    Builds a one-entry sources dict and delegates to classify_sessions — the
+    ingestion_check_cache short-circuit inside it naturally misses here after a
+    real repair (the DB coverage fingerprint changed), so this reflects genuinely
+    current state rather than a stale cached verdict.
+    """
+    cursor = conn.cursor()
+    sources = {session_uuid: {"existing": filepaths, "missing": []}}
+    result = next(classify_sessions(cursor, sources, Instant.now(), stale_tail_seconds), None)
+    return result[1] if result else "missing_source"

@@ -7,24 +7,35 @@ v3 schema: messages stored once per session, branches as separate index.
 """
 
 import logging
+import os
 import resource
 import sqlite3
 import time
 from collections.abc import Callable
 from pathlib import Path
 
-from ccrecall.config import DEFAULT_DB_PATH, get_db_path, load_settings, remove_pid_file, setup_logging
+from ccrecall import ingestion_status
+from ccrecall.config import (
+    DEFAULT_DB_PATH,
+    get_db_path,
+    load_settings,
+    pid_file_path,
+    remove_pid_file,
+    setup_logging,
+    try_acquire_pid_file,
+)
 from ccrecall.config import PID_KEY_IMPORT as PID_KEY
 from ccrecall.db import DEFAULT_PROJECTS_DIR, get_connection
 from ccrecall.db_vec import TRIGGER_CHUNKS_VEC_AD, vec_available
 from ccrecall.file_hashing import transcript_file_hash
 from ccrecall.formatting import extract_project_name, normalize_project_key
+from ccrecall.hooks import import_repair
 from ccrecall.hooks.subprocess_utils import reclaim_memory, try_load_libc
 from ccrecall.import_log_ops import has_pending_tool_content
 from ccrecall.models import LOGGER_NAME
 from ccrecall.parsing import extract_session_uuid, sort_session_files
 from ccrecall.project_ops import key_could_match_excluded, upsert_project
-from ccrecall.session_ops import sync_session
+from ccrecall.session_ops import sync_session, sync_session_group
 from ccrecall.transcript_sources import discover_project_transcript_files, is_safe_project_dir
 
 BYTES_PER_MB = 1024 * 1024
@@ -127,6 +138,31 @@ def import_session(
     # Gather branch and message counts for the return value
     session_uuid = extract_session_uuid(filepath)
 
+    branches_imported, total_messages = _finalize_import(conn, session_uuid)
+    if branches_imported == -1:
+        return -1, 0
+
+    log.debug(
+        "imported %s (%.1f MB): %d branches, %d messages [RSS %.0f MB]",
+        filepath.name,
+        file_size / BYTES_PER_MB,
+        branches_imported,
+        total_messages,
+        _rss_mb(),
+    )
+    return branches_imported, total_messages
+
+
+def _finalize_import(conn: sqlite3.Connection, session_uuid: str) -> tuple[int, int]:
+    """Shared post-sync bookkeeping for import_session/import_session_group.
+
+    Tears down an all-filtered-out session (see the comment this replaces
+    below) and computes ``(branches_imported, total_message_count)``, or
+    ``(-1, 0)`` when there's nothing to report. Factored out so the two
+    call sites (single-file and multi-file force-reimport) can't drift on
+    this cleanup logic.
+    """
+    cursor = conn.cursor()
     cursor.execute("SELECT id FROM sessions WHERE uuid = ?", (session_uuid,))
     session_row = cursor.fetchone()
     if not session_row:
@@ -177,10 +213,60 @@ def import_session(
     if cursor.fetchone()[0] == 0:
         return -1, 0
 
+    return branches_imported, total_messages
+
+
+def import_session_group(
+    conn: sqlite3.Connection,
+    filepaths: list[Path],
+    project_id: int,
+) -> tuple[int, int]:
+    """Force-reimport a multi-file session transcript as one merged unit.
+
+    A parent session's transcript and its ``agent-*.jsonl`` subagent
+    transcripts share one session UUID but are separate files. Reimporting
+    them one at a time via ``import_session`` (as ``hooks/import_repair.py``
+    used to) computes each file's branch/message links from that file's own
+    entries in isolation, so a later file's ``branch_messages`` diff drops
+    links that only exist via an earlier sibling file. This delegates to
+    ``session_ops.sync_session_group`` instead, which parses and syncs every
+    file's entries in one pass.
+
+    Always force-processes (no skip-check — matching ``import_session``'s
+    ``force=True`` mode, which is the only mode this repair-only entry point
+    needs). Mirrors ``import_session``'s return shape and post-processing via
+    the shared ``_finalize_import`` helper. Used by
+    ``import_repair.repair_sessions()`` for multi-file candidates only —
+    single-file candidates still go through ``import_session`` unchanged.
+    """
+    ordered = sort_session_files(filepaths)
+
+    file_hashes: dict[Path, str] = {}
+    file_stats: dict[Path, tuple[int, float]] = {}
+    for target in ordered:
+        st = target.stat()
+        file_stats[target] = (st.st_size, st.st_mtime)
+        file_hashes[target] = get_file_hash(target)
+
+    sync_session_group(
+        conn,
+        ordered,
+        ordered[0].parent,
+        file_hashes=file_hashes,
+        file_stats=file_stats,
+        _project_id=project_id,
+        embed=False,
+    )
+
+    session_uuid = extract_session_uuid(ordered[0])
+    branches_imported, total_messages = _finalize_import(conn, session_uuid)
+    if branches_imported == -1:
+        return -1, 0
+
     log.debug(
-        "imported %s (%.1f MB): %d branches, %d messages [RSS %.0f MB]",
-        filepath.name,
-        file_size / BYTES_PER_MB,
+        "imported %s (group of %d files): %d branches, %d messages [RSS %.0f MB]",
+        ordered[0].name,
+        len(ordered),
         branches_imported,
         total_messages,
         _rss_mb(),
@@ -314,10 +400,31 @@ def run(
     projects_dir: Path = DEFAULT_PROJECTS_DIR,
     project: str | None = None,
     verbose: bool = False,
+    repair_gaps: bool = False,
 ) -> None:
     """Import Claude Code conversations into the memory DB."""
+    repair_failures = 0
+    # Default to "not yet acquired" whenever repair_gaps=True: if _run() raises
+    # before it reaches (or returns from) its own PID_KEY acquisition attempt
+    # (e.g. load_settings()/setup_logging() blow up first), this invocation
+    # never touched the marker, so the finally block below must not delete it —
+    # deleting it would un-guard a genuinely live holder (e.g. the
+    # SessionStart-spawned background import). When repair_gaps=False, _run()
+    # never touches PID_KEY at all, so the default stays False (delete
+    # unconditionally) — unchanged from today's contract with _spawn_background.
+    #
+    # This default also applies (deliberately left unrefined) if _run() DOES
+    # acquire the lock and then raises later — this process's own marker is
+    # then skipped here too, not just another holder's. That's an acceptable
+    # gap, not a live leak: try_acquire_pid_file's liveness probe reaps a dead
+    # PID's stale marker on the next acquisition attempt, so a future
+    # --repair-gaps invocation self-heals past it rather than skipping
+    # forever.
+    repair_lock_denied = repair_gaps
     try:
-        _run(db=db, projects_dir=projects_dir, project=project, verbose=verbose)
+        repair_failures, repair_lock_denied = _run(
+            db=db, projects_dir=projects_dir, project=project, verbose=verbose, repair_gaps=repair_gaps
+        )
     except Exception:
         # Top-level catch (#170): this process is detached and spawned with
         # stdout/stderr redirected to DEVNULL (see memory_setup._spawn_background),
@@ -331,8 +438,24 @@ def run(
         log.exception("Import process failed with an uncaught exception")
         raise
     finally:
-        # Delete PID file so _spawn_background can spawn again next session
-        remove_pid_file(PID_KEY)
+        # Delete PID file so _spawn_background can spawn again next session,
+        # but only if this process owns it. A concurrent holder (e.g. a
+        # --repair-gaps invocation, or the SessionStart auto-import) wrote
+        # its own PID; deleting their marker would let a third process start
+        # unguarded. When repair_lock_denied is True we already know we don't
+        # own it; otherwise, verify by comparing the file's PID to ours.
+        if not repair_lock_denied:
+            marker = pid_file_path(PID_KEY)
+            try:
+                stored_pid = int(marker.read_text().strip())
+            except (OSError, ValueError):
+                # Missing or corrupt marker — nothing to preserve.
+                remove_pid_file(PID_KEY)
+            else:
+                if stored_pid == os.getpid():
+                    remove_pid_file(PID_KEY)
+    if repair_failures:
+        raise SystemExit(1)
 
 
 def _run(
@@ -341,9 +464,24 @@ def _run(
     projects_dir: Path,
     project: str | None,
     verbose: bool,
-) -> None:
+    repair_gaps: bool,
+) -> tuple[int, bool]:
     settings = load_settings()
     logger = setup_logging(settings, process_name="import", verbose=verbose)
+
+    # When repair_gaps is requested, the PID guard is acquired here — before
+    # the per-project/DB-wide import loop below even starts — and held for
+    # the entire invocation (released by run()'s existing finally). This
+    # covers the whole run, not just the repair step: two concurrent
+    # --repair-gaps invocations (or one racing the SessionStart background
+    # auto-import) must not both run the ordinary import loop unguarded and
+    # only collide later at the repair step, which is what happened when the
+    # guard wrapped only that step. repair_gaps=False keeps today's behavior
+    # exactly — no guard at all.
+    if repair_gaps and not try_acquire_pid_file(PID_KEY):
+        print("ccrecall import --repair-gaps: another import is already running — skipping this run")
+        logger.info("Import + --repair-gaps skipped — PID_KEY_IMPORT already held by a live process")
+        return 0, True
 
     if db != DEFAULT_DB_PATH:
         settings["db_path"] = str(db)
@@ -376,17 +514,15 @@ def _run(
             project_dir = projects_dir / project
             if not project_dir.exists():
                 print(f"Project not found: {project_dir}")
-                return
-            if not is_safe_project_dir(project_dir, projects_dir):
+            elif not is_safe_project_dir(project_dir, projects_dir):
                 print(f"Unsafe project path: {project_dir}")
-                return
-
-            sessions, messages, skipped = import_project(conn, project_dir, exclude_projects, _reclaim)
-            conn.commit()
-            total_sessions += sessions
-            total_messages += messages
-            total_skipped += skipped
-            print(f"Imported {project}: {sessions} branches, {messages} messages")
+            else:
+                sessions, messages, skipped = import_project(conn, project_dir, exclude_projects, _reclaim)
+                conn.commit()
+                total_sessions += sessions
+                total_messages += messages
+                total_skipped += skipped
+                print(f"Imported {project}: {sessions} branches, {messages} messages")
         else:
             t_import_total = 0.0
             t_commit_total = 0.0
@@ -420,6 +556,24 @@ def _run(
                 t_gc_total,
             )
 
+        repair_failures = 0
+        if repair_gaps:
+            # The PID guard was already acquired (or this function returned
+            # early) at the top of _run() — no re-check needed here.
+            candidates = ingestion_status.find_repairable_sessions(conn)
+            repaired_sessions, repaired_messages, repair_failures, repair_unrepairable = import_repair.repair_sessions(
+                conn, candidates, on_reclaim=_reclaim
+            )
+            summary = f"Repaired {repaired_sessions} session(s), recovered {repaired_messages} message(s)"
+            if repair_unrepairable:
+                summary += (
+                    f", {repair_unrepairable} could not be repaired "
+                    "(source transcript is missing the required message(s))"
+                )
+            if repair_failures:
+                summary += f", {repair_failures} failed — see ccrecall-import.log"
+            print(summary)
+
     t_end = time.monotonic()
     logger.debug("total wall time: %.2fs", t_end - t_start)
     logger.info("Import complete: %s branches, %s messages", total_sessions, total_messages)
@@ -428,3 +582,5 @@ def _run(
     if db_path.exists():
         db_size = db_path.stat().st_size
         print(f"Database size: {db_size / BYTES_PER_MB:.2f} MB")
+
+    return repair_failures, False
