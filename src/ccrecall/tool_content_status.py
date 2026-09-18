@@ -43,6 +43,10 @@ def classify_pending_sessions(
     remaining existing path empty/invalid) land in both buckets, driving
     `pending_backfillable_sessions` negative (#207 review).
 
+    Sessions with no ``import_log`` entry at all (synced via the hook
+    rather than the import CLI, with the JSONL since deleted) are also
+    ``missing`` — they have no source file to backfill from.
+
     A session that clears the `missing` check is then checked against
     ``backfill_session``'s no-op conditions (zero parsed entries, or
     ``find_all_branches`` finds none) — those sessions never leave the
@@ -83,6 +87,8 @@ def classify_pending_sessions(
                 continue
 
             if not paths["existing"]:
+                # No import_log entry at all (paths["missing"] is also empty here)
+                missing += 1
                 continue
             all_entries: list[dict] = []
             for path in paths["existing"]:
