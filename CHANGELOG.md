@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.25.1](https://github.com/NodeJSmith/claude-code-recall/compare/v0.25.0...v0.25.1) (2026-09-18)
+
+
+### Bug Fixes
+
+* count sessions with no import_log entry as missing in status ([#214](https://github.com/NodeJSmith/claude-code-recall/issues/214)) ([3d22d2e](https://github.com/NodeJSmith/claude-code-recall/commit/3d22d2e96911842c3ecadbc39aeac01b49b591d7))
+
 ## [0.25.0](https://github.com/NodeJSmith/claude-code-recall/compare/v0.24.2...v0.25.0) (2026-09-17)
 
 
