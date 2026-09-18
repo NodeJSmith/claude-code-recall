@@ -264,6 +264,24 @@ def test_pending_missing_jsonl_requires_all_pending_rows_recoverable(memory_db, 
     assert classify_pending_sessions(memory_db.cursor(), None)["missing"] == 1
 
 
+def test_session_with_no_import_log_entry_counts_as_missing(memory_db):
+    """A session synced via the hook (not the import CLI) has no import_log
+    entry. If its JSONL has since been deleted, classify_pending_sessions must
+    count it as ``missing`` — not silently skip it, which would inflate
+    ``pending_backfillable_sessions`` in the status report."""
+    memory_db.execute("INSERT INTO sessions (uuid) VALUES ('sess-no-log')")
+    session_id = memory_db.execute("SELECT last_insert_rowid()").fetchone()[0]
+    memory_db.execute("INSERT INTO branches (session_id, leaf_uuid, is_active) VALUES (?, 'u1', 1)", (session_id,))
+    memory_db.execute(
+        "INSERT INTO messages (session_id, uuid, role, content, tool_content) VALUES (?, 'u1', 'user', 'x', NULL)",
+        (session_id,),
+    )
+    memory_db.commit()
+
+    result = classify_pending_sessions(memory_db.cursor(), None)
+    assert result == {"missing": 1, "no_usable_branch": 0}
+
+
 def test_pending_no_usable_branch_counts_surviving_jsonl_that_parses_to_nothing(memory_db, tmp_path):
     """A session whose JSONL survives on disk but parses to no uuid-bearing
     entries (or no branch) is a real backfill no-op — the `missing` bucket
