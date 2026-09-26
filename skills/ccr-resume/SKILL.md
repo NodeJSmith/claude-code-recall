@@ -28,7 +28,7 @@ To target a session other than the auto-picked prior one (rare), run `ccrecall t
 
 ## Phase 1: Recover the transcript tail (do this first, always)
 
-Run the lever — it auto-picks the prior session, locates its JSONL, and prints the tail, the last typed instruction, the last assistant message, and any **unanswered** `AskUserQuestion`:
+Run the lever — it auto-picks the prior session, locates its JSONL, and prints the tail, the last typed instruction, the last assistant message, any **unanswered** `AskUserQuestion`, and the skills the session loaded:
 
 ```bash
 ccrecall tail
@@ -49,6 +49,7 @@ Now — and only now — check the on-disk reality and line it up with what the 
 
 - `git status` / `git -C <root> log --oneline -5` — what actually landed vs. what the tail says was in flight.
 - Task/spec files, background-job notifications in the tail (a job may have finished after the session ended).
+- The `SKILLS INVOKED` block, most recent first. A workflow skill near the top (`/mine-orchestrate`, `/mine-define`, a review loop) usually means the prior session was working inside that skill's phases. The transcript records that a skill *started*, never that it finished, so check the tail and disk state to judge whether it looks complete. Say "the prior session was in `<skill>` as of `<time>`", not "`<skill>` is still running."
 
 Name any mismatch between "what the transcript wanted" and "what the disk shows." Do not paper over it.
 
@@ -65,7 +66,9 @@ The prior session may have ended on an **open decision** it was waiting on the u
 
 Then **stop** — do not pick an option, and do not act on the work the decision gates.
 
-**If there is no open decision:** give a 3–5 line orientation — where things stand, the last instruction, what's reconciled vs. mismatched.
+**If there is no open decision:** give a 3–5 line orientation — where things stand, the last instruction, what's reconciled vs. mismatched, and which workflow skill (if any) the prior session was in.
+
+**Continuing inside a skill means re-invoking it.** This session starts with none of the prior session's skill bodies loaded. If the way forward is to continue a workflow skill from `SKILLS INVOKED`, invoke that skill (with the args shown, adjusted as needed) so its phases and gates are back in context. Do not carry on from memory of what the skill probably says. Don't pre-load skills just because they're in the list either. The list tells you what the prior session was doing; it doesn't tell you what this one needs.
 
 **Folding in the $ARGUMENTS directive (if given):** it is the user's answer to "how do we proceed" — but it does *not* override an open decision the prior session was waiting on *from them*. So:
 - Open decision present, and the directive plainly answers it → confirm that reading with the user, then proceed. Otherwise surface the decision first; the directive resolves what comes after.

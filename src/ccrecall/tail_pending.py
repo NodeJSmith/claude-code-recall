@@ -11,6 +11,8 @@ Self-contained by design: imports only from ``ccrecall.content`` and stdlib, so
 ``session_tail.py`` can import from here without creating a cycle.
 """
 
+from collections.abc import Iterator
+
 from ccrecall.content import (
     extract_text_content,
     is_task_notification,
@@ -22,10 +24,13 @@ from ccrecall.content import (
 # wrappers, task-notifications, and <local-command-caveat> blocks are already
 # handled by extract_text_content / is_task_notification / the "<local-command-"
 # prefix below; these are the remainder.
+# Opens the user entry that carries a loaded skill's body. Noise for
+# typed_instruction; the load signal for tail_skills.py.
+SKILL_BODY_PREFIX = "base directory for this skill:"
 _NOISE_PREFIXES = (
     "<system-reminder>",
     "<local-command-",
-    "base directory for this skill:",
+    SKILL_BODY_PREFIX,
 )
 _TEXT_CLIP = 600
 
@@ -43,6 +48,18 @@ def clip(text: str, limit: int = _TEXT_CLIP) -> str:
 
 def _is_main_chain(entry: dict) -> bool:
     return not entry.get("isSidechain", False)
+
+
+def tool_use_blocks(entry: dict, name: str) -> Iterator[dict]:
+    """The ``tool_use`` blocks calling tool ``name`` in an assistant entry."""
+    if entry.get("type") != "assistant":
+        return
+    content = (entry.get("message") or {}).get("content")
+    if not isinstance(content, list):
+        return
+    for block in content:
+        if isinstance(block, dict) and block.get("type") == "tool_use" and block.get("name") == name:
+            yield block
 
 
 def typed_instruction(entry: dict) -> str | None:
@@ -125,15 +142,11 @@ def find_pending_question(entries: list[dict]) -> dict | None:
     last = None
     last_entry_idx = -1
     for i, entry in enumerate(entries):
-        if not _is_main_chain(entry) or entry.get("type") != "assistant":
+        if not _is_main_chain(entry):
             continue
-        content = (entry.get("message") or {}).get("content")
-        if not isinstance(content, list):
-            continue
-        for block in content:
-            if isinstance(block, dict) and block.get("type") == "tool_use" and block.get("name") == "AskUserQuestion":
-                last = (block.get("id"), block.get("input", {}))
-                last_entry_idx = i
+        for block in tool_use_blocks(entry, "AskUserQuestion"):
+            last = (block.get("id"), block.get("input", {}))
+            last_entry_idx = i
 
     if not last:
         return None
