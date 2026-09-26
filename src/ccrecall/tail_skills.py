@@ -18,10 +18,9 @@ import re
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import PurePosixPath
-from typing import NamedTuple
 
 from ccrecall.content import extract_text_content
-from ccrecall.tail_pending import SKILL_BODY_PREFIX, _is_main_chain, clip
+from ccrecall.tail_pending import SKILL_BODY_PREFIX, _is_main_chain, clip, tool_use_blocks
 
 # Slash-command wrapper tags on the user entry that precedes a typed skill's body.
 _COMMAND_NAME_RE = re.compile(r"<command-name>/?(.*?)</command-name>", re.DOTALL)
@@ -37,7 +36,8 @@ class InvokedSkill:
     last_args: str
 
 
-class _SkillLoad(NamedTuple):
+@dataclass(frozen=True)
+class _SkillLoad:
     name: str
     timestamp: str | None
     args: str
@@ -85,14 +85,7 @@ def _skill_tool_inputs(entries: list[dict]) -> dict[str, dict]:
     """Map each ``Skill`` tool_use id to its input payload."""
     inputs: dict[str, dict] = {}
     for entry in entries:
-        if entry.get("type") != "assistant":
-            continue
-        content = (entry.get("message") or {}).get("content")
-        if not isinstance(content, list):
-            continue
-        for block in content:
-            if not isinstance(block, dict) or block.get("type") != "tool_use" or block.get("name") != "Skill":
-                continue
+        for block in tool_use_blocks(entry, "Skill"):
             tool_id = block.get("id")
             inp = block.get("input")
             if isinstance(tool_id, str) and isinstance(inp, dict):
