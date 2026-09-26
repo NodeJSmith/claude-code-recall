@@ -123,6 +123,19 @@ class TestFindInvokedSkills:
             ("mine-audit", ""),
         ]
 
+    def test_unhashable_source_tool_use_id_does_not_crash(self):
+        call = skill_tool_call("toolu_5", {"skill": "mine-audit"})
+        result = _user(
+            [{"type": "tool_result", "tool_use_id": "toolu_5", "content": "Launching skill"}],
+            parent=call["uuid"],
+        )
+        load = skill_load("/s/mine-audit", parent=result["uuid"])
+        load["sourceToolUseID"] = ["toolu_5"]  # undocumented field, wrong type
+        entries = [call, result, load]
+        [skill] = find_invoked_skills(entries)
+        assert skill.name == "mine-audit"  # falls back to directory name, not the tool input
+        assert skill.last_args == ""
+
     def test_prefix_match_ignores_case_and_leading_whitespace(self):
         # Same normalization typed_instruction uses to filter skill bodies as noise.
         entry = _user([{"type": "text", "text": "\n  base DIRECTORY for this skill: /s/mine-why\n\nbody"}])

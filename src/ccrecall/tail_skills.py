@@ -101,7 +101,8 @@ def _invocation(
     directory's name with no args."""
     fallback_name = PurePosixPath(skill_dir).name
 
-    inp = skill_inputs.get(entry.get("sourceToolUseID") or "")
+    source_tool_use_id = entry.get("sourceToolUseID")
+    inp = skill_inputs.get(source_tool_use_id) if isinstance(source_tool_use_id, str) else None
     if inp is not None:
         return _stripped_or_empty(inp.get("skill")) or fallback_name, _stripped_or_empty(inp.get("args"))
 
