@@ -2,7 +2,8 @@
 
 Powers the ``ccrecall tail`` CLI and the SessionStart "unresolved decision"
 warning (``context_rendering.py``). Path resolution lives in
-``tail_resolve.py``; pending-question detection in ``tail_pending.py``. This
+``tail_resolve.py``; pending-question detection in ``tail_pending.py``;
+invoked-skill detection in ``tail_skills.py``. This
 module owns tail rendering and the CLI orchestrator.
 """
 
@@ -36,6 +37,7 @@ from ccrecall.tail_resolve import _resolve_across_dirs as _resolve_across_dirs
 from ccrecall.tail_resolve import list_transcripts, resolve_target_global
 from ccrecall.tail_resolve import resolve_target as resolve_target
 from ccrecall.tail_resolve import transcript_dir as transcript_dir
+from ccrecall.tail_skills import find_invoked_skills, format_skills_block
 
 # Lines of transcript tail the SessionStart hook parses — enough to catch the
 # trailing AskUserQuestion + its result without reading a multi-MB file in full.
@@ -186,6 +188,11 @@ def emit(path: Path, k: int, full: bool = False) -> int:
     pending = find_pending_question(entries)
     if pending:
         print(format_pending_block(pending))
+        print()
+
+    skills = find_invoked_skills(entries)
+    if skills:
+        print(format_skills_block(skills))
         print()
 
     if full:

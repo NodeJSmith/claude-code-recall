@@ -22,10 +22,13 @@ from ccrecall.content import (
 # wrappers, task-notifications, and <local-command-caveat> blocks are already
 # handled by extract_text_content / is_task_notification / the "<local-command-"
 # prefix below; these are the remainder.
+# Opens the user entry that carries a loaded skill's body. Noise for
+# typed_instruction; the load signal for tail_skills.py.
+SKILL_BODY_PREFIX = "base directory for this skill:"
 _NOISE_PREFIXES = (
     "<system-reminder>",
     "<local-command-",
-    "base directory for this skill:",
+    SKILL_BODY_PREFIX,
 )
 _TEXT_CLIP = 600
 
