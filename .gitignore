@@ -20,5 +20,8 @@ htmlcov/
 # Local code-index artifacts
 .codegraph/
 
+# Per-machine reviewer-agent memory (.claude/ itself holds tracked rules/commands)
+.claude/agent-memory/
+
 # OS / editor
 .DS_Store
