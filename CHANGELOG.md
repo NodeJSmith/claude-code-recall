@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.26.0](https://github.com/NodeJSmith/claude-code-recall/compare/v0.25.1...v0.26.0) (2026-09-26)
+
+
+### Features
+
+* show invoked skills in ccrecall tail ([#217](https://github.com/NodeJSmith/claude-code-recall/issues/217)) ([99d2b64](https://github.com/NodeJSmith/claude-code-recall/commit/99d2b64ed0ae53ba784ce2825117bfc0b4d74dc4))
+
 ## [0.25.1](https://github.com/NodeJSmith/claude-code-recall/compare/v0.25.0...v0.25.1) (2026-09-18)
 
 
