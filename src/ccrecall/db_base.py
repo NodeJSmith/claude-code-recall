@@ -20,7 +20,7 @@ log = logging.getLogger(LOGGER_NAME)
 
 # Current schema version. Bump when adding a migration and wire the new DDL
 # delta into _apply_migrations (see _migrate_to_v1 for the version-1 shape).
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 V7_BRANCH_COLUMNS = {
     "summary_enrichment_json": "TEXT",
@@ -270,6 +270,33 @@ def _migrate_to_v8(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_chunks_cap_tokens ON chunks(cap_tokens) WHERE cap_tokens IS NOT NULL")
 
 
+def _migrate_to_v9(conn: sqlite3.Connection) -> None:
+    """Version-9 migration: rebuild projects without UNIQUE on path (#221).
+
+    Identity is the key; path is metadata that moves with the repo, so a
+    uniqueness constraint on it turns a moved repo into an IntegrityError.
+    Builds projects_new and renames it into place, never renaming projects
+    away: since SQLite 3.26 a rename rewrites the sessions FK to follow the
+    renamed table. Every id is copied verbatim so sessions.project_id stays valid.
+    """
+    conn.execute("""
+        CREATE TABLE projects_new (
+          id INTEGER PRIMARY KEY,
+          path TEXT NOT NULL,
+          key TEXT UNIQUE NOT NULL,
+          name TEXT,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.execute("""
+        INSERT INTO projects_new (id, path, key, name, created_at)
+        SELECT id, path, key, name, created_at FROM projects
+    """)
+    conn.execute("DROP TABLE projects")
+    conn.execute("ALTER TABLE projects_new RENAME TO projects")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_projects_key ON projects(key)")
+
+
 def _warn_if_schema_ahead(current: int) -> None:
     """Log a WARNING if the database's stored version exceeds this code's SCHEMA_VERSION.
 
@@ -282,7 +309,7 @@ def _warn_if_schema_ahead(current: int) -> None:
         return
     log.warning(
         "database schema is ahead of this code's SCHEMA_VERSION — skipping the "
-        "version-gated reshape migrations (v1/v2) rather than rebuild a table "
+        "version-gated reshape migrations (v1/v2/v9) rather than rebuild a table "
         "this code doesn't know the shape of; additive column/table checks "
         "(v3-v8) still run — they're guarded (IF NOT EXISTS / duplicate-column "
         "handling) so they're safe regardless of this database's actual shape, "
@@ -334,6 +361,8 @@ def _apply_migrations(
                     migrate_to_v1(conn)
                 if current < 2:
                     migrate_to_v2(conn)
+                if current < 9:
+                    _migrate_to_v9(conn)
                 conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             conn.execute("COMMIT")
             if current < SCHEMA_VERSION:

@@ -18,7 +18,7 @@ SCHEMA_CORE = """
 -- Projects table (derived from directory structure)
 CREATE TABLE IF NOT EXISTS projects (
   id INTEGER PRIMARY KEY,
-  path TEXT UNIQUE NOT NULL,
+  path TEXT NOT NULL,
   key TEXT UNIQUE NOT NULL,
   name TEXT,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP

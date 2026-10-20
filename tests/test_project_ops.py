@@ -1,9 +1,12 @@
 """Tests for the shared project_ops module."""
 
+import json
+import os
 import shutil
 import tempfile
 from pathlib import Path
 
+import pytest
 from conftest import FIXTURE_DIR
 
 from ccrecall.project_ops import key_could_match_excluded, upsert_project
@@ -114,8 +117,8 @@ class TestUpsertProjectProbesJsonl:
         )
         assert row[1] == "node-banana"
 
-    def test_upsert_project_probes_safe_nested_subagent_jsonl(self, memory_db):
-        """Subagent-only projects should probe the first safe discovered transcript."""
+    def test_upsert_project_does_not_probe_subagent_jsonl(self, memory_db):
+        """Subagent transcripts are never a path source; a subagent-only project falls back to lossy."""
 
         with tempfile.TemporaryDirectory() as tmpdir:
             project_dir = Path(tmpdir) / "-home-user-node-banana"
@@ -128,14 +131,9 @@ class TestUpsertProjectProbesJsonl:
             project_id, used_lossy = upsert_project(cursor, "-home-user-node-banana", project_dir=project_dir)
             memory_db.commit()
 
-        assert project_id is not None
-        assert not used_lossy
-
-        cursor.execute("SELECT path, name FROM projects WHERE id = ?", (project_id,))
-        row = cursor.fetchone()
-        assert row is not None
-        assert row[0] == "/Users/samarthgupta/repos/forks/node-banana"
-        assert row[1] == "node-banana"
+        assert used_lossy
+        cursor.execute("SELECT path FROM projects WHERE id = ?", (project_id,))
+        assert cursor.fetchone()[0] == "/home/user/node/banana"
 
     def test_upsert_project_falls_back_to_key_when_no_jsonl(self, memory_db):
         """When project_dir has no JSONL, fall back to lossy hyphen reconstruction."""
@@ -272,3 +270,120 @@ class TestLossyFallbackExclusionChain:
         # The suffix check would match (false positive), but it must not fire
         # because used_lossy_fallback is False
         assert key_could_match_excluded("-home-user-repos-team-app", ["app"])
+
+
+def _write_transcript(path: Path, cwd: str | None, mtime: float) -> None:
+    """Write a minimal one-entry transcript (with cwd when given) and set its mtime."""
+    entry = {"uuid": f"u-{path.stem}", "type": "user", "message": {"role": "user", "content": "hi"}}
+    if cwd is not None:
+        entry["cwd"] = cwd
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(entry) + "\n", encoding="utf-8")
+    os.utime(path, (mtime, mtime))
+
+
+def _probe(memory_db, project_dir: Path) -> tuple[str, bool]:
+    cursor = memory_db.cursor()
+    project_id, used_lossy = upsert_project(cursor, project_dir.name, project_dir=project_dir)
+    cursor.execute("SELECT path FROM projects WHERE id = ?", (project_id,))
+    return cursor.fetchone()[0], used_lossy
+
+
+class TestProbeSourceRule:
+    """Probe source rule (#221): the first cwd of the newest top-level session transcript."""
+
+    def test_newest_top_level_transcript_wins(self, memory_db, tmp_path):
+        project_dir = tmp_path / "-home-u-repo"
+        _write_transcript(project_dir / "old.jsonl", "/home/u/old-location/repo", 1000)
+        _write_transcript(project_dir / "new.jsonl", "/home/u/new-location/repo", 2000)
+
+        assert _probe(memory_db, project_dir) == ("/home/u/new-location/repo", False)
+
+    def test_filename_breaks_mtime_ties(self, memory_db, tmp_path):
+        project_dir = tmp_path / "-home-u-repo"
+        _write_transcript(project_dir / "aaa.jsonl", "/home/u/a/repo", 1000)
+        _write_transcript(project_dir / "zzz.jsonl", "/home/u/z/repo", 1000)
+
+        assert _probe(memory_db, project_dir) == ("/home/u/z/repo", False)
+
+    def test_newer_subagent_transcripts_are_ignored(self, memory_db, tmp_path):
+        project_dir = tmp_path / "-home-u-repo"
+        _write_transcript(project_dir / "sess.jsonl", "/home/u/repo", 1000)
+        _write_transcript(project_dir / "sess" / "subagents" / "agent-1.jsonl", "/home/u/repo/sub", 3000)
+        _write_transcript(project_dir / "subagents" / "agent-2.jsonl", "/home/u/repo/sub", 3000)
+        _write_transcript(project_dir / "agent-3.jsonl", "/home/u/repo/sub", 3000)
+
+        assert _probe(memory_db, project_dir) == ("/home/u/repo", False)
+
+    def test_walks_past_newest_file_without_cwd(self, memory_db, tmp_path):
+        project_dir = tmp_path / "-home-u-repo"
+        _write_transcript(project_dir / "has-cwd.jsonl", "/home/u/repo", 1000)
+        _write_transcript(project_dir / "no-cwd.jsonl", None, 2000)
+
+        assert _probe(memory_db, project_dir) == ("/home/u/repo", False)
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file permissions")
+    def test_unreadable_file_is_skipped_for_next_older(self, memory_db, tmp_path):
+        project_dir = tmp_path / "-home-u-repo"
+        _write_transcript(project_dir / "readable.jsonl", "/home/u/repo", 1000)
+        unreadable = project_dir / "unreadable.jsonl"
+        _write_transcript(unreadable, "/home/u/elsewhere/repo", 2000)
+        unreadable.chmod(0)
+        try:
+            assert _probe(memory_db, project_dir) == ("/home/u/repo", False)
+        finally:
+            unreadable.chmod(0o644)
+
+    def test_no_cwd_anywhere_falls_back_to_lossy(self, memory_db, tmp_path):
+        project_dir = tmp_path / "-home-u-repo"
+        _write_transcript(project_dir / "a.jsonl", None, 1000)
+
+        assert _probe(memory_db, project_dir) == ("/home/u/repo", True)
+
+
+class TestPathWriteRules:
+    """Identity is the key; an accurate path replaces, a lossy one only inserts (#221)."""
+
+    def test_accurate_path_replaces_stored_accurate_path(self, memory_db):
+        cursor = memory_db.cursor()
+        project_id, _ = upsert_project(cursor, "-home-u-repo", cwd="/home/u/old/repo-renamed")
+        upsert_project(cursor, "-home-u-repo", cwd="/home/u/new/repo")
+
+        cursor.execute("SELECT path, name FROM projects WHERE id = ?", (project_id,))
+        assert cursor.fetchone() == ("/home/u/new/repo", "repo")
+
+    def test_lossy_path_never_overwrites_existing_row(self, memory_db, tmp_path):
+        cursor = memory_db.cursor()
+        project_id, _ = upsert_project(cursor, "-home-u-otf-api", cwd="/home/u/otf-api")
+        empty_dir = tmp_path / "-home-u-otf-api"
+        empty_dir.mkdir()
+
+        same_id, used_lossy = upsert_project(cursor, "-home-u-otf-api", project_dir=empty_dir)
+
+        assert same_id == project_id
+        assert used_lossy, "the lossy flag still reports how this call derived its path"
+        cursor.execute("SELECT path, name FROM projects WHERE id = ?", (project_id,))
+        assert cursor.fetchone() == ("/home/u/otf-api", "otf-api")
+
+    def test_moved_repo_path_held_by_another_row_does_not_raise(self, memory_db):
+        """The #221 crash: a moved repo's new path already belongs to an orphan row."""
+        cursor = memory_db.cursor()
+        orphan_id, _ = upsert_project(cursor, "-home-u-new-repo", cwd="/home/u/new/repo")
+        moved_id, _ = upsert_project(cursor, "-home-u-old-repo", cwd="/home/u/old/repo")
+
+        upsert_project(cursor, "-home-u-old-repo", cwd="/home/u/new/repo")
+
+        cursor.execute("SELECT id, key, path FROM projects ORDER BY id")
+        assert cursor.fetchall() == [
+            (orphan_id, "-home-u-new-repo", "/home/u/new/repo"),
+            (moved_id, "-home-u-old-repo", "/home/u/new/repo"),
+        ]
+
+    def test_insert_sharing_a_path_never_rekeys_the_existing_row(self, memory_db):
+        cursor = memory_db.cursor()
+        first_id, _ = upsert_project(cursor, "-home-u-personal-telegram-bot", cwd="/home/u/personal/telegram/bot")
+        second_id, _ = upsert_project(cursor, "-home-u-personal-telegram-bot-x", cwd="/home/u/personal/telegram/bot")
+
+        assert second_id != first_id
+        cursor.execute("SELECT key FROM projects WHERE id = ?", (first_id,))
+        assert cursor.fetchone()[0] == "-home-u-personal-telegram-bot"

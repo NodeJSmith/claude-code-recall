@@ -188,8 +188,15 @@ The streaming and per-file failure rules come from the sketch-time challenge, Fi
 
 ## Build
 
-- [ ] Implementation and tests committed
-- [ ] Docs
+- [x] Implementation and tests committed
+- [x] Docs — CLAUDE.md invariant 4 gains the v9 entry
 - [ ] Ship-time challenge
 
 **Calls made during the build:**
+- The probe also skips top-level `agent-*.jsonl` and dot-prefixed files: `agent-*` at the top level is the legacy subagent transcript layout, which D4 excludes for the same reason as `subagents/`. The import loop already skips dot-prefixed files.
+- `_migrate_to_v9` isn't injectable through `_apply_migrations` the way v1/v2 are: no test needs to swap it, and the partial-failure test already pins the shared transaction.
+- Containment lives in a new `import_project_contained` (import plus commit) shared by both `_run` branches. Because the commit moved inside it, the loop's debug timing line reports `import+commit` together rather than splitting them.
+- `_run` returns repair failures plus project failures as one count, and `run` exits 1 when that count is non-zero. Only the exit code reads that count.
+- A probe candidate that vanishes between discovery and its `stat` is dropped with a WARNING, the same as a file that fails to read. It doesn't fail the project.
+- `sqlite3.DatabaseError` (e.g. SQLITE_CORRUPT) other than `OperationalError` is contained per project, not aborted, to match `import_project`'s existing per-file split. The run still exits non-zero.
+- Verified on a copy of the real DB: v8→v9 kept all 1382 project rows (identical) and 6147 sessions, the FK still targets `projects`, and there are 0 FK violations. A full `ccrecall import` against the copy exited 0, and otf-api and personal-apps resolved to their real paths.
