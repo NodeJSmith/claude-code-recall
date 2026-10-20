@@ -25,7 +25,7 @@ from conftest import (
 from ccrecall import ingestion_status
 from ccrecall.config import PID_KEY_IMPORT, pid_file_path, remove_pid_file, try_acquire_pid_file
 from ccrecall.embeddings import EMBEDDING_DIM
-from ccrecall.hooks.import_conversations import _run, import_project, import_session, run
+from ccrecall.hooks.import_conversations import _run, import_project, import_project_contained, import_session, run
 from ccrecall.import_log_ops import import_log_source_index
 
 _STALE_IMPORT_LOG_SQL = (
@@ -860,6 +860,122 @@ class TestImportPoisonContainment:
             "rollback after the second import_project call must undo both new files' writes — "
             "a partial commit here means the per-project transaction boundary leaked"
         )
+
+
+class TestImportProjectContainment:
+    """Per-project containment (#221): one project's failure must not block the projects after it."""
+
+    @staticmethod
+    def _make_projects(tmp_path: Path, *names: str) -> Path:
+        projects_dir = tmp_path / "projects"
+        for name in names:
+            (projects_dir / name).mkdir(parents=True)
+            shutil.copy(FIXTURE_DIR / "linear_3_exchange.jsonl", projects_dir / name / f"{name}-sess.jsonl")
+        return projects_dir
+
+    @staticmethod
+    def _patch_run_env(monkeypatch, memory_db, db_path: Path) -> None:
+        @contextmanager
+        def fake_connection(*_args, **_kwargs):
+            yield memory_db
+
+        monkeypatch.setattr("ccrecall.hooks.import_conversations.load_settings", lambda: {"exclude_projects": []})
+        monkeypatch.setattr(
+            "ccrecall.hooks.import_conversations.setup_logging", lambda *_args, **_kwargs: logging.getLogger("test")
+        )
+        monkeypatch.setattr("ccrecall.hooks.import_conversations.get_connection", fake_connection)
+        monkeypatch.setattr("ccrecall.hooks.import_conversations.get_db_path", lambda _settings: db_path)
+
+    @staticmethod
+    def _fail_after_writing(failing_name: str, exc: Exception):
+        """Wrap import_project so the named project writes a row, then raises.
+
+        Opens BEGIN itself the way import_project does, so the partial row sits in
+        the project's transaction exactly as a real mid-import failure would.
+        """
+
+        def wrapper(conn, project_dir, exclude_projects=None, on_reclaim=None):
+            if project_dir.name != failing_name:
+                return import_project(conn, project_dir, exclude_projects)
+            if not conn.in_transaction:
+                conn.execute("BEGIN")
+            conn.execute("INSERT INTO projects (path, key, name) VALUES ('/partial', '-partial', 'partial')")
+            raise exc
+
+        return wrapper
+
+    def test_failed_project_is_rolled_back_and_later_projects_import(self, memory_db, tmp_path, monkeypatch, capsys):
+        projects_dir = self._make_projects(tmp_path, "-aaa-bad", "-zzz-good")
+        db_path = tmp_path / "memory.db"
+        db_path.write_text("", encoding="utf-8")
+        self._patch_run_env(monkeypatch, memory_db, db_path)
+        monkeypatch.setattr(
+            "ccrecall.hooks.import_conversations.import_project",
+            self._fail_after_writing("-aaa-bad", RuntimeError("simulated project failure")),
+        )
+
+        failures, _ = _run(db=db_path, projects_dir=projects_dir, project=None, verbose=False, repair_gaps=False)
+
+        assert failures == 1
+        out = capsys.readouterr().out
+        assert "Failed to import -aaa-bad" in out
+        assert "1 project(s) failed" in out
+        assert memory_db.execute("SELECT COUNT(*) FROM projects WHERE key = '-partial'").fetchone()[0] == 0, (
+            "the failed project's partial writes must be rolled back, not committed with the next project"
+        )
+        good_file = str(projects_dir / "-zzz-good" / "-zzz-good-sess.jsonl")
+        assert memory_db.execute("SELECT COUNT(*) FROM import_log WHERE file_path = ?", (good_file,)).fetchone()[0] == 1
+
+    def test_single_project_failure_is_contained_and_exits_nonzero(self, memory_db, tmp_path, monkeypatch, capsys):
+        projects_dir = self._make_projects(tmp_path, "-only")
+        db_path = tmp_path / "memory.db"
+        db_path.write_text("", encoding="utf-8")
+        self._patch_run_env(monkeypatch, memory_db, db_path)
+        monkeypatch.setattr(
+            "ccrecall.hooks.import_conversations.import_project",
+            self._fail_after_writing("-only", RuntimeError("simulated project failure")),
+        )
+        monkeypatch.setattr("ccrecall.hooks.import_conversations.remove_pid_file", lambda _key: None)
+
+        with pytest.raises(SystemExit) as excinfo:
+            run(db=db_path, projects_dir=projects_dir, project="-only")
+
+        assert excinfo.value.code == 1
+        assert "Failed to import -only" in capsys.readouterr().out
+        assert memory_db.execute("SELECT COUNT(*) FROM projects WHERE key = '-partial'").fetchone()[0] == 0
+
+    def test_failed_commit_is_rolled_back_and_contained(self, memory_db, tmp_path, monkeypatch):
+        """A project whose commit fails is rolled back like one whose import raised."""
+        projects_dir = self._make_projects(tmp_path, "-proj")
+
+        def import_then_break_commit(conn, project_dir, exclude_projects=None, on_reclaim=None):
+            result = import_project(conn, project_dir, exclude_projects)
+            # Defers FK checks to COMMIT, so the dangling project_id makes commit() raise.
+            conn.execute("PRAGMA defer_foreign_keys = ON")
+            conn.execute("INSERT INTO sessions (uuid, project_id) VALUES ('dangling', 999999)")
+            return result
+
+        monkeypatch.setattr("ccrecall.hooks.import_conversations.import_project", import_then_break_commit)
+
+        assert import_project_contained(memory_db, projects_dir / "-proj", []) is None
+        assert not memory_db.in_transaction
+        assert memory_db.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 0
+        assert memory_db.execute("SELECT COUNT(*) FROM import_log").fetchone()[0] == 0, (
+            "import_log rows roll back with the project, so it is retried next run"
+        )
+
+    def test_operational_error_rolls_back_and_propagates(self, memory_db, tmp_path, monkeypatch):
+        projects_dir = self._make_projects(tmp_path, "-proj")
+        monkeypatch.setattr(
+            "ccrecall.hooks.import_conversations.import_project",
+            self._fail_after_writing("-proj", sqlite3.OperationalError("simulated disk I/O error")),
+        )
+
+        with pytest.raises(sqlite3.OperationalError, match="simulated disk I/O error"):
+            import_project_contained(memory_db, projects_dir / "-proj", [])
+
+        assert not memory_db.in_transaction
+        assert memory_db.execute("SELECT COUNT(*) FROM projects WHERE key = '-partial'").fetchone()[0] == 0
 
 
 class TestImportRunPathSafety:

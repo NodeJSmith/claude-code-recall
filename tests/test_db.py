@@ -30,6 +30,15 @@ from ccrecall.db_vec import fetch_branch_messages, vec_available
 from ccrecall.embeddings import EMBEDDING_DIM, EMBEDDING_MODEL, EMBEDDING_VERSION
 from ccrecall.schema import SCHEMA, SCHEMA_CORE, SCHEMA_FTS5, detect_fts_support
 
+# projects as every schema before v9 created it, with UNIQUE on path. The v0/v1 seeds
+# create it ahead of SCHEMA_CORE (whose CREATE IF NOT EXISTS then leaves it alone),
+# because SCHEMA_CORE itself now carries the v9 shape.
+PRE_V9_PROJECTS_DDL = (
+    "CREATE TABLE projects ("
+    "id INTEGER PRIMARY KEY, path TEXT UNIQUE NOT NULL, key TEXT UNIQUE NOT NULL, "
+    "name TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)"
+)
+
 
 def _run_subprocess_probe(
     code: str, *, timeout: int = 30, env: dict[str, str] | None = None
@@ -564,6 +573,7 @@ def _seed_v0_db_with_dead_branches(db_path) -> None:
 
     conn = sqlite3.connect(db_path)
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute(PRE_V9_PROJECTS_DDL)
     conn.executescript(SCHEMA_CORE)
     conn.executescript(pre_migration_fts5)
     conn.commit()
@@ -658,6 +668,7 @@ def _seed_v1_db_with_orphan_messages(db_path) -> None:
     """
     conn = sqlite3.connect(db_path)
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute(PRE_V9_PROJECTS_DDL)
     conn.executescript(SCHEMA_CORE)
     conn.executescript(SCHEMA_FTS5)
     conn.execute("PRAGMA user_version = 1")
@@ -712,6 +723,8 @@ def _seed_genuine_db(db_path, target_version: int) -> None:
       v6: ingestion_check_cache has db_coverage_fingerprint; branches still lacks v7 cols
       v7: branches has summary_enrichment_*/summary_source_hash; chunks still lacks
           cap_tokens (v8 adds it)
+      v8: chunks has cap_tokens and idx_chunks_cap_tokens; projects.path is still
+          UNIQUE (v9 rebuilds projects without it)
 
     Note: SCHEMA_CORE runs before _apply_migrations in open_connection, using
     CREATE TABLE IF NOT EXISTS — so tables that already exist keep their genuine
@@ -726,7 +739,7 @@ def _seed_genuine_db(db_path, target_version: int) -> None:
     if target_version == 1:
         _seed_v1_db_with_orphan_messages(db_path)
         return
-    if target_version > 7:
+    if target_version > 8:
         raise AssertionError(
             f"_seed_genuine_db has no genuine schema for v{target_version}; add it when SCHEMA_VERSION increases"
         )
@@ -735,11 +748,7 @@ def _seed_genuine_db(db_path, target_version: int) -> None:
     conn.execute("PRAGMA foreign_keys = ON")
 
     # Static tables (unchanged across v2-v6)
-    conn.execute(
-        "CREATE TABLE projects ("
-        "id INTEGER PRIMARY KEY, path TEXT UNIQUE NOT NULL, key TEXT UNIQUE NOT NULL, "
-        "name TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)"
-    )
+    conn.execute(PRE_V9_PROJECTS_DDL)
     conn.execute("CREATE INDEX idx_projects_key ON projects(key)")
 
     conn.execute(
@@ -824,7 +833,8 @@ def _seed_genuine_db(db_path, target_version: int) -> None:
     )
     conn.execute("CREATE INDEX idx_branch_messages_message ON branch_messages(message_id)")
 
-    # chunks (unchanged)
+    # chunks: v2-v7 lack cap_tokens (v8 adds it)
+    chunks_v8_cols = ", cap_tokens INTEGER" if target_version >= 8 else ""
     conn.execute(
         "CREATE TABLE chunks ("
         "id INTEGER PRIMARY KEY, "
@@ -833,11 +843,14 @@ def _seed_genuine_db(db_path, target_version: int) -> None:
         "first_message_uuid TEXT, timestamp TEXT, "
         "user_text TEXT, assistant_text TEXT, "
         "was_capped INTEGER NOT NULL DEFAULT 0, "
-        "embedding_version INTEGER NOT NULL DEFAULT 0, embedding_model TEXT, "
+        "embedding_version INTEGER NOT NULL DEFAULT 0, embedding_model TEXT"
+        f"{chunks_v8_cols}, "
         "UNIQUE(branch_id, exchange_index))"
     )
     conn.execute("CREATE INDEX idx_chunks_branch ON chunks(branch_id)")
     conn.execute("CREATE INDEX idx_chunks_version ON chunks(embedding_version)")
+    if target_version >= 8:
+        conn.execute("CREATE INDEX idx_chunks_cap_tokens ON chunks(cap_tokens) WHERE cap_tokens IS NOT NULL")
 
     # ingestion_check_cache: absent before v5; v5 lacks db_coverage_fingerprint (v6 adds it)
     if target_version == 5:
@@ -1441,6 +1454,38 @@ class TestSchemaVersioning:
             )
 
 
+def _path_is_unique(conn: sqlite3.Connection) -> bool:
+    """True if any unique index on projects covers exactly the path column."""
+    for _seq, index_name, is_unique, *_rest in conn.execute("PRAGMA index_list(projects)").fetchall():
+        if not is_unique:
+            continue
+        columns = [row[2] for row in conn.execute(f"PRAGMA index_info({index_name})").fetchall()]
+        if columns == ["path"]:
+            return True
+    return False
+
+
+class TestProjectsPathNotUnique:
+    """Schema v9 (#221): projects.path is metadata, so two keys may share a path."""
+
+    def test_fresh_install_has_v9_projects_shape(self, tmp_path):
+        with get_connection(settings={"db_path": str(tmp_path / "fresh.db")}) as conn:
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+            assert not _path_is_unique(conn)
+            indexes = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'index'")}
+            assert "idx_projects_key" in indexes
+
+            conn.execute("INSERT INTO projects (path, key, name) VALUES ('/same', '-key-a', 'same')")
+            conn.execute("INSERT INTO projects (path, key, name) VALUES ('/same', '-key-b', 'same')")
+            assert conn.execute("SELECT COUNT(*) FROM projects WHERE path = '/same'").fetchone()[0] == 2
+
+    def test_key_stays_unique(self, tmp_path):
+        with get_connection(settings={"db_path": str(tmp_path / "fresh.db")}) as conn:
+            conn.execute("INSERT INTO projects (path, key, name) VALUES ('/a', '-key', 'a')")
+            with pytest.raises(sqlite3.IntegrityError):
+                conn.execute("INSERT INTO projects (path, key, name) VALUES ('/b', '-key', 'b')")
+
+
 class TestMigrationVersionMatrix:
     """Version matrix: every starting version migrates to current SCHEMA_VERSION.
 
@@ -1456,7 +1501,7 @@ class TestMigrationVersionMatrix:
     # Expected row counts after migrating from each version to current.
     # v0: v1 deletes inactive branch + cascade (chunks, branch_messages)
     # v1: v2 deletes orphan messages
-    # v2-v7: v3-v8 only ADD columns/tables, no data modification
+    # v2-v8: v3-v8 only ADD columns/tables and v9 copies projects verbatim, no data modification
     EXPECTED_COUNTS: ClassVar[dict[int, dict[str, int]]] = {
         0: {
             "projects": 1,
@@ -1547,14 +1592,34 @@ class TestMigrationVersionMatrix:
         assert summary is not None
         assert summary[0] is not None
 
+        assert not _path_is_unique(conn), "v9 must drop UNIQUE on projects.path"
+        indexes = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'index'").fetchall()}
+        assert "idx_projects_key" in indexes
+        fk_targets = {row[2] for row in conn.execute("PRAGMA foreign_key_list(sessions)").fetchall()}
+        assert "projects" in fk_targets, "the v9 rebuild must leave sessions.project_id pointing at projects"
+        assert "projects_new" not in fk_targets
+
+    @staticmethod
+    def _project_rows(db_path) -> list[tuple]:
+        """Read projects rows, asserting the seed really is pre-v9 (UNIQUE path)."""
+        raw = sqlite3.connect(db_path)
+        try:
+            assert _path_is_unique(raw), "the seed must start with UNIQUE path, or the v9 assertions are vacuous"
+            return raw.execute("SELECT id, path, key, name, created_at FROM projects ORDER BY id").fetchall()
+        finally:
+            raw.close()
+
     @pytest.mark.parametrize("start_version", range(SCHEMA_VERSION))
     def test_migration_from_any_version_reaches_current(self, tmp_path, start_version):
         """Every starting version migrates to SCHEMA_VERSION with data preserved."""
         db_path = tmp_path / f"v{start_version}.db"
         self._build_db_at_version(db_path, start_version)
+        projects_before = self._project_rows(db_path)
 
         with get_connection(settings={"db_path": str(db_path)}) as conn:
             self._assert_post_migration(conn, start_version)
+            projects_after = conn.execute("SELECT id, path, key, name, created_at FROM projects ORDER BY id").fetchall()
+        assert projects_after == projects_before, "the v9 rebuild must preserve every project row and id"
 
     @VEC_SKIP
     @pytest.mark.parametrize("start_version", range(SCHEMA_VERSION))
