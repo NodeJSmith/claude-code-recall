@@ -299,8 +299,9 @@ def import_project(
     # Without an explicit transaction already open here, the per-file SAVEPOINT
     # below becomes its own top-level transaction and commits on RELEASE — the
     # first file's writes go durable immediately instead of waiting for
-    # import_project_contained's single per-project conn.commit(), breaking the "transaction spans the whole
-    # project" invariant the SAVEPOINT/ROLLBACK containment below depends on.
+    # import_project_contained's single per-project conn.commit(), breaking the
+    # "transaction spans the whole project" invariant the SAVEPOINT/ROLLBACK
+    # containment below depends on.
     if not conn.in_transaction:
         conn.execute("BEGIN")
 
@@ -348,8 +349,9 @@ def import_project(
             # whole batch. A SAVEPOINT bounds the containment to exactly this
             # file's writes — the surrounding connection's transaction still spans
             # the whole project (committed once, by import_project_contained,
-            # after import_project returns), so rolling back to the savepoint discards only this
-            # file's partial work without touching already-imported siblings.
+            # after import_project returns), so rolling back to the savepoint
+            # discards only this file's partial work without touching
+            # already-imported siblings.
             conn.execute("SAVEPOINT import_file")
             try:
                 branches_count, msg_count = import_session(conn, target, project_id, force=repair_group)
@@ -557,12 +559,12 @@ def _run(
             elif not is_safe_project_dir(project_dir, projects_dir):
                 print(f"Unsafe project path: {project_dir}")
             else:
-                result = import_project_contained(conn, project_dir, exclude_projects, _reclaim)
-                if result is None:
+                project_counts = import_project_contained(conn, project_dir, exclude_projects, _reclaim)
+                if project_counts is None:
                     project_failures += 1
                     print(f"Failed to import {project} — see ccrecall-import.log")
                 else:
-                    sessions, messages, skipped = result
+                    sessions, messages, skipped = project_counts
                     total_sessions += sessions
                     total_messages += messages
                     total_skipped += skipped
@@ -577,15 +579,15 @@ def _run(
 
                 project_count += 1
                 t0 = time.monotonic()
-                result = import_project_contained(conn, project_dir, exclude_projects, _reclaim)
+                project_counts = import_project_contained(conn, project_dir, exclude_projects, _reclaim)
                 t_import_total += time.monotonic() - t0
 
-                if result is None:
+                if project_counts is None:
                     project_failures += 1
                     print(f"Failed to import {project_dir.name} — see ccrecall-import.log")
                     continue
 
-                sessions, messages, skipped = result
+                sessions, messages, skipped = project_counts
                 total_sessions += sessions
                 total_messages += messages
                 total_skipped += skipped

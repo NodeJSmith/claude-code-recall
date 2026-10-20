@@ -1470,7 +1470,7 @@ class TestProjectsPathNotUnique:
 
     def test_fresh_install_has_v9_projects_shape(self, tmp_path):
         with get_connection(settings={"db_path": str(tmp_path / "fresh.db")}) as conn:
-            assert conn.execute("PRAGMA user_version").fetchone()[0] == 9
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
             assert not _path_is_unique(conn)
             indexes = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'index'")}
             assert "idx_projects_key" in indexes
