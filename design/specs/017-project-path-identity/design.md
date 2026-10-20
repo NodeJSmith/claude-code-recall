@@ -1,7 +1,7 @@
 # Design: Project path is metadata, not identity
 
 **Date:** 2026-10-20
-**Status:** ratified
+**Status:** built
 **Mode:** sketch
 **Issues:** #221
 
@@ -190,7 +190,7 @@ The streaming and per-file failure rules come from the sketch-time challenge, Fi
 
 - [x] Implementation and tests committed
 - [x] Docs — CLAUDE.md invariant 4 gains the v9 entry
-- [ ] Ship-time challenge
+- [x] Ship-time challenge
 
 **Calls made during the build:**
 - The probe also skips top-level `agent-*.jsonl` and dot-prefixed files: `agent-*` at the top level is the legacy subagent transcript layout, which D4 excludes for the same reason as `subagents/`. The import loop already skips dot-prefixed files.

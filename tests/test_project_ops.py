@@ -334,6 +334,15 @@ class TestProbeSourceRule:
         finally:
             unreadable.chmod(0o644)
 
+    def test_non_string_cwd_is_skipped_for_next_older(self, memory_db, tmp_path):
+        project_dir = tmp_path / "-home-u-repo"
+        _write_transcript(project_dir / "good.jsonl", "/home/u/repo", 1000)
+        bad = project_dir / "bad.jsonl"
+        bad.write_text(json.dumps({"uuid": "u-bad", "type": "user", "cwd": 42}) + "\n", encoding="utf-8")
+        os.utime(bad, (2000, 2000))
+
+        assert _probe(memory_db, project_dir) == ("/home/u/repo", False)
+
     def test_no_cwd_anywhere_falls_back_to_lossy(self, memory_db, tmp_path):
         project_dir = tmp_path / "-home-u-repo"
         _write_transcript(project_dir / "a.jsonl", None, 1000)

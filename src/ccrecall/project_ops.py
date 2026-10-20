@@ -159,8 +159,11 @@ def _first_cwd(jsonl_file: Path) -> str | None:
     entries = parse_all_with_uuids(jsonl_file)
     try:
         for entry in entries:
-            if entry.get("cwd"):
-                return entry["cwd"]
+            # Transcript data is external: a non-string cwd counts as no cwd, so
+            # the walk keeps going instead of failing later in normalize_cwd.
+            cwd = entry.get("cwd")
+            if isinstance(cwd, str) and cwd:
+                return cwd
     finally:
         entries.close()
     return None
