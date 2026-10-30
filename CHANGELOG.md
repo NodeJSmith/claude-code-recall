@@ -5,8 +5,9 @@
 
 ### Bug Fixes
 
-* stop moved repos from crashing every ccrecall import ([#224](https://github.com/NodeJSmith/claude-code-recall/issues/224)) ([c35ae74](https://github.com/NodeJSmith/claude-code-recall/commit/c35ae74a292df6c2f4a0a6dc4eb8d6fc23da6004))
-* upgrade dependencies with known vulnerabilities ([#227](https://github.com/NodeJSmith/claude-code-recall/issues/227)) ([41bb9e0](https://github.com/NodeJSmith/claude-code-recall/commit/41bb9e046ccc47b60f9eaf044c67a5f78a858f6c))
+- **Moved repos no longer break imports.** A repo moved to a path already recorded for another project used to abort every `ccrecall import` with an `IntegrityError`. A project is now identified by its key, and its stored path updates when the repo moves. The database upgrades automatically; after that, older ccrecall versions fail when they try to add a new project. (#224)
+- **One failing project no longer stops the whole import.** `ccrecall import` rolls back the failed project, retries it on the next run, and continues with the rest. It prints each failure and a failure count, then exits 1. Database-level errors such as a full disk or a locked database still stop the run. (#224)
+- **Known vulnerabilities fixed in dependencies.** Upgrades `fastembed` to 0.9.1, `pillow` to 13.0.0, `urllib3` to 2.8.0, `filelock` to 4.2.5, `fsspec` to 2026.9.0, and `certifi` to 2026.10.23. Existing embeddings stay valid, so no re-embed is needed. If your model cache came from an earlier ccrecall, `fastembed` now prints a harmless `Xenova/... is not usable` line to stderr when it loads the model. (#227)
 
 ## [0.26.0](https://github.com/NodeJSmith/claude-code-recall/compare/v0.25.1...v0.26.0) (2026-09-26)
 
