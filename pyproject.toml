@@ -43,7 +43,7 @@ classifiers = [
 # a bump: `uv lock` then mirror the resolved versions here.
 dependencies = [
     "sqlite-vec==0.1.9",
-    "fastembed==0.8.0",
+    "fastembed==0.9.1",
     "numpy==2.4.6",
     "whenever==0.10.0",
     # Pin pydantic exactly so its native (Rust) pydantic-core dep resolves to a
@@ -90,7 +90,7 @@ dev = [
 testpaths = ["tests"]
 
 [tool.uv]
-constraint-dependencies = ["pillow>=12.3.0"]
+constraint-dependencies = ["pillow>=13.0.0"]
 
 [tool.coverage.run]
 branch = true          # measure branch coverage, not just lines
