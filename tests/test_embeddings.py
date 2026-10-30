@@ -21,9 +21,23 @@ from ccrecall.embeddings import (
     embed_batch,
     embed_text,
     get_model,
+    is_model_cached_on_disk,
     model_available,
     resolve_thread_count,
 )
+
+
+class TestIsModelCachedOnDisk:
+    @pytest.mark.parametrize("org", ["Xenova", "xenova"])
+    def test_finds_cache_under_either_org_casing(self, tmp_path, monkeypatch, org):
+        """Current fastembed writes Xenova/; caches from older releases stay under xenova/."""
+        monkeypatch.setenv("FASTEMBED_CACHE_PATH", str(tmp_path))
+        (tmp_path / f"models--{org}--jina-embeddings-v2-small-en").mkdir()
+        assert is_model_cached_on_disk() is True
+
+    def test_false_when_cache_absent(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("FASTEMBED_CACHE_PATH", str(tmp_path))
+        assert is_model_cached_on_disk() is False
 
 
 class TestResolveThreadCount:
