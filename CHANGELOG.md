@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.26.1](https://github.com/NodeJSmith/claude-code-recall/compare/v0.26.0...v0.26.1) (2026-10-30)
+
+
+### Bug Fixes
+
+* stop moved repos from crashing every ccrecall import ([#224](https://github.com/NodeJSmith/claude-code-recall/issues/224)) ([c35ae74](https://github.com/NodeJSmith/claude-code-recall/commit/c35ae74a292df6c2f4a0a6dc4eb8d6fc23da6004))
+* upgrade dependencies with known vulnerabilities ([#227](https://github.com/NodeJSmith/claude-code-recall/issues/227)) ([41bb9e0](https://github.com/NodeJSmith/claude-code-recall/commit/41bb9e046ccc47b60f9eaf044c67a5f78a858f6c))
+
 ## [0.26.0](https://github.com/NodeJSmith/claude-code-recall/compare/v0.25.1...v0.26.0) (2026-09-26)
 
 
