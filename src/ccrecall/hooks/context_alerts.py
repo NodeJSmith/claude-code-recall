@@ -15,6 +15,7 @@ from ccrecall.health import (
     ALERT_CANT_PERSIST,
     ALERT_DRAFT_QUALITY_VECTORS,
     ALERT_EMBEDDINGS_FAILING,
+    ALERT_SCHEMA_AHEAD,
     ALERT_TOOL_CONTENT_INCOMPLETE,
     build_alert_block,
     count_draft_quality_chunks,
@@ -35,6 +36,7 @@ def proactive_alert_block(
     conn: sqlite3.Connection | None,
     db_available: bool,
     *,
+    schema_ahead_cause: str = "",
     marker_path: Path | None = None,
     snooze_path: Path | None = None,
     status_path: Path | None = None,
@@ -51,6 +53,8 @@ def proactive_alert_block(
     - Draft-quality chunk check (a cheap COUNT(*) on the already-open
       connection) gated by the backfill-schedule marker: a configured
       schedule or an explicit dismiss suppresses the alert entirely.
+    - Schema-ahead cause, read by main() before it opened the connection, so it
+      is reported even when an ahead database makes that connection fail.
 
     Passes active keys through the snooze ledger (fire / suppress / auto-clear)
     and builds ONE combined block for whatever fires.
@@ -102,6 +106,9 @@ def proactive_alert_block(
         if conn is not None and has_draft_quality_chunks(conn) and read_schedule_marker(schedule_path) is None:
             active_keys.add(ALERT_DRAFT_QUALITY_VECTORS)
 
+        if schema_ahead_cause:
+            active_keys.add(ALERT_SCHEMA_AHEAD)
+
         # 5. Evaluate snooze ledger: fire / suppress / auto-clear.
         # load_settings() always carries alert_snooze_hours from DEFAULT_SETTINGS;
         # fall back to the canonical default only for sparse (test) settings dicts.
@@ -113,6 +120,7 @@ def proactive_alert_block(
             keys_to_fire,
             fault_reason=fault_reason,
             embedding_reason=embedding_reason,
+            schema_ahead_cause=schema_ahead_cause,
         )
 
     except Exception:

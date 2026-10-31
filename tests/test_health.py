@@ -12,6 +12,7 @@ from ccrecall.health import (
     ALERT_CANT_PERSIST,
     ALERT_DRAFT_QUALITY_VECTORS,
     ALERT_EMBEDDINGS_FAILING,
+    ALERT_SCHEMA_AHEAD,
     ALERT_TOOL_CONTENT_INCOMPLETE,
     RECALL_CAVEAT_COVERAGE_THRESHOLD,
     ProbeResult,
@@ -658,9 +659,10 @@ class TestConstants:
             ALERT_EMBEDDINGS_FAILING,
             ALERT_TOOL_CONTENT_INCOMPLETE,
             ALERT_DRAFT_QUALITY_VECTORS,
+            ALERT_SCHEMA_AHEAD,
         }
         assert all(isinstance(k, str) and k for k in keys)
-        assert len(keys) == 4
+        assert len(keys) == 5
 
     def test_probe_result_frozen_dataclass(self):
         """ProbeResult is frozen and carries ok + reason fields."""
