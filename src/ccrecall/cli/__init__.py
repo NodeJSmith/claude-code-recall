@@ -6,6 +6,7 @@ this module triggers that registration).
 """
 
 import inspect
+import sys
 from importlib.metadata import PackageNotFoundError, version
 from typing import Annotated
 
@@ -13,7 +14,8 @@ from cyclopts import App, Group, Parameter
 from cyclopts.exceptions import CycloptsError
 
 from ccrecall.cli.context import CLIContext
-from ccrecall.config import load_settings, setup_logging
+from ccrecall.config import DEFAULT_DB_PATH, get_db_path, load_settings, load_settings_for_db, setup_logging
+from ccrecall.db_base import describe_schema_ahead
 
 try:
     _version = version("ccrecall")
@@ -82,6 +84,14 @@ def launcher(
     # ctx must stay keyword-only in every command for **bound.kwargs to carry it.
     if "ctx" in inspect.signature(command).parameters:
         bound.arguments["ctx"] = ctx
+    schema_ahead_cause = describe_schema_ahead(
+        get_db_path(load_settings_for_db(bound.arguments.get("db", DEFAULT_DB_PATH)))
+    )
+    if schema_ahead_cause:
+        # stderr, so --json output on stdout stays parseable.
+        print(
+            f"ccrecall: warning: {schema_ahead_cause}. Upgrade ccrecall; commands may fail until then.", file=sys.stderr
+        )
     command(*bound.args, **bound.kwargs)
 
 

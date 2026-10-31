@@ -96,8 +96,9 @@ ccrecall is meant to be invisible — it runs in the background and Claude consu
 
 - **It can't save your history** — the data directory or database is unwritable (disk full, permissions, corruption). Left unsaid, a working install would silently stop recording sessions.
 - **Embeddings are persistently failing** — the vector extension or embedding model is unavailable, so semantic search is degraded until you fix the environment.
+- **Your install is older than your database** — another, newer ccrecall has already migrated the database, so imports and sync may fail until you upgrade. `ccrecall` commands also print this as a one-line warning on stderr.
 
-When either condition holds, the next session injects a short alert for Claude to relay to you in plain language. It's **told once, then goes quiet for ~24h** (tunable via `alert_snooze_hours` in the config file) even if still broken, and **clears itself the moment the condition resolves**. Coverage that's merely catching up is never surfaced this way — only genuine, unrecoverable failures earn the interruption.
+When any of these holds, the next session injects a short alert for Claude to relay to you in plain language. It's **told once, then goes quiet for ~24h** (tunable via `alert_snooze_hours` in the config file) even if still broken, and **clears itself the moment the condition resolves**. Coverage that's merely catching up is never surfaced this way — only genuine, unrecoverable failures earn the interruption.
 
 ## Skills
 

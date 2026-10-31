@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 import pytest
 import sqlite_vec
-from conftest import VEC_SKIP, make_vec_conn
+from conftest import VEC_SKIP, make_vec_conn, stamp_user_version
 
 import ccrecall.config as config_module
 import ccrecall.db as db_module
@@ -26,6 +26,7 @@ from ccrecall.config import (
     log_hook_exception,
 )
 from ccrecall.db import SCHEMA_VERSION, get_connection
+from ccrecall.db_base import describe_schema_ahead
 from ccrecall.db_vec import fetch_branch_messages, vec_available
 from ccrecall.embeddings import EMBEDDING_DIM, EMBEDDING_MODEL, EMBEDDING_VERSION
 from ccrecall.schema import SCHEMA, SCHEMA_CORE, SCHEMA_FTS5, detect_fts_support
@@ -1687,6 +1688,33 @@ class TestMigrationVersionMatrix:
         ), (
             f"expected an ahead-of-code WARNING naming v{ahead_version}, got: {[(r.message, r.__dict__) for r in warnings]}"
         )
+
+    def test_describe_schema_ahead_names_both_versions(self, tmp_path):
+        db_path = tmp_path / "ahead.db"
+        stamp_user_version(db_path, SCHEMA_VERSION + 1)
+
+        cause = describe_schema_ahead(db_path)
+
+        assert f"v{SCHEMA_VERSION + 1}" in cause
+        assert f"v{SCHEMA_VERSION}" in cause
+
+    def test_describe_schema_ahead_empty_when_current_or_behind(self, tmp_path):
+        db_path = tmp_path / "current.db"
+        stamp_user_version(db_path, SCHEMA_VERSION)
+        assert describe_schema_ahead(db_path) == ""
+
+        stamp_user_version(db_path, SCHEMA_VERSION - 1)
+        assert describe_schema_ahead(db_path) == ""
+
+    def test_describe_schema_ahead_does_not_create_a_missing_database(self, tmp_path):
+        db_path = tmp_path / "missing.db"
+        assert describe_schema_ahead(db_path) == ""
+        assert not db_path.exists()
+
+    def test_describe_schema_ahead_empty_for_a_file_that_is_not_a_database(self, tmp_path):
+        db_path = tmp_path / "garbage.db"
+        db_path.write_bytes(b"this is not a sqlite database, not even close")
+        assert describe_schema_ahead(db_path) == ""
 
     def test_partial_migration_failure_rolls_back_cleanly(self, tmp_path):
         """A migration that raises partway through leaves user_version and schema untouched.

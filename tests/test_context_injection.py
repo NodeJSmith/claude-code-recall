@@ -10,7 +10,10 @@ from pathlib import Path
 from unittest.mock import patch
 from uuid import uuid4
 
+from conftest import stamp_user_version
+
 from ccrecall.config import DEFAULT_SETTINGS
+from ccrecall.db import SCHEMA_VERSION, get_connection
 from ccrecall.health import (
     ALERT_CANT_PERSIST,
     ALERT_EMBEDDINGS_FAILING,
@@ -1275,6 +1278,41 @@ class TestMemoryContextMalformedInput:
             "Malformed input has no session_id/cwd, so the full context-injection "
             "path (which always includes this directive) must not run"
         )
+
+
+class TestMemoryContextSchemaAhead:
+    """main() reports a database written by a newer ccrecall at SessionStart."""
+
+    def _run_main(self, tmp_path, db_path) -> str:
+        fake_settings = {**DEFAULT_SETTINGS, "db_path": str(db_path), "alert_snooze_hours": 0}
+        stdin_data = json.dumps({"session_id": "sess-1", "cwd": str(tmp_path), "source": "startup"})
+        stdout_capture = io.StringIO()
+        with (
+            patch.object(sys, "stdin", io.StringIO(stdin_data)),
+            patch.object(sys, "stdout", stdout_capture),
+            patch.object(memory_context, "load_settings", return_value=fake_settings),
+        ):
+            memory_context.main()
+        return json.loads(stdout_capture.getvalue()).get("hookSpecificOutput", {}).get("additionalContext", "")
+
+    def test_ahead_database_fires_the_alert(self, tmp_path):
+        db_path = tmp_path / "conversations.db"
+        with get_connection(settings={"db_path": str(db_path)}):
+            pass
+        stamp_user_version(db_path, SCHEMA_VERSION + 1)
+
+        additional_context = self._run_main(tmp_path, db_path)
+
+        assert f"schema v{SCHEMA_VERSION + 1}" in additional_context
+
+    def test_current_database_does_not_fire_the_alert(self, tmp_path):
+        db_path = tmp_path / "conversations.db"
+        with get_connection(settings={"db_path": str(db_path)}):
+            pass
+
+        additional_context = self._run_main(tmp_path, db_path)
+
+        assert "upgrade ccrecall" not in additional_context.lower()
 
 
 class TestMemoryContextUnwritableRuntimeDir:

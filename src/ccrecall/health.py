@@ -61,6 +61,7 @@ ALERT_CANT_PERSIST = "cant_persist"
 ALERT_EMBEDDINGS_FAILING = "embeddings_failing"
 ALERT_TOOL_CONTENT_INCOMPLETE = "tool_content_incomplete"
 ALERT_DRAFT_QUALITY_VECTORS = "draft_quality_vectors"
+ALERT_SCHEMA_AHEAD = "schema_ahead"
 
 # Deliberate duplication of embeddings.MODEL_TOKEN_LIMIT: health.py must never
 # import from embeddings.py (see module docstring's hot-path invariant), so this
@@ -491,6 +492,12 @@ _ALERT_PROSE: dict[str, tuple[str, str, str]] = {
         "scheduled job (`ccrecall backfill schedule write`) or dismiss permanently "
         "(`ccrecall backfill embeddings --dismiss`)",
     ),
+    ALERT_SCHEMA_AHEAD: (
+        "ccrecall's database was written by a newer version than this install — imports and sync may fail.",
+        "this install is older than the one that last migrated the database",
+        "upgrade ccrecall the way you installed it; with more than one install (such as a dev checkout), "
+        "the older one is the one running here",
+    ),
 }
 
 _RELAY_INSTRUCTION = "Surface this to the user in prose; do not hard-code how prominently to raise it."
@@ -509,6 +516,7 @@ def build_alert_block(
     keys_to_fire: list[str],
     fault_reason: str = "",
     embedding_reason: str = "",
+    schema_ahead_cause: str = "",
 ) -> str:
     """Build a single Markdown alert block for all active, un-snoozed alerts.
 
@@ -534,6 +542,7 @@ def build_alert_block(
         # Translate the embedding reason code to prose here so callers pass the raw
         # code from the sidecar and never have to know the prose mapping.
         ALERT_EMBEDDINGS_FAILING: _REASON_PROSE.get(embedding_reason, embedding_reason),
+        ALERT_SCHEMA_AHEAD: schema_ahead_cause,
     }
 
     for key in keys_to_fire:

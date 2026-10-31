@@ -9,9 +9,10 @@ test_backfill_embeddings.py and is not repeated here.
 from unittest.mock import patch
 
 import pytest
+from conftest import stamp_user_version
 from cyclopts.exceptions import ValidationError
 
-from ccrecall.cli import app
+from ccrecall.cli import app, launcher
 from ccrecall.cli.commands import (
     cmd_backfill_summaries,
     cmd_backfill_tool_content,
@@ -25,9 +26,50 @@ from ccrecall.cli.commands import (
 )
 from ccrecall.cli.context import DEFAULT_CLI_CONTEXT
 from ccrecall.config import DEFAULT_DB_PATH
-from ccrecall.db import DEFAULT_PROJECTS_DIR
+from ccrecall.db import DEFAULT_PROJECTS_DIR, SCHEMA_VERSION
 from ccrecall.hooks import backfill_query as backfill_query_mod
 from ccrecall.session_tail import DEFAULT_TAIL_EVENTS
+
+
+class TestSchemaAheadWarning:
+    """launcher warns on stderr, before dispatch, when the database is ahead of this code."""
+
+    def _run_import_against(self, tmp_path, user_version: int) -> int:
+        db_path = tmp_path / "conversations.db"
+        stamp_user_version(db_path, user_version)
+        with (
+            patch("ccrecall.config.load_settings", return_value={"db_path": str(db_path)}),
+            patch("ccrecall.cli.commands.import_mod.run") as mock_run,
+        ):
+            launcher("import")
+        return mock_run.call_count
+
+    def test_ahead_database_warns_on_stderr_and_still_runs_the_command(self, tmp_path, capsys):
+        calls = self._run_import_against(tmp_path, SCHEMA_VERSION + 1)
+
+        captured = capsys.readouterr()
+        assert f"schema v{SCHEMA_VERSION + 1}" in captured.err
+        assert "upgrade ccrecall" in captured.err.lower()
+        assert "schema v" not in captured.out
+        assert calls == 1
+
+    def test_current_database_prints_no_warning(self, tmp_path, capsys):
+        self._run_import_against(tmp_path, SCHEMA_VERSION)
+
+        assert "upgrade ccrecall" not in capsys.readouterr().err.lower()
+
+    def test_checks_the_database_named_by_db_not_the_configured_one(self, tmp_path, capsys):
+        configured = tmp_path / "configured.db"
+        stamp_user_version(configured, SCHEMA_VERSION)
+        ahead = tmp_path / "ahead.db"
+        stamp_user_version(ahead, SCHEMA_VERSION + 1)
+        with (
+            patch("ccrecall.config.load_settings", return_value={"db_path": str(configured)}),
+            patch("ccrecall.cli.commands.import_mod.run"),
+        ):
+            launcher("import", "--db", str(ahead))
+
+        assert f"schema v{SCHEMA_VERSION + 1}" in capsys.readouterr().err
 
 
 class TestCmdSyncCurrent:

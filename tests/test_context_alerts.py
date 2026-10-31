@@ -354,3 +354,33 @@ class TestToolContentAlertWiring:
             status_path=status,
         )
         assert block2 == ""
+
+
+class TestSchemaAheadAlertWiring:
+    """ALERT_SCHEMA_AHEAD wiring into proactive_alert_block."""
+
+    def test_alert_names_the_versions_when_schema_is_ahead(self, tmp_path):
+        block = proactive_alert_block(
+            {"alert_snooze_hours": 0},
+            None,
+            db_available=False,
+            schema_ahead_cause="the database is at schema v10, but this install expects v9",
+            marker_path=tmp_path / ".write-probe",
+            snooze_path=tmp_path / "snooze.json",
+            status_path=tmp_path / "embedding-status.json",
+            schedule_path=tmp_path / "backfill-schedule.json",
+        )
+        assert "the database is at schema v10, but this install expects v9" in block
+        assert "upgrade ccrecall" in block.lower()
+
+    def test_no_alert_when_schema_is_not_ahead(self, tmp_path):
+        block = proactive_alert_block(
+            {"alert_snooze_hours": 0},
+            None,
+            db_available=False,
+            marker_path=tmp_path / ".write-probe",
+            snooze_path=tmp_path / "snooze.json",
+            status_path=tmp_path / "embedding-status.json",
+            schedule_path=tmp_path / "backfill-schedule.json",
+        )
+        assert block == ""

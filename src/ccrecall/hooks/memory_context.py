@@ -30,6 +30,7 @@ from ccrecall.config import (
     setup_logging,
 )
 from ccrecall.db import get_connection
+from ccrecall.db_base import describe_schema_ahead
 from ccrecall.formatting import get_project_key
 from ccrecall.hooks.context_alerts import proactive_alert_block
 from ccrecall.hooks.context_rendering import (
@@ -125,6 +126,8 @@ def main():
     # at every gate.
     db_path = get_db_path(settings)
     db_available = db_path.exists()
+    # Before get_connection, which an ahead database's shape can make fail.
+    schema_ahead_cause = describe_schema_ahead(db_path)
     conn: sqlite3.Connection | None = None
     with contextlib.ExitStack() as stack:
         if db_available:
@@ -137,7 +140,7 @@ def main():
         # ── Proactive alert evaluation ──────────────────────────────────────────
         # Must run before ALL early-return gates so alerts fire even when sessions
         # is empty or the DB is inaccessible.
-        proactive_block = proactive_alert_block(settings, conn, db_available)
+        proactive_block = proactive_alert_block(settings, conn, db_available, schema_ahead_cause=schema_ahead_cause)
 
         # ── Gate: context injection disabled ─────────────────────────────────────
         if not settings.get("auto_inject_context", True):

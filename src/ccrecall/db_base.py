@@ -8,9 +8,11 @@ top; keeping that split is what lets a caller migrate the DB without paying the
 those, so keep new heavy dependencies out of it.
 """
 
+import contextlib
 import logging
 import sqlite3
 from collections.abc import Callable
+from pathlib import Path
 
 from ccrecall.config import ensure_parent_dir, get_db_path
 from ccrecall.models import BUSY_TIMEOUT_MS, LOGGER_NAME
@@ -300,25 +302,41 @@ def _migrate_to_v9(conn: sqlite3.Connection) -> None:
 def _warn_if_schema_ahead(current: int) -> None:
     """Log a WARNING if the database's stored version exceeds this code's SCHEMA_VERSION.
 
-    A database ahead of SCHEMA_VERSION (e.g. from a reverted feature branch that
-    bumped it and stamped a real database) is otherwise indistinguishable from a
-    fully-migrated one, and its actual structure may not match what its stored
-    version implies — see #156.
+    The migration ladder treats a database ahead of SCHEMA_VERSION the same as a
+    fully-migrated one. The usual cause is an older install running against a
+    database a newer one migrated; a reverted feature branch that bumped the
+    version and stamped a real database looks the same — see #156.
     """
     if current <= SCHEMA_VERSION:
         return
     log.warning(
-        "database schema is ahead of this code's SCHEMA_VERSION — skipping the "
-        "version-gated reshape migrations (v1/v2/v9) rather than rebuild a table "
-        "this code doesn't know the shape of; additive column/table checks "
-        "(v3-v8) still run — they're guarded (IF NOT EXISTS / duplicate-column "
-        "handling) so they're safe regardless of this database's actual shape, "
-        "but are only true no-ops if it already has those columns/tables. If "
-        "this wasn't intentional (e.g. a reverted feature branch that bumped "
-        "SCHEMA_VERSION), this database's actual structure may not match what "
-        "its stored version implies",
+        "database schema is ahead of this code's SCHEMA_VERSION — this install is "
+        "probably older than the one that last migrated the database, so upgrade it. "
+        "Version-gated reshape migrations (v1/v2/v9) are skipped; guarded additive "
+        "checks (v3-v8) still run. Queries written for the older schema may fail",
         extra={"db_user_version": current, "code_schema_version": SCHEMA_VERSION},
     )
+
+
+def describe_schema_ahead(db_path: Path) -> str:
+    """Return a one-clause cause if the database at db_path is ahead of this code, else "".
+
+    Reads through its own read-only connection rather than an open_connection one.
+    A read-only connection never creates a missing database, and reading the version
+    runs no schema DDL, so an ahead database whose shape makes SCHEMA_CORE fail
+    still gets an answer.
+    """
+    try:
+        with contextlib.closing(sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True)) as conn:
+            current = conn.execute("PRAGMA user_version").fetchone()[0]
+    except (sqlite3.Error, OSError):
+        # Missing on a fresh install, or unreadable; open_connection and probe_db
+        # own reporting an unusable database, so this check just has no answer.
+        log.debug("could not read the database schema version", extra={"db_path": str(db_path)}, exc_info=True)
+        return ""
+    if current <= SCHEMA_VERSION:
+        return ""
+    return f"the database is at schema v{current}, but this install expects v{SCHEMA_VERSION}"
 
 
 def _apply_migrations(
