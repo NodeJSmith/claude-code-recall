@@ -100,6 +100,14 @@ VEC_AVAILABLE = vec_available_in_env()
 VEC_SKIP = pytest.mark.skipif(not VEC_AVAILABLE, reason="sqlite-vec not available in this environment")
 
 
+def stamp_user_version(db_path, version: int) -> None:
+    """Set a database file's PRAGMA user_version, creating the file if needed."""
+    raw = sqlite3.connect(db_path)
+    raw.execute(f"PRAGMA user_version = {version}")
+    raw.commit()
+    raw.close()
+
+
 def make_vec_conn(db_path: str = ":memory:") -> sqlite3.Connection:
     """Return a connection with schema + sqlite-vec extension loaded.
 

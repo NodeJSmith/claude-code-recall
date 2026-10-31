@@ -10,6 +10,8 @@ from pathlib import Path
 from unittest.mock import patch
 from uuid import uuid4
 
+from conftest import stamp_user_version
+
 from ccrecall.config import DEFAULT_SETTINGS
 from ccrecall.db import SCHEMA_VERSION, get_connection
 from ccrecall.health import (
@@ -1297,10 +1299,7 @@ class TestMemoryContextSchemaAhead:
         db_path = tmp_path / "conversations.db"
         with get_connection(settings={"db_path": str(db_path)}):
             pass
-        raw = sqlite3.connect(db_path)
-        raw.execute(f"PRAGMA user_version = {SCHEMA_VERSION + 1}")
-        raw.commit()
-        raw.close()
+        stamp_user_version(db_path, SCHEMA_VERSION + 1)
 
         additional_context = self._run_main(tmp_path, db_path)
 

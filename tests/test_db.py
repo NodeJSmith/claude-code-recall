@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 import pytest
 import sqlite_vec
-from conftest import VEC_SKIP, make_vec_conn
+from conftest import VEC_SKIP, make_vec_conn, stamp_user_version
 
 import ccrecall.config as config_module
 import ccrecall.db as db_module
@@ -1691,10 +1691,7 @@ class TestMigrationVersionMatrix:
 
     def test_describe_schema_ahead_names_both_versions(self, tmp_path):
         db_path = tmp_path / "ahead.db"
-        raw = sqlite3.connect(db_path)
-        raw.execute(f"PRAGMA user_version = {SCHEMA_VERSION + 1}")
-        raw.commit()
-        raw.close()
+        stamp_user_version(db_path, SCHEMA_VERSION + 1)
 
         cause = describe_schema_ahead(db_path)
 
@@ -1703,16 +1700,10 @@ class TestMigrationVersionMatrix:
 
     def test_describe_schema_ahead_empty_when_current_or_behind(self, tmp_path):
         db_path = tmp_path / "current.db"
-        raw = sqlite3.connect(db_path)
-        raw.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
-        raw.commit()
-        raw.close()
+        stamp_user_version(db_path, SCHEMA_VERSION)
         assert describe_schema_ahead(db_path) == ""
 
-        raw = sqlite3.connect(db_path)
-        raw.execute(f"PRAGMA user_version = {SCHEMA_VERSION - 1}")
-        raw.commit()
-        raw.close()
+        stamp_user_version(db_path, SCHEMA_VERSION - 1)
         assert describe_schema_ahead(db_path) == ""
 
     def test_describe_schema_ahead_does_not_create_a_missing_database(self, tmp_path):

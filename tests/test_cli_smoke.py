@@ -6,10 +6,10 @@ its own tests. cmd_backfill_embeddings is covered separately in
 test_backfill_embeddings.py and is not repeated here.
 """
 
-import sqlite3
 from unittest.mock import patch
 
 import pytest
+from conftest import stamp_user_version
 from cyclopts.exceptions import ValidationError
 
 from ccrecall.cli import app, launcher
@@ -34,16 +34,9 @@ from ccrecall.session_tail import DEFAULT_TAIL_EVENTS
 class TestSchemaAheadWarning:
     """launcher warns on stderr, before dispatch, when the database is ahead of this code."""
 
-    def _stamp_db(self, tmp_path, name: str, user_version: int):
-        db_path = tmp_path / name
-        raw = sqlite3.connect(db_path)
-        raw.execute(f"PRAGMA user_version = {user_version}")
-        raw.commit()
-        raw.close()
-        return db_path
-
     def _run_import_against(self, tmp_path, user_version: int) -> int:
-        db_path = self._stamp_db(tmp_path, "conversations.db", user_version)
+        db_path = tmp_path / "conversations.db"
+        stamp_user_version(db_path, user_version)
         with (
             patch("ccrecall.config.load_settings", return_value={"db_path": str(db_path)}),
             patch("ccrecall.cli.commands.import_mod.run") as mock_run,
@@ -66,8 +59,10 @@ class TestSchemaAheadWarning:
         assert "upgrade ccrecall" not in capsys.readouterr().err.lower()
 
     def test_checks_the_database_named_by_db_not_the_configured_one(self, tmp_path, capsys):
-        configured = self._stamp_db(tmp_path, "configured.db", SCHEMA_VERSION)
-        ahead = self._stamp_db(tmp_path, "ahead.db", SCHEMA_VERSION + 1)
+        configured = tmp_path / "configured.db"
+        stamp_user_version(configured, SCHEMA_VERSION)
+        ahead = tmp_path / "ahead.db"
+        stamp_user_version(ahead, SCHEMA_VERSION + 1)
         with (
             patch("ccrecall.config.load_settings", return_value={"db_path": str(configured)}),
             patch("ccrecall.cli.commands.import_mod.run"),

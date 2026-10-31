@@ -1,8 +1,8 @@
 """Proactive health-alert block builder for the SessionStart context hook.
 
 Evaluates the filesystem-writability probe, the embedding-status sidecar, the
-DB write-lock probe, and the tool-content backfill coverage check, then builds
-a single combined alert block for whatever fires. Split out of
+DB write-lock probe, the tool-content backfill coverage check, and the
+schema-ahead cause, then builds a single combined alert block for whatever fires. Split out of
 memory_context.py so the alert-evaluation concern has its own module.
 """
 
@@ -44,7 +44,7 @@ def proactive_alert_block(
 ) -> str:
     """Build the proactive health-alert block for SessionStart injection.
 
-    Evaluates both proactive alert classes:
+    Evaluates the proactive alert classes:
     - Filesystem writability probe (active, cheap, no DB required)
     - Embedding-status sidecar read (passive, plain file read — never imports
       fastembed/onnxruntime/sqlite_vec — hot-path invariant)
