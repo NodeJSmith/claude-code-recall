@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.26.2](https://github.com/NodeJSmith/claude-code-recall/compare/v0.26.1...v0.26.2) (2026-10-31)
+
+
+### Bug Fixes
+
+* warn when the database is newer than your ccrecall install ([#228](https://github.com/NodeJSmith/claude-code-recall/issues/228)) ([e9ecc6a](https://github.com/NodeJSmith/claude-code-recall/commit/e9ecc6a23ccee1df45a6366c902d4448f45753ee))
+
 ## [0.26.1](https://github.com/NodeJSmith/claude-code-recall/compare/v0.26.0...v0.26.1) (2026-10-30)
 
 
