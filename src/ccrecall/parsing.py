@@ -191,7 +191,7 @@ def active_chain(all_entries: list[dict]) -> list[dict]:
     pointing downstream ends the walk too.
 
     Changing which entries this returns requires bumping
-    ``ingestion_status.ACTIVE_CHAIN_VERSION``.
+    ``ingestion_status.ACTIVE_CHAIN_VERSION``; see that constant.
     """
     latest = select_active_leaf_entry(all_entries)
     if latest is None:

@@ -147,6 +147,31 @@ class TestActiveChain:
         assert chain_uuids(entries) == ["u1", "a1", "u2", "a2", "b1"]
         assert find_all_branches(entries)[0]["leaf_uuid"] == "b1"
 
+    @pytest.mark.parametrize(
+        ("logical_parent", "expected"),
+        [
+            ("a2", ["u1", "a1", "u2", "a2", "b1", "att", "info"]),
+            ("gone", ["b1", "s1", "att", "info"]),
+        ],
+    )
+    def test_session_left_idle_after_a_compaction(self, logical_parent, expected):
+        """The real shape of a session whose last act was a compaction: the boundary is
+        timestamped just after its summary, and attachments and a system note trail it."""
+        entries = [
+            *compacted_session(logical_parent)[:4],
+            summary("s1", "b1", "2026-01-01T10:04:00.000Z"),
+            boundary("b1", logical_parent, "2026-01-01T10:04:00.005Z"),
+            {"uuid": "att", "parentUuid": "s1", "type": "attachment", "timestamp": "2026-01-01T10:04:01Z"},
+            {
+                "uuid": "info",
+                "parentUuid": "att",
+                "type": "system",
+                "subtype": "informational",
+                "timestamp": "2026-01-01T10:04:02Z",
+            },
+        ]
+        assert chain_uuids(entries) == expected
+
     def test_non_string_logical_parent_is_rejected_at_the_parse_boundary(self):
         assert not is_valid_entry(boundary("b1", ["not", "a", "uuid"], "2026-01-01T10:04:00Z"))
 
@@ -275,6 +300,34 @@ class TestOkVerdictWrites:
         memory_db.rollback()
 
         assert memory_db.execute("SELECT COUNT(*) FROM ingestion_check_cache").fetchone()[0] == 2
+
+    def test_one_unreadable_transcript_does_not_stop_the_others(self, memory_db, legacy_session, tmp_path, monkeypatch):
+        bad = self._seed_sessions(memory_db, memory_db.execute("SELECT id FROM projects").fetchone()[0], tmp_path, 1)[0]
+        real_expected = ingestion_status._expected_uuids
+
+        def unreadable(filepaths):
+            if filepaths == [bad]:
+                raise PermissionError(13, "Permission denied", str(bad))
+            return real_expected(filepaths)
+
+        monkeypatch.setattr(ingestion_status, "_expected_uuids", unreadable)
+
+        assert [candidate[0] for candidate in find_repairable_sessions(memory_db)] == ["sess-compacted"]
+        assert summarize_ingestion(memory_db)["missing_source_sessions"] == 1
+
+    def test_one_unstatable_transcript_does_not_stop_the_others(self, memory_db, legacy_session, tmp_path, monkeypatch):
+        bad = self._seed_sessions(memory_db, memory_db.execute("SELECT id FROM projects").fetchone()[0], tmp_path, 1)[0]
+        real_fingerprint = ingestion_status._source_fingerprint
+
+        def unstatable(filepaths):
+            if filepaths == [bad]:
+                raise PermissionError(13, "Permission denied", str(bad))
+            return real_fingerprint(filepaths)
+
+        monkeypatch.setattr(ingestion_status, "_source_fingerprint", unstatable)
+
+        assert [candidate[0] for candidate in find_repairable_sessions(memory_db)] == ["sess-compacted"]
+        assert summarize_ingestion(memory_db)["missing_source_sessions"] == 1
 
     def test_gapped_sessions_get_no_verdict(self, memory_db, legacy_session):
         find_repairable_sessions(memory_db)

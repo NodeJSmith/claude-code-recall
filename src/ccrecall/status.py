@@ -210,7 +210,7 @@ def print_status_report(status: dict) -> None:
             f"/{ingestion['stale_tail_turns']} turn(s); "
             f"gaps {ingestion['ingestion_gap_sessions']} session(s) "
             f"/{ingestion['ingestion_gap_turns']} turn(s); "
-            f"missing source {ingestion['missing_source_sessions']} session(s)"
+            f"missing or unreadable source {ingestion['missing_source_sessions']} session(s)"
         )
 
     tool = status["tool_content"]

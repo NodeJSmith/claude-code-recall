@@ -30,6 +30,8 @@ from ccrecall.db_vec import TRIGGER_CHUNKS_VEC_AD, vec_available
 from ccrecall.file_hashing import transcript_file_hash
 from ccrecall.formatting import extract_project_name, normalize_project_key
 from ccrecall.hooks import import_repair
+from ccrecall.hooks.backfill_query import BACKFILL_NICE_LEVEL
+from ccrecall.hooks.backfill_runner import lower_scheduling_priority
 from ccrecall.hooks.subprocess_utils import reclaim_memory, try_load_libc
 from ccrecall.import_log_ops import has_pending_tool_content
 from ccrecall.models import LOGGER_NAME
@@ -441,22 +443,7 @@ def run(
     Exits non-zero when any project import or gap repair failed.
     """
     total_failures = 0
-    # Default to "not yet acquired" whenever repair_gaps=True: if _run() raises
-    # before it reaches (or returns from) its own PID_KEY acquisition attempt
-    # (e.g. load_settings()/setup_logging() blow up first), this invocation
-    # never touched the marker, so the finally block below must not delete it —
-    # deleting it would un-guard a genuinely live holder (e.g. a manual
-    # --repair-gaps run). When repair_gaps=False, _run() never touches PID_KEY
-    # at all, so the default stays False and the ownership check below decides.
-    #
-    # This default also applies (deliberately left unrefined) if _run() DOES
-    # acquire the lock and then raises later — this process's own marker is
-    # then skipped here too, not just another holder's. That's an acceptable
-    # gap, not a live leak: try_acquire_pid_file's liveness probe reaps a dead
-    # PID's stale marker on the next acquisition attempt, so a future
-    # --repair-gaps invocation self-heals past it rather than skipping
-    # forever.
-    repair_lock_denied = repair_gaps
+    repair_lock_denied = False
     try:
         total_failures, repair_lock_denied = _run(
             db=db, projects_dir=projects_dir, project=project, verbose=verbose, repair_gaps=repair_gaps
@@ -522,6 +509,11 @@ def _run(
         print("ccrecall import --repair-gaps: another import is already running — skipping this run")
         logger.info("Import + --repair-gaps skipped — PID_KEY_IMPORT already held by a live process")
         return 0, True
+
+    # Repair scans every transcript, usually spawned at SessionStart next to the
+    # session that just started, so yield under CPU contention like the backfills.
+    if repair_gaps:
+        lower_scheduling_priority(BACKFILL_NICE_LEVEL)
 
     if db != DEFAULT_DB_PATH:
         settings["db_path"] = str(db)

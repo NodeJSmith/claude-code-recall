@@ -24,8 +24,10 @@ log = logging.getLogger(LOGGER_NAME)
 STALE_TAIL_SECONDS = 15 * 60
 
 # Part of every source fingerprint, so bumping it invalidates all cached "ok"
-# verdicts. Bump it when active_chain changes which entries it returns: an
-# unchanged transcript can then be missing rows the old walk never expected.
+# verdicts. Bump it when anything changes which entries an up-to-date session is
+# expected to have (active_chain, is_valid_entry / TranscriptEntry,
+# message_content_parts): an unchanged transcript can then be missing rows the
+# old code never expected.
 ACTIVE_CHAIN_VERSION = 2
 
 # Sessions verified per commit on the repair path, so a killed run keeps its progress.
@@ -50,7 +52,10 @@ class SessionVerdict(NamedTuple):
 
 
 def _entry_expects_message(entry: dict) -> bool:
-    """True when an entry should have a ``messages`` row after ingestion."""
+    """True when an entry should have a ``messages`` row after ingestion.
+
+    Changing this answer requires bumping ``ACTIVE_CHAIN_VERSION``; see that constant.
+    """
     return message_content_parts(entry) is not None
 
 
@@ -69,7 +74,10 @@ def _is_contiguous_suffix(indices: list[int], total: int) -> bool:
 
 
 def _source_fingerprint(filepaths: list[Path]) -> str | None:
-    """Return a deterministic stat fingerprint, or None if any source is missing."""
+    """Return a deterministic stat fingerprint, or None if any source is missing.
+
+    Any other stat failure raises ``OSError``.
+    """
     parts: list[str] = [f"active-chain-v{ACTIVE_CHAIN_VERSION}"]
     for path in sorted(filepaths, key=str):
         try:
@@ -169,7 +177,8 @@ def classify_sessions(
     category is one of "ok", "pending_tail", "stale_tail", "ingestion_gap", or
     "missing_source" (the rare case where a source file that was present when
     ``sources`` was built has since disappeared — a stat-time TOCTOU race, not
-    the more common paths["missing"] case below).
+    the more common paths["missing"] case below — or can't be read: one bad
+    transcript must not stop every other session from being classified).
     Sessions confirmed via the ok-fingerprint cache are yielded as category "ok"
     with an empty missing_indices list — same as a freshly-computed zero-gap session.
     Sessions whose entire source is missing (``paths["missing"]`` non-empty) are
@@ -185,7 +194,12 @@ def classify_sessions(
             continue
         session_id = session_row[0]
 
-        source_fingerprint = _source_fingerprint(filepaths)
+        try:
+            source_fingerprint = _source_fingerprint(filepaths)
+        except OSError:
+            log.exception("cannot stat transcript source", extra={"session_uuid": session_uuid})
+            yield SessionVerdict(session_uuid, "missing_source", session_id, [])
+            continue
         if source_fingerprint is None:
             yield SessionVerdict(session_uuid, "missing_source", session_id, [])
             continue
@@ -241,6 +255,13 @@ def classify_sessions(
                 extra={"path": str(exc.filename) if exc.filename else None},
             )
             yield SessionVerdict(session_uuid, "missing_source", session_id, [])
+        except Exception:
+            # Same containment as repair_sessions' poison-transcript handling.
+            log.exception(
+                "cannot read transcript source; session counted as missing_source",
+                extra={"session_uuid": session_uuid},
+            )
+            yield SessionVerdict(session_uuid, "missing_source", session_id, [])
 
 
 def summarize_ingestion(
@@ -256,7 +277,8 @@ def summarize_ingestion(
     Code is still writing the session. ``stale_tail`` is the same shape after the
     grace window. ``ingestion_gap`` means missing UUIDs are in the middle of the
     expected active branch and should be recoverable by import/sync. A session
-    with import-log rows but no surviving JSONL is counted as ``missing_source``.
+    with import-log rows but no surviving JSONL, or with a JSONL that can't be read,
+    is counted as ``missing_source``.
     """
     cursor = conn.cursor()
     if sources is None:
@@ -317,7 +339,7 @@ def find_repairable_sessions(
     session classified as stale_tail or ingestion_gap — the categories a
     force-reimport can actually repair. project_id is None when the session's
     project_id column is nullable and unset. Excludes pending_tail (likely
-    still being written) and missing_source (no surviving JSONL to reimport
+    still being written) and missing_source (no readable JSONL to reimport
     from).
 
     Also records each ok verdict it had to parse for, so the next run skips those
@@ -360,7 +382,7 @@ def reclassify_session(
     stale_tail_seconds: int = STALE_TAIL_SECONDS,
 ) -> SessionCategory:
     """Return the current classification ("ok", "pending_tail", "stale_tail",
-    "ingestion_gap", or "missing_source" for the rare no-session-row race) for
+    "ingestion_gap", or "missing_source" for a no-session-row race or an unreadable transcript) for
     one session, given its known-existing filepaths.
 
     Builds a one-entry sources dict and delegates to classify_sessions — the

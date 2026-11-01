@@ -1088,6 +1088,39 @@ class TestEmbedBranchChunks:
 
         conn.close()
 
+    def test_links_changed_with_embedding_failing_early_clears_watermark(self, tmp_path):
+        """A model-load failure raises before embed_branch_chunks reaches its own
+        clear, so the branch must already be cleared for the backfill to find it."""
+        conn = _make_vec_conn(tmp_path)
+        if conn is None:
+            pytest.skip("sqlite-vec not available")
+
+        cursor = conn.cursor()
+        branch_id = _seed_branch(cursor, embedding_version=EMBEDDING_VERSION)
+        session_id = cursor.execute("SELECT session_id FROM branches WHERE id = ?", (branch_id,)).fetchone()[0]
+        entries = [
+            make_jsonl_entry("u1", None, "2024-01-01T00:00:00Z", "user", "question"),
+            make_jsonl_entry("a1", "u1", "2024-01-01T00:00:30Z", "assistant", "answer"),
+        ]
+        uuid_to_msg_id = {}
+        for entry in entries:
+            cursor.execute(
+                "INSERT INTO messages (session_id, uuid, timestamp, role, content, tool_content) "
+                "VALUES (?, ?, ?, ?, ?, '')",
+                (session_id, entry["uuid"], entry["timestamp"], entry["type"], entry["message"]["content"]),
+            )
+            uuid_to_msg_id[entry["uuid"]] = cursor.lastrowid
+        branch = {"leaf_uuid": "a1", "uuids": {"u1", "a1"}, "is_active": True}
+
+        with patch("ccrecall.embeddings.get_model", side_effect=RuntimeError("model unavailable")) as mock_model:
+            sync_branch(cursor, branch, entries, uuid_to_msg_id, session_id, vec_writable=True)
+
+        assert mock_model.called
+        ev = cursor.execute("SELECT embedding_version FROM branches WHERE id = ?", (branch_id,)).fetchone()[0]
+        assert ev is None
+
+        conn.close()
+
     def test_zero_exchange_branch_stamps_watermark(self, tmp_path):
         """An active branch with no embeddable exchange (all-assistant messages,
         as in a sub-agent/sidechain transcript) embeds nothing but advances its

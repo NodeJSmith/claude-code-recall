@@ -88,14 +88,15 @@ def repair_sessions(
     classification is re-checked via ingestion_status.reclassify_session:
       - now "ok" -> sessions_repaired
       - still "stale_tail"/"ingestion_gap" (or the rarer "pending_tail"/
-        "missing_source" edge cases reclassify_session can theoretically
-        return) -> sessions_unrepairable (the on-disk transcript genuinely
+        "missing_source" cases reclassify_session can return) ->
+        sessions_unrepairable (the on-disk transcript genuinely
         lacks the expected content; reattempting won't help)
     If any of the candidate's files raised, it counts toward sessions_failed
     instead, and reclassification is skipped for it (a poison-file failure is
     an operational problem, not evidence the source content is missing). A
-    reclassification failure (e.g. the transcript becoming unreadable between
-    import and reclassification) also counts toward sessions_failed; a
+    reclassification failure raised past reclassify_session also counts toward
+    sessions_failed, while a transcript becoming unreadable between import and
+    reclassification comes back "missing_source" and counts as unrepairable; a
     sqlite3.OperationalError during reclassification aborts the batch, matching
     the force-reimport's own infrastructure-failure escalation. A
     candidate with no project_id on record is also unrepairable — a missing

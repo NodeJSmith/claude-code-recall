@@ -14,7 +14,7 @@ BATCH_SIZE = 20
 BACKFILL_BATCH_DELAY_SECONDS = 0.05
 DEFAULT_PROGRESS_EVERY = BATCH_SIZE
 
-# Lower scheduling priority for this background CPU job so interactive work wins.
+# Lower scheduling priority for background CPU jobs so interactive work wins.
 BACKFILL_NICE_LEVEL = 10
 
 EXIT_OK = 0

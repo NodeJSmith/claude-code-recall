@@ -1,7 +1,7 @@
 # Design: Index Conversation History Across Compaction
 
 **Date:** 2026-10-31
-**Status:** ratified
+**Status:** built
 **Mode:** sketch
 **Issues:** #168
 **Prior art:** design/research/2026-10-31-compaction-transcript-stitching/prior-art.md, design/research/2026-11-01-repair-negative-cache/prior-art.md, design/research/2026-11-01-parser-change-invalidation/prior-art.md
@@ -96,7 +96,7 @@ Out of scope: `sort_session_files`, `select_active_leaf_entry`, and the seven re
 
 ### D4: How do repaired sessions reach embeddings?
 
-**Situation:** repair and background imports run with `embed=False`, and `embed_branch_chunks` returns immediately in that case (`src/ccrecall/embed_ops.py:270`), leaving `embedding_version` at the current version. `backfill embeddings` selects on that watermark (`build_selection`), so a repaired session's new exchanges would be searchable by keyword but never embedded. `f84165c7` is at version 3 today with one chunk. The same gap already exists for any `embed=False` import that adds messages to a branch. `embed_branch_chunks` returns 0 for three different reasons, so "embedding didn't run" is read from `sync_branch`'s own arguments as `not (is_active and vec_writable)`, never from that return value. Behavior to pin: a links-changed sync with embedding enabled and nothing to embed keeps its stamped watermark, and an `embed=False` import clears it.
+**Situation:** repair and background imports run with `embed=False`, and `embed_branch_chunks` returns immediately in that case (`src/ccrecall/embed_ops.py:270`), leaving `embedding_version` at the current version. `backfill embeddings` selects on that watermark (`build_selection`), so a repaired session's new exchanges would be searchable by keyword but never embedded. `f84165c7` is at version 3 today with one chunk. The same gap already exists for any `embed=False` import that adds messages to a branch. The clear happens on any link change, before the embed attempt, and that attempt stamps the watermark again only if every exchange ends up current. Behavior to pin: a links-changed sync with embedding enabled and nothing to embed keeps its stamped watermark, and an `embed=False` import clears it.
 
 **Deciding factor:** repaired history must reach semantic search through the existing backfill, without a separate step.
 
@@ -112,7 +112,7 @@ Out of scope: `sort_session_files`, `select_active_leaf_entry`, and the seven re
 **Pick B instead if** you want this PR to leave ordinary imports' behaviour exactly as it is.
 **Pick C instead if** semantic search on old compacted sessions doesn't matter to you.
 **Reversibility:** easy (a watermark clear only causes an extra backfill pass)
-**Ratified:** Chose clearing the watermark in `sync_branch` when links changed and embedding didn't run, over a repair-only reset or documenting a forced re-embed, to keep the watermark truthful for every import, accepting that ordinary imports which add messages now also queue a backfill pass.
+**Ratified:** Chose clearing the watermark in `sync_branch` whenever links changed, before the embed attempt, over a repair-only reset or documenting a forced re-embed, to keep the watermark truthful for every import, accepting that ordinary imports which add messages now also queue a backfill pass. (Originally "when links changed and embedding didn't run"; the ship-time challenge showed that copied gate missed an embedding failure before its own clear, and the user chose this wording.)
 
 ### D5: Should repaired sessions get embedded without a manual command?
 
@@ -267,7 +267,7 @@ Out of scope: `sort_session_files`, `select_active_leaf_entry`, and the seven re
 
 - [x] Implementation and tests committed
 - [x] Docs: the `src/ccrecall/hooks/import_repair.py` module docstring, CLAUDE.md's architecture notes on the walk and repair, the `--repair-gaps` help text, and any other user-facing text that presents that flag as the only way to repair (README's hook table and flow diagram)
-- [ ] Ship-time challenge
+- [x] Ship-time challenge
 
 **Calls made during the build:**
 
@@ -277,5 +277,8 @@ Out of scope: `sort_session_files`, `select_active_leaf_entry`, and the seven re
 - `classify_sessions` yields a `SessionVerdict` carrying the row to cache when parsing just verified a session ok, and `summarize_ingestion` uses it too: re-computing the coverage fingerprint for every ok session would have roughly doubled D7's 4 s, and the verdict now records the fingerprints it was checked against.
 - D9's log line is WARNING when anything failed or was unrepairable and INFO otherwise, with counts in the message. It has no log-capture test (repo testing convention); it was observed on a real run against a database copy.
 - The `project_id` test fixture moved to `tests/conftest.py`, since this change would have added a third copy.
+- Ship-time challenge: `--repair-gaps` runs at `BACKFILL_NICE_LEVEL`, because D7 and D8 priced this work as niced and nothing set it (the user chose this). Manual repair runs are niced too.
+- Measured against a copy of the real database, in place of D3's and D7's "about 4 s": the first run took 150 s wall and 114 s CPU, repairing 109 sessions and recovering 10,716 messages with a 164 MB peak; the next took 11 s wall with 0 candidates, including the ordinary import loop.
+- Ship-time challenge: a transcript that can't be read counts as `missing_source` and logs, so one bad file can't stop repair for every other session; database errors raise outside that containment and still stop the run. `run()` always decides marker cleanup by comparing the stored PID, since the spawned import now always passes `--repair-gaps` and would otherwise leak its marker on failure.
 
 ## Addendum

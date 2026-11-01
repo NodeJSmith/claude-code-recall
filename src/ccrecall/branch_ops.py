@@ -276,12 +276,11 @@ def sync_branch(
 
     links_changed = diff_branch_messages(cursor, branch_db_id, branch_uuids, uuid_to_msg_id)
 
-    # The watermark means "every current exchange has a vector". Changed links
-    # with no embedding pass make that false, so hand the branch to the backfill.
-    # When embedding does run, embed_branch_chunks owns the watermark. This reads
-    # the arguments that function gates on, not its return value: it returns 0
-    # for several reasons.
-    if links_changed and not (is_active and vec_writable):
+    # The watermark means "every current exchange has a vector", which changed
+    # links make false. Clear it before the embed attempt below: that attempt
+    # stamps it again only if every exchange ends up current, so skipping or
+    # failing leaves the branch for the backfill.
+    if links_changed:
         cursor.execute("UPDATE branches SET embedding_version = NULL WHERE id = ?", (branch_db_id,))
 
     # Aggregate branch content for FTS — SET (recompute from scratch, not append)

@@ -26,6 +26,7 @@ from conftest import (
 from ccrecall import ingestion_status
 from ccrecall.config import PID_KEY_IMPORT, pid_file_path, remove_pid_file
 from ccrecall.embeddings import EMBEDDING_DIM
+from ccrecall.hooks.backfill_query import BACKFILL_NICE_LEVEL
 from ccrecall.hooks.import_conversations import _run, import_project, import_project_contained, import_session, run
 from ccrecall.import_log_ops import import_log_source_index
 
@@ -1470,6 +1471,8 @@ class TestImportRepairGapsEndToEnd:
             yield conn
 
         monkeypatch.setattr("ccrecall.hooks.import_conversations.get_connection", fake_connection)
+        self.nice_levels = []
+        monkeypatch.setattr("ccrecall.hooks.import_conversations.lower_scheduling_priority", self.nice_levels.append)
         run(db=db_path, projects_dir=projects_dir, project=project, verbose=False, repair_gaps=repair_gaps)
 
     def test_repair_gaps_recovers_stale_tail_and_plain_import_does_not(self, memory_db, tmp_path, monkeypatch):
@@ -1694,6 +1697,29 @@ class TestImportRepairGapsEndToEnd:
             ).fetchone()[0]
             == 1
         )
+        assert not pid_file_path(PID_KEY_IMPORT).exists()
+
+    def test_only_repair_runs_lower_their_priority(self, memory_db, tmp_path, monkeypatch):
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+
+        self._run_import(memory_db, monkeypatch, tmp_path, projects_dir, repair_gaps=False)
+        assert self.nice_levels == []
+
+        self._run_import(memory_db, monkeypatch, tmp_path, projects_dir, repair_gaps=True)
+        assert self.nice_levels == [BACKFILL_NICE_LEVEL]
+
+    def test_failed_run_removes_its_own_marker(self, tmp_path, monkeypatch):
+        def _raise_after_acquisition(**_kwargs):
+            pid_file_path(PID_KEY_IMPORT).parent.mkdir(parents=True, exist_ok=True)
+            pid_file_path(PID_KEY_IMPORT).write_text(str(os.getpid()))
+            raise RuntimeError("simulated failure mid-import")
+
+        monkeypatch.setattr("ccrecall.hooks.import_conversations._run", _raise_after_acquisition)
+
+        with pytest.raises(RuntimeError, match="simulated failure"):
+            run(db=tmp_path / "memory.db", projects_dir=tmp_path, repair_gaps=True)
+
         assert not pid_file_path(PID_KEY_IMPORT).exists()
 
     def test_repair_gaps_preserves_other_holders_marker_on_early_exception(self, tmp_path, monkeypatch):
