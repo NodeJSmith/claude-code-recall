@@ -445,10 +445,9 @@ def run(
     # before it reaches (or returns from) its own PID_KEY acquisition attempt
     # (e.g. load_settings()/setup_logging() blow up first), this invocation
     # never touched the marker, so the finally block below must not delete it —
-    # deleting it would un-guard a genuinely live holder (e.g. the
-    # SessionStart-spawned background import). When repair_gaps=False, _run()
-    # never touches PID_KEY at all, so the default stays False (delete
-    # unconditionally) — unchanged from today's contract with _spawn_background.
+    # deleting it would un-guard a genuinely live holder (e.g. a manual
+    # --repair-gaps run). When repair_gaps=False, _run() never touches PID_KEY
+    # at all, so the default stays False and the ownership check below decides.
     #
     # This default also applies (deliberately left unrefined) if _run() DOES
     # acquire the lock and then raises later — this process's own marker is
@@ -514,11 +513,11 @@ def _run(
     # the per-project/DB-wide import loop below even starts — and held for
     # the entire invocation (released by run()'s existing finally). This
     # covers the whole run, not just the repair step: two concurrent
-    # --repair-gaps invocations (or one racing the SessionStart background
-    # auto-import) must not both run the ordinary import loop unguarded and
-    # only collide later at the repair step, which is what happened when the
-    # guard wrapped only that step. repair_gaps=False keeps today's behavior
-    # exactly — no guard at all.
+    # --repair-gaps invocations (a manual one and the one SessionStart spawns)
+    # must not both run the ordinary import loop unguarded and only collide
+    # later at the repair step. A spawned child finds its own PID here, which
+    # counts as acquired. repair_gaps=False keeps today's behavior exactly —
+    # no guard at all.
     if repair_gaps and not try_acquire_pid_file(PID_KEY):
         print("ccrecall import --repair-gaps: another import is already running — skipping this run")
         logger.info("Import + --repair-gaps skipped — PID_KEY_IMPORT already held by a live process")
@@ -619,6 +618,17 @@ def _run(
             if repair_failures:
                 summary += f", {repair_failures} failed — see ccrecall-import.log"
             print(summary)
+            # The SessionStart-spawned import has stdout on DEVNULL, so the log is
+            # the only record of this summary.
+            logger.log(
+                logging.WARNING if repair_failures or repair_unrepairable else logging.INFO,
+                "repair complete: %d candidates, %d repaired, %d messages recovered, %d unrepairable, %d failed",
+                len(candidates),
+                repaired_sessions,
+                repaired_messages,
+                repair_unrepairable,
+                repair_failures,
+            )
 
     t_end = time.monotonic()
     logger.debug("total wall time: %.2fs", t_end - t_start)

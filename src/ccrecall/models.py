@@ -59,6 +59,7 @@ class TranscriptEntry(BaseModel):
 
     uuid: str | None = None
     parent_uuid: str | None = Field(default=None, alias="parentUuid")
+    logical_parent_uuid: str | None = Field(default=None, alias="logicalParentUuid")
     type: str | None = None
     timestamp: str | None = None
     git_branch: str | None = Field(default=None, alias="gitBranch")

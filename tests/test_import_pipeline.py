@@ -2,6 +2,7 @@
 
 import json
 import logging
+import os
 import shutil
 import sqlite3
 import tempfile
@@ -23,7 +24,7 @@ from conftest import (
 )
 
 from ccrecall import ingestion_status
-from ccrecall.config import PID_KEY_IMPORT, pid_file_path, remove_pid_file, try_acquire_pid_file
+from ccrecall.config import PID_KEY_IMPORT, pid_file_path, remove_pid_file
 from ccrecall.embeddings import EMBEDDING_DIM
 from ccrecall.hooks.import_conversations import _run, import_project, import_project_contained, import_session, run
 from ccrecall.import_log_ops import import_log_source_index
@@ -31,18 +32,6 @@ from ccrecall.import_log_ops import import_log_source_index
 _STALE_IMPORT_LOG_SQL = (
     "UPDATE import_log SET file_hash = 'stale', file_size = NULL, file_mtime = NULL WHERE file_path = ?"
 )
-
-
-@pytest.fixture
-def project_id(memory_db):
-    """Create a test project and return its ID."""
-    cursor = memory_db.cursor()
-    cursor.execute(
-        "INSERT INTO projects (path, key, name) VALUES (?, ?, ?)",
-        ("/test/project", "-test-project", "test_project"),
-    )
-    memory_db.commit()
-    return cursor.lastrowid
 
 
 class TestImportSessionBasic:
@@ -1653,7 +1642,8 @@ class TestImportRepairGapsEndToEnd:
 
         # Simulate a concurrently-running import (e.g. the SessionStart background
         # auto-import) already holding the PID marker.
-        assert try_acquire_pid_file(PID_KEY_IMPORT) is True, "test setup: must hold the marker before invoking run()"
+        pid_file_path(PID_KEY_IMPORT).parent.mkdir(parents=True, exist_ok=True)
+        pid_file_path(PID_KEY_IMPORT).write_text(str(os.getppid()))
 
         try:
             self._run_import(memory_db, monkeypatch, tmp_path, projects_dir, repair_gaps=True)
@@ -1676,6 +1666,36 @@ class TestImportRepairGapsEndToEnd:
         finally:
             remove_pid_file(PID_KEY_IMPORT)
 
+    def test_spawned_import_repairs_past_its_own_marker(self, memory_db, tmp_path, monkeypatch):
+        """ccrecall-setup writes the child's PID into the marker before the child
+        runs, so the child finds its own PID, repairs, and removes the marker."""
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        project_dir = projects_dir / "-Users-sam-project"
+        project_dir.mkdir()
+        filepath = project_dir / "sess-spawned.jsonl"
+        write_four_turns(filepath)
+
+        self._run_import(memory_db, monkeypatch, tmp_path, projects_dir, repair_gaps=False)
+
+        session_id = memory_db.execute("SELECT id FROM sessions WHERE uuid = ?", ("sess-spawned",)).fetchone()[0]
+        delete_message(memory_db, session_id, "a2")
+        memory_db.commit()
+        age_past_grace_window(filepath)
+
+        pid_file_path(PID_KEY_IMPORT).parent.mkdir(parents=True, exist_ok=True)
+        pid_file_path(PID_KEY_IMPORT).write_text(str(os.getpid()))
+
+        self._run_import(memory_db, monkeypatch, tmp_path, projects_dir, repair_gaps=True)
+
+        assert (
+            memory_db.execute(
+                "SELECT COUNT(*) FROM messages WHERE session_id = ? AND uuid = 'a2'", (session_id,)
+            ).fetchone()[0]
+            == 1
+        )
+        assert not pid_file_path(PID_KEY_IMPORT).exists()
+
     def test_repair_gaps_preserves_other_holders_marker_on_early_exception(self, tmp_path, monkeypatch):
         """If _run() raises before it ever reaches its own PID_KEY acquisition
         attempt (e.g. load_settings() blows up), run()'s finally block must NOT
@@ -1688,7 +1708,8 @@ class TestImportRepairGapsEndToEnd:
         monkeypatch.setattr("ccrecall.hooks.import_conversations._run", _raise_before_acquisition)
 
         # Simulate a concurrently-running import already holding the marker.
-        assert try_acquire_pid_file(PID_KEY_IMPORT) is True, "test setup: must hold the marker before invoking run()"
+        pid_file_path(PID_KEY_IMPORT).parent.mkdir(parents=True, exist_ok=True)
+        pid_file_path(PID_KEY_IMPORT).write_text(str(os.getppid()))
 
         try:
             with pytest.raises(RuntimeError, match="simulated load_settings"):

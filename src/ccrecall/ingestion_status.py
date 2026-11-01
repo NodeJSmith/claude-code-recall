@@ -1,7 +1,8 @@
 """Transcript-vs-DB ingestion coverage diagnostics.
 
 Diagnostics are read-only except for confirmed-OK cache rows, which let later
-deep-check runs skip reparsing unchanged transcript sources.
+runs skip reparsing unchanged transcript sources. ``summarize_ingestion`` leaves
+committing them to its caller; ``find_repairable_sessions`` commits its own.
 """
 
 import logging
@@ -9,20 +10,43 @@ import sqlite3
 from collections.abc import Iterator
 from pathlib import Path
 from sqlite3 import Connection
-from typing import Literal
+from typing import Literal, NamedTuple
 
 from whenever import Instant
 
 from ccrecall.import_log_ops import import_log_source_index
 from ccrecall.message_ops import message_content_parts
 from ccrecall.models import LOGGER_NAME
-from ccrecall.parsing import parse_all_with_uuids, select_active_leaf_entry
+from ccrecall.parsing import active_chain, parse_all_with_uuids
 
 log = logging.getLogger(LOGGER_NAME)
 
 STALE_TAIL_SECONDS = 15 * 60
 
+# Part of every source fingerprint, so bumping it invalidates all cached "ok"
+# verdicts. Bump it when active_chain changes which entries it returns: an
+# unchanged transcript can then be missing rows the old walk never expected.
+ACTIVE_CHAIN_VERSION = 2
+
+# Sessions verified per commit on the repair path, so a killed run keeps its progress.
+OK_CACHE_COMMIT_BATCH = 100
+
 SessionCategory = Literal["ok", "pending_tail", "stale_tail", "ingestion_gap", "missing_source"]
+
+
+class OkCacheRow(NamedTuple):
+    session_uuid: str
+    source_fingerprint: str
+    db_coverage_fingerprint: str
+
+
+class SessionVerdict(NamedTuple):
+    session_uuid: str
+    category: SessionCategory
+    session_id: int
+    missing_indices: list[int]
+    # Set only when parsing just verified this session ok, so the caller can cache that.
+    new_ok_row: OkCacheRow | None = None
 
 
 def _entry_expects_message(entry: dict) -> bool:
@@ -35,21 +59,7 @@ def _expected_uuids(filepaths: list[Path]) -> list[str]:
     entries: list[dict] = []
     for filepath in filepaths:
         entries.extend(parse_all_with_uuids(filepath))
-    latest = select_active_leaf_entry(entries)
-    if latest is None:
-        return []
-
-    uuid_to_entry = {entry["uuid"]: entry for entry in entries if entry.get("uuid")}
-    ordered_branch: list[dict] = []
-    current_uuid: str | None = latest["uuid"]
-    while current_uuid:
-        entry = uuid_to_entry.get(current_uuid)
-        if entry is None:
-            break
-        ordered_branch.append(entry)
-        current_uuid = entry.get("parentUuid")
-    ordered_branch.reverse()
-    return [entry["uuid"] for entry in ordered_branch if _entry_expects_message(entry)]
+    return [entry["uuid"] for entry in active_chain(entries) if _entry_expects_message(entry)]
 
 
 def _is_contiguous_suffix(indices: list[int], total: int) -> bool:
@@ -60,7 +70,7 @@ def _is_contiguous_suffix(indices: list[int], total: int) -> bool:
 
 def _source_fingerprint(filepaths: list[Path]) -> str | None:
     """Return a deterministic stat fingerprint, or None if any source is missing."""
-    parts: list[str] = []
+    parts: list[str] = [f"active-chain-v{ACTIVE_CHAIN_VERSION}"]
     for path in sorted(filepaths, key=str):
         try:
             stat = path.stat()
@@ -137,19 +147,14 @@ def _cached_ok_fingerprint(cursor: sqlite3.Cursor, session_uuid: str) -> tuple[s
     return (row[0], row[1]) if row is not None else None
 
 
-def _record_ok_fingerprint(
-    cursor: sqlite3.Cursor,
-    session_uuid: str,
-    source_fingerprint: str,
-    db_coverage_fingerprint: str,
-) -> None:
-    cursor.execute(
+def _record_ok_rows(cursor: sqlite3.Cursor, rows: list[OkCacheRow]) -> None:
+    cursor.executemany(
         """
         INSERT OR REPLACE INTO ingestion_check_cache
         (session_uuid, source_fingerprint, db_coverage_fingerprint)
         VALUES (?, ?, ?)
         """,
-        (session_uuid, source_fingerprint, db_coverage_fingerprint),
+        rows,
     )
 
 
@@ -158,8 +163,8 @@ def classify_sessions(
     sources: dict[str, dict[str, list[Path]]],
     now: Instant,
     stale_tail_seconds: int,
-) -> Iterator[tuple[str, SessionCategory, int, list[int]]]:
-    """Yield (session_uuid, category, session_id, missing_indices) for each session with a verdict.
+) -> Iterator[SessionVerdict]:
+    """Yield a SessionVerdict for each session with a verdict.
 
     category is one of "ok", "pending_tail", "stale_tail", "ingestion_gap", or
     "missing_source" (the rare case where a source file that was present when
@@ -182,13 +187,13 @@ def classify_sessions(
 
         source_fingerprint = _source_fingerprint(filepaths)
         if source_fingerprint is None:
-            yield session_uuid, "missing_source", session_id, []
+            yield SessionVerdict(session_uuid, "missing_source", session_id, [])
             continue
 
         db_coverage_fingerprint = _db_coverage_fingerprint(cursor, session_id)
 
         if _cached_ok_fingerprint(cursor, session_uuid) == (source_fingerprint, db_coverage_fingerprint):
-            yield session_uuid, "ok", session_id, []
+            yield SessionVerdict(session_uuid, "ok", session_id, [])
             continue
 
         # Scoped to the active branch's branch_messages links, not just "any
@@ -217,24 +222,25 @@ def classify_sessions(
             expected = _expected_uuids(filepaths)
             missing_indices = [i for i, uuid in enumerate(expected) if uuid not in existing_msg_uuids]
             if not missing_indices:
-                yield session_uuid, "ok", session_id, []
+                new_ok_row = OkCacheRow(session_uuid, source_fingerprint, db_coverage_fingerprint)
+                yield SessionVerdict(session_uuid, "ok", session_id, [], new_ok_row)
                 continue
 
             if _is_contiguous_suffix(missing_indices, len(expected)):
                 newest_mtime = max(Instant.from_timestamp(path.stat().st_mtime) for path in filepaths)
                 if (now - newest_mtime).total("seconds") <= stale_tail_seconds:
-                    yield session_uuid, "pending_tail", session_id, missing_indices
+                    yield SessionVerdict(session_uuid, "pending_tail", session_id, missing_indices)
                 else:
-                    yield session_uuid, "stale_tail", session_id, missing_indices
+                    yield SessionVerdict(session_uuid, "stale_tail", session_id, missing_indices)
             else:
-                yield session_uuid, "ingestion_gap", session_id, missing_indices
+                yield SessionVerdict(session_uuid, "ingestion_gap", session_id, missing_indices)
         except FileNotFoundError as exc:
             log.warning(
                 "transcript source missing while computing ingestion fingerprint; "
                 "session will be counted as missing_source",
                 extra={"path": str(exc.filename) if exc.filename else None},
             )
-            yield session_uuid, "missing_source", session_id, []
+            yield SessionVerdict(session_uuid, "missing_source", session_id, [])
 
 
 def summarize_ingestion(
@@ -267,7 +273,7 @@ def summarize_ingestion(
         "ingestion_gap_turns": 0,
         "missing_source_sessions": 0,
     }
-    ok_cache_writes: list[tuple[str, str, str]] = []
+    new_ok_rows: list[OkCacheRow] = []
 
     for session_uuid, paths in sources.items():
         if not paths["missing"]:
@@ -277,7 +283,7 @@ def summarize_ingestion(
             summary["missing_source_sessions"] += 1
 
     now = Instant.now()
-    for session_uuid, category, session_id, missing_indices in classify_sessions(
+    for _session_uuid, category, _session_id, missing_indices, new_ok_row in classify_sessions(
         cursor, sources, now, stale_tail_seconds
     ):
         summary["sessions_checked"] += 1
@@ -288,20 +294,15 @@ def summarize_ingestion(
 
         if category == "ok":
             summary["ok_sessions"] += 1
-            filepaths = sources[session_uuid]["existing"]
-            source_fingerprint = _source_fingerprint(filepaths)
-            if source_fingerprint is not None:
-                db_coverage_fingerprint = _db_coverage_fingerprint(cursor, session_id)
-                if _cached_ok_fingerprint(cursor, session_uuid) != (source_fingerprint, db_coverage_fingerprint):
-                    ok_cache_writes.append((session_uuid, source_fingerprint, db_coverage_fingerprint))
+            if new_ok_row is not None:
+                new_ok_rows.append(new_ok_row)
             continue
 
         turns = len(missing_indices)
         summary[f"{category}_sessions"] += 1
         summary[f"{category}_turns"] += turns
 
-    for session_uuid, source_fingerprint, db_coverage_fingerprint in ok_cache_writes:
-        _record_ok_fingerprint(cursor, session_uuid, source_fingerprint, db_coverage_fingerprint)
+    _record_ok_rows(cursor, new_ok_rows)
 
     return summary
 
@@ -317,16 +318,28 @@ def find_repairable_sessions(
     force-reimport can actually repair. project_id is None when the session's
     project_id column is nullable and unset. Excludes pending_tail (likely
     still being written) and missing_source (no surviving JSONL to reimport
-    from)."""
+    from).
+
+    Also records each ok verdict it had to parse for, so the next run skips those
+    transcripts. Commits in batches, then once more before returning, so a kill
+    keeps its progress and the caller's repair loop starts with no open
+    transaction (see hooks/import_repair.py)."""
     cursor = conn.cursor()
     if sources is None:
         sources = import_log_source_index(cursor)
 
     now = Instant.now()
     candidates: list[tuple[str, int, int | None, list[Path]]] = []
-    for session_uuid, category, session_id, _missing_indices in classify_sessions(
+    new_ok_rows: list[OkCacheRow] = []
+    for session_uuid, category, session_id, _missing_indices, new_ok_row in classify_sessions(
         cursor, sources, now, stale_tail_seconds
     ):
+        if new_ok_row is not None:
+            new_ok_rows.append(new_ok_row)
+            if len(new_ok_rows) >= OK_CACHE_COMMIT_BATCH:
+                _record_ok_rows(cursor, new_ok_rows)
+                conn.commit()
+                new_ok_rows = []
         if category not in ("stale_tail", "ingestion_gap"):
             continue
         project_row = cursor.execute("SELECT project_id FROM sessions WHERE id = ?", (session_id,)).fetchone()
@@ -334,6 +347,8 @@ def find_repairable_sessions(
         filepaths = sources[session_uuid]["existing"]
         candidates.append((session_uuid, session_id, project_id, filepaths))
 
+    _record_ok_rows(cursor, new_ok_rows)
+    conn.commit()
     return candidates
 
 

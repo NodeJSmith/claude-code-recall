@@ -57,17 +57,6 @@ class _SavepointFailingConn:
         return getattr(self._real, name)
 
 
-@pytest.fixture
-def project_id(memory_db):
-    cursor = memory_db.cursor()
-    cursor.execute(
-        "INSERT INTO projects (path, key, name) VALUES (?, ?, ?)",
-        ("/test/project", "-test-project", "test_project"),
-    )
-    memory_db.commit()
-    return cursor.lastrowid
-
-
 def _stale_tail_candidates(memory_db) -> list:
     cursor = memory_db.cursor()
     sources = import_log_source_index(cursor)

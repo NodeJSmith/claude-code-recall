@@ -1,12 +1,16 @@
 """Force-reimport execution loop for `ccrecall import --repair-gaps`.
 
+The SessionStart hook spawns that same command in the background, so gaps repair
+without a manual run.
+
 Split out of hooks/import_conversations.py (already ~430 lines) rather than
 growing it further — see design/specs/016-stale-tail-import-repair/design.md.
 
 Durability model (deliberate, not an oversight): unlike import_project, this
 loop never wraps its candidates in an outer transaction. find_repairable_sessions
-is pure-SELECT and the call site runs after _run()'s per-project loop has
-already committed, so each candidate's SAVEPOINT/RELEASE here commits
+commits its only writes (ok verdicts) before returning and the call site runs
+after _run()'s per-project loop has already committed, so each candidate's
+SAVEPOINT/RELEASE here commits
 independently and durably the moment it completes. A repair batch has no
 cross-candidate invariant to protect: a run interrupted partway through keeps
 whatever it already fixed, and is safe to resume by re-running --repair-gaps

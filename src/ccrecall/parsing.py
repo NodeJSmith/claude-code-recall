@@ -173,6 +173,52 @@ def select_active_leaf_entry(all_entries: list[dict]) -> dict | None:
     return max(latest_candidates, key=lambda entry: branch_depth(entry["uuid"], uuid_to_parent))
 
 
+def active_chain(all_entries: list[dict]) -> list[dict]:
+    """Return the active conversation's entries in order, root first.
+
+    The only place the active set is computed: indexing (``find_all_branches``)
+    and the ingestion check (``ingestion_status``) must agree on it.
+
+    Walks from the active leaf through ``parentUuid``. A ``compact_boundary`` has
+    no parent, so the walk crosses it through ``logicalParentUuid``, which names
+    the last entry before the compaction. Rewound forks are never reached.
+
+    A hop resolves when its target exists and hasn't been visited. When it
+    resolves, the synthetic compact summary just after the boundary is left out,
+    because the real turns it recaps are now on the chain. When it doesn't, the
+    walk ends there and the summary stays, as the only record of the earlier
+    conversation. Transcript JSONL is untrusted, so a parent cycle or a hop
+    pointing downstream ends the walk too.
+
+    Changing which entries this returns requires bumping
+    ``ingestion_status.ACTIVE_CHAIN_VERSION``.
+    """
+    latest = select_active_leaf_entry(all_entries)
+    if latest is None:
+        return []
+    uuid_to_entry = {entry["uuid"]: entry for entry in all_entries if entry.get("uuid")}
+
+    chain: list[dict] = []
+    visited: set[str] = set()
+    current: str | None = latest["uuid"]
+    while current and current not in visited:
+        entry = uuid_to_entry.get(current)
+        if entry is None:
+            break
+        visited.add(current)
+        current = entry.get("parentUuid")
+        if not current and entry.get("subtype") == "compact_boundary":
+            logical_parent = entry.get("logicalParentUuid")
+            if logical_parent in uuid_to_entry and logical_parent not in visited:
+                current = logical_parent
+                # The walk runs leaf to root, so the entry just after this boundary is last.
+                if chain and chain[-1].get("isCompactSummary"):
+                    chain.pop()
+        chain.append(entry)
+    chain.reverse()
+    return chain
+
+
 def sort_session_files(filepaths: list[Path]) -> list[Path]:
     """Order sibling transcript files so parent-chain segments replay before descendants."""
     entries_by_path = {
@@ -235,43 +281,19 @@ def find_all_branches(all_entries: list[dict]) -> list[dict]:
       - uuids: set of all UUIDs on this branch path
       - is_active: always True
 
-    Algorithm: trace from the latest message back to the root via parentUuid.
+    The path itself comes from ``active_chain``.
     """
-    uuid_to_entry: dict[str, dict] = {}
-    uuid_to_parent: dict[str, str | None] = {}
-
-    for entry in all_entries:
-        uuid = entry.get("uuid")
-        if not uuid:
-            continue
-        uuid_to_entry[uuid] = entry
-        uuid_to_parent[uuid] = entry.get("parentUuid")
-
-    if not uuid_to_entry:
+    chain = active_chain(all_entries)
+    if not chain:
         return []
 
-    # Find active branch (latest/deepest leaf -> root)
-    latest = select_active_leaf_entry(all_entries)
-    if latest is None:
-        return []
-    active_uuids: set[str] = set()
-    current: str | None = latest["uuid"]
-    # Transcript JSONL is untrusted: a parentUuid cycle (a -> b -> a) from a
-    # partial write, a corrupted sync, or a hand-edited file would walk forever.
-    # The set being built is the visited set, so the guard costs nothing.
-    while current and current not in active_uuids:
-        active_uuids.add(current)
-        current = uuid_to_parent.get(current)
-
-    branches: list[dict] = [
+    return [
         {
-            "leaf_uuid": latest["uuid"],
-            "uuids": active_uuids,
+            "leaf_uuid": chain[-1]["uuid"],
+            "uuids": {entry["uuid"] for entry in chain},
             "is_active": True,
         }
     ]
-
-    return branches
 
 
 def compute_branch_metadata(

@@ -115,7 +115,7 @@ These are wired by the plugin's `hooks/hooks.json` and fire on their respective 
 
 | Entry point | Event | What it does |
 |---|---|---|
-| `ccrecall-setup` | SessionStart | Creates `~/.ccrecall/` if needed, opens the DB to apply any pending migrations, then spawns `ccrecall import` and `ccrecall backfill summaries` as background processes |
+| `ccrecall-setup` | SessionStart | Creates `~/.ccrecall/` if needed, opens the DB to apply any pending migrations, then spawns `ccrecall import --repair-gaps` and `ccrecall backfill summaries` as background processes. The import also repairs sessions with missing history, including sessions indexed before compaction stitching |
 | `ccrecall-context` | SessionStart (startup + clear) | Injects a summary of your most recent session into Claude's context so it knows what you were working on. On `/clear`, reads a handoff file to link directly to the session you just cleared from |
 | `ccrecall-clear-handoff` | SessionEnd (clear only) | Writes a small handoff file so the next session start knows which session to link to after a `/clear`. Without this, context injection falls back to a "most recent session" heuristic |
 | `ccrecall-sync` | Stop | Syncs the current session to the DB in a detached background process. Runs on every session end |
@@ -158,7 +158,7 @@ Session ends
 
 Session starts
   └─ ccrecall-setup (SessionStart)
-  │    └─ ccrecall import (background, first run / new files)
+  │    └─ ccrecall import --repair-gaps (background, first run / new files / gaps)
   │         └─ embeds each new active leaf via jina if model available
   │    └─ ccrecall backfill summaries (background, if summaries missing)
   │    └─ (embedding backfill is NOT auto-spawned — opt-in via ccrecall backfill embeddings)
