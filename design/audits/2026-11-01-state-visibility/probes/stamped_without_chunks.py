@@ -5,6 +5,7 @@ import sqlite3
 import sys
 
 from ccrecall.db_vec import fetch_branch_messages
+from ccrecall.embeddings import EMBEDDING_VERSION
 from ccrecall.import_log_ops import import_log_source_index
 from ccrecall.summarizer import build_exchange_pairs
 
@@ -13,7 +14,8 @@ cur = conn.cursor()
 gone = {u for u, p in import_log_source_index(cur).items() if p["missing"]}
 rows = cur.execute(
     "SELECT b.id, s.uuid, b.ended_at FROM branches b JOIN sessions s ON s.id=b.session_id "
-    "WHERE b.is_active=1 AND b.embedding_version=3"
+    "WHERE b.is_active=1 AND b.embedding_version=?",
+    (EMBEDDING_VERSION,),
 ).fetchall()
 months = collections.Counter()
 t = collections.Counter()

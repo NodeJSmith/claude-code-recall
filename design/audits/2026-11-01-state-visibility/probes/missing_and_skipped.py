@@ -6,6 +6,7 @@ import sqlite3
 import sys
 from pathlib import Path
 
+from ccrecall.embeddings import EMBEDDING_VERSION
 from ccrecall.import_log_ops import import_log_source_index
 
 conn = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
@@ -26,12 +27,11 @@ for u in gone:
     n = cur.execute("SELECT COUNT(*) FROM messages WHERE session_id=?", (row[0],)).fetchone()[0]
     msgs += n
     zero += n == 0
-    emb += row[2] == 3
+    emb += row[2] == EMBEDDING_VERSION
     if row[1]:
         ends.append(row[1][:10])
     missing_paths = sources[u]["missing"]
     projects_gone[Path(missing_paths[0]).parent.name[:55]] += 1
-    projects_gone_dir_exists = Path(missing_paths[0]).parent.exists()
 print(f"missing-source: messages still in DB={msgs} sessions with zero messages={zero} embedded={emb}")
 ends.sort()
 print(f"   ended_at range {ends[0]} .. {ends[-1]}, median {ends[len(ends) // 2]}")

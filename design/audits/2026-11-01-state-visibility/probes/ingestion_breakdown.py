@@ -8,14 +8,14 @@ from pathlib import Path
 
 from whenever import Instant
 
-from ccrecall import ingestion_status
+from ccrecall.embeddings import EMBEDDING_VERSION, SYNC_PATH_TOKEN_LIMIT
+from ccrecall.import_log_ops import import_log_source_index
 from ccrecall.ingestion_status import STALE_TAIL_SECONDS, classify_sessions
 
 db = sys.argv[1]
 conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
 cur = conn.cursor()
-index_fn = ingestion_status.import_log_source_index
-sources = index_fn(cur)
+sources = import_log_source_index(cur)
 
 missing_all = [u for u, p in sources.items() if p["missing"]]
 in_sessions = [u for u in missing_all if cur.execute("SELECT 1 FROM sessions WHERE uuid=?", (u,)).fetchone()]
@@ -82,15 +82,17 @@ for row in cur.execute(
        (SELECT COUNT(*) FROM branch_messages bm WHERE bm.branch_id=b.id),
        length(b.aggregated_content)
        FROM branches b JOIN sessions s ON s.id=b.session_id
-       WHERE b.is_active=1 AND (b.embedding_version IS NULL OR b.embedding_version < 3)
-       ORDER BY b.ended_at DESC"""
+       WHERE b.is_active=1 AND (b.embedding_version IS NULL OR b.embedding_version < ?)
+       ORDER BY b.ended_at DESC""",
+    (EMBEDDING_VERSION,),
 ):
     print("  ", row)
 
-print("\ndraft branches (cap_tokens=4096):")
+print(f"\ndraft branches (cap_tokens={SYNC_PATH_TOKEN_LIMIT}):")
 for row in cur.execute(
     """SELECT substr(s.uuid,1,8), COUNT(*), MAX(c.timestamp), b.embedding_version
        FROM chunks c JOIN branches b ON b.id=c.branch_id JOIN sessions s ON s.id=b.session_id
-       WHERE c.cap_tokens=4096 GROUP BY b.id ORDER BY 3 DESC"""
+       WHERE c.cap_tokens=? GROUP BY b.id ORDER BY 3 DESC""",
+    (SYNC_PATH_TOKEN_LIMIT,),
 ):
     print("  ", row)

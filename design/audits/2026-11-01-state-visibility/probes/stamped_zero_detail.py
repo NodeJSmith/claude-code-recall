@@ -8,19 +8,21 @@ import sqlite3
 import sys
 
 from ccrecall.db_vec import fetch_branch_messages
+from ccrecall.embeddings import EMBEDDING_VERSION
 from ccrecall.summarizer import build_exchange_pairs
 
 live = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True).cursor()
 aug = sqlite3.connect(f"file:{sys.argv[2]}?immutable=1", uri=True).cursor()
 rows = live.execute(
-    "SELECT b.id, s.uuid, b.ended_at, b.started_at, (SELECT COUNT(*) FROM chunks c WHERE c.branch_id=b.id) "
-    "FROM branches b JOIN sessions s ON s.id=b.session_id WHERE b.is_active=1 AND b.embedding_version=3"
+    "SELECT b.id, s.uuid, b.ended_at, (SELECT COUNT(*) FROM chunks c WHERE c.branch_id=b.id) "
+    "FROM branches b JOIN sessions s ON s.id=b.session_id WHERE b.is_active=1 AND b.embedding_version=?",
+    (EMBEDDING_VERSION,),
 ).fetchall()
 zero_days = collections.Counter()
 partial_days = collections.Counter()
 aug_state = collections.Counter()
 partial_shape = collections.Counter()
-for bid, uuid, ended, _, nchunks in rows:
+for bid, uuid, ended, nchunks in rows:
     pairs = build_exchange_pairs(fetch_branch_messages(live, bid, False))
     have = {r[0] for r in live.execute("SELECT exchange_index FROM chunks WHERE branch_id=?", (bid,))}
     missing = [p["index"] for p in pairs if p["index"] not in have]
