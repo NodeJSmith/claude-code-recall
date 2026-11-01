@@ -34,7 +34,8 @@ for u in gone:
     projects_gone[Path(missing_paths[0]).parent.name[:55]] += 1
 print(f"missing-source: messages still in DB={msgs} sessions with zero messages={zero} embedded={emb}")
 ends.sort()
-print(f"   ended_at range {ends[0]} .. {ends[-1]}, median {ends[len(ends) // 2]}")
+if ends:
+    print(f"   ended_at range {ends[0]} .. {ends[-1]}, median {ends[len(ends) // 2]}")
 parent_exists = sum(Path(sources[u]["missing"][0]).parent.exists() for u in gone)
 print(f"   project dir still on disk: {parent_exists}/{len(gone)}")
 for proj, n in projects_gone.most_common(6):
