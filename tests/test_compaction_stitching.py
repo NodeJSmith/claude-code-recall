@@ -17,10 +17,10 @@ from ccrecall.parsing import active_chain, find_all_branches, is_valid_entry, se
 SUMMARY_TEXT = "This session is being continued from a previous conversation"
 
 
-def boundary(uuid: str, logical_parent: str | None, ts: str, parent: str | None = None) -> dict:
+def boundary(uuid: str, logical_parent: str | None, ts: str) -> dict:
     return {
         "uuid": uuid,
-        "parentUuid": parent,
+        "parentUuid": None,
         "logicalParentUuid": logical_parent,
         "type": "system",
         "subtype": "compact_boundary",
@@ -301,30 +301,19 @@ class TestOkVerdictWrites:
 
         assert memory_db.execute("SELECT COUNT(*) FROM ingestion_check_cache").fetchone()[0] == 2
 
-    def test_one_unreadable_transcript_does_not_stop_the_others(self, memory_db, legacy_session, tmp_path, monkeypatch):
-        bad = self._seed_sessions(memory_db, memory_db.execute("SELECT id FROM projects").fetchone()[0], tmp_path, 1)[0]
-        real_expected = ingestion_status._expected_uuids
+    @pytest.mark.parametrize("failing_read", ["_expected_uuids", "_source_fingerprint"])
+    def test_one_bad_transcript_does_not_stop_the_others(
+        self, memory_db, legacy_session, project_id, tmp_path, monkeypatch, failing_read
+    ):
+        bad = self._seed_sessions(memory_db, project_id, tmp_path, 1)[0]
+        real_read = getattr(ingestion_status, failing_read)
 
         def unreadable(filepaths):
             if filepaths == [bad]:
                 raise PermissionError(13, "Permission denied", str(bad))
-            return real_expected(filepaths)
+            return real_read(filepaths)
 
-        monkeypatch.setattr(ingestion_status, "_expected_uuids", unreadable)
-
-        assert [candidate[0] for candidate in find_repairable_sessions(memory_db)] == ["sess-compacted"]
-        assert summarize_ingestion(memory_db)["missing_source_sessions"] == 1
-
-    def test_one_unstatable_transcript_does_not_stop_the_others(self, memory_db, legacy_session, tmp_path, monkeypatch):
-        bad = self._seed_sessions(memory_db, memory_db.execute("SELECT id FROM projects").fetchone()[0], tmp_path, 1)[0]
-        real_fingerprint = ingestion_status._source_fingerprint
-
-        def unstatable(filepaths):
-            if filepaths == [bad]:
-                raise PermissionError(13, "Permission denied", str(bad))
-            return real_fingerprint(filepaths)
-
-        monkeypatch.setattr(ingestion_status, "_source_fingerprint", unstatable)
+        monkeypatch.setattr(ingestion_status, failing_read, unreadable)
 
         assert [candidate[0] for candidate in find_repairable_sessions(memory_db)] == ["sess-compacted"]
         assert summarize_ingestion(memory_db)["missing_source_sessions"] == 1

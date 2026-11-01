@@ -382,8 +382,8 @@ def reclassify_session(
     stale_tail_seconds: int = STALE_TAIL_SECONDS,
 ) -> SessionCategory:
     """Return the current classification ("ok", "pending_tail", "stale_tail",
-    "ingestion_gap", or "missing_source" for a no-session-row race or an unreadable transcript) for
-    one session, given its known-existing filepaths.
+    "ingestion_gap", or "missing_source" for a no-session-row race or an
+    unreadable transcript) for one session, given its known-existing filepaths.
 
     Builds a one-entry sources dict and delegates to classify_sessions — the
     ingestion_check_cache short-circuit inside it naturally misses here after a

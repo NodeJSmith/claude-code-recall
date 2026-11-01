@@ -10,8 +10,8 @@ Durability model (deliberate, not an oversight): unlike import_project, this
 loop never wraps its candidates in an outer transaction. find_repairable_sessions
 commits its only writes (ok verdicts) before returning and the call site runs
 after _run()'s per-project loop has already committed, so each candidate's
-SAVEPOINT/RELEASE here commits
-independently and durably the moment it completes. A repair batch has no
+SAVEPOINT/RELEASE here commits independently and durably the moment it
+completes. A repair batch has no
 cross-candidate invariant to protect: a run interrupted partway through keeps
 whatever it already fixed, and is safe to resume by re-running --repair-gaps
 (force=True reimports are idempotent — sync_session's UUID-dedup insert is a
