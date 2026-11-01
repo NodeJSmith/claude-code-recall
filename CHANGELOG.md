@@ -5,8 +5,8 @@
 
 ### Bug Fixes
 
-* index conversation history from before a compaction ([#230](https://github.com/NodeJSmith/claude-code-recall/issues/230)) ([2e54e8f](https://github.com/NodeJSmith/claude-code-recall/commit/2e54e8ff8448ce22fa6e04f5d2c1e2e875a294fc))
-* warn when the database is newer than your ccrecall install ([#228](https://github.com/NodeJSmith/claude-code-recall/issues/228)) ([e9ecc6a](https://github.com/NodeJSmith/claude-code-recall/commit/e9ecc6a23ccee1df45a6366c902d4448f45753ee))
+- **Conversation history from before a compaction is now indexed.** A compacted session used to lose everything before its last compaction from message counts, keyword search and embeddings. Existing sessions repair automatically: the first background import after upgrading re-parses every transcript once at lowered priority, and later imports skip unchanged ones. Recovered history gets keyword search right away; run `ccrecall backfill embeddings` to add it to semantic search. (#230)
+- **ccrecall now warns when the database is newer than your install.** An older ccrecall running against a database that a newer version already migrated could fail with an obscure SQLite error, with only a log line as a hint. You now get a SessionStart alert naming both schema versions, and CLI commands print a one-line warning on stderr, so `--json` output stays parseable. Commands still run, because most schema changes are compatible with older code. (#228)
 
 ## [0.26.1](https://github.com/NodeJSmith/claude-code-recall/compare/v0.26.0...v0.26.1) (2026-10-30)
 
