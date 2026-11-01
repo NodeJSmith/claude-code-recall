@@ -11,7 +11,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-from conftest import FIXTURE_DIR
+from conftest import FIXTURE_DIR, make_jsonl_entry, write_jsonl
 
 from ccrecall.branch_ops import sync_branch
 from ccrecall.db_vec import _ensure_vec_schema, vec_available
@@ -1020,6 +1020,104 @@ class TestEmbedBranchChunks:
             embed_branch_chunks(cursor, branch_id, msgs, is_active=True, vec_writable=True)
 
         assert mock_embed.call_count == 0, "unchanged content must not trigger re-embedding"
+
+        conn.close()
+
+    def test_import_that_adds_messages_clears_watermark(self, memory_db, project_id, tmp_path):
+        """embed=False means sync_branch sees vec_writable=False."""
+        filepath = tmp_path / "sess.jsonl"
+        entries = [
+            make_jsonl_entry("u1", None, "2026-01-01T10:00:00Z", "user", "first"),
+            make_jsonl_entry("a1", "u1", "2026-01-01T10:01:00Z", "assistant", "answer"),
+        ]
+        write_jsonl(filepath, entries)
+        sync_session(memory_db, filepath, tmp_path, embed=False, _project_id=project_id)
+        memory_db.execute("UPDATE branches SET embedding_version = ?", (EMBEDDING_VERSION,))
+
+        entries.append(make_jsonl_entry("u2", "a1", "2026-01-01T10:02:00Z", "user", "second"))
+        write_jsonl(filepath, entries)
+        sync_session(memory_db, filepath, tmp_path, embed=False, _project_id=project_id)
+
+        assert memory_db.execute("SELECT embedding_version FROM branches").fetchone()[0] is None
+
+    def test_import_with_unchanged_links_keeps_watermark(self, memory_db, project_id, tmp_path):
+        filepath = tmp_path / "sess.jsonl"
+        write_jsonl(
+            filepath,
+            [
+                make_jsonl_entry("u1", None, "2026-01-01T10:00:00Z", "user", "first"),
+                make_jsonl_entry("a1", "u1", "2026-01-01T10:01:00Z", "assistant", "answer"),
+            ],
+        )
+        sync_session(memory_db, filepath, tmp_path, embed=False, _project_id=project_id)
+        memory_db.execute("UPDATE branches SET embedding_version = ?", (EMBEDDING_VERSION,))
+
+        sync_session(memory_db, filepath, tmp_path, embed=False, _project_id=project_id, force=True)
+
+        assert memory_db.execute("SELECT embedding_version FROM branches").fetchone()[0] == EMBEDDING_VERSION
+
+    def test_links_changed_with_embedding_enabled_keeps_stamped_watermark(self, tmp_path):
+        """embed_branch_chunks owns the watermark when it runs: a links-changed
+        sync with nothing to embed stamps it, and sync_branch must not clear it."""
+        conn = _make_vec_conn(tmp_path)
+        if conn is None:
+            pytest.skip("sqlite-vec not available")
+
+        cursor = conn.cursor()
+        branch_id = _seed_branch(cursor)
+        session_id = cursor.execute("SELECT session_id FROM branches WHERE id = ?", (branch_id,)).fetchone()[0]
+        cursor.execute(
+            "INSERT INTO messages (session_id, uuid, timestamp, role, content, tool_content) "
+            "VALUES (?, 'a1', '2024-01-01T00:00:30', 'assistant', 'sidechain output', '')",
+            (session_id,),
+        )
+        msg_id = cursor.lastrowid
+        entry = {
+            "uuid": "a1",
+            "type": "assistant",
+            "timestamp": "2024-01-01T00:00:30",
+            "message": {"role": "assistant", "content": "sidechain output"},
+        }
+        branch = {"leaf_uuid": "a1", "uuids": {"a1"}, "is_active": True}
+
+        sync_branch(cursor, branch, [entry], {"a1": msg_id}, session_id, vec_writable=True)
+
+        assert cursor.execute("SELECT COUNT(*) FROM branch_messages").fetchone()[0] == 1
+        ev = cursor.execute("SELECT embedding_version FROM branches WHERE id = ?", (branch_id,)).fetchone()[0]
+        assert ev == EMBEDDING_VERSION
+
+        conn.close()
+
+    def test_links_changed_with_embedding_failing_early_clears_watermark(self, tmp_path):
+        """A model-load failure raises before embed_branch_chunks reaches its own
+        clear, so the branch must already be cleared for the backfill to find it."""
+        conn = _make_vec_conn(tmp_path)
+        if conn is None:
+            pytest.skip("sqlite-vec not available")
+
+        cursor = conn.cursor()
+        branch_id = _seed_branch(cursor, embedding_version=EMBEDDING_VERSION)
+        session_id = cursor.execute("SELECT session_id FROM branches WHERE id = ?", (branch_id,)).fetchone()[0]
+        entries = [
+            make_jsonl_entry("u1", None, "2024-01-01T00:00:00Z", "user", "question"),
+            make_jsonl_entry("a1", "u1", "2024-01-01T00:00:30Z", "assistant", "answer"),
+        ]
+        uuid_to_msg_id = {}
+        for entry in entries:
+            cursor.execute(
+                "INSERT INTO messages (session_id, uuid, timestamp, role, content, tool_content) "
+                "VALUES (?, ?, ?, ?, ?, '')",
+                (session_id, entry["uuid"], entry["timestamp"], entry["type"], entry["message"]["content"]),
+            )
+            uuid_to_msg_id[entry["uuid"]] = cursor.lastrowid
+        branch = {"leaf_uuid": "a1", "uuids": {"u1", "a1"}, "is_active": True}
+
+        with patch("ccrecall.embeddings.get_model", side_effect=RuntimeError("model unavailable")) as mock_model:
+            sync_branch(cursor, branch, entries, uuid_to_msg_id, session_id, vec_writable=True)
+
+        assert mock_model.called
+        ev = cursor.execute("SELECT embedding_version FROM branches WHERE id = ?", (branch_id,)).fetchone()[0]
+        assert ev is None
 
         conn.close()
 

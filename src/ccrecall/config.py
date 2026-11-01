@@ -112,7 +112,9 @@ def try_acquire_pid_file(pid_key: str) -> bool:
 
     Atomic write-then-link acquisition with a liveness probe on any existing
     sentinel: a live holder means False (caller must skip, not queue); a dead
-    or unreadable sentinel is reaped and acquisition retried. On success the
+    or unreadable sentinel is reaped and acquisition retried. A marker already
+    holding the caller's own PID counts as acquired, because _spawn_background
+    writes its child's PID before the child gets here. On success the
     marker holds the caller's PID and True is returned — the caller MUST later
     call remove_pid_file(pid_key), including on error paths. A holder we lack
     permission to signal counts as live (PermissionError → False).
@@ -142,6 +144,8 @@ def try_acquire_pid_file(pid_key: str) -> bool:
                     # 0/negative would probe the caller's own process group and
                     # read as permanently "alive" — treat as a corrupt marker.
                     raise ValueError(f"bogus pid: {existing_pid}")
+                if existing_pid == os.getpid():
+                    return True
                 os.kill(existing_pid, 0)  # signal 0: liveness probe, no signal sent
                 return False
             except (ValueError, OverflowError):

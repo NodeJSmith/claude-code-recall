@@ -475,6 +475,22 @@ class TestPidGuard:
         assert flags & os.O_EXCL, "O_EXCL must be set for atomic create"
 
 
+class TestBackgroundImportSpawn:
+    def test_session_start_import_repairs_gaps(self, monkeypatch):
+        spawned = []
+        monkeypatch.setattr(memory_setup, "load_settings", dict)
+        monkeypatch.setattr(memory_setup, "setup_logging", lambda *a, **k: MagicMock())
+        monkeypatch.setattr(memory_setup, "_needs_reimport", lambda *a: True)
+        monkeypatch.setattr(memory_setup, "_needs_backfill", lambda *a: False)
+        monkeypatch.setattr(memory_setup, "_reap_stale_temp_files", lambda: None)
+        monkeypatch.setattr(memory_setup, "_spawn_background", lambda argv, key, logger: spawned.append((argv, key)))
+
+        with patch("builtins.print"):
+            memory_setup.main()
+
+        assert (["ccrecall", "import", "--repair-gaps"], memory_setup.PID_KEY_IMPORT) in spawned
+
+
 class TestNeedsCheckDbError:
     """_needs_reimport and _needs_backfill both gracefully degrade (return False)
     on DB access failure.
@@ -753,8 +769,8 @@ class TestSyncCurrentConcurrencyGuard:
         monkeypatch.setattr("ccrecall.config.pid_file_path", lambda key: tmp_path / f".pid-{key}")
         monkeypatch.setattr(sync_current, "remove_pid_file", lambda key: None)
 
-        # Write current process PID as "live" holder
-        (tmp_path / f".pid-{sync_current.PID_KEY}").write_text(str(os.getpid()))
+        # Another live process holds the marker
+        (tmp_path / f".pid-{sync_current.PID_KEY}").write_text(str(os.getppid()))
 
         sync_called = []
         monkeypatch.setattr(sync_current, "sync_session", lambda *a, **k: sync_called.append(1) or 0)
@@ -772,7 +788,7 @@ class TestSyncCurrentConcurrencyGuard:
         """Skip path prints exactly the hook-contract JSON: {\"continue\": true}."""
         monkeypatch.setattr("ccrecall.config.pid_file_path", lambda key: tmp_path / f".pid-{key}")
         monkeypatch.setattr(sync_current, "remove_pid_file", lambda key: None)
-        (tmp_path / f".pid-{sync_current.PID_KEY}").write_text(str(os.getpid()))
+        (tmp_path / f".pid-{sync_current.PID_KEY}").write_text(str(os.getppid()))
 
         input_file = self._make_input(tmp_path)
         captured = io.StringIO()

@@ -140,6 +140,17 @@ def memory_db():
     conn.close()
 
 
+@pytest.fixture
+def project_id(memory_db):
+    cursor = memory_db.cursor()
+    cursor.execute(
+        "INSERT INTO projects (path, key, name) VALUES (?, ?, ?)",
+        ("/test/project", "-test-project", "test_project"),
+    )
+    memory_db.commit()
+    return cursor.lastrowid
+
+
 @pytest.fixture(params=sorted(FIXTURE_DIR.glob("*.jsonl")), ids=lambda p: p.stem)
 def jsonl_fixture(request):
     """Parameterized fixture yielding each JSONL file path."""

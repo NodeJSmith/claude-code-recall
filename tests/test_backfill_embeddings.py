@@ -1161,11 +1161,18 @@ class TestBackfillPidGuard:
     peak. --status is read-only and never touches the marker.
     """
 
-    def test_acquire_then_second_instance_fails(self, monkeypatch, tmp_path):
+    def test_marker_held_by_another_live_process_refuses(self, monkeypatch, tmp_path):
         monkeypatch.setattr("ccrecall.config.pid_file_path", lambda key: tmp_path / f".pid-{key}")
-        assert try_acquire_pid_file(PID_KEY) is True
-        # Our own live PID holds the marker — a second acquisition must refuse.
+        (tmp_path / f".pid-{PID_KEY}").write_text(str(os.getppid()))
         assert try_acquire_pid_file(PID_KEY) is False
+        assert (tmp_path / f".pid-{PID_KEY}").read_text() == str(os.getppid())
+
+    def test_marker_holding_own_pid_counts_as_acquired(self, monkeypatch, tmp_path):
+        """_spawn_background writes the child's PID before the child gets to acquire."""
+        monkeypatch.setattr("ccrecall.config.pid_file_path", lambda key: tmp_path / f".pid-{key}")
+        (tmp_path / f".pid-{PID_KEY}").write_text(str(os.getpid()))
+        assert try_acquire_pid_file(PID_KEY) is True
+        assert (tmp_path / f".pid-{PID_KEY}").read_text() == str(os.getpid())
 
     def test_stale_pid_reaped(self, monkeypatch, tmp_path):
         monkeypatch.setattr("ccrecall.config.pid_file_path", lambda key: tmp_path / f".pid-{key}")

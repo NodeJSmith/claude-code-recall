@@ -35,7 +35,7 @@ STALE_TEMP_FILE_MAX_AGE_SECONDS = 3600
 def _spawn_background(argv: list[str], pid_key: str, logger: logging.Logger) -> None:
     """Spawn an installed entry point as a detached background process.
 
-    ``argv`` is the command to run (e.g. ``["ccrecall", "import"]``); ``pid_key``
+    ``argv`` is the command to run (e.g. ``["ccrecall-warm-model"]``); ``pid_key``
     names the PID file (``.pid-<pid_key>``) and must match the constant the
     spawned command unlinks on exit.
 
@@ -154,7 +154,7 @@ def main():
         db_absent = not DEFAULT_DB_PATH.exists()
 
         if db_absent or _needs_reimport(settings, logger):
-            _spawn_background(["ccrecall", "import"], PID_KEY_IMPORT, logger)
+            _spawn_background(["ccrecall", "import", "--repair-gaps"], PID_KEY_IMPORT, logger)
 
         if _needs_backfill(settings, logger):
             _spawn_background(["ccrecall", "backfill", "summaries"], PID_KEY_BACKFILL_SUMMARIES, logger)

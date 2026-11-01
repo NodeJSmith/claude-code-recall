@@ -17,7 +17,8 @@ shared here), and the batch trailer's commit plus any extras
 
 `limit_reached` and `lower_scheduling_priority` are two more bits of
 identical start-of-run scaffolding both callers needed; they live here too
-rather than being redefined per caller.
+rather than being redefined per caller. `ccrecall import --repair-gaps` lowers
+its priority the same way.
 """
 
 import contextlib

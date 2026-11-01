@@ -161,8 +161,11 @@ def diff_branch_messages(
     branch_db_id: int,
     branch_uuids: list[str],
     uuid_to_msg_id: dict[str, int],
-) -> None:
-    """Diff branch_messages links: add missing, remove stale (not messages themselves)."""
+) -> bool:
+    """Diff branch_messages links: add missing, remove stale (not messages themselves).
+
+    Returns True when any link was added or removed.
+    """
     cursor.execute(
         "SELECT message_id FROM branch_messages WHERE branch_id = ?",
         (branch_db_id,),
@@ -186,6 +189,7 @@ def diff_branch_messages(
         )
     if to_add:
         insert_branch_message_links(cursor, branch_db_id, to_add)
+    return bool(to_add or to_remove)
 
 
 def insert_branch_message_links(
@@ -270,7 +274,14 @@ def sync_branch(
         session_id,
     )
 
-    diff_branch_messages(cursor, branch_db_id, branch_uuids, uuid_to_msg_id)
+    links_changed = diff_branch_messages(cursor, branch_db_id, branch_uuids, uuid_to_msg_id)
+
+    # The watermark means "every current exchange has a vector", which changed
+    # links make false. Clear it before the embed attempt below: that attempt
+    # stamps it again only if every exchange ends up current, so skipping or
+    # failing leaves the branch for the backfill.
+    if links_changed:
+        cursor.execute("UPDATE branches SET embedding_version = NULL WHERE id = ?", (branch_db_id,))
 
     # Aggregate branch content for FTS — SET (recompute from scratch, not append)
     # Includes: message text + deduplicated full file paths + commit text

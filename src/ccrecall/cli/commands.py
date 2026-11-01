@@ -137,7 +137,8 @@ def cmd_import(
         bool,
         _FLAG,
         Parameter(
-            help="Force-reimport sessions with a stale-tail or ingestion-gap (see `ccrecall status --check-ingestion`)."
+            help="Force-reimport sessions with a stale-tail or ingestion-gap "
+            "(see `ccrecall status --check-ingestion`). The SessionStart background import already does this."
         ),
     ] = False,
     ctx: CLIContextParam = DEFAULT_CLI_CONTEXT,
