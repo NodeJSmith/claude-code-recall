@@ -70,6 +70,7 @@ from ccrecall.branch_ops import insert_branch_message_links
 from ccrecall.config import DEFAULT_DB_PATH, load_settings_for_db, setup_logging
 from ccrecall.content import extract_text_content
 from ccrecall.db import get_connection
+from ccrecall.db_base import is_database_locked
 from ccrecall.db_vec import VEC_BUSY_TIMEOUT_MS
 from ccrecall.hooks.backfill_query import (
     BACKFILL_BATCH_DELAY_SECONDS,
@@ -154,8 +155,7 @@ def backfill_with_retry(
             with savepoint(cursor):
                 return backfill_session(cursor, session_id, filepaths, logger)
         except sqlite3.OperationalError as exc:  # noqa: PERF203 — retry loop; the try/except IS the mechanism, not incidental control flow
-            msg = str(exc).lower()
-            if "locked" not in msg and "busy" not in msg:
+            if not is_database_locked(exc):
                 raise
             logger.warning(
                 "%s: session %s transient DB error (attempt %s/%s): %s",

@@ -14,7 +14,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-from conftest import NoCloseConn
+from conftest import NoCloseConn, locked_error
 from conftest import make_jsonl_entry as _entry
 from conftest import write_jsonl as _write_jsonl
 
@@ -800,7 +800,7 @@ class TestTransientDbLock:
             nonlocal call_count
             if session_id == bad_sid:
                 call_count += 1
-                raise sqlite3.OperationalError("database is locked")
+                raise locked_error()
             return real_backfill(cursor, session_id, filepaths, logger)
 
         with (
@@ -852,7 +852,7 @@ class TestTransientDbLock:
             nonlocal attempt_count
             attempt_count += 1
             if attempt_count == 1:
-                raise sqlite3.OperationalError("database is locked")
+                raise locked_error()
             return backfill_session(cursor, session_id, filepaths, logger)
 
         with (

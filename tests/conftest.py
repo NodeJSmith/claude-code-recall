@@ -157,6 +157,13 @@ def jsonl_fixture(request):
     return request.param
 
 
+def locked_error() -> sqlite3.OperationalError:
+    """What sqlite3 raises for SQLITE_BUSY: a message plus the numeric code."""
+    error = sqlite3.OperationalError("database is locked")
+    error.sqlite_errorcode = sqlite3.SQLITE_BUSY
+    return error
+
+
 def make_jsonl_entry(uuid: str, parent_uuid: str | None, ts: str, role: str, content) -> dict:
     return {
         "uuid": uuid,

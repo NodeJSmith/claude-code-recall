@@ -7,7 +7,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
-from conftest import make_jsonl_entry, seed_stale_tail_session, write_jsonl
+from conftest import locked_error, make_jsonl_entry, seed_stale_tail_session, write_jsonl
 
 from ccrecall.config import PID_KEY_IMPORT, pid_file_path, remove_pid_file
 from ccrecall.db import get_connection
@@ -30,13 +30,6 @@ def write_session(project_dir: Path, name: str) -> Path:
         ],
     )
     return filepath
-
-
-def locked_error() -> sqlite3.OperationalError:
-    """What sqlite3 raises for SQLITE_BUSY: a message plus the numeric code."""
-    error = sqlite3.OperationalError("database is locked")
-    error.sqlite_errorcode = sqlite3.SQLITE_BUSY
-    return error
 
 
 @pytest.fixture

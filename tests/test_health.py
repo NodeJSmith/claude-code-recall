@@ -4,6 +4,7 @@ import json
 import sqlite3
 import threading
 
+from conftest import locked_error
 from whenever import Instant
 
 import ccrecall.health as health
@@ -105,21 +106,20 @@ class TestProbeDb:
         class _LockedConn:
             def execute(self, sql):
                 if "BEGIN" in sql.upper():
-                    raise sqlite3.OperationalError("database is locked")
+                    raise locked_error()
 
         result = probe_db(_LockedConn())
         assert result.ok is True
 
-    def test_returns_ok_for_busy_error(self):
-        """'database is busy' OperationalError → ok (treated as lock contention)."""
+    def test_returns_fault_for_other_error_mentioning_locked(self):
+        """Only SQLite's lock result code means contention, not the word in a message."""
 
-        class _BusyConn:
+        class _SchemaErrorConn:
             def execute(self, sql):
                 if "BEGIN" in sql.upper():
-                    raise sqlite3.OperationalError("unable to acquire lock — database is busy")
+                    raise sqlite3.OperationalError("no such table: locked_items")
 
-        result = probe_db(_BusyConn())
-        assert result.ok is True
+        assert probe_db(_SchemaErrorConn()).ok is False
 
     def test_returns_fault_for_readonly_error(self):
         """Read-only OperationalError → fault."""
