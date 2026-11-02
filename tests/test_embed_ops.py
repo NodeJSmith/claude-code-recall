@@ -4,21 +4,33 @@ parameterization.
 
 import hashlib
 import logging
+import os
 import sqlite3
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from conftest import VEC_SKIP, embed_messages, make_vec_conn, set_branch_messages
 
+from ccrecall.config import PID_KEY_BACKFILL_EMBEDDINGS, pid_file_path
+from ccrecall.db_base import is_database_locked
 from ccrecall.db_vec import _ensure_vec_schema, vec_available
 from ccrecall.embed_ops import (
+    _content_hash,
     _diff_exchanges,
     _prepare_exchange_data,
     _should_stamp_watermark,
     _write_embedded_chunks,
     embed_branch_chunks,
+    resolve_sync_cap,
 )
-from ccrecall.embeddings import EMBEDDING_DIM, EMBEDDING_VERSION, MODEL_TOKEN_LIMIT, SYNC_PATH_TOKEN_LIMIT
+from ccrecall.embeddings import (
+    EMBEDDING_DIM,
+    EMBEDDING_MODEL,
+    EMBEDDING_VERSION,
+    MODEL_TOKEN_LIMIT,
+    SYNC_PATH_TOKEN_LIMIT,
+)
 from ccrecall.schema import SCHEMA
 
 
@@ -269,7 +281,7 @@ class TestEmbedBranchChunksCapLimit:
             patch("ccrecall.embed_ops.cap_for_embedding", side_effect=fake_cap),
             patch("ccrecall.embed_ops.embed_batch", side_effect=lambda texts, **kw: [fake_vec] * len(texts)),
         ):
-            embed_branch_chunks(cursor, branch_id, real_texts, is_active=True, vec_writable=True)
+            embed_messages(conn, branch_id, real_texts)
 
         assert captured_cap_calls
         assert all(c == MODEL_TOKEN_LIMIT for c in captured_cap_calls)
@@ -295,7 +307,7 @@ class TestEmbedBranchChunksCapLimit:
             patch("ccrecall.embed_ops.cap_for_embedding", side_effect=lambda text, max_tokens=None: (text, True)),
             patch("ccrecall.embed_ops.embed_batch", side_effect=lambda texts, **kw: [fake_vec] * len(texts)),
         ):
-            embed_branch_chunks(cursor, branch_id, real_texts, is_active=True, vec_writable=True)
+            embed_messages(conn, branch_id, real_texts)
 
         cursor.execute("SELECT cap_tokens FROM chunks WHERE branch_id = ?", (branch_id,))
         assert cursor.fetchone()[0] == MODEL_TOKEN_LIMIT
@@ -322,7 +334,7 @@ class TestEmbedBranchChunksCapLimit:
             patch("ccrecall.embed_ops.cap_for_embedding", side_effect=fake_cap),
             patch("ccrecall.embed_ops.embed_batch", side_effect=lambda texts, **kw: [fake_vec] * len(texts)),
         ):
-            embed_branch_chunks(cursor, branch_id, real_texts, is_active=True, vec_writable=True, cap_limit=4096)
+            embed_messages(conn, branch_id, real_texts, cap_limit=4096)
 
         assert captured_cap_calls
         assert all(c == 4096 for c in captured_cap_calls)
@@ -344,7 +356,7 @@ class TestEmbedBranchChunksCapLimit:
         fake_vec = [0.1] * EMBEDDING_DIM
 
         with patch("ccrecall.embed_ops.embed_batch", return_value=[fake_vec]) as mock_embed_batch:
-            embed_branch_chunks(cursor, branch_id, real_texts, is_active=True, vec_writable=True, cap_limit=4096)
+            embed_messages(conn, branch_id, real_texts, cap_limit=4096)
 
         mock_embed_batch.assert_called_once()
         _, kwargs = mock_embed_batch.call_args
@@ -372,7 +384,7 @@ class TestEmbedBranchChunksCapExceededWarning:
             patch("ccrecall.embed_ops.embed_batch", side_effect=lambda texts, **kw: [fake_vec] * len(texts)),
             caplog.at_level(logging.WARNING, logger="ccrecall"),
         ):
-            embed_branch_chunks(cursor, branch_id, real_texts, is_active=True, vec_writable=True, cap_limit=4096)
+            embed_messages(conn, branch_id, real_texts, cap_limit=4096)
 
         warnings = [r for r in caplog.records if r.message == "exchange truncated for embedding"]
         assert warnings, "was_capped=True exchange must emit a WARNING"
@@ -396,7 +408,7 @@ class TestEmbedBranchChunksCapExceededWarning:
             patch("ccrecall.embed_ops.embed_batch", side_effect=lambda texts, **kw: [fake_vec] * len(texts)),
             caplog.at_level(logging.WARNING, logger="ccrecall"),
         ):
-            embed_branch_chunks(cursor, branch_id, real_texts, is_active=True, vec_writable=True, cap_limit=4096)
+            embed_messages(conn, branch_id, real_texts, cap_limit=4096)
 
         warnings = [r for r in caplog.records if r.message == "exchange truncated for embedding"]
         assert not warnings, "untruncated exchange must not emit the cap-exceeded WARNING"
@@ -413,10 +425,9 @@ class TestDiffExchangesCapTokensUpgrade:
         exchange_data = [{"index": 0, "content_hash": "hash0"}]
         existing_chunks = {0: {"content_hash": "hash0", "cap_tokens": 4096}}
 
-        needing_embed, indices_to_prune = _diff_exchanges(exchange_data, existing_chunks, target_cap=MODEL_TOKEN_LIMIT)
+        needing_embed = _diff_exchanges(exchange_data, existing_chunks, target_cap=MODEL_TOKEN_LIMIT)
 
         assert needing_embed == exchange_data
-        assert indices_to_prune == set()
 
     def test_does_not_flag_chunk_when_cap_tokens_meets_target(self):
         """After upgrading to MODEL_TOKEN_LIMIT, the sync-context
@@ -424,12 +435,9 @@ class TestDiffExchangesCapTokensUpgrade:
         exchange_data = [{"index": 0, "content_hash": "hash0"}]
         existing_chunks = {0: {"content_hash": "hash0", "cap_tokens": MODEL_TOKEN_LIMIT}}
 
-        needing_embed, indices_to_prune = _diff_exchanges(
-            exchange_data, existing_chunks, target_cap=SYNC_PATH_TOKEN_LIMIT
-        )
+        needing_embed = _diff_exchanges(exchange_data, existing_chunks, target_cap=SYNC_PATH_TOKEN_LIMIT)
 
         assert needing_embed == []
-        assert indices_to_prune == set()
 
     def test_null_cap_tokens_treated_as_full_quality(self):
         """cap_tokens=NULL (pre-migration/untruncated) does not raise and is
@@ -437,7 +445,7 @@ class TestDiffExchangesCapTokensUpgrade:
         exchange_data = [{"index": 0, "content_hash": "hash0"}]
         existing_chunks = {0: {"content_hash": "hash0", "cap_tokens": None}}
 
-        needing_embed, _ = _diff_exchanges(exchange_data, existing_chunks, target_cap=MODEL_TOKEN_LIMIT)
+        needing_embed = _diff_exchanges(exchange_data, existing_chunks, target_cap=MODEL_TOKEN_LIMIT)
 
         assert needing_embed == []
 
@@ -445,7 +453,7 @@ class TestDiffExchangesCapTokensUpgrade:
         exchange_data = [{"index": 0, "content_hash": "hash0"}]
         existing_chunks = {0: {"content_hash": "hash0", "cap_tokens": 4096}}
 
-        needing_embed, _ = _diff_exchanges(exchange_data, existing_chunks)
+        needing_embed = _diff_exchanges(exchange_data, existing_chunks)
 
         assert needing_embed == exchange_data
 
@@ -455,64 +463,523 @@ class TestDiffExchangesCapTokensUpgrade:
         exchange_data = [{"index": 0, "content_hash": "new-hash"}]
         existing_chunks = {0: {"content_hash": "old-hash", "cap_tokens": None}}
 
-        needing_embed, _ = _diff_exchanges(exchange_data, existing_chunks, target_cap=MODEL_TOKEN_LIMIT)
+        needing_embed = _diff_exchanges(exchange_data, existing_chunks, target_cap=MODEL_TOKEN_LIMIT)
 
         assert needing_embed == exchange_data
 
-    def test_cap_tokens_upgrade_does_not_add_to_prune_set(self):
-        """Cap-tokens upgrades are additive to needing_embed only — pruning stays
-        reserved for exchange indices that no longer exist in exchange_data."""
+
+def _chunk(content_hash: str = "hash0", cap_tokens: int | None = None, **overrides) -> dict:
+    return {
+        "content_hash": content_hash,
+        "embedding_version": EMBEDDING_VERSION,
+        "embedding_model": EMBEDDING_MODEL,
+        "cap_tokens": cap_tokens,
+        "has_vector": True,
+        **overrides,
+    }
+
+
+class TestDiffExchangesReplaceStale:
+    """Only backfill selects chunks that aren't current; sync leaves them to it."""
+
+    @pytest.mark.parametrize(
+        "stale",
+        [
+            {"embedding_version": 0},
+            {"embedding_version": None},
+            {"embedding_model": "old/model"},
+            {"has_vector": False},
+        ],
+    )
+    def test_stale_chunk_selected_only_with_replace_stale(self, stale):
         exchange_data = [{"index": 0, "content_hash": "hash0"}]
-        existing_chunks = {
-            0: {"content_hash": "hash0", "cap_tokens": 4096},
-            1: {"content_hash": "hash1", "cap_tokens": None},  # no longer in exchange_data
-        }
+        existing = {0: _chunk(**stale)}
 
-        needing_embed, indices_to_prune = _diff_exchanges(exchange_data, existing_chunks, target_cap=MODEL_TOKEN_LIMIT)
+        assert _diff_exchanges(exchange_data, existing, target_cap=SYNC_PATH_TOKEN_LIMIT) == []
+        assert _diff_exchanges(exchange_data, existing, replace_stale=True) == exchange_data
 
-        assert needing_embed == exchange_data
-        assert indices_to_prune == {1}
+    def test_current_chunk_not_selected_with_replace_stale(self):
+        exchange_data = [{"index": 0, "content_hash": "hash0"}]
+
+        assert _diff_exchanges(exchange_data, {0: _chunk()}, replace_stale=True) == []
 
 
-class TestShouldStampWatermarkCapTokens:
-    """Watermark withheld while any chunk (existing or
-    freshly-embedded) is draft quality; stamped once every chunk is full quality."""
+class TestShouldStampWatermark:
+    """The stamp requires every exchange's chunk current at full quality, judged on stored state."""
 
-    def test_existing_chunk_below_full_quality_withholds_watermark(self):
-        """An existing chunk with cap_tokens=4096 withholds
-        the watermark even though embedding_version and content_hash both match."""
-        exchange_data = [{"index": 0, "content_hash": "hash0", "cap_tokens": None}]
-        existing_chunks = {0: {"content_hash": "hash0", "embedding_version": EMBEDDING_VERSION, "cap_tokens": 4096}}
+    def test_current_full_quality_chunks_stamp(self):
+        assert _should_stamp_watermark({0: "hash0"}, {0: _chunk()}) is True
 
-        result = _should_stamp_watermark(exchange_data, embedded_indices=set(), existing_chunks=existing_chunks)
+    def test_no_exchanges_stamps(self):
+        assert _should_stamp_watermark({}, {}) is True
 
-        assert result is False
+    @pytest.mark.parametrize(
+        "chunk",
+        [
+            _chunk(cap_tokens=4096),
+            _chunk(content_hash="other"),
+            _chunk(embedding_version=0),
+            _chunk(embedding_model="old/model"),
+            _chunk(has_vector=False),
+        ],
+    )
+    def test_chunk_not_current_at_full_quality_withholds(self, chunk):
+        assert _should_stamp_watermark({0: "hash0"}, {0: chunk}) is False
 
-    def test_existing_chunk_null_cap_tokens_does_not_withhold(self):
-        """NULL cap_tokens on an existing chunk is full-quality and does not
-        raise TypeError."""
-        exchange_data = [{"index": 0, "content_hash": "hash0", "cap_tokens": None}]
-        existing_chunks = {0: {"content_hash": "hash0", "embedding_version": EMBEDDING_VERSION, "cap_tokens": None}}
+    def test_exchange_without_chunk_withholds(self):
+        assert _should_stamp_watermark({0: "hash0", 1: "hash1"}, {0: _chunk()}) is False
 
-        result = _should_stamp_watermark(exchange_data, embedded_indices=set(), existing_chunks=existing_chunks)
+    def test_cap_at_model_limit_is_full_quality(self):
+        assert _should_stamp_watermark({0: "hash0"}, {0: _chunk(cap_tokens=MODEL_TOKEN_LIMIT)}) is True
 
-        assert result is True
 
-    def test_freshly_embedded_draft_quality_withholds_watermark(self):
-        """A freshly-embedded chunk (in embedded_indices) with per-exchange
-        cap_tokens=4096 (< MODEL_TOKEN_LIMIT) still withholds the watermark — the
-        `idx in embedded_indices` shortcut must not bypass this check."""
-        exchange_data = [{"index": 0, "content_hash": "hash0", "cap_tokens": 4096}]
+class TestResolveSyncCap:
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            (None, SYNC_PATH_TOKEN_LIMIT),
+            (0, 1),
+            (-5, 1),
+            (2048, 2048),
+            (20000, MODEL_TOKEN_LIMIT),
+            ("4096", SYNC_PATH_TOKEN_LIMIT),
+            (True, SYNC_PATH_TOKEN_LIMIT),
+        ],
+    )
+    def test_clamps_raw_setting(self, raw, expected):
+        assert resolve_sync_cap(raw) == expected
 
-        result = _should_stamp_watermark(exchange_data, embedded_indices={0}, existing_chunks={})
 
-        assert result is False
+_FAKE_VEC = [0.1] * EMBEDDING_DIM
 
-    def test_freshly_embedded_full_quality_stamps_watermark(self):
-        """Freshly-embedded chunks all with cap_tokens=NULL (untruncated)
-        still stamp the watermark."""
-        exchange_data = [{"index": 0, "content_hash": "hash0", "cap_tokens": None}]
 
-        result = _should_stamp_watermark(exchange_data, embedded_indices={0}, existing_chunks={})
+def _fake_cap(text, max_tokens=None):
+    """Report truncation below the model limit, so a sync-capped chunk is draft quality."""
+    return text, max_tokens is not None and max_tokens < MODEL_TOKEN_LIMIT
 
-        assert result is True
+
+class _FileDb:
+    """A file database with two connections: one embeds, the other plays a concurrent process."""
+
+    def __init__(self, tmp_path: Path):
+        path = str(tmp_path / "concurrent.db")
+        self.conn = make_vec_conn(path)
+        self.other = make_vec_conn(path)
+        self.other.execute("PRAGMA busy_timeout = 0")
+        self.branch_id = _seed_branch(self.conn.cursor())
+        self.conn.commit()
+
+    def set_messages(self, *pairs: tuple[str, str]) -> None:
+        set_branch_messages(self.conn, self.branch_id, _msgs(*pairs))
+
+    def watermark(self):
+        return self.other.execute("SELECT embedding_version FROM branches WHERE id = ?", (self.branch_id,)).fetchone()[
+            0
+        ]
+
+    def chunks(self) -> dict[int, tuple]:
+        rows = self.conn.execute(
+            """
+            SELECT c.exchange_index, c.content_hash, c.cap_tokens, c.embedding_version,
+                   EXISTS (SELECT 1 FROM chunk_vec WHERE chunk_id = c.id)
+            FROM chunks c WHERE c.branch_id = ?
+            """,
+            (self.branch_id,),
+        ).fetchall()
+        return {row[0]: row[1:] for row in rows}
+
+    def embed(self, during_inference=None, **kwargs):
+        """Run the embed with fake inference, calling ``during_inference`` once mid-inference."""
+        pending = [during_inference] if during_inference else []
+
+        def fake_embed(texts, **_kwargs):
+            if pending:
+                pending.pop()()
+            return [_FAKE_VEC] * len(texts)
+
+        with (
+            patch("ccrecall.embed_ops.cap_for_embedding", side_effect=_fake_cap),
+            patch("ccrecall.embed_ops.embed_batch", side_effect=fake_embed),
+        ):
+            return embed_branch_chunks(self.conn, self.branch_id, **kwargs)
+
+
+@pytest.fixture
+def file_db(tmp_path):
+    db = _FileDb(tmp_path)
+    yield db
+    db.conn.close()
+    db.other.close()
+
+
+@VEC_SKIP
+class TestNoLockDuringInference:
+    def test_another_writer_gets_the_lock_during_inference(self, file_db):
+        file_db.set_messages(("q", "a"))
+
+        def write_elsewhere():
+            assert file_db.conn.in_transaction is False
+            file_db.other.execute("BEGIN IMMEDIATE")
+            file_db.other.commit()
+
+        assert file_db.embed(during_inference=write_elsewhere, max_embeds=None).stamped is True
+
+    def test_tokenizer_runs_with_no_transaction_open(self, file_db):
+        file_db.set_messages(("q", "a"))
+        seen = []
+
+        def cap(text, max_tokens=None):
+            seen.append(file_db.conn.in_transaction)
+            return text, False
+
+        with (
+            patch("ccrecall.embed_ops.cap_for_embedding", side_effect=cap),
+            patch("ccrecall.embed_ops.embed_batch", side_effect=lambda texts, **kw: [_FAKE_VEC] * len(texts)),
+        ):
+            embed_branch_chunks(file_db.conn, file_db.branch_id)
+
+        assert seen
+        assert not any(seen)
+
+    def test_watermark_clear_is_committed_before_inference(self, file_db):
+        """A crash during inference must leave the branch selected by backfill."""
+        file_db.conn.execute(
+            "UPDATE branches SET embedding_version = ? WHERE id = ?", (EMBEDDING_VERSION, file_db.branch_id)
+        )
+        file_db.set_messages(("q", "a"))
+        seen = []
+
+        file_db.embed(during_inference=lambda: seen.append(file_db.watermark()))
+
+        assert seen == [0]
+
+    def test_failed_inference_leaves_existing_chunks_intact(self, file_db):
+        file_db.set_messages(("q", "a"))
+        file_db.embed()
+        before = file_db.chunks()
+        file_db.set_messages(("q", "a"), ("q2", "a2"))
+
+        with (
+            patch("ccrecall.embed_ops.cap_for_embedding", side_effect=_fake_cap),
+            patch("ccrecall.embed_ops.embed_batch", side_effect=RuntimeError("boom")),
+            pytest.raises(RuntimeError),
+        ):
+            embed_branch_chunks(file_db.conn, file_db.branch_id)
+
+        assert file_db.chunks() == before
+        assert file_db.watermark() == 0
+
+
+@VEC_SKIP
+class TestWriteStepRecheck:
+    """The branch can change during inference; the write must judge the state at commit."""
+
+    def test_content_changed_with_no_link_change_discards_only_that_vector(self, file_db):
+        file_db.set_messages(("q0", "a0"), ("q1", "a1"))
+
+        def repair_tool_content():
+            file_db.other.execute(
+                "UPDATE messages SET tool_content = '[Read: x]' WHERE content = 'a1' AND role = 'assistant'"
+            )
+            file_db.other.commit()
+
+        outcome = file_db.embed(during_inference=repair_tool_content)
+
+        assert outcome.embedded == 1
+        assert outcome.stamped is False
+        assert set(file_db.chunks()) == {0}
+        assert file_db.watermark() == 0
+
+    def test_exchange_added_during_inference_keeps_vectors_and_withholds_stamp(self, file_db):
+        file_db.set_messages(("q0", "a0"))
+
+        def append_turn():
+            session_id = file_db.other.execute("SELECT session_id FROM branches").fetchone()[0]
+            cursor = file_db.other.execute(
+                "INSERT INTO messages (session_id, uuid, role, content, timestamp) "
+                "VALUES (?, 'later', 'user', 'later', '2024-01-01T01:00:00')",
+                (session_id,),
+            )
+            file_db.other.execute(
+                "INSERT INTO branch_messages (branch_id, message_id) VALUES (?, ?)",
+                (file_db.branch_id, cursor.lastrowid),
+            )
+            file_db.other.commit()
+
+        outcome = file_db.embed(during_inference=append_turn)
+
+        assert outcome == (1, False)
+        assert set(file_db.chunks()) == {0}
+        assert file_db.watermark() == 0
+
+    def test_branch_deleted_during_inference_writes_nothing_and_does_not_raise(self, file_db):
+        file_db.set_messages(("q0", "a0"))
+
+        def delete_branch():
+            file_db.other.execute("DELETE FROM branch_messages WHERE branch_id = ?", (file_db.branch_id,))
+            file_db.other.execute("DELETE FROM branches WHERE id = ?", (file_db.branch_id,))
+            file_db.other.commit()
+
+        outcome = file_db.embed(during_inference=delete_branch)
+
+        assert outcome == (0, False)
+        assert file_db.chunks() == {}
+
+    def test_pruning_uses_the_fresh_exchange_set(self, file_db):
+        file_db.set_messages(("q0", "a0"), ("q1", "a1"))
+        file_db.embed()
+        file_db.conn.execute("UPDATE branches SET embedding_version = 0 WHERE id = ?", (file_db.branch_id,))
+        file_db.conn.commit()
+        session_id = file_db.conn.execute("SELECT session_id FROM branches").fetchone()[0]
+        # Exchange 0's text changes so an embed runs, then exchange 1 vanishes during it.
+        file_db.conn.execute("UPDATE messages SET content = 'q0 edited' WHERE content = 'q0'")
+        file_db.conn.commit()
+
+        def shrink():
+            file_db.other.execute(
+                "DELETE FROM branch_messages WHERE message_id IN "
+                "(SELECT id FROM messages WHERE session_id = ? AND content IN ('q1', 'a1'))",
+                (session_id,),
+            )
+            file_db.other.commit()
+
+        outcome = file_db.embed(during_inference=shrink, max_embeds=None)
+
+        assert set(file_db.chunks()) == {0}
+        assert outcome.stamped is True
+
+    def test_sync_vector_does_not_downgrade_a_chunk_backfill_wrote_during_inference(self, file_db):
+        """A sync at 4096 finishing after a backfill at 8192 keeps the 8192 chunk and its stamp."""
+        file_db.set_messages(("q0", "a0"))
+
+        def backfill_elsewhere():
+            embed_branch_chunks(
+                file_db.other, file_db.branch_id, max_embeds=None, cap_limit=MODEL_TOKEN_LIMIT, replace_stale=True
+            )
+
+        outcome = file_db.embed(during_inference=backfill_elsewhere, cap_limit=SYNC_PATH_TOKEN_LIMIT)
+
+        assert outcome == (0, True)
+        assert file_db.chunks()[0][1] is None
+        assert file_db.watermark() == EMBEDDING_VERSION
+
+    def test_draft_chunk_is_replaced_by_a_better_vector(self, file_db):
+        file_db.set_messages(("q0", "a0"))
+        file_db.embed(cap_limit=SYNC_PATH_TOKEN_LIMIT)
+        assert file_db.chunks()[0][1] == SYNC_PATH_TOKEN_LIMIT
+
+        outcome = file_db.embed(cap_limit=MODEL_TOKEN_LIMIT, max_embeds=None, replace_stale=True)
+
+        assert outcome == (1, True)
+        assert file_db.chunks()[0][1] is None
+
+
+@VEC_SKIP
+class TestLockContention:
+    def test_write_lock_is_held_before_the_re_read(self, file_db):
+        """Nothing can commit between the check and the stamp. WAL matches production,
+        where a deferred transaction would read a snapshot and fail on upgrade."""
+        file_db.conn.execute("PRAGMA journal_mode = WAL")
+        file_db.set_messages(("q", "a"))
+        other_got_lock = []
+
+        def probe(sql):
+            if "SELECT 1 FROM branches" not in sql:
+                return
+            try:
+                file_db.other.execute("BEGIN IMMEDIATE")
+            except sqlite3.OperationalError:
+                other_got_lock.append(False)
+            else:
+                file_db.other.rollback()
+                other_got_lock.append(True)
+
+        file_db.conn.set_trace_callback(probe)
+        file_db.embed()
+        file_db.conn.set_trace_callback(None)
+
+        assert other_got_lock == [False]
+
+    def test_open_transaction_is_refused_without_committing_it(self, file_db):
+        file_db.set_messages(("q", "a"))
+        file_db.conn.execute("UPDATE branches SET leaf_uuid = 'uncommitted' WHERE id = ?", (file_db.branch_id,))
+
+        with pytest.raises(sqlite3.ProgrammingError):
+            embed_branch_chunks(file_db.conn, file_db.branch_id)
+
+        assert file_db.conn.in_transaction is True
+        file_db.conn.rollback()
+        leaf = file_db.conn.execute("SELECT leaf_uuid FROM branches WHERE id = ?", (file_db.branch_id,)).fetchone()[0]
+        assert leaf == "test-leaf-uuid"
+
+    def test_clear_timing_out_runs_no_inference(self, file_db):
+        file_db.set_messages(("q", "a"))
+        file_db.conn.execute("PRAGMA busy_timeout = 0")
+        file_db.other.execute("BEGIN IMMEDIATE")
+
+        with (
+            patch("ccrecall.embed_ops.embed_batch") as mock_embed,
+            pytest.raises(sqlite3.OperationalError) as exc_info,
+        ):
+            embed_branch_chunks(file_db.conn, file_db.branch_id)
+
+        assert is_database_locked(exc_info.value)
+        assert mock_embed.call_count == 0
+        assert file_db.conn.in_transaction is False
+
+    def test_write_timing_out_loses_the_inference_and_leaves_connection_usable(self, file_db):
+        file_db.set_messages(("q", "a"))
+        file_db.conn.execute("PRAGMA busy_timeout = 0")
+
+        with pytest.raises(sqlite3.OperationalError) as exc_info:
+            file_db.embed(during_inference=lambda: file_db.other.execute("BEGIN IMMEDIATE"))
+
+        assert is_database_locked(exc_info.value)
+        assert file_db.conn.in_transaction is False
+        file_db.other.rollback()
+        assert file_db.chunks() == {}
+        assert file_db.watermark() == 0
+
+        assert file_db.embed().stamped is True
+
+
+@VEC_SKIP
+class TestYieldToBackfill:
+    def test_live_backfill_skips_inference_after_committing_the_clear(self, file_db):
+        file_db.conn.execute(
+            "UPDATE branches SET embedding_version = ? WHERE id = ?", (EMBEDDING_VERSION, file_db.branch_id)
+        )
+        file_db.set_messages(("q", "a"))
+        pid_file_path(PID_KEY_BACKFILL_EMBEDDINGS).parent.mkdir(parents=True, exist_ok=True)
+        pid_file_path(PID_KEY_BACKFILL_EMBEDDINGS).write_text(str(os.getppid()))
+
+        with patch("ccrecall.embed_ops.embed_batch") as mock_embed:
+            outcome = embed_branch_chunks(file_db.conn, file_db.branch_id, yield_to_backfill=True)
+
+        assert outcome == (0, False)
+        assert mock_embed.call_count == 0
+        assert file_db.watermark() == 0
+
+    def test_dead_backfill_marker_does_not_skip_and_is_left_in_place(self, file_db):
+        file_db.set_messages(("q", "a"))
+        marker = pid_file_path(PID_KEY_BACKFILL_EMBEDDINGS)
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("99999999")
+
+        outcome = file_db.embed(yield_to_backfill=True)
+
+        assert outcome.embedded == 1
+        assert marker.read_text() == "99999999"
+
+    def test_backfill_itself_does_not_yield_to_its_own_marker(self, file_db):
+        file_db.set_messages(("q", "a"))
+        marker = pid_file_path(PID_KEY_BACKFILL_EMBEDDINGS)
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(str(os.getpid()))
+
+        assert file_db.embed(max_embeds=None, replace_stale=True).embedded == 1
+
+
+@VEC_SKIP
+class TestPathsWithoutInference:
+    """Nothing to infer still goes through the write step, and needs no model."""
+
+    def _embed_without_model(self, file_db):
+        with (
+            patch("ccrecall.embed_ops.cap_for_embedding", side_effect=AssertionError("tokenizer used")),
+            patch("ccrecall.embed_ops.embed_batch", side_effect=AssertionError("model used")),
+        ):
+            return embed_branch_chunks(file_db.conn, file_db.branch_id)
+
+    def test_watermark_repair_stamps_current_chunks(self, file_db):
+        file_db.set_messages(("q", "a"))
+        file_db.embed()
+        file_db.conn.execute("UPDATE branches SET embedding_version = 0 WHERE id = ?", (file_db.branch_id,))
+        file_db.conn.commit()
+
+        assert self._embed_without_model(file_db) == (0, True)
+        assert file_db.watermark() == EMBEDDING_VERSION
+
+    def test_repair_withholds_stamp_when_a_vector_is_missing(self, file_db):
+        file_db.set_messages(("q", "a"))
+        file_db.embed()
+        file_db.conn.execute("UPDATE branches SET embedding_version = 0 WHERE id = ?", (file_db.branch_id,))
+        file_db.conn.execute("DELETE FROM chunk_vec")
+        file_db.conn.commit()
+
+        assert self._embed_without_model(file_db) == (0, False)
+        assert file_db.watermark() == 0
+
+    def test_prune_only_does_not_clear_the_watermark(self, file_db):
+        file_db.set_messages(("q0", "a0"), ("q1", "a1"))
+        file_db.embed()
+        assert file_db.watermark() == EMBEDDING_VERSION
+        file_db.set_messages(("q0", "a0"))
+        seen = []
+        real_write = file_db.conn
+
+        def snapshot(*_args):
+            seen.append(file_db.watermark())
+
+        real_write.set_trace_callback(lambda sql: snapshot() if sql.startswith("BEGIN IMMEDIATE") else None)
+        outcome = self._embed_without_model(file_db)
+        real_write.set_trace_callback(None)
+
+        assert seen == [EMBEDDING_VERSION]
+        assert outcome == (0, True)
+        assert set(file_db.chunks()) == {0}
+
+    @pytest.mark.parametrize("cap_limit", [MODEL_TOKEN_LIMIT, SYNC_PATH_TOKEN_LIMIT])
+    def test_no_op_takes_no_lock(self, file_db, cap_limit):
+        """A stamped branch, or a draft-quality one sync can't stamp, has nothing to write."""
+        file_db.set_messages(("q", "a"))
+        file_db.embed(cap_limit=cap_limit)
+        stamped = file_db.watermark() == EMBEDDING_VERSION
+        file_db.conn.execute("PRAGMA busy_timeout = 0")
+        file_db.other.execute("BEGIN IMMEDIATE")
+
+        with (
+            patch("ccrecall.embed_ops.cap_for_embedding", side_effect=AssertionError("tokenizer used")),
+            patch("ccrecall.embed_ops.embed_batch", side_effect=AssertionError("model used")),
+        ):
+            outcome = embed_branch_chunks(file_db.conn, file_db.branch_id, cap_limit=SYNC_PATH_TOKEN_LIMIT)
+
+        file_db.other.rollback()
+        assert outcome == (0, stamped)
+        assert stamped is (cap_limit == MODEL_TOKEN_LIMIT)
+
+    @pytest.mark.parametrize("shrink", [False, True])
+    def test_a_needed_stamp_or_prune_still_takes_the_lock(self, file_db, shrink):
+        file_db.set_messages(("q0", "a0"), ("q1", "a1"))
+        file_db.embed()
+        if shrink:
+            file_db.set_messages(("q0", "a0"))
+        else:
+            file_db.conn.execute("UPDATE branches SET embedding_version = 0 WHERE id = ?", (file_db.branch_id,))
+            file_db.conn.commit()
+        file_db.conn.execute("PRAGMA busy_timeout = 0")
+        file_db.other.execute("BEGIN IMMEDIATE")
+
+        with pytest.raises(sqlite3.OperationalError) as exc_info:
+            embed_branch_chunks(file_db.conn, file_db.branch_id)
+
+        file_db.other.rollback()
+        assert is_database_locked(exc_info.value)
+
+    def test_zero_exchange_branch_stamps_and_loses_stale_chunks(self, file_db):
+        file_db.set_messages(("q", "a"))
+        file_db.embed()
+        set_branch_messages(
+            file_db.conn,
+            file_db.branch_id,
+            [{"role": "assistant", "content": "x", "timestamp": "2024-01-01T00:00:00", "uuid": None}],
+        )
+
+        assert self._embed_without_model(file_db) == (0, True)
+        assert file_db.chunks() == {}
+
+
+def test_content_hash_needs_no_tokenizer():
+    with patch("ccrecall.embed_ops.cap_for_embedding", side_effect=AssertionError("tokenizer used")):
+        expected = hashlib.sha256(b"hello\n\nhi there").hexdigest()
+        assert _content_hash(_exchange()) == expected

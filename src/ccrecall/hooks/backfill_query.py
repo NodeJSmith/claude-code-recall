@@ -5,6 +5,7 @@ constants that both the orchestrator (`backfill_embeddings.run`) and the
 status reporter (`backfill_status`) need to agree on.
 """
 
+from ccrecall.config import PID_KEY_BACKFILL_EMBEDDINGS as PID_KEY
 from ccrecall.config import remove_pid_file
 from ccrecall.db import CHUNK_DRAFT_QUALITY_FILTER, CHUNK_EMBEDDABLE_BRANCH_FILTER, CONTENT_ERROR_VERSION
 from ccrecall.embeddings import EMBEDDING_MODEL, EMBEDDING_VERSION, MODEL_TOKEN_LIMIT
@@ -19,11 +20,6 @@ BACKFILL_NICE_LEVEL = 10
 
 EXIT_OK = 0
 EXIT_ABORT = 1
-
-# PID key for the self-concurrency guard (this command is manual-only, never
-# auto-spawned; the marker is acquired at CLI start via try_acquire_pid_file
-# and cleaned up by the CLI command on exit).
-PID_KEY = "ccrecall-backfill-embeddings"
 
 
 def cleanup_pid() -> None:

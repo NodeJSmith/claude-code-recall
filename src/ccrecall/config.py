@@ -63,6 +63,7 @@ PID_FILE_MODE = 0o600
 # still imports its own key from here for its remove_pid_file() call on exit.
 PID_KEY_IMPORT = "ccrecall-import"
 PID_KEY_BACKFILL_SUMMARIES = "ccrecall-backfill-summaries"
+PID_KEY_BACKFILL_EMBEDDINGS = "ccrecall-backfill-embeddings"
 PID_KEY_WARM_MODEL = "ccrecall-warm-model"
 
 
@@ -107,6 +108,32 @@ def remove_pid_file(pid_key: str) -> None:
         pid_file_path(pid_key).unlink(missing_ok=True)
 
 
+def read_marker_holder(pid_path: Path) -> int:
+    """Return the PID a marker names, if that process is alive (which may be the caller).
+
+    A holder we lack permission to signal counts as alive. Raises ValueError or
+    OverflowError on a corrupt marker, ProcessLookupError on a dead holder, and
+    another OSError on a marker that can't be read.
+    """
+    pid = int(pid_path.read_text().strip())
+    if pid <= 0:
+        # 0/negative would probe the caller's own process group and
+        # read as permanently "alive" — treat as a corrupt marker.
+        raise ValueError(f"bogus pid: {pid}")
+    if pid != os.getpid():
+        with contextlib.suppress(PermissionError):
+            os.kill(pid, 0)  # signal 0: liveness probe, no signal sent
+    return pid
+
+
+def live_pid_holder(pid_key: str) -> int | None:
+    """Return the PID of ``pid_key``'s running job, or None. Read-only: never reaps a stale marker."""
+    try:
+        return read_marker_holder(pid_file_path(pid_key))
+    except (ValueError, OverflowError, OSError):
+        return None
+
+
 def try_acquire_pid_file(pid_key: str) -> bool:
     """Attempt to become the sole running instance of ``pid_key``'s job.
 
@@ -139,15 +166,7 @@ def try_acquire_pid_file(pid_key: str) -> bool:
             os.link(tmp_path, pid_path)
         except FileExistsError:
             try:
-                existing_pid = int(pid_path.read_text().strip())
-                if existing_pid <= 0:
-                    # 0/negative would probe the caller's own process group and
-                    # read as permanently "alive" — treat as a corrupt marker.
-                    raise ValueError(f"bogus pid: {existing_pid}")
-                if existing_pid == os.getpid():
-                    return True
-                os.kill(existing_pid, 0)  # signal 0: liveness probe, no signal sent
-                return False
+                return read_marker_holder(pid_path) == os.getpid()
             except (ValueError, OverflowError):
                 # Unreadable/corrupt PID file (OverflowError: an in-range int()
                 # result that os.kill can't convert to a C pid) — reap and
@@ -163,7 +182,7 @@ def try_acquire_pid_file(pid_key: str) -> bool:
                     raise RuntimeError(f"cannot reap corrupt PID marker: {pid_path}") from e
                 continue
             except PermissionError:
-                # Process exists but we lack permission to signal it — treat as alive
+                # A marker we can't read — treat its holder as alive
                 return False
             except OSError:
                 # Dead holder (ESRCH from the probe), a marker that vanished

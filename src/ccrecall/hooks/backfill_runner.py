@@ -9,11 +9,11 @@ owns exactly that shape via `run_batch_loop`, alongside the existing
 reporting) that both `run()` functions already import from.
 
 Everything domain-specific stays with the caller's callbacks: per-item
-processing (SAVEPOINT handling, exception taxonomy, progress-message
-content), no-progress *recovery* (embeddings aborts the whole run;
-tool_content excludes the stuck ids and continues — only the *detection* is
-shared here), and the batch trailer's commit plus any extras
-(`reclaim_memory` for embeddings, none for tool_content).
+processing (transactions, exception taxonomy, progress-message content),
+no-progress *recovery* (tool_content excludes the stuck ids and continues;
+embeddings selects forward-only, so it never repeats a batch — only the
+*detection* is shared here), and the batch trailer (tool_content commits there;
+embeddings commits per branch and reclaims memory there).
 
 `limit_reached` and `lower_scheduling_priority` are two more bits of
 identical start-of-run scaffolding both callers needed; they live here too
@@ -40,7 +40,7 @@ def run_batch_loop(
       caller-side `--limit` remainder). An empty return ends the loop.
     - `is_limit_reached()` is checked before every `select_batch()` call.
     - `process_batch(rows)` runs the per-item work for one batch. It owns its
-      own exception handling and must rollback or commit before returning
+      own exception handling and must leave no transaction open before returning
       False — this driver does not touch the connection on that path.
     - `on_stuck(current_ids)` runs when the same batch is re-selected
       (`current_ids == last_batch_ids`). Return True to abort the whole run,
@@ -48,7 +48,7 @@ def run_batch_loop(
       `select_batch()` output (e.g. excluding the stuck ids) so the next
       call doesn't re-select the same batch forever.
     - `after_batch(rows)` runs only after a batch's `process_batch` returns
-      True. It owns the success-path commit plus any domain-specific
+      True. It owns any success-path commit plus any domain-specific
       trailer (memory reclaim, a fixed sleep, ...).
 
     Returns False if the run should abort (caller returns EXIT_ABORT), True

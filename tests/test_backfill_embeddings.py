@@ -19,13 +19,13 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-from conftest import VEC_SKIP, make_vec_conn, patched_clear, patched_record
+from conftest import VEC_SKIP, locked_error, make_vec_conn, patched_clear, patched_record
 
 from ccrecall.cli.commands import cmd_backfill_embeddings
 from ccrecall.config import remove_pid_file, try_acquire_pid_file
 from ccrecall.db import CONTENT_ERROR_VERSION
 from ccrecall.db_vec import find_stamped_branches_missing_chunks, upsert_chunk_vec
-from ccrecall.embed_ops import MAX_WRITE_PATH_EMBEDS_PER_SYNC
+from ccrecall.embed_ops import MAX_WRITE_PATH_EMBEDS_PER_SYNC, EmbedOutcome, embed_branch_chunks
 from ccrecall.embeddings import EMBEDDING_DIM, EMBEDDING_MODEL, EMBEDDING_VERSION
 from ccrecall.health import REASON_VEC_UNAVAILABLE
 from ccrecall.hooks.backfill_embeddings import run
@@ -316,8 +316,7 @@ class TestBackfillEmbedsFull:
         assert row[0] == EMBEDDING_VERSION
         assert row[1] == EMBEDDING_MODEL
 
-    def test_commits_per_batch(self):
-        """Each batch is committed; data is durable between batches."""
+    def test_every_batch_is_processed(self):
         conn = make_vec_conn()
         count = BATCH_SIZE + 3
         for _ in range(count):
@@ -326,6 +325,35 @@ class TestBackfillEmbedsFull:
         _run_backfill_with_stub(conn)
 
         assert _chunk_count(conn) == count
+
+    def test_each_branch_commits_and_no_lock_is_held_during_inference(self, tmp_path):
+        """While one branch infers, the previous branch is already durable and
+        another writer can take the lock without waiting."""
+        db_path = str(tmp_path / "backfill.db")
+        conn = make_vec_conn(db_path)
+        first = _insert_branch_with_messages(conn)
+        second = _insert_branch_with_messages(conn)
+        other = sqlite3.connect(db_path, timeout=0)
+        seen = []
+
+        def embed(texts: list[str], **kwargs) -> list[list[float]]:
+            seen.append(_branch_embedding_version(other, first))
+            other.execute("BEGIN IMMEDIATE")
+            other.commit()
+            return [_FIXED_VEC] * len(texts)
+
+        with (
+            patch("ccrecall.hooks.backfill_embeddings.model_available", return_value=True),
+            patch("ccrecall.embed_ops.embed_batch", side_effect=embed),
+            patch("ccrecall.hooks.backfill_embeddings.get_connection", return_value=_NoCloseConn(conn)),
+            patch("ccrecall.hooks.backfill_embeddings.load_settings_for_db", return_value={}),
+            patch("ccrecall.hooks.backfill_embeddings.time.sleep"),
+        ):
+            assert run() == EXIT_OK
+
+        assert seen[1] == EMBEDDING_VERSION
+        assert _branch_embedding_version(other, second) == EMBEDDING_VERSION
+        other.close()
 
 
 # Resume processes only remaining; heal clause for missing chunk_vecs
@@ -522,33 +550,178 @@ class TestBuildSelectionCapTokens:
         assert not self._is_selected(conn, bid)
 
 
-# No-progress guard: loop breaks when same batch re-selected
+# Forward-only pass: each branch is attempted at most once per run
+
+
+def _run_backfill_with_embed_patch(conn: sqlite3.Connection, embed_side_effect, **run_kwargs) -> tuple[int, list[int]]:
+    """Run run() with embed_branch_chunks replaced, so a test decides each branch's outcome."""
+    with (
+        patch("ccrecall.hooks.backfill_embeddings.model_available", return_value=True),
+        patch("ccrecall.hooks.backfill_embeddings.embed_branch_chunks", side_effect=embed_side_effect) as mock_embed,
+        patch("ccrecall.embed_ops.embed_batch", side_effect=lambda texts, **kwargs: [_FIXED_VEC] * len(texts)),
+        patch("ccrecall.hooks.backfill_embeddings.embed_batch", return_value=[_FIXED_VEC]),
+        patch("ccrecall.hooks.backfill_embeddings.get_connection", return_value=_NoCloseConn(conn)),
+        patch("ccrecall.hooks.backfill_embeddings.load_settings_for_db", return_value={}),
+        patch("ccrecall.hooks.backfill_embeddings.time.sleep"),
+    ):
+        code = run(**run_kwargs)
+    return code, [call.args[1] for call in mock_embed.call_args_list]
 
 
 @_VEC_SKIP
-class TestBackfillNoProgressGuard:
-    def test_guard_fires_when_embed_does_not_advance_row(self):
-        """If embed_branch_chunks is a no-op (row stays eligible), the no-progress
-        guard detects the same batch on the next iteration and aborts rather than
-        looping forever."""
+class TestBackfillForwardOnlyPass:
+    def test_unfinished_branch_is_attempted_once_and_run_completes(self):
+        """A branch left eligible is not re-selected in the same run, and the run
+        ends normally instead of tripping the stuck guard."""
         conn = make_vec_conn()
         bid = _insert_branch_with_messages(conn)
 
+        code, attempted = _run_backfill_with_embed_patch(conn, lambda *a, **k: EmbedOutcome(embedded=0, stamped=False))
+
+        assert code == EXIT_OK
+        assert attempted == [bid]
+
+    def test_unfinished_branches_do_not_repeat_across_batches(self):
+        conn = make_vec_conn()
+        ids = [_insert_branch_with_messages(conn) for _ in range(BATCH_SIZE + 2)]
+
+        code, attempted = _run_backfill_with_embed_patch(conn, lambda *a, **k: EmbedOutcome(embedded=0, stamped=False))
+
+        assert code == EXIT_OK
+        assert attempted == ids
+
+    def test_unfinished_branch_is_retried_by_the_next_run(self):
+        conn = make_vec_conn()
+        bid = _insert_branch_with_messages(conn)
+        _run_backfill_with_embed_patch(conn, lambda *a, **k: EmbedOutcome(embedded=0, stamped=False))
+
+        _run_backfill_with_stub(conn)
+
+        assert _branch_embedding_version(conn, bid) == EMBEDDING_VERSION
+
+    def test_completion_reports_branches_not_updated(self, capsys):
+        conn = make_vec_conn()
+        _insert_branch_with_messages(conn)
+        finished = _insert_branch_with_messages(conn)
+
+        def embed(conn_arg, branch_id, **kwargs):
+            if branch_id == finished:
+                return embed_branch_chunks(conn_arg, branch_id, **kwargs)
+            return EmbedOutcome(embedded=0, stamped=False)
+
+        _run_backfill_with_embed_patch(conn, embed, json_mode=True)
+
+        report = json.loads(capsys.readouterr().out)
+        assert report["embedded"] == 1
+        assert report["not_updated"] == 1
+
+
+@_VEC_SKIP
+class TestBackfillLockTimeout:
+    def test_lock_timeout_costs_one_branch_and_run_continues(self):
+        conn = make_vec_conn()
+        contended = _insert_branch_with_messages(conn)
+        later = _insert_branch_with_messages(conn)
+
+        def embed(conn_arg, branch_id, **kwargs):
+            if branch_id == contended:
+                raise locked_error()
+            return embed_branch_chunks(conn_arg, branch_id, **kwargs)
+
+        code, attempted = _run_backfill_with_embed_patch(conn, embed)
+
+        assert code == EXIT_OK
+        assert attempted == [contended, later]
+        assert _branch_embedding_version(conn, contended) != CONTENT_ERROR_VERSION
+        assert _branch_embedding_version(conn, later) == EMBEDDING_VERSION
+
+    def test_lock_timeout_on_sentinel_leaves_row_unmarked_and_run_continues(self):
+        conn = make_vec_conn()
+        bad = _insert_branch_with_messages(conn)
+        later = _insert_branch_with_messages(conn)
+
+        def embed(conn_arg, branch_id, **kwargs):
+            if branch_id == bad:
+                raise ValueError("simulated tokenizer overflow")
+            return embed_branch_chunks(conn_arg, branch_id, **kwargs)
+
+        with patch("ccrecall.hooks.backfill_embeddings.commit_single_write", side_effect=locked_error()):
+            code, _attempted = _run_backfill_with_embed_patch(conn, embed)
+
+        assert code == EXIT_OK
+        assert _branch_embedding_version(conn, bad) != CONTENT_ERROR_VERSION
+        assert _branch_embedding_version(conn, later) == EMBEDDING_VERSION
+
+    def test_consecutive_lock_timeouts_abort_the_run(self):
+        conn = make_vec_conn()
+        ids = [_insert_branch_with_messages(conn) for _ in range(5)]
+
+        code, attempted = _run_backfill_with_embed_patch(conn, locked_error())
+
+        assert code == EXIT_ABORT
+        assert attempted == ids[:3]
+
+    def test_a_finished_branch_resets_the_lock_timeout_count(self):
+        conn = make_vec_conn()
+        ids = [_insert_branch_with_messages(conn) for _ in range(5)]
+
+        def embed(conn_arg, branch_id, **kwargs):
+            if branch_id == ids[2]:
+                return embed_branch_chunks(conn_arg, branch_id, **kwargs)
+            raise locked_error()
+
+        code, attempted = _run_backfill_with_embed_patch(conn, embed)
+
+        assert code == EXIT_OK
+        assert attempted == ids
+
+    def test_other_database_errors_still_abort(self):
+        conn = make_vec_conn()
+        _insert_branch_with_messages(conn)
+        later = _insert_branch_with_messages(conn)
+
+        code, attempted = _run_backfill_with_embed_patch(conn, sqlite3.OperationalError("disk I/O error"))
+
+        assert code == EXIT_ABORT
+        assert later not in attempted
+
+
+@_VEC_SKIP
+class TestBackfillReplacesStaleChunks:
+    """Stale chunks stay until their replacement commits, so a failed embed loses nothing."""
+
+    def _branch_with_stale_chunk(self, conn: sqlite3.Connection) -> tuple[int, int]:
+        bid = _insert_branch_with_messages(conn)
+        _run_backfill_with_stub(conn)
+        conn.execute("UPDATE chunks SET embedding_version = 0 WHERE branch_id = ?", (bid,))
+        conn.execute("UPDATE branches SET embedding_version = 0 WHERE id = ?", (bid,))
+        conn.commit()
+        return bid, conn.execute("SELECT id FROM chunks WHERE branch_id = ?", (bid,)).fetchone()[0]
+
+    def test_failed_embed_keeps_stale_chunk_and_vector(self):
+        conn = make_vec_conn()
+        bid, chunk_id = self._branch_with_stale_chunk(conn)
+
         with (
             patch("ccrecall.hooks.backfill_embeddings.model_available", return_value=True),
-            # no-op: row never advanced; return_value=0 so total_inferences stays an int
-            patch("ccrecall.hooks.backfill_embeddings.embed_branch_chunks", return_value=0),
+            patch("ccrecall.embed_ops.embed_batch", side_effect=OSError("disk I/O error")),
             patch("ccrecall.hooks.backfill_embeddings.get_connection", return_value=_NoCloseConn(conn)),
             patch("ccrecall.hooks.backfill_embeddings.load_settings_for_db", return_value={}),
             patch("ccrecall.hooks.backfill_embeddings.time.sleep"),
         ):
-            exit_code = run()  # must return, not hang
+            assert run() == EXIT_ABORT
 
-        assert exit_code == EXIT_ABORT
+        assert [row[0] for row in _chunks_for_branch(conn, bid)] == [chunk_id]
+        assert _branch_has_chunk_vecs(conn, bid)
 
-        # Row was never stamped (embed was a no-op), confirming exit via the guard.
-        ev = _branch_embedding_version(conn, bid)
-        assert ev != EMBEDDING_VERSION, "Row should not be at EMBEDDING_VERSION — embed was no-op"
+    def test_successful_embed_replaces_stale_chunk(self):
+        conn = make_vec_conn()
+        bid, _chunk_id = self._branch_with_stale_chunk(conn)
+
+        _run_backfill_with_stub(conn)
+
+        assert [row[1] for row in _chunks_for_branch(conn, bid)] == [EMBEDDING_VERSION]
+        assert _branch_has_chunk_vecs(conn, bid)
 
 
 @_VEC_SKIP
@@ -657,8 +830,8 @@ class TestBackfillHealsStampedBranches:
         assert _chunk_count(conn) == 0
 
     def test_heal_survives_a_run_that_aborts_mid_batch(self):
-        """The batch-abort rollback must not undo the heal, or a branch that
-        keeps aborting would go back to claiming it's fully embedded."""
+        """An abort must not undo the heal, or a branch that keeps aborting
+        would go back to claiming it's fully embedded."""
         conn = make_vec_conn()
         bid = _insert_branch_with_messages(conn)
         _stamp_watermark(conn, bid)
@@ -867,7 +1040,7 @@ class TestBackfillFailureModes:
             patch("ccrecall.hooks.backfill_embeddings.model_available", return_value=True),
             # Simulate an infra failure during message fetch
             patch(
-                "ccrecall.hooks.backfill_embeddings.fetch_branch_messages",
+                "ccrecall.embed_ops.fetch_branch_messages",
                 side_effect=sqlite3.OperationalError("disk I/O error"),
             ),
             patch("ccrecall.hooks.backfill_embeddings.get_connection", return_value=_NoCloseConn(conn)),
@@ -919,6 +1092,18 @@ class TestBackfillFlags:
         assert _branch_has_chunk_vecs(conn, recent)
         assert not _branch_has_chunk_vecs(conn, old)
         assert _chunk_count(conn) == 1
+
+    def test_limit_counts_attempts_not_stamped_branches(self):
+        """--limit is a ceiling on work, so branches left unfinished use it up too."""
+        conn = make_vec_conn()
+        ids = [_insert_branch_with_messages(conn) for _ in range(5)]
+
+        code, attempted = _run_backfill_with_embed_patch(
+            conn, lambda *a, **k: EmbedOutcome(embedded=0, stamped=False), limit=2
+        )
+
+        assert code == EXIT_OK
+        assert attempted == ids[:2]
 
     def test_limit_caps_embeds_across_batches(self):
         """--limit N stops after N branches even though batches are BATCH_SIZE-wide."""

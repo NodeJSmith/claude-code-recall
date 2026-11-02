@@ -7,7 +7,7 @@ import sqlite3
 from pathlib import Path
 from unittest.mock import patch
 
-from conftest import FIXTURE_DIR, VEC_SKIP, NoCloseConn, make_vec_conn
+from conftest import FIXTURE_DIR, VEC_SKIP, NoCloseConn, embed_messages, make_vec_conn
 from conftest import make_jsonl_entry as _entry
 from conftest import write_jsonl as _write_jsonl
 
@@ -504,6 +504,8 @@ class TestSearchMessagesToolContentMatch:
         fake_vec = [1.0 / EMBEDDING_DIM**0.5] * EMBEDDING_DIM
         with patch("ccrecall.embed_ops.embed_batch", side_effect=lambda texts, **kwargs: [fake_vec] * len(texts)):
             sync_session(conn, filepath, tmp_path)
+            conn.commit()
+            embed_branch_chunks(conn, conn.execute("SELECT id FROM branches").fetchone()[0])
 
         with (
             patch("ccrecall.search_conversations.model_available", return_value=True),
@@ -605,35 +607,29 @@ class TestEmbeddingLifecycle:
 
         with patch("ccrecall.embed_ops.embed_batch", side_effect=lambda texts, **kw: [fake_vec] * len(texts)):
             # Step 1: sync-path embed, capped at SYNC_PATH_TOKEN_LIMIT (4096).
-            count1 = embed_branch_chunks(
-                cursor, branch_id, msgs, is_active=True, vec_writable=True, cap_limit=SYNC_PATH_TOKEN_LIMIT
-            )
-            assert count1 == 1, "sync-path embed must embed the over-cap exchange"
+            count1 = embed_messages(conn, branch_id, msgs, cap_limit=SYNC_PATH_TOKEN_LIMIT)
+            assert count1.embedded == 1, "sync-path embed must embed the over-cap exchange"
             cursor.execute("SELECT cap_tokens FROM chunks WHERE branch_id = ?", (branch_id,))
             assert cursor.fetchone()[0] == SYNC_PATH_TOKEN_LIMIT
 
             # Step 2: backfill upgrades to MODEL_TOKEN_LIMIT (8192). The text fits
             # without truncation at 8192, so cap_tokens becomes NULL (full quality).
-            count2 = embed_branch_chunks(
-                cursor,
+            count2 = embed_messages(
+                conn,
                 branch_id,
                 msgs,
-                is_active=True,
-                vec_writable=True,
                 cap_limit=MODEL_TOKEN_LIMIT,
                 max_embeds=None,
             )
-            assert count2 == 1, "backfill must re-embed the draft-quality chunk"
+            assert count2.embedded == 1, "backfill must re-embed the draft-quality chunk"
             cursor.execute("SELECT cap_tokens FROM chunks WHERE branch_id = ?", (branch_id,))
             assert cursor.fetchone()[0] is None, "untruncated text at 8192 must store cap_tokens=NULL"
 
             # Step 3: sync-path embed again -- content_hash is unchanged (raw text
             # never changed) and cap_tokens IS NULL (>= SYNC_PATH_TOKEN_LIMIT), so
             # no ping-pong re-embed.
-            count3 = embed_branch_chunks(
-                cursor, branch_id, msgs, is_active=True, vec_writable=True, cap_limit=SYNC_PATH_TOKEN_LIMIT
-            )
-            assert count3 == 0, "no-ping-pong: sync path must not re-embed a full-quality chunk"
+            count3 = embed_messages(conn, branch_id, msgs, cap_limit=SYNC_PATH_TOKEN_LIMIT)
+            assert count3.embedded == 0, "no-ping-pong: sync path must not re-embed a full-quality chunk"
 
         conn.close()
 
@@ -652,9 +648,7 @@ class TestEmbeddingLifecycle:
 
         with patch("ccrecall.embed_ops.embed_batch", side_effect=lambda texts, **kw: [fake_vec] * len(texts)):
             # Step 1: sync-path embed at SYNC_PATH_TOKEN_LIMIT (4096).
-            embed_branch_chunks(
-                cursor, branch_id, msgs, is_active=True, vec_writable=True, cap_limit=SYNC_PATH_TOKEN_LIMIT
-            )
+            embed_messages(conn, branch_id, msgs, cap_limit=SYNC_PATH_TOKEN_LIMIT)
             conn.commit()
 
             cursor.execute("SELECT embedding_version FROM branches WHERE id = ?", (branch_id,))
@@ -666,12 +660,10 @@ class TestEmbeddingLifecycle:
             assert branch_id in selected_ids, "build_selection must select the draft-quality branch"
 
             # Step 2: backfill upgrades to MODEL_TOKEN_LIMIT (8192).
-            embed_branch_chunks(
-                cursor,
+            embed_messages(
+                conn,
                 branch_id,
                 msgs,
-                is_active=True,
-                vec_writable=True,
                 cap_limit=MODEL_TOKEN_LIMIT,
                 max_embeds=None,
             )

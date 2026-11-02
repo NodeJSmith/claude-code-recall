@@ -10,6 +10,7 @@ import contextlib
 import json
 import logging
 import re
+import sqlite3
 import sys
 import time
 from logging.handlers import RotatingFileHandler
@@ -28,11 +29,15 @@ from ccrecall.config import (
     try_acquire_pid_file,
 )
 from ccrecall.db import DEFAULT_PROJECTS_DIR, get_connection
+from ccrecall.db_base import is_database_locked
 from ccrecall.db_vec import chunk_vec_queryable
+from ccrecall.embed_ops import embed_branch_chunks, resolve_sync_cap
 from ccrecall.embeddings import is_model_cached_on_disk
 from ccrecall.formatting import extract_project_name, normalize_cwd
 from ccrecall.health import REASON_VEC_UNAVAILABLE, clear_embedding_failure, record_embedding_failure
+from ccrecall.hooks.subprocess_utils import reclaim_memory, try_load_libc
 from ccrecall.models import HookInput
+from ccrecall.parsing import extract_session_uuid
 from ccrecall.session_ops import sync_session
 from ccrecall.transcript_sources import discover_session_transcript_files
 
@@ -118,6 +123,37 @@ def _project_root_for_session_file(session_file: Path, projects_dir: Path) -> Pa
     return projects_dir / relative.parts[0]
 
 
+def embed_session_branch(conn: sqlite3.Connection, session_file: Path, settings: dict, logger: logging.Logger) -> None:
+    """Embed the session's branch. Runs after sync commits, so a failure here never undoes its messages.
+
+    A failure leaves the branch eligible for backfill, and the next Stop tries again.
+    """
+    row = conn.execute(
+        """
+        SELECT b.id FROM branches b JOIN sessions s ON s.id = b.session_id
+        WHERE s.uuid = ? AND b.is_active = 1
+        """,
+        (extract_session_uuid(session_file),),
+    ).fetchone()
+    if row is None:
+        return
+
+    # Return the parse's memory to the OS before the inference peak.
+    reclaim_memory(try_load_libc())
+    try:
+        embed_branch_chunks(
+            conn,
+            row[0],
+            cap_limit=resolve_sync_cap(settings.get("sync_path_token_limit")),
+            yield_to_backfill=True,
+        )
+    except Exception as exc:
+        if isinstance(exc, sqlite3.OperationalError) and is_database_locked(exc):
+            logger.warning("embedding skipped: database locked; left for backfill", extra={"branch_id": row[0]})
+        else:
+            logger.exception("embedding failed for branch; left for backfill", extra={"branch_id": row[0]})
+
+
 def run(input_file: Path | None = None) -> None:
     """Sync only the current session into the memory DB (Stop-hook helper)."""
     # Concurrency guard.
@@ -198,8 +234,8 @@ def run(input_file: Path | None = None) -> None:
                 # Embedding capability check: sqlite-vec availability determines whether
                 # embedding can run. Record a failure on unavailability; clear on success.
                 # Only the vec check is accessible here — model failures in sync_current
-                # are silently swallowed by session_ops (contextlib.suppress) and are
-                # detected authoritatively by backfill_embeddings instead.
+                # are logged by embed_session_branch and are detected authoritatively
+                # by backfill_embeddings instead.
                 # Both calls are best-effort: a sidecar write failure must never affect
                 # the hook's output or exit behavior.
                 vec_ok = chunk_vec_queryable(conn)
@@ -207,13 +243,12 @@ def run(input_file: Path | None = None) -> None:
                     with contextlib.suppress(Exception):  # best-effort; must not affect hook behavior
                         record_embedding_failure(reason=REASON_VEC_UNAVAILABLE)
 
-                new_messages = sync_session(
-                    conn,
-                    session_file,
-                    project_dir,
-                    settings=settings,
-                )
-            # conn is committed and closed on the line above (context manager exit).
+                new_messages = sync_session(conn, session_file, project_dir)
+                # Commit here, not at the `with` exit: inference must run with no write lock held.
+                conn.commit()
+
+                if vec_ok:
+                    embed_session_branch(conn, session_file, settings, logger)
 
             if new_messages > 0:
                 logger.info("Synced %s new message(s) from session %s", new_messages, session_id[:8])

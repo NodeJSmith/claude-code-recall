@@ -3,8 +3,11 @@
 Opt-in: invoke manually via `ccrecall backfill embeddings` to seed historical
 embeddings. NOT auto-spawned on SessionStart (embedding inference is CPU-bound);
 forward coverage comes from embed-on-write instead.
-Processes branches in batches, commits between batches, and marks per-row
-content errors with embedding_version = -1 to avoid infinite retry.
+Processes branches in batches, committing each branch on its own with no lock
+held during inference, and marks per-row content errors with
+embedding_version = -1 to avoid infinite retry. A batch selects only ids above
+the last one seen, so a run attempts each branch at most once; a branch it
+couldn't finish waits for the next run.
 Each run first clears the watermark on branches stamped as embedded but missing
 exchanges (`clear_false_watermarks`), since selection can't see a chunk that
 was never created.
@@ -13,8 +16,9 @@ Exception taxonomy is catch-all-then-filter-infra, matching
 `backfill_summaries.py`: any exception raised while embedding one branch is a
 content error for that row (mark the sentinel, continue) unless it's a
 `sqlite3.Error`/`OSError` — an infra/DB failure, which propagates to abort the
-batch without poisoning the row. A narrow content-error allow-list would let
-an unanticipated exception type fall through to the infra path unmarked, and
+run without poisoning the row. (A lock timeout is the exception: it costs only
+that branch, which the next run retries, unless three in a row abort the run.)
+A narrow content-error allow-list would let an unanticipated exception type fall through to the infra path unmarked, and
 since this backfill is built to run unattended on a recurring schedule (see
 below), an unmarked row wedges every scheduled run indefinitely: the run
 aborts on that same row every time, blocking every branch behind it in `id`
@@ -42,10 +46,9 @@ If the probe succeeds, the failure was specific to that branch's content —
 mark the sentinel and continue as before. If the probe also raises, the
 model/session is the thing that broke; the caught exception is re-raised
 instead of marking the row, so it flows through the same infra-abort path as
-a `sqlite3.Error`/`OSError` (batch rollback, `run()` returns `EXIT_ABORT`).
-This bounds worst-case poisoning to the current, uncommitted batch — batches
-already committed earlier in the run are unaffected, and the row that
-triggered the failure stays eligible for retry on the next run.
+a `sqlite3.Error`/`OSError` (`run()` returns `EXIT_ABORT`). Branches finished
+earlier in the run stay committed, and the row that triggered the failure stays
+eligible for retry on the next run.
 
 Built to run unattended (systemd timer): `--status [--json]` reports progress
 without embedding, progress lines carry elapsed/ETA, and abort paths exit
@@ -74,12 +77,11 @@ from typing import NamedTuple
 
 from ccrecall.config import DEFAULT_DB_PATH, load_settings_for_db, setup_logging
 from ccrecall.db import CONTENT_ERROR_VERSION, get_connection
-from ccrecall.db_vec import chunk_vec_queryable, fetch_branch_messages, find_stamped_branches_missing_chunks
+from ccrecall.db_base import commit_single_write, is_database_locked
+from ccrecall.db_vec import chunk_vec_queryable, find_stamped_branches_missing_chunks
 from ccrecall.embed_ops import embed_branch_chunks
 from ccrecall.embeddings import (
     DEFAULT_EMBED_THREADS,
-    EMBEDDING_MODEL,
-    EMBEDDING_VERSION,
     MODEL_TOKEN_LIMIT,
     embed_batch,
     model_available,
@@ -105,9 +107,11 @@ from ccrecall.hooks.subprocess_utils import reclaim_memory, try_load_libc
 
 _PRINT_PREFIX = "ccrecall backfill embeddings"
 _LOG_PREFIX = "Backfill embeddings"
-_SAVEPOINT_NAME = "row"
 _WARMUP_BRANCHES = 5
 _RATE_WINDOW = 30
+# A lock timeout costs one branch, but this many in a row means a writer is stuck,
+# and walking the rest of the backlog would only wait out each branch's timeout.
+_MAX_CONSECUTIVE_LOCK_TIMEOUTS = 3
 
 
 def run(
@@ -159,6 +163,8 @@ def run(
     total_inferences = 0
     last_progress = 0
     work_done = 0
+    last_selected_id = 0
+    consecutive_lock_timeouts = 0
     rate_samples: deque[tuple[float, int]] = deque(maxlen=_RATE_WINDOW)
     started = time.monotonic()
 
@@ -184,8 +190,8 @@ def run(
                 return EXIT_ABORT
 
             # Before the eligible count, so healed branches are in this run's
-            # totals. Committed now because a batch abort rolls back the open
-            # transaction, which would restore the false watermarks.
+            # totals. Committed now because the first embed's BEGIN IMMEDIATE
+            # needs no transaction open.
             clear_false_watermarks(cursor, logger)
             conn.commit()
 
@@ -218,23 +224,28 @@ def run(
             )
 
             def select_batch_cb() -> list[tuple]:
-                # ORDER BY id keeps batch order deterministic: the no-progress
-                # guard compares current_ids across calls, which is only
-                # meaningful if re-selection returns rows in a stable order.
+                nonlocal last_selected_id
+                # Forward-only: a branch that stays eligible after its attempt
+                # would otherwise head every later batch and be inferred again.
                 cursor.execute(
-                    f"SELECT id FROM branches {where} ORDER BY id LIMIT ?",
-                    (*params, BATCH_SIZE),
+                    f"SELECT id FROM branches {where} AND id > ? ORDER BY id LIMIT ?",
+                    (*params, last_selected_id, BATCH_SIZE),
                 )
                 rows = cursor.fetchall()
                 # Honor --limit precisely even though batches are BATCH_SIZE-wide.
                 if limit is not None:
-                    rows = rows[: limit - total_updated]
+                    rows = rows[: limit - total_processed]
+                if rows:
+                    last_selected_id = rows[-1][0]
                 return rows
 
             def is_limit_reached() -> bool:
-                return limit_reached(limit, total_updated)
+                # --limit caps work, so a branch that didn't stamp still uses it up.
+                return limit_reached(limit, total_processed)
 
             def on_stuck(_current_ids: list[int]) -> bool:
+                # A required callback, but selection only moves forward, so a
+                # batch can't repeat.
                 logger.error("%s: no progress — same batch re-selected; aborting to avoid infinite loop", _LOG_PREFIX)
                 print(
                     f"{_PRINT_PREFIX}: no progress — same batch re-selected, aborting",
@@ -244,14 +255,26 @@ def run(
 
             def process_batch(rows: list[tuple]) -> bool:
                 nonlocal total_updated, total_processed, total_inferences, last_progress, work_done
+                nonlocal consecutive_lock_timeouts
                 try:
                     for (branch_id,) in rows:
-                        result = _embed_one_branch(cursor, branch_id, logger)
+                        result = _embed_one_branch(conn, branch_id, logger)
                         total_updated += result.updated
                         total_inferences += result.inferences
                         total_processed += 1
                         work_done += result.message_count
                         rate_samples.append((time.monotonic(), work_done))
+
+                        consecutive_lock_timeouts = consecutive_lock_timeouts + 1 if result.lock_timed_out else 0
+                        if consecutive_lock_timeouts >= _MAX_CONSECUTIVE_LOCK_TIMEOUTS:
+                            logger.error(
+                                "%s: %s lock timeouts in a row, aborting after %s branches embedded",
+                                _LOG_PREFIX,
+                                consecutive_lock_timeouts,
+                                total_updated,
+                            )
+                            print(f"{_PRINT_PREFIX}: database stayed locked, aborting", file=sys.stderr)
+                            return False
 
                         if total_processed - last_progress >= progress_every:
                             msg = _format_embed_progress(
@@ -272,19 +295,14 @@ def run(
                     # unexpected failure from the bookkeeping code above
                     # (progress formatting, logging) — never a per-row content
                     # error, which _embed_one_branch marks and absorbs
-                    # internally. Rolling back discards the entire current
-                    # batch — both the failed branch's partial state and any
-                    # earlier branches whose SAVEPOINTs were released but not
-                    # yet committed. All are re-selected cleanly on the next
-                    # run. Prior batches (committed by after_batch) are
-                    # unaffected.
+                    # internally. Branches finished earlier in the run are
+                    # already committed; the failed one is re-selected next run.
                     logger.exception("%s: session failure, aborting", _LOG_PREFIX)
                     conn.rollback()
                     return False
                 return True
 
             def after_batch(_rows: list[tuple]) -> None:
-                conn.commit()
                 reclaim_memory(libc)
                 time.sleep(BACKFILL_BATCH_DELAY_SECONDS)
 
@@ -306,11 +324,13 @@ def run(
 
     elapsed = time.monotonic() - started
     remaining = max(0, total_eligible - total_updated)
+    not_updated = total_processed - total_updated
     logger.info(
-        "%s complete: %s exchanges across %s branches in %s",
+        "%s complete: %s exchanges across %s branches, %s attempted and not updated, in %s",
         _LOG_PREFIX,
         total_inferences,
         total_updated,
+        not_updated,
         format_duration(elapsed),
     )
     if json_mode:
@@ -319,6 +339,7 @@ def run(
                 {
                     "status": "complete",
                     "embedded": total_updated,
+                    "not_updated": not_updated,
                     "inferences": total_inferences,
                     "remaining": remaining,
                     "elapsed_seconds": round(elapsed, 1),
@@ -328,7 +349,8 @@ def run(
     else:
         print(
             f"{_PRINT_PREFIX}: complete — "
-            f"{total_inferences} exchanges across {total_updated} branches "
+            f"{total_inferences} exchanges across {total_updated} branches, "
+            f"{not_updated} attempted and not updated, "
             f"in {format_duration(elapsed)}",
             file=sys.stderr,
         )
@@ -356,12 +378,14 @@ def clear_false_watermarks(cursor: sqlite3.Cursor, logger: logging.Logger) -> No
 
 
 class _EmbedResult(NamedTuple):
-    """Outcome of embedding one branch. `updated` is 1 on success or 0 on a
-    per-row content error."""
+    """Outcome of embedding one branch. `updated` is 1 when the branch ended up
+    stamped, or 0 when it didn't: a content error, a lock timeout, or the branch
+    changing or vanishing during inference."""
 
     message_count: int
     updated: int
     inferences: int
+    lock_timed_out: bool = False
 
 
 def _model_still_healthy(logger: logging.Logger) -> bool:
@@ -387,75 +411,58 @@ def _model_still_healthy(logger: logging.Logger) -> bool:
         return False
 
 
+def _count_branch_messages(conn: sqlite3.Connection, branch_id: int) -> int:
+    """Non-notification messages in a branch, the unit of the run's `total_work`."""
+    return conn.execute(
+        """
+        SELECT COUNT(*) FROM branch_messages bm
+        JOIN messages m ON m.id = bm.message_id
+        WHERE bm.branch_id = ? AND COALESCE(m.is_notification, 0) = 0
+        """,
+        (branch_id,),
+    ).fetchone()[0]
+
+
 def _embed_one_branch(
-    cursor: sqlite3.Cursor,
+    conn: sqlite3.Connection,
     branch_id: int,
     logger: logging.Logger,
 ) -> _EmbedResult:
-    """Fetch and embed one branch inside a SAVEPOINT.
+    """Embed one branch, which commits on its own.
 
-    Implements the content-vs-infra split described in this module's
-    docstring: infra errors propagate to the caller's batch-abort handler,
-    everything else marks the row's content-error sentinel and returns.
+    Implements the content-vs-infra split described in this module's docstring:
+    a lock timeout costs this branch alone, other infra errors propagate to the
+    caller's abort handler, and everything else marks the row's content-error
+    sentinel and returns.
     """
-    # Fetch messages BEFORE the SAVEPOINT: a sqlite3.Error here is a
-    # batch-abort (infra failure), NOT a per-row content error. It propagates
-    # through the inner except to the outer handler.
-    branch_msgs = fetch_branch_messages(cursor, branch_id, include_notifications=False)
+    message_count = _count_branch_messages(conn, branch_id)
+    not_updated = _EmbedResult(message_count=message_count, updated=0, inferences=0)
 
-    cursor.execute(f"SAVEPOINT {_SAVEPOINT_NAME}")
     try:
-        # Pre-delete stale or missing-vector chunk rows so embed_branch_chunks
-        # sees them as new and re-embeds them. The cascade trigger removes
-        # their chunk_vec rows too. Chunks that are already current (correct
-        # version+model AND have a chunk_vec) are preserved — not re-embedded
-        # needlessly.
-        cursor.execute(
-            """
-            DELETE FROM chunks
-            WHERE branch_id = ?
-              AND (
-                embedding_version IS NULL
-                OR embedding_version != ?
-                OR embedding_model IS NOT ?
-                OR NOT EXISTS (
-                  SELECT 1 FROM chunk_vec WHERE chunk_id = chunks.id
-                )
-              )
-            """,
-            (branch_id, EMBEDDING_VERSION, EMBEDDING_MODEL),
-        )
-        # embed_branch_chunks RAISES on failure. max_embeds=None: backfill is
-        # off the hot path and must fully embed each branch in one pass. With
-        # the write-path cap, a branch longer than the cap would stay
-        # eligible and trip the no-progress guard on re-selection. The return
-        # value is the actual inference count (exchanges embedded), so
-        # total_inferences excludes already-current chunks the pre-delete
-        # preserved.
-        embedded = embed_branch_chunks(
-            cursor,
+        # max_embeds=None: backfill is off the hot path and fully embeds each
+        # branch in one pass.
+        outcome = embed_branch_chunks(
+            conn,
             branch_id,
-            branch_msgs,
-            is_active=True,
-            vec_writable=True,
             max_embeds=None,
             cap_limit=MODEL_TOKEN_LIMIT,
+            replace_stale=True,
         )
-        cursor.execute(f"RELEASE SAVEPOINT {_SAVEPOINT_NAME}")
-        return _EmbedResult(message_count=len(branch_msgs), updated=1, inferences=embedded)
+    except sqlite3.OperationalError as exc:
+        if not is_database_locked(exc):
+            raise
+        logger.warning("%s: database locked on branch %s, next run retries", _LOG_PREFIX, branch_id)
+        return not_updated._replace(lock_timed_out=True)
     except (sqlite3.Error, OSError):
-        # sqlite3.Error/OSError are themselves Exception subclasses, so this
-        # clause exists only to shadow the broader `except Exception` below:
-        # re-raise so the caller's batch-abort handler treats this as an
-        # infra failure instead of poisoning the row.
+        # Both are Exception subclasses, so this clause exists only to shadow the
+        # broader `except Exception` below and keep an infra failure from
+        # poisoning the row.
         raise
     except Exception:
-        cursor.execute(f"ROLLBACK TO SAVEPOINT {_SAVEPOINT_NAME}")
-        cursor.execute(f"RELEASE SAVEPOINT {_SAVEPOINT_NAME}")
         logger.exception("%s: branch %s failed", _LOG_PREFIX, branch_id)
         if not _model_still_healthy(logger):
             # Model/session failure, not a content error: don't poison this
-            # row — re-raise so the caller's batch-abort handler rolls back
+            # row — re-raise so the caller's abort handler stops the run
             # instead of marking every subsequent branch unrecoverable.
             logger.error(
                 "%s: model health probe failed after branch %s, aborting without marking",
@@ -463,12 +470,28 @@ def _embed_one_branch(
                 branch_id,
             )
             raise
-        # Per-row content error: mark sentinel so this row is skipped next run.
-        cursor.execute(
+        marked = _mark_content_error(conn, branch_id, logger)
+        return not_updated._replace(lock_timed_out=not marked)
+    return _EmbedResult(message_count=message_count, updated=int(outcome.stamped), inferences=outcome.embedded)
+
+
+def _mark_content_error(conn: sqlite3.Connection, branch_id: int, logger: logging.Logger) -> bool:
+    """Mark the sentinel so this row is skipped next run, returning whether it was marked.
+
+    A lock timeout leaves it unmarked, to be retried.
+    """
+    try:
+        commit_single_write(
+            conn,
             "UPDATE branches SET embedding_version = ? WHERE id = ?",
             (CONTENT_ERROR_VERSION, branch_id),
         )
-        return _EmbedResult(message_count=len(branch_msgs), updated=0, inferences=0)
+    except sqlite3.OperationalError as exc:
+        if not is_database_locked(exc):
+            raise
+        logger.warning("%s: database locked marking branch %s, next run retries", _LOG_PREFIX, branch_id)
+        return False
+    return True
 
 
 def _format_embed_progress(

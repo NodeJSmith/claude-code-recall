@@ -13,6 +13,7 @@ import ccrecall.config as config
 import ccrecall.health as health
 import ccrecall.hooks.sync_current as sync_current
 from ccrecall.db_vec import _ensure_vec_schema
+from ccrecall.embed_ops import EmbedOutcome, embed_branch_chunks
 from ccrecall.health import clear_embedding_failure, record_embedding_failure
 from ccrecall.hooks import import_conversations
 from ccrecall.ingestion_status import STALE_TAIL_SECONDS
@@ -261,3 +262,23 @@ class NoCloseConn:
 
     def __getattr__(self, name: str):
         return getattr(self._conn, name)
+
+
+def set_branch_messages(conn: sqlite3.Connection, branch_id: int, messages: list[dict]) -> None:
+    """Make ``messages`` the branch's stored messages and commit, as a sync would."""
+    session_id = conn.execute("SELECT session_id FROM branches WHERE id = ?", (branch_id,)).fetchone()[0]
+    conn.execute("DELETE FROM branch_messages WHERE branch_id = ?", (branch_id,))
+    conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
+    for msg in messages:
+        cursor = conn.execute(
+            "INSERT INTO messages (session_id, uuid, role, content, timestamp, tool_content) VALUES (?, ?, ?, ?, ?, ?)",
+            (session_id, msg.get("uuid"), msg["role"], msg["content"], msg["timestamp"], msg.get("tool_content")),
+        )
+        conn.execute("INSERT INTO branch_messages (branch_id, message_id) VALUES (?, ?)", (branch_id, cursor.lastrowid))
+    conn.commit()
+
+
+def embed_messages(conn: sqlite3.Connection, branch_id: int, messages: list[dict], **kwargs) -> EmbedOutcome:
+    """Store ``messages`` on the branch, then embed it."""
+    set_branch_messages(conn, branch_id, messages)
+    return embed_branch_chunks(conn, branch_id, **kwargs)

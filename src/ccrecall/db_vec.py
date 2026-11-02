@@ -204,10 +204,9 @@ def branch_embedding_coverage(conn: sqlite3.Connection) -> tuple[int, int, int]:
 
     `total` is every CHUNK_EMBEDDABLE branch. `embedded_full` is those whose
     watermark (embedding_version/embedding_model) is at the current version
-    and model — the write path's clear-first/set-last protocol
-    (embed_ops.py:_should_stamp_watermark) deliberately withholds that
-    watermark from a branch that still carries a draft-quality (capped) chunk
-    so a branch never reaches embedded_full while
+    and model — the stamp rule (embed_ops.py:_should_stamp_watermark)
+    deliberately withholds that watermark from a branch that still carries a
+    draft-quality (capped) chunk so a branch never reaches embedded_full while
     any of its chunks are below FULL_QUALITY_TOKEN_LIMIT. `embedded_draft` is
     the remainder of the non-full branches that DO have at least one chunk —
     i.e. searchable now, just not at full fidelity; a branch that has neither
