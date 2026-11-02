@@ -65,8 +65,9 @@ def imported_sessions(conn: sqlite3.Connection) -> set[str]:
 def test_commit_by_another_process_during_the_scan_does_not_fail_the_import(
     db_conn, competitor, project_dir, monkeypatch
 ):
-    """A commit landing between the import's reads and its first write used to fail
-    that write immediately, because the transaction's read snapshot had gone stale.
+    """A commit between the import's reads and its first write must not fail the import.
+
+    In a deferred transaction that write would fail at once on a stale read snapshot.
 
     has_pending_tool_content is the first read after upsert_project, so it marks
     that window. The inserted row is arbitrary: only the other process's commit matters.
@@ -246,7 +247,7 @@ class TestRun:
 
     def test_aborted_repair_still_reports_what_it_repaired(self, tmp_path, projects_dir, monkeypatch, capsys):
         def abort_after_one(_conn, candidates, on_reclaim):
-            raise import_repair.RepairAborted("database or disk is full", (1, 3, 0, 0))
+            raise import_repair.RepairAborted("database or disk is full", import_repair.RepairCounts(1, 3, 0, 0))
 
         monkeypatch.setattr(import_repair, "repair_sessions", abort_after_one)
         monkeypatch.setattr(import_conversations.ingestion_status, "find_repairable_sessions", lambda _conn: [])

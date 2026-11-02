@@ -491,7 +491,7 @@ def run(
         raise SystemExit(1)
 
 
-def report_repair(logger: logging.Logger, candidate_count: int, counts: tuple[int, int, int, int]) -> None:
+def report_repair(logger: logging.Logger, candidate_count: int, counts: import_repair.RepairCounts) -> None:
     """Print and log what a repair batch did, whether it finished or aborted."""
     repaired, messages, failed, unrepairable = counts
     summary = f"Repaired {repaired} session(s), recovered {messages} message(s)"
@@ -533,7 +533,7 @@ def run_repair(conn: sqlite3.Connection, logger: logging.Logger, on_reclaim: Cal
         report_repair(logger, len(candidates), aborted.counts)
         raise
     report_repair(logger, len(candidates), counts)
-    return counts[2]
+    return counts.failed
 
 
 def _run(

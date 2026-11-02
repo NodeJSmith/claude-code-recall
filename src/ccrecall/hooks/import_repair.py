@@ -33,6 +33,7 @@ import logging
 import sqlite3
 from collections.abc import Callable
 from pathlib import Path
+from typing import NamedTuple
 
 from ccrecall import ingestion_status
 from ccrecall.db_base import is_database_locked
@@ -44,11 +45,18 @@ log = logging.getLogger(LOGGER_NAME)
 PROGRESS_LOG_INTERVAL = 10
 
 
+class RepairCounts(NamedTuple):
+    repaired: int
+    messages_recovered: int
+    failed: int
+    unrepairable: int
+
+
 class RepairAborted(sqlite3.OperationalError):
     """A database failure stopped the batch. ``counts`` is what repair_sessions
     would have returned for the candidates it finished, all already committed."""
 
-    def __init__(self, message: str, counts: tuple[int, int, int, int]) -> None:
+    def __init__(self, message: str, counts: RepairCounts) -> None:
         super().__init__(message)
         self.counts = counts
 
@@ -61,7 +69,7 @@ def repair_sessions(
     conn: sqlite3.Connection,
     candidates: list[tuple[str, int, int | None, list[Path]]],
     on_reclaim: Callable[[], None] = _noop,
-) -> tuple[int, int, int, int]:
+) -> RepairCounts:
     """Force-reimport every (session_uuid, session_id, project_id, filepaths)
     candidate — matching ingestion_status.find_repairable_sessions's return
     shape, where project_id is None when the session's project_id column is
@@ -279,10 +287,10 @@ def repair_sessions(
 
             _log_progress(index, total_candidates, sessions_repaired, sessions_failed, sessions_unrepairable)
     except sqlite3.OperationalError as exc:
-        counts = (sessions_repaired, messages_recovered, sessions_failed, sessions_unrepairable)
+        counts = RepairCounts(sessions_repaired, messages_recovered, sessions_failed, sessions_unrepairable)
         raise RepairAborted(str(exc), counts) from exc
 
-    return sessions_repaired, messages_recovered, sessions_failed, sessions_unrepairable
+    return RepairCounts(sessions_repaired, messages_recovered, sessions_failed, sessions_unrepairable)
 
 
 def _log_progress(index: int, total: int, repaired: int, failed: int, unrepairable: int) -> None:
