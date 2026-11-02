@@ -259,7 +259,7 @@ def cmd_backfill_embeddings(
     ] = None,
     limit: Annotated[
         int | None,
-        Parameter(validator=Number(gte=1), help="Stop after embedding at most N branches this run (>= 1)."),
+        Parameter(validator=Number(gte=1), help="Stop after attempting at most N branches this run (>= 1)."),
     ] = None,
     progress_every: Annotated[
         int, Parameter(help="Print a progress line every N newly embedded branches.")

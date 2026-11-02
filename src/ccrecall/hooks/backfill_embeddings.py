@@ -17,8 +17,8 @@ Exception taxonomy is catch-all-then-filter-infra, matching
 content error for that row (mark the sentinel, continue) unless it's a
 `sqlite3.Error`/`OSError` — an infra/DB failure, which propagates to abort the
 run without poisoning the row. (A lock timeout is the exception: it costs only
-that branch, which the next run retries.) A narrow content-error allow-list would let
-an unanticipated exception type fall through to the infra path unmarked, and
+that branch, which the next run retries, unless three in a row abort the run.)
+A narrow content-error allow-list would let an unanticipated exception type fall through to the infra path unmarked, and
 since this backfill is built to run unattended on a recurring schedule (see
 below), an unmarked row wedges every scheduled run indefinitely: the run
 aborts on that same row every time, blocking every branch behind it in `id`
@@ -240,6 +240,7 @@ def run(
                 return rows
 
             def is_limit_reached() -> bool:
+                # --limit caps work, so a branch that didn't stamp still uses it up.
                 return limit_reached(limit, total_processed)
 
             def on_stuck(_current_ids: list[int]) -> bool:
@@ -267,7 +268,10 @@ def run(
                         consecutive_lock_timeouts = consecutive_lock_timeouts + 1 if result.lock_timed_out else 0
                         if consecutive_lock_timeouts >= _MAX_CONSECUTIVE_LOCK_TIMEOUTS:
                             logger.error(
-                                "%s: %s lock timeouts in a row, aborting", _LOG_PREFIX, consecutive_lock_timeouts
+                                "%s: %s lock timeouts in a row, aborting after %s branches embedded",
+                                _LOG_PREFIX,
+                                consecutive_lock_timeouts,
+                                total_updated,
                             )
                             print(f"{_PRINT_PREFIX}: database stayed locked, aborting", file=sys.stderr)
                             return False
@@ -472,7 +476,10 @@ def _embed_one_branch(
 
 
 def _mark_content_error(conn: sqlite3.Connection, branch_id: int, logger: logging.Logger) -> bool:
-    """Mark the sentinel so this row is skipped next run. A lock timeout leaves it unmarked, to be retried."""
+    """Mark the sentinel so this row is skipped next run, returning whether it was marked.
+
+    A lock timeout leaves it unmarked, to be retried.
+    """
     try:
         commit_single_write(
             conn,
