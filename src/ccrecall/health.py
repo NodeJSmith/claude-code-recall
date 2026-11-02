@@ -24,6 +24,7 @@ from pathlib import Path
 from whenever import Instant
 
 from ccrecall.config import PID_FILE_MODE, RUNTIME_DIR, atomic_write_json, ensure_parent_dir
+from ccrecall.db_base import is_database_locked
 from ccrecall.models import LOGGER_NAME
 
 # ── Sidecar paths ──────────────────────────────────────────────────────────────
@@ -140,8 +141,7 @@ def probe_db(conn: sqlite3.Connection | None) -> ProbeResult:
         conn.execute("ROLLBACK")
         return ProbeResult.success()
     except sqlite3.OperationalError as exc:
-        msg = str(exc).lower()
-        if "locked" in msg or "busy" in msg:
+        if is_database_locked(exc):
             # Lock contention from another concurrent session — not a fault.
             return ProbeResult.success()
         return ProbeResult.fault(f"database error: {exc}")

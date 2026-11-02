@@ -127,7 +127,7 @@ These are wired by the plugin's `hooks/hooks.json` and fire on their respective 
 | Entry point | What it does |
 |---|---|
 | `ccrecall sync-current` | Syncs a single session file to the DB. Called by `ccrecall-sync` with the session ID from stdin |
-| `ccrecall import` | Full import of all JSONL files in `~/.claude/projects/`. Skips files that haven't changed since last import (file hash check). Run on first install and whenever new sessions need backfilling |
+| `ccrecall import` | Full import of all JSONL files in `~/.claude/projects/`. Skips files that haven't changed since last import (size and modified time, then file hash), and skips the whole run if another import is already running. Run on first install and whenever new sessions need backfilling |
 | `ccrecall backfill summaries` | Generates context summaries for any DB branches that don't have one yet. Runs in the background after `ccrecall-setup` |
 
 ### Skill CLIs (called from skill files — can also be used directly)

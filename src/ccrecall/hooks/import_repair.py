@@ -33,14 +33,32 @@ import logging
 import sqlite3
 from collections.abc import Callable
 from pathlib import Path
+from typing import NamedTuple
 
 from ccrecall import ingestion_status
+from ccrecall.db_base import is_database_locked
 from ccrecall.hooks import import_conversations
 from ccrecall.models import LOGGER_NAME
 
 log = logging.getLogger(LOGGER_NAME)
 
 PROGRESS_LOG_INTERVAL = 10
+
+
+class RepairCounts(NamedTuple):
+    repaired: int
+    messages_recovered: int
+    failed: int
+    unrepairable: int
+
+
+class RepairAborted(sqlite3.OperationalError):
+    """A database failure stopped the batch. ``counts`` is what repair_sessions
+    would have returned for the candidates it finished, all already committed."""
+
+    def __init__(self, message: str, counts: RepairCounts) -> None:
+        super().__init__(message)
+        self.counts = counts
 
 
 def _noop() -> None:
@@ -51,7 +69,7 @@ def repair_sessions(
     conn: sqlite3.Connection,
     candidates: list[tuple[str, int, int | None, list[Path]]],
     on_reclaim: Callable[[], None] = _noop,
-) -> tuple[int, int, int, int]:
+) -> RepairCounts:
     """Force-reimport every (session_uuid, session_id, project_id, filepaths)
     candidate — matching ingestion_status.find_repairable_sessions's return
     shape, where project_id is None when the session's project_id column is
@@ -72,7 +90,10 @@ def repair_sessions(
     all wrapped by the same try/except: an OperationalError raised by the
     force-reimport itself (a genuine infrastructure failure — full disk,
     corrupt DB, incompatible schema) still aborts the whole remaining batch
-    by re-raising, matching import_project's existing convention. But an
+    by raising RepairAborted, which carries the counts so far, matching
+    import_project's existing convention. A locked database is the exception:
+    another process is busy, not broken, so that candidate counts as failed
+    and the next background import retries it. An
     OperationalError on the SAVEPOINT/RELEASE statements themselves (a
     transient, candidate-local problem, not evidence the DB is broken) is
     treated like any other per-candidate failure instead — logged, counted,
@@ -128,139 +149,148 @@ def repair_sessions(
     sessions_unrepairable = 0
     total_candidates = len(candidates)
 
-    for index, (session_uuid, session_id, project_id, filepaths) in enumerate(candidates, start=1):
-        if project_id is None:
-            # sessions.project_id is nullable; import_session requires a concrete
-            # project_id to force-reimport into. A candidate with no project_id
-            # is a permanent data-integrity condition — project_id will never
-            # become non-null via retry — not a transient operational failure,
-            # so it counts as unrepairable rather than failed.
-            log.error(
-                "Skipping repair for session %s — no project_id on record (unrepairable, not retryable)",
-                session_uuid,
-            )
-            sessions_unrepairable += 1
-            _log_progress(index, total_candidates, sessions_repaired, sessions_failed, sessions_unrepairable)
-            continue
+    try:
+        for index, (session_uuid, session_id, project_id, filepaths) in enumerate(candidates, start=1):
+            if project_id is None:
+                # sessions.project_id is nullable; import_session requires a concrete
+                # project_id to force-reimport into. A candidate with no project_id
+                # is a permanent data-integrity condition — project_id will never
+                # become non-null via retry — not a transient operational failure,
+                # so it counts as unrepairable rather than failed.
+                log.error(
+                    "Skipping repair for session %s — no project_id on record (unrepairable, not retryable)",
+                    session_uuid,
+                )
+                sessions_unrepairable += 1
+                _log_progress(index, total_candidates, sessions_repaired, sessions_failed, sessions_unrepairable)
+                continue
 
-        candidate_failed = False
-        count_before = conn.execute("SELECT COUNT(*) FROM messages WHERE session_id = ?", (session_id,)).fetchone()[0]
+            candidate_failed = False
+            count_before = conn.execute("SELECT COUNT(*) FROM messages WHERE session_id = ?", (session_id,)).fetchone()[
+                0
+            ]
 
-        try:
-            conn.execute("SAVEPOINT import_candidate")
-        except sqlite3.OperationalError:
-            log.exception(
-                "Failed to acquire SAVEPOINT while repairing session %s — counting as failed, continuing batch",
-                session_uuid,
-            )
-            sessions_failed += 1
-            on_reclaim()
-            _log_progress(index, total_candidates, sessions_repaired, sessions_failed, sessions_unrepairable)
-            continue
-
-        try:
-            if len(filepaths) == 1:
-                import_conversations.import_session(conn, filepaths[0], project_id, force=True)
-            else:
-                import_conversations.import_session_group(conn, filepaths, project_id)
-        except sqlite3.OperationalError:
-            conn.execute("ROLLBACK TO SAVEPOINT import_candidate")
-            conn.execute("RELEASE SAVEPOINT import_candidate")
-            log.exception(
-                "Database-level failure repairing session %s — aborting run",
-                session_uuid,
-            )
-            raise
-        except Exception:
-            conn.execute("ROLLBACK TO SAVEPOINT import_candidate")
-            conn.execute("RELEASE SAVEPOINT import_candidate")
-            log.exception(
-                "Skipping poison transcript(s) while repairing session %s",
-                session_uuid,
-            )
-            candidate_failed = True
-        else:
             try:
-                conn.execute("RELEASE SAVEPOINT import_candidate")
+                conn.execute("SAVEPOINT import_candidate")
             except sqlite3.OperationalError:
-                # A failed RELEASE leaves the savepoint open on the connection's
-                # stack instead of discarding it — left alone, the next
-                # candidate's SAVEPOINT nests inside this "failed" one instead
-                # of starting its own independent, durably-committing
-                # transaction (see the module docstring's durability model).
-                # Roll back the candidate's writes and release the savepoint
-                # explicitly so the connection returns to a clean, zero-depth
-                # state before the next candidate starts.
-                try:
-                    conn.execute("ROLLBACK TO SAVEPOINT import_candidate")
-                    conn.execute("RELEASE SAVEPOINT import_candidate")
-                except sqlite3.OperationalError:
-                    # The recovery itself failed under the same transient
-                    # condition — the connection's savepoint stack can no
-                    # longer be trusted to be at a known depth, so this is a
-                    # genuine infrastructure failure, not a candidate-local
-                    # one. Abort the whole batch rather than let subsequent
-                    # candidates nest inside an unknown state, matching the
-                    # force-reimport OperationalError branch above.
+                log.exception(
+                    "Failed to acquire SAVEPOINT while repairing session %s — counting as failed, continuing batch",
+                    session_uuid,
+                )
+                sessions_failed += 1
+                on_reclaim()
+                _log_progress(index, total_candidates, sessions_repaired, sessions_failed, sessions_unrepairable)
+                continue
+
+            try:
+                if len(filepaths) == 1:
+                    import_conversations.import_session(conn, filepaths[0], project_id, force=True)
+                else:
+                    import_conversations.import_session_group(conn, filepaths, project_id)
+            except sqlite3.OperationalError as exc:
+                conn.execute("ROLLBACK TO SAVEPOINT import_candidate")
+                conn.execute("RELEASE SAVEPOINT import_candidate")
+                if not is_database_locked(exc):
                     log.exception(
-                        "Failed to recover from RELEASE SAVEPOINT failure while repairing session %s — aborting run",
+                        "Database-level failure repairing session %s — aborting run",
                         session_uuid,
                     )
                     raise
+                log.warning("Database locked while repairing session %s — counting as failed", session_uuid)
+                candidate_failed = True
+            except Exception:
+                conn.execute("ROLLBACK TO SAVEPOINT import_candidate")
+                conn.execute("RELEASE SAVEPOINT import_candidate")
                 log.exception(
-                    "Failed to RELEASE SAVEPOINT while repairing session %s — counting as failed, continuing batch",
+                    "Skipping poison transcript(s) while repairing session %s",
                     session_uuid,
                 )
                 candidate_failed = True
+            else:
+                try:
+                    conn.execute("RELEASE SAVEPOINT import_candidate")
+                except sqlite3.OperationalError:
+                    # A failed RELEASE leaves the savepoint open on the connection's
+                    # stack instead of discarding it — left alone, the next
+                    # candidate's SAVEPOINT nests inside this "failed" one instead
+                    # of starting its own independent, durably-committing
+                    # transaction (see the module docstring's durability model).
+                    # Roll back the candidate's writes and release the savepoint
+                    # explicitly so the connection returns to a clean, zero-depth
+                    # state before the next candidate starts.
+                    try:
+                        conn.execute("ROLLBACK TO SAVEPOINT import_candidate")
+                        conn.execute("RELEASE SAVEPOINT import_candidate")
+                    except sqlite3.OperationalError:
+                        # The recovery itself failed under the same transient
+                        # condition — the connection's savepoint stack can no
+                        # longer be trusted to be at a known depth, so this is a
+                        # genuine infrastructure failure, not a candidate-local
+                        # one. Abort the whole batch rather than let subsequent
+                        # candidates nest inside an unknown state, matching the
+                        # force-reimport OperationalError branch above.
+                        log.exception(
+                            "Failed to recover from RELEASE SAVEPOINT failure repairing session %s — aborting run",
+                            session_uuid,
+                        )
+                        raise
+                    log.exception(
+                        "Failed to RELEASE SAVEPOINT while repairing session %s — counting as failed, continuing batch",
+                        session_uuid,
+                    )
+                    candidate_failed = True
 
-        on_reclaim()
+            on_reclaim()
 
-        resolved = conn.execute("SELECT id FROM sessions WHERE uuid = ?", (session_uuid,)).fetchone()
-        if resolved is not None:
-            count_after = conn.execute("SELECT COUNT(*) FROM messages WHERE session_id = ?", (resolved[0],)).fetchone()[
-                0
-            ]
-        else:
-            count_after = 0
-        delta = count_after - count_before
-        if delta < 0:
-            log.warning(
-                "negative message delta while repairing session %s: before=%d after=%d",
-                session_uuid,
-                count_before,
-                count_after,
-            )
-        messages_recovered += max(delta, 0)
+            resolved = conn.execute("SELECT id FROM sessions WHERE uuid = ?", (session_uuid,)).fetchone()
+            if resolved is not None:
+                count_after = conn.execute(
+                    "SELECT COUNT(*) FROM messages WHERE session_id = ?", (resolved[0],)
+                ).fetchone()[0]
+            else:
+                count_after = 0
+            delta = count_after - count_before
+            if delta < 0:
+                log.warning(
+                    "negative message delta while repairing session %s: before=%d after=%d",
+                    session_uuid,
+                    count_before,
+                    count_after,
+                )
+            messages_recovered += max(delta, 0)
 
-        if candidate_failed:
-            sessions_failed += 1
+            if candidate_failed:
+                sessions_failed += 1
+                _log_progress(index, total_candidates, sessions_repaired, sessions_failed, sessions_unrepairable)
+                continue
+
+            try:
+                category = ingestion_status.reclassify_session(conn, session_uuid, filepaths)
+            except sqlite3.OperationalError:
+                log.exception(
+                    "Database-level failure reclassifying session %s — aborting run",
+                    session_uuid,
+                )
+                raise
+            except Exception:
+                log.exception(
+                    "Post-repair reclassification failed for session %s",
+                    session_uuid,
+                )
+                sessions_failed += 1
+                _log_progress(index, total_candidates, sessions_repaired, sessions_failed, sessions_unrepairable)
+                continue
+            if category == "ok":
+                sessions_repaired += 1
+            else:
+                sessions_unrepairable += 1
+
             _log_progress(index, total_candidates, sessions_repaired, sessions_failed, sessions_unrepairable)
-            continue
+    except sqlite3.OperationalError as exc:
+        counts = RepairCounts(sessions_repaired, messages_recovered, sessions_failed, sessions_unrepairable)
+        raise RepairAborted(str(exc), counts) from exc
 
-        try:
-            category = ingestion_status.reclassify_session(conn, session_uuid, filepaths)
-        except sqlite3.OperationalError:
-            log.exception(
-                "Database-level failure reclassifying session %s — aborting run",
-                session_uuid,
-            )
-            raise
-        except Exception:
-            log.exception(
-                "Post-repair reclassification failed for session %s",
-                session_uuid,
-            )
-            sessions_failed += 1
-            _log_progress(index, total_candidates, sessions_repaired, sessions_failed, sessions_unrepairable)
-            continue
-        if category == "ok":
-            sessions_repaired += 1
-        else:
-            sessions_unrepairable += 1
-
-        _log_progress(index, total_candidates, sessions_repaired, sessions_failed, sessions_unrepairable)
-
-    return sessions_repaired, messages_recovered, sessions_failed, sessions_unrepairable
+    return RepairCounts(sessions_repaired, messages_recovered, sessions_failed, sessions_unrepairable)
 
 
 def _log_progress(index: int, total: int, repaired: int, failed: int, unrepairable: int) -> None:

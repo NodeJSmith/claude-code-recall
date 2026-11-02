@@ -26,6 +26,7 @@ from ccrecall.config import (
 )
 from ccrecall.config import PID_KEY_IMPORT as PID_KEY
 from ccrecall.db import DEFAULT_PROJECTS_DIR, get_connection
+from ccrecall.db_base import is_database_locked
 from ccrecall.db_vec import TRIGGER_CHUNKS_VEC_AD, vec_available
 from ccrecall.file_hashing import transcript_file_hash
 from ccrecall.formatting import extract_project_name, normalize_project_key
@@ -33,7 +34,7 @@ from ccrecall.hooks import import_repair
 from ccrecall.hooks.backfill_query import BACKFILL_NICE_LEVEL
 from ccrecall.hooks.backfill_runner import lower_scheduling_priority
 from ccrecall.hooks.subprocess_utils import reclaim_memory, try_load_libc
-from ccrecall.import_log_ops import has_pending_tool_content
+from ccrecall.import_log_ops import has_pending_tool_content, unchanged_since_import
 from ccrecall.models import LOGGER_NAME
 from ccrecall.parsing import extract_session_uuid, sort_session_files
 from ccrecall.project_ops import key_could_match_excluded, upsert_project
@@ -85,22 +86,12 @@ def import_session(
     file_mtime = st.st_mtime
 
     # Fast path: if size + mtime match the stored values, skip without hashing.
-    cursor.execute(
-        "SELECT id, file_hash, file_size, file_mtime FROM import_log WHERE file_path = ?",
-        (str(filepath),),
-    )
-    log_row = cursor.fetchone()
-    if (
-        log_row
-        and log_row[2] == file_size
-        and log_row[3] == file_mtime
-        and not force
-        and not has_pending_tool_content(cursor, filepath)
-    ):
+    if not force and unchanged_since_import(cursor, filepath):
         log.debug("skip %s (%.1f MB, stat match)", filepath.name, file_size / BYTES_PER_MB)
         return -1, 0
 
     # Stat changed or no prior record — fall back to full hash comparison.
+    log_row = cursor.execute("SELECT id, file_hash FROM import_log WHERE file_path = ?", (str(filepath),)).fetchone()
     file_hash = get_file_hash(filepath)
     if (
         log_row
@@ -296,17 +287,6 @@ def import_project(
     """
     cursor = conn.cursor()
 
-    # A pure-SELECT upsert_project (already-known project, unchanged path) never
-    # triggers sqlite3's implicit BEGIN, which only fires on INSERT/UPDATE/DELETE.
-    # Without an explicit transaction already open here, the per-file SAVEPOINT
-    # below becomes its own top-level transaction and commits on RELEASE — the
-    # first file's writes go durable immediately instead of waiting for
-    # import_project_contained's single per-project conn.commit(), breaking the
-    # "transaction spans the whole project" invariant the SAVEPOINT/ROLLBACK
-    # containment below depends on.
-    if not conn.in_transaction:
-        conn.execute("BEGIN")
-
     project_key = normalize_project_key(project_dir.name)
 
     # Upsert project using the JSONL-probe strategy for accurate path derivation
@@ -347,6 +327,27 @@ def import_project(
         )
         targets = [target for target in targets if target not in processed]
         for target in targets:
+            # Skipping needs no write lock, so a known project with nothing new
+            # never takes it and can't block sync or be blocked by it.
+            if not repair_group and unchanged_since_import(cursor, target):
+                log.debug("skip %s (stat match)", target.name)
+                processed.add(target)
+                sessions_skipped += 1
+                continue
+
+            # IMMEDIATE, because a deferred transaction that reads before writing
+            # fails without waiting if another process commits in between. Waiting
+            # here takes the lock with no read snapshot to go stale. Skipped when
+            # upsert_project's write already opened the transaction.
+            #
+            # Explicit because a pure-SELECT upsert_project never triggers sqlite3's
+            # implicit BEGIN. Without an open transaction the SAVEPOINT below becomes
+            # its own top-level transaction and commits on RELEASE, breaking the
+            # "transaction spans the whole project" invariant its containment
+            # depends on. import_project_contained commits once per project.
+            if not conn.in_transaction:
+                conn.execute("BEGIN IMMEDIATE")
+
             # Per-file containment (#170): one poison transcript must not wedge the
             # whole batch. A SAVEPOINT bounds the containment to exactly this
             # file's writes — the surrounding connection's transaction still spans
@@ -357,7 +358,7 @@ def import_project(
             conn.execute("SAVEPOINT import_file")
             try:
                 branches_count, msg_count = import_session(conn, target, project_id, force=repair_group)
-            except sqlite3.OperationalError:
+            except sqlite3.OperationalError as exc:
                 # Infrastructure failure (full disk, corrupt DB, incompatible schema) —
                 # not a poison transcript. Treating it as one would repeat the same
                 # failure for every remaining file while _run still commits and reports
@@ -365,7 +366,8 @@ def import_project(
                 # the batch actually stops and the failure surfaces.
                 conn.execute("ROLLBACK TO SAVEPOINT import_file")
                 conn.execute("RELEASE SAVEPOINT import_file")
-                log.exception("Database-level failure importing %s — aborting run", target)
+                if not is_database_locked(exc):
+                    log.exception("Database-level failure importing %s", target)
                 raise
             except Exception:
                 conn.execute("ROLLBACK TO SAVEPOINT import_file")
@@ -410,16 +412,24 @@ def import_project_contained(
     exception other than sqlite3.OperationalError (an infrastructure failure
     that would repeat for every project), roll the project's whole transaction
     back — including its import_log rows, so it is retried next run — log it,
-    and return None. The rollback is required, not tidy-up: import_project only
+    and return None. A locked database gets the same treatment: another process
+    outlasted busy_timeout, which isn't a fault and can clear before the next
+    project. The rollback is required, not tidy-up: import_project only
     opens its own BEGIN when no transaction is open, so without it the next
     project would join this one's failed transaction.
     """
     try:
         result = import_project(conn, project_dir, exclude_projects, on_reclaim)
         conn.commit()
-    except sqlite3.OperationalError:
+    except sqlite3.OperationalError as exc:
         conn.rollback()
-        raise
+        if not is_database_locked(exc):
+            raise
+        log.warning(
+            "database locked; rolled back this project and continuing with the remaining projects",
+            extra={"project_key": normalize_project_key(project_dir.name), "project_dir": str(project_dir)},
+        )
+        return None
     except Exception:
         conn.rollback()
         log.exception(
@@ -443,9 +453,9 @@ def run(
     Exits non-zero when any project import or gap repair failed.
     """
     total_failures = 0
-    repair_lock_denied = False
+    another_import_running = False
     try:
-        total_failures, repair_lock_denied = _run(
+        total_failures, another_import_running = _run(
             db=db, projects_dir=projects_dir, project=project, verbose=verbose, repair_gaps=repair_gaps
         )
     except Exception:
@@ -463,11 +473,11 @@ def run(
     finally:
         # Delete PID file so _spawn_background can spawn again next session,
         # but only if this process owns it. A concurrent holder (e.g. a
-        # --repair-gaps invocation, or the SessionStart auto-import) wrote
+        # manual import, or the SessionStart auto-import) wrote
         # its own PID; deleting their marker would let a third process start
-        # unguarded. When repair_lock_denied is True we already know we don't
+        # unguarded. When another_import_running is True we already know we don't
         # own it; otherwise, verify by comparing the file's PID to ours.
-        if not repair_lock_denied:
+        if not another_import_running:
             marker = pid_file_path(PID_KEY)
             try:
                 stored_pid = int(marker.read_text().strip())
@@ -481,6 +491,51 @@ def run(
         raise SystemExit(1)
 
 
+def report_repair(logger: logging.Logger, candidate_count: int, counts: import_repair.RepairCounts) -> None:
+    """Print and log what a repair batch did, whether it finished or aborted."""
+    repaired, messages, failed, unrepairable = counts
+    summary = f"Repaired {repaired} session(s), recovered {messages} message(s)"
+    if unrepairable:
+        summary += f", {unrepairable} could not be repaired (source transcript is missing the required message(s))"
+    if failed:
+        summary += f", {failed} failed — see ccrecall-import.log"
+    print(summary)
+    # The SessionStart-spawned import has stdout on DEVNULL, so the log is
+    # the only record of this summary.
+    logger.log(
+        logging.WARNING if failed or unrepairable else logging.INFO,
+        "repair complete: %d candidates, %d repaired, %d messages recovered, %d unrepairable, %d failed",
+        candidate_count,
+        repaired,
+        messages,
+        unrepairable,
+        failed,
+    )
+
+
+def run_repair(conn: sqlite3.Connection, logger: logging.Logger, on_reclaim: Callable[[], None]) -> int:
+    """Find and repair gapped sessions, report the outcome, and return how many failed."""
+    try:
+        candidates = ingestion_status.find_repairable_sessions(conn)
+    except sqlite3.OperationalError as exc:
+        conn.rollback()
+        if not is_database_locked(exc):
+            raise
+        # The scan writes ok verdicts, so it can lose a lock wait too. It commits
+        # them in batches, so the next run resumes instead of starting over.
+        print("Skipped gap repair: database is locked — the next import retries it")
+        logger.warning("Gap repair skipped — database locked during the candidate scan")
+        return 1  # counts as a failure so the run exits non-zero
+
+    try:
+        counts = import_repair.repair_sessions(conn, candidates, on_reclaim=on_reclaim)
+    except import_repair.RepairAborted as aborted:
+        report_repair(logger, len(candidates), aborted.counts)
+        raise
+    report_repair(logger, len(candidates), counts)
+    return counts.failed
+
+
 def _run(
     *,
     db: Path,
@@ -489,25 +544,19 @@ def _run(
     verbose: bool,
     repair_gaps: bool,
 ) -> tuple[int, bool]:
-    """Run the import and return ``(total_failures, repair_lock_denied)``.
+    """Run the import and return ``(total_failures, another_import_running)``.
 
     ``total_failures`` counts failed projects plus failed gap repairs.
     """
     settings = load_settings()
     logger = setup_logging(settings, process_name="import", verbose=verbose)
 
-    # When repair_gaps is requested, the PID guard is acquired here — before
-    # the per-project/DB-wide import loop below even starts — and held for
-    # the entire invocation (released by run()'s existing finally). This
-    # covers the whole run, not just the repair step: two concurrent
-    # --repair-gaps invocations (a manual one and the one SessionStart spawns)
-    # must not both run the ordinary import loop unguarded and only collide
-    # later at the repair step. A spawned child finds its own PID here, which
-    # counts as acquired. repair_gaps=False keeps today's behavior exactly —
-    # no guard at all.
-    if repair_gaps and not try_acquire_pid_file(PID_KEY):
-        print("ccrecall import --repair-gaps: another import is already running — skipping this run")
-        logger.info("Import + --repair-gaps skipped — PID_KEY_IMPORT already held by a live process")
+    # Only one import runs at a time. The PID guard is acquired here, before the
+    # import loop starts, and held for the entire invocation (released by run()'s
+    # finally). A spawned child finds its own PID here, which counts as acquired.
+    if not try_acquire_pid_file(PID_KEY):
+        print("ccrecall import: another import is already running — skipping this run")
+        logger.info("Import skipped — PID_KEY_IMPORT already held by a live process")
         return 0, True
 
     # Repair scans every transcript, usually spawned at SessionStart next to the
@@ -524,111 +573,101 @@ def _run(
     total_messages = 0
     total_skipped = 0
     project_failures = 0
+    repair_failures = 0
+    finished = False
 
     t_start = time.monotonic()
 
     # load_vec=True so the chunks_vec_ad cascade trigger works during empty-session
     # cleanup (DELETE FROM branches fires triggers that touch chunk_vec). embed=False
     # on sync_session keeps the expensive embedding model unloaded.
-    with get_connection(settings, load_vec=True) as conn:
-        t_conn = time.monotonic()
-        logger.debug("connection opened in %.2fs", t_conn - t_start)
+    try:
+        with get_connection(settings, load_vec=True) as conn:
+            t_conn = time.monotonic()
+            logger.debug("connection opened in %.2fs", t_conn - t_start)
 
-        libc = try_load_libc()
-        t_gc_total = 0.0
+            libc = try_load_libc()
+            t_gc_total = 0.0
 
-        def _reclaim() -> None:
-            nonlocal t_gc_total
-            t0 = time.monotonic()
-            reclaim_memory(libc)
-            t_gc_total += time.monotonic() - t0
+            def _reclaim() -> None:
+                nonlocal t_gc_total
+                t0 = time.monotonic()
+                reclaim_memory(libc)
+                t_gc_total += time.monotonic() - t0
 
-        if project:
-            project_dir = projects_dir / project
-            if not project_dir.exists():
-                print(f"Project not found: {project_dir}")
-            elif not is_safe_project_dir(project_dir, projects_dir):
-                print(f"Unsafe project path: {project_dir}")
-            else:
-                project_counts = import_project_contained(conn, project_dir, exclude_projects, _reclaim)
-                if project_counts is None:
-                    project_failures += 1
-                    print(f"Failed to import {project} — see ccrecall-import.log")
+            if project:
+                project_dir = projects_dir / project
+                if not project_dir.exists():
+                    print(f"Project not found: {project_dir}")
+                elif not is_safe_project_dir(project_dir, projects_dir):
+                    print(f"Unsafe project path: {project_dir}")
                 else:
+                    project_counts = import_project_contained(conn, project_dir, exclude_projects, _reclaim)
+                    if project_counts is None:
+                        project_failures += 1
+                        print(f"Failed to import {project} — see ccrecall-import.log")
+                    else:
+                        sessions, messages, skipped = project_counts
+                        total_sessions += sessions
+                        total_messages += messages
+                        total_skipped += skipped
+                        print(f"Imported {project}: {sessions} branches, {messages} messages")
+            else:
+                t_import_total = 0.0
+                project_count = 0
+
+                for project_dir in sorted(projects_dir.iterdir()):
+                    if project_dir.is_symlink() or not project_dir.is_dir() or project_dir.name.startswith("."):
+                        continue
+
+                    project_count += 1
+                    t0 = time.monotonic()
+                    project_counts = import_project_contained(conn, project_dir, exclude_projects, _reclaim)
+                    t_import_total += time.monotonic() - t0
+
+                    if project_counts is None:
+                        project_failures += 1
+                        print(f"Failed to import {project_dir.name} — see ccrecall-import.log")
+                        continue
+
                     sessions, messages, skipped = project_counts
                     total_sessions += sessions
                     total_messages += messages
                     total_skipped += skipped
-                    print(f"Imported {project}: {sessions} branches, {messages} messages")
-        else:
-            t_import_total = 0.0
-            project_count = 0
 
-            for project_dir in sorted(projects_dir.iterdir()):
-                if project_dir.is_symlink() or not project_dir.is_dir() or project_dir.name.startswith("."):
-                    continue
+                    if sessions > 0 or messages > 0:
+                        print(f"Imported {project_dir.name}: {sessions} branches, {messages} messages")
 
-                project_count += 1
-                t0 = time.monotonic()
-                project_counts = import_project_contained(conn, project_dir, exclude_projects, _reclaim)
-                t_import_total += time.monotonic() - t0
-
-                if project_counts is None:
-                    project_failures += 1
-                    print(f"Failed to import {project_dir.name} — see ccrecall-import.log")
-                    continue
-
-                sessions, messages, skipped = project_counts
-                total_sessions += sessions
-                total_messages += messages
-                total_skipped += skipped
-
-                if sessions > 0 or messages > 0:
-                    print(f"Imported {project_dir.name}: {sessions} branches, {messages} messages")
-
-            logger.debug(
-                "timing: %d projects, import+commit=%.2fs, gc=%.2fs",
-                project_count,
-                t_import_total,
-                t_gc_total,
-            )
-
-        repair_failures = 0
-        if repair_gaps:
-            # The PID guard was already acquired (or this function returned
-            # early) at the top of _run() — no re-check needed here.
-            candidates = ingestion_status.find_repairable_sessions(conn)
-            repaired_sessions, repaired_messages, repair_failures, repair_unrepairable = import_repair.repair_sessions(
-                conn, candidates, on_reclaim=_reclaim
-            )
-            summary = f"Repaired {repaired_sessions} session(s), recovered {repaired_messages} message(s)"
-            if repair_unrepairable:
-                summary += (
-                    f", {repair_unrepairable} could not be repaired "
-                    "(source transcript is missing the required message(s))"
+                logger.debug(
+                    "timing: %d projects, import+commit=%.2fs, gc=%.2fs",
+                    project_count,
+                    t_import_total,
+                    t_gc_total,
                 )
-            if repair_failures:
-                summary += f", {repair_failures} failed — see ccrecall-import.log"
-            print(summary)
-            # The SessionStart-spawned import has stdout on DEVNULL, so the log is
-            # the only record of this summary.
-            logger.log(
-                logging.WARNING if repair_failures or repair_unrepairable else logging.INFO,
-                "repair complete: %d candidates, %d repaired, %d messages recovered, %d unrepairable, %d failed",
-                len(candidates),
-                repaired_sessions,
-                repaired_messages,
-                repair_unrepairable,
-                repair_failures,
-            )
 
-    t_end = time.monotonic()
-    logger.debug("total wall time: %.2fs", t_end - t_start)
-    logger.info("Import complete: %s branches, %s messages", total_sessions, total_messages)
-    totals_line = f"\nTotal: {total_sessions} branches, {total_messages} messages imported ({total_skipped} unchanged)"
-    if project_failures:
-        totals_line += f", {project_failures} project(s) failed — see ccrecall-import.log"
-    print(totals_line)
+            if repair_gaps:
+                repair_failures = run_repair(conn, logger, _reclaim)
+
+        finished = True
+    finally:
+        t_end = time.monotonic()
+        logger.debug("total wall time: %.2fs", t_end - t_start)
+        # Log as well as print: the SessionStart-spawned import has stdout on DEVNULL.
+        logger.log(
+            logging.INFO if finished else logging.ERROR,
+            "Import %s: %s branches, %s messages",
+            "complete" if finished else "aborted",
+            total_sessions,
+            total_messages,
+        )
+        totals_line = (
+            f"\nTotal: {total_sessions} branches, {total_messages} messages imported ({total_skipped} unchanged)"
+        )
+        if project_failures:
+            totals_line += f", {project_failures} project(s) failed — see ccrecall-import.log"
+        if not finished:
+            totals_line += ", aborted early — see ccrecall-import.log"
+        print(totals_line)
 
     if db_path.exists():
         db_size = db_path.stat().st_size

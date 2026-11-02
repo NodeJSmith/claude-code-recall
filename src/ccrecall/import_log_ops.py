@@ -59,6 +59,23 @@ def import_log_source_index(cursor: sqlite3.Cursor) -> dict[str, dict[str, list[
     return sources
 
 
+def unchanged_since_import(cursor: sqlite3.Cursor, filepath: Path) -> bool:
+    """True when size and mtime match import_log and no pending tool_content needs this file.
+
+    Read-only, so import_project can use it to skip a file without the write lock.
+    A file that can't be statted returns False, leaving import_session's per-file
+    containment to handle it.
+    """
+    try:
+        st = filepath.stat()
+    except OSError:
+        return False
+    row = cursor.execute(
+        "SELECT file_size, file_mtime FROM import_log WHERE file_path = ?", (str(filepath),)
+    ).fetchone()
+    return row == (st.st_size, st.st_mtime) and not has_pending_tool_content(cursor, filepath)
+
+
 def import_log_skip_check(
     cursor: sqlite3.Cursor,
     filepath: Path,

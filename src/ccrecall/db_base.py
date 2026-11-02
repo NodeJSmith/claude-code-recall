@@ -35,6 +35,16 @@ V7_BRANCH_COLUMNS = {
 }
 
 
+def is_database_locked(exc: sqlite3.OperationalError) -> bool:
+    """True when another connection's lock caused this, so a later attempt can succeed.
+
+    Masks to the primary result code because a stale read snapshot raises the
+    extended SQLITE_BUSY_SNAPSHOT. The attribute is absent on an exception SQLite
+    didn't raise.
+    """
+    return (getattr(exc, "sqlite_errorcode", 0) & 0xFF) == sqlite3.SQLITE_BUSY
+
+
 def apply_base_pragmas(conn: sqlite3.Connection) -> None:
     """Set WAL mode, busy_timeout, and foreign-key enforcement for concurrent-safe access."""
     conn.execute("PRAGMA journal_mode = WAL")
