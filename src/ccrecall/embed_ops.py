@@ -196,9 +196,9 @@ def _chunk_at_least_as_good(chunk: dict, prepared_exchange: dict) -> bool:
     An untruncated vector's cap_tokens is None, which counts as full quality
     whatever cap it was prepared under.
     """
-    return _chunk_is_current(chunk, prepared_exchange["content_hash"]) and effective_cap_tokens(
-        chunk["cap_tokens"]
-    ) >= effective_cap_tokens(prepared_exchange["cap_tokens"])
+    stored_cap = effective_cap_tokens(chunk["cap_tokens"])
+    new_cap = effective_cap_tokens(prepared_exchange["cap_tokens"])
+    return _chunk_is_current(chunk, prepared_exchange["content_hash"]) and stored_cap >= new_cap
 
 
 def _diff_exchanges(

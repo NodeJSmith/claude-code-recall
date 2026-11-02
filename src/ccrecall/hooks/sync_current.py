@@ -147,13 +147,11 @@ def embed_session_branch(conn: sqlite3.Connection, session_file: Path, settings:
             cap_limit=resolve_sync_cap(settings.get("sync_path_token_limit")),
             yield_to_backfill=True,
         )
-    except sqlite3.OperationalError as exc:
-        if is_database_locked(exc):
+    except Exception as exc:
+        if isinstance(exc, sqlite3.OperationalError) and is_database_locked(exc):
             logger.warning("embedding skipped: database locked; left for backfill", extra={"branch_id": row[0]})
         else:
             logger.exception("embedding failed for branch; left for backfill", extra={"branch_id": row[0]})
-    except Exception:
-        logger.exception("embedding failed for branch; left for backfill", extra={"branch_id": row[0]})
 
 
 def run(input_file: Path | None = None) -> None:
