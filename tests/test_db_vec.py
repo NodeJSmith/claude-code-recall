@@ -5,7 +5,8 @@ docstring), so these use the plain `memory_db` fixture rather than
 `make_vec_conn`/`VEC_SKIP`.
 """
 
-from ccrecall.db_vec import branch_embedding_coverage
+from ccrecall.db import CONTENT_ERROR_VERSION
+from ccrecall.db_vec import branch_embedding_coverage, find_stamped_branches_missing_chunks
 from ccrecall.embeddings import EMBEDDING_MODEL, EMBEDDING_VERSION, MODEL_TOKEN_LIMIT
 
 
@@ -106,3 +107,59 @@ class TestBranchEmbeddingCoverageThreeState:
         memory_db.commit()
         _seed_branch(memory_db, 1)
         assert branch_embedding_coverage(memory_db) == (0, 0, 1)
+
+
+class TestFindStampedBranchesMissingChunks:
+    def _stamped(self, conn, i: int = 1) -> int:
+        return _seed_branch(conn, i, embedding_version=EMBEDDING_VERSION, embedding_model=EMBEDDING_MODEL)
+
+    def _add_user_message(self, conn, branch_id: int) -> None:
+        session_id = conn.execute("SELECT session_id FROM branches WHERE id = ?", (branch_id,)).fetchone()[0]
+        conn.execute(
+            "INSERT INTO messages (session_id, uuid, role, content, timestamp) "
+            "VALUES (?, 'newer', 'user', 'again', '2024-01-02T00:00:00Z')",
+            (session_id,),
+        )
+        msg_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.execute("INSERT INTO branch_messages (branch_id, message_id) VALUES (?, ?)", (branch_id, msg_id))
+        conn.commit()
+
+    def test_stamped_branch_with_no_chunks_is_reported(self, memory_db):
+        branch_id = self._stamped(memory_db)
+        assert find_stamped_branches_missing_chunks(memory_db.cursor()) == {branch_id: 1}
+
+    def test_stamped_branch_missing_newest_exchange_is_reported(self, memory_db):
+        branch_id = self._stamped(memory_db)
+        _add_chunk(memory_db, branch_id, cap_tokens=None)
+        self._add_user_message(memory_db, branch_id)
+        assert find_stamped_branches_missing_chunks(memory_db.cursor()) == {branch_id: 1}
+
+    def test_stamped_branch_with_every_chunk_is_not_reported(self, memory_db):
+        branch_id = self._stamped(memory_db)
+        _add_chunk(memory_db, branch_id, cap_tokens=None)
+        assert find_stamped_branches_missing_chunks(memory_db.cursor()) == {}
+
+    def test_branch_with_no_exchanges_is_not_reported(self, memory_db):
+        self._stamped(memory_db)
+        memory_db.execute("UPDATE messages SET role = 'assistant'")
+        memory_db.commit()
+        assert find_stamped_branches_missing_chunks(memory_db.cursor()) == {}
+
+    def test_notification_turns_are_not_expected_exchanges(self, memory_db):
+        self._stamped(memory_db)
+        memory_db.execute("UPDATE messages SET is_notification = 1")
+        memory_db.commit()
+        assert find_stamped_branches_missing_chunks(memory_db.cursor()) == {}
+
+    def test_branches_without_a_current_stamp_are_not_reported(self, memory_db):
+        _seed_branch(memory_db, 1)
+        _seed_branch(memory_db, 2, embedding_version=CONTENT_ERROR_VERSION, embedding_model=EMBEDDING_MODEL)
+        _seed_branch(memory_db, 3, embedding_version=EMBEDDING_VERSION, embedding_model="other-model")
+        _seed_branch(memory_db, 4, embedding_version=EMBEDDING_VERSION, embedding_model=EMBEDDING_MODEL, is_active=0)
+        assert find_stamped_branches_missing_chunks(memory_db.cursor()) == {}
+
+    def test_writes_nothing(self, memory_db):
+        self._stamped(memory_db)
+        before = memory_db.total_changes
+        find_stamped_branches_missing_chunks(memory_db.cursor())
+        assert memory_db.total_changes == before

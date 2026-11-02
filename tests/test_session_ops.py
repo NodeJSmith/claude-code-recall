@@ -1040,6 +1040,20 @@ class TestEmbedBranchChunks:
 
         assert memory_db.execute("SELECT embedding_version FROM branches").fetchone()[0] is None
 
+    def test_import_giving_a_zero_exchange_branch_a_user_turn_clears_watermark(self, memory_db, project_id, tmp_path):
+        """A branch with no exchanges is stamped trivially, so its first user turn must clear that."""
+        filepath = tmp_path / "sess.jsonl"
+        entries = [make_jsonl_entry("a1", None, "2026-01-01T10:00:00Z", "assistant", "sidechain output")]
+        write_jsonl(filepath, entries)
+        sync_session(memory_db, filepath, tmp_path, embed=False, _project_id=project_id)
+        memory_db.execute("UPDATE branches SET embedding_version = ?", (EMBEDDING_VERSION,))
+
+        entries.append(make_jsonl_entry("u1", "a1", "2026-01-01T10:01:00Z", "user", "a real question"))
+        write_jsonl(filepath, entries)
+        sync_session(memory_db, filepath, tmp_path, embed=False, _project_id=project_id)
+
+        assert memory_db.execute("SELECT embedding_version FROM branches").fetchone()[0] is None
+
     def test_import_with_unchanged_links_keeps_watermark(self, memory_db, project_id, tmp_path):
         filepath = tmp_path / "sess.jsonl"
         write_jsonl(

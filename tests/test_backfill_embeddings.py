@@ -24,7 +24,7 @@ from conftest import VEC_SKIP, make_vec_conn, patched_clear, patched_record
 from ccrecall.cli.commands import cmd_backfill_embeddings
 from ccrecall.config import remove_pid_file, try_acquire_pid_file
 from ccrecall.db import CONTENT_ERROR_VERSION
-from ccrecall.db_vec import upsert_chunk_vec
+from ccrecall.db_vec import find_stamped_branches_missing_chunks, upsert_chunk_vec
 from ccrecall.embed_ops import MAX_WRITE_PATH_EMBEDS_PER_SYNC
 from ccrecall.embeddings import EMBEDDING_DIM, EMBEDDING_MODEL, EMBEDDING_VERSION
 from ccrecall.health import REASON_VEC_UNAVAILABLE
@@ -584,6 +584,95 @@ class TestBackfillZeroExchangeBranches:
         assert _branch_has_chunk_vecs(conn, real), (
             "real branch must embed, not be blocked behind zero-exchange branches"
         )
+
+
+def _stamp_watermark(conn: sqlite3.Connection, branch_id: int) -> None:
+    conn.execute(
+        "UPDATE branches SET embedding_version = ?, embedding_model = ? WHERE id = ?",
+        (EMBEDDING_VERSION, EMBEDDING_MODEL, branch_id),
+    )
+    conn.commit()
+
+
+def _embedded_exchange_indices(conn: sqlite3.Connection, branch_id: int) -> set[int]:
+    """Exchange indices of this branch that have a chunk row and a vector."""
+    rows = conn.execute(
+        """
+        SELECT c.exchange_index FROM chunks c
+        JOIN chunk_vec v ON v.chunk_id = c.id
+        WHERE c.branch_id = ?
+        """,
+        (branch_id,),
+    ).fetchall()
+    return {row[0] for row in rows}
+
+
+@_VEC_SKIP
+class TestBackfillHealsStampedBranches:
+    """A branch stamped as embedded but missing exchanges has no chunk row for
+    build_selection to find, so the backfill clears its watermark at startup."""
+
+    def test_stamped_branch_with_no_chunks_gets_embedded(self):
+        conn = make_vec_conn()
+        bid = _insert_branch_with_messages(conn, num_exchanges=2)
+        _stamp_watermark(conn, bid)
+
+        _run_backfill_with_stub(conn)
+
+        assert _embedded_exchange_indices(conn, bid) == {0, 1}
+        assert _branch_embedding_version(conn, bid) == EMBEDDING_VERSION
+        assert find_stamped_branches_missing_chunks(conn.cursor()) == {}
+
+    def test_stamped_branch_missing_newest_exchange_gets_embedded(self):
+        conn = make_vec_conn()
+        bid = _insert_branch_with_messages(conn, num_exchanges=2)
+        _run_backfill_with_stub(conn)
+        conn.execute("DELETE FROM chunks WHERE branch_id = ? AND exchange_index = 1", (bid,))
+        conn.commit()
+
+        _run_backfill_with_stub(conn)
+
+        assert _embedded_exchange_indices(conn, bid) == {0, 1}
+
+    def test_fully_embedded_branch_is_not_re_embedded(self):
+        conn = make_vec_conn()
+        bid = _insert_branch_with_messages(conn, num_exchanges=2)
+        _run_backfill_with_stub(conn)
+        chunk_ids = {row[0] for row in _chunks_for_branch(conn, bid)}
+
+        _run_backfill_with_stub(conn)
+
+        assert {row[0] for row in _chunks_for_branch(conn, bid)} == chunk_ids
+        assert _branch_embedding_version(conn, bid) == EMBEDDING_VERSION
+
+    def test_content_error_branch_is_not_retried(self):
+        conn = make_vec_conn()
+        bid = _insert_branch_with_messages(conn)
+        conn.execute("UPDATE branches SET embedding_version = ? WHERE id = ?", (CONTENT_ERROR_VERSION, bid))
+        conn.commit()
+
+        _run_backfill_with_stub(conn)
+
+        assert _branch_embedding_version(conn, bid) == CONTENT_ERROR_VERSION
+        assert _chunk_count(conn) == 0
+
+    def test_heal_survives_a_run_that_aborts_mid_batch(self):
+        """The batch-abort rollback must not undo the heal, or a branch that
+        keeps aborting would go back to claiming it's fully embedded."""
+        conn = make_vec_conn()
+        bid = _insert_branch_with_messages(conn)
+        _stamp_watermark(conn, bid)
+
+        with (
+            patch("ccrecall.hooks.backfill_embeddings.model_available", return_value=True),
+            patch("ccrecall.embed_ops.embed_batch", side_effect=sqlite3.OperationalError("disk I/O error")),
+            patch("ccrecall.hooks.backfill_embeddings.get_connection", return_value=_NoCloseConn(conn)),
+            patch("ccrecall.hooks.backfill_embeddings.load_settings_for_db", return_value={}),
+            patch("ccrecall.hooks.backfill_embeddings.time.sleep"),
+        ):
+            assert run() == EXIT_ABORT
+
+        assert _branch_embedding_version(conn, bid) != EMBEDDING_VERSION
 
 
 # Failure modes: model failure marks nothing; content errors mark only that row

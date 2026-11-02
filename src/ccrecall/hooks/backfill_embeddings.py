@@ -5,6 +5,9 @@ embeddings. NOT auto-spawned on SessionStart (embedding inference is CPU-bound);
 forward coverage comes from embed-on-write instead.
 Processes branches in batches, commits between batches, and marks per-row
 content errors with embedding_version = -1 to avoid infinite retry.
+Each run first clears the watermark on branches stamped as embedded but missing
+exchanges (`clear_false_watermarks`), since selection can't see a chunk that
+was never created.
 
 Exception taxonomy is catch-all-then-filter-infra, matching
 `backfill_summaries.py`: any exception raised while embedding one branch is a
@@ -71,7 +74,7 @@ from typing import NamedTuple
 
 from ccrecall.config import DEFAULT_DB_PATH, load_settings_for_db, setup_logging
 from ccrecall.db import CONTENT_ERROR_VERSION, get_connection
-from ccrecall.db_vec import chunk_vec_queryable, fetch_branch_messages
+from ccrecall.db_vec import chunk_vec_queryable, fetch_branch_messages, find_stamped_branches_missing_chunks
 from ccrecall.embed_ops import embed_branch_chunks
 from ccrecall.embeddings import (
     DEFAULT_EMBED_THREADS,
@@ -179,6 +182,12 @@ def run(
                     file=sys.stderr,
                 )
                 return EXIT_ABORT
+
+            # Before the eligible count, so healed branches are in this run's
+            # totals. Committed now because a batch abort rolls back the open
+            # transaction, which would restore the false watermarks.
+            clear_false_watermarks(cursor, logger)
+            conn.commit()
 
             # Compute total-eligible count once (avoid per-batch full COUNT).
             cursor.execute(f"SELECT COUNT(*) FROM branches {where}", params)
@@ -326,6 +335,24 @@ def run(
     with contextlib.suppress(Exception):  # best-effort; sidecar clear must not affect exit behavior
         clear_embedding_failure()
     return EXIT_OK
+
+
+def clear_false_watermarks(cursor: sqlite3.Cursor, logger: logging.Logger) -> None:
+    """Make branches stamped as embedded but missing exchanges eligible again.
+
+    Covers the whole database even under --days or --limit: the cleared watermark
+    is accurate whether or not this run gets to the branch, and a later run embeds it.
+    """
+    missing = find_stamped_branches_missing_chunks(cursor)
+    if not missing:
+        return
+    cursor.executemany("UPDATE branches SET embedding_version = 0 WHERE id = ?", [(bid,) for bid in missing])
+    logger.info(
+        "%s: cleared watermark on %s branches missing %s exchanges",
+        _LOG_PREFIX,
+        len(missing),
+        sum(missing.values()),
+    )
 
 
 class _EmbedResult(NamedTuple):

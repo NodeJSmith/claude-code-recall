@@ -62,7 +62,7 @@ ccrecall backfill embeddings --limit 500  # cap this run at 500 branches
 ccrecall backfill embeddings --threads 4  # use 4 inference threads (idle machine)
 ```
 
-It runs at low scheduling priority (`nice`) and a single inference thread by default so it yields to interactive work. Tune the thread count with `--threads` (e.g. `--threads 4` on an idle workstation to finish faster). Progress prints to stderr (one line per batch); the run is resumable — re-running skips already-embedded branches.
+It runs at low scheduling priority (`nice`) and a single inference thread by default so it yields to interactive work. Tune the thread count with `--threads` (e.g. `--threads 4` on an idle workstation to finish faster). Progress prints to stderr (one line per batch); the run is resumable — re-running skips already-embedded branches. Each run also starts by checking that branches marked as embedded really have all their exchanges, and picks up any that don't.
 
 ### Flags
 
