@@ -1423,6 +1423,19 @@ class TestSyncCurrentEmbedStep:
         assert mock_embed.call_count == 1
         conn.close()
 
+    def test_inactive_branch_is_not_embedded(self, tmp_path):
+        conn = make_vec_conn()
+        conn.execute("INSERT INTO sessions (uuid) VALUES (?)", (VALID_SYNC_UUID,))
+        session_id = conn.execute("SELECT id FROM sessions").fetchone()[0]
+        conn.execute("INSERT INTO branches (session_id, leaf_uuid, is_active) VALUES (?, 'leaf', 0)", (session_id,))
+        conn.commit()
+
+        with patch("ccrecall.hooks.sync_current.embed_branch_chunks") as mock_embed:
+            sync_current.embed_session_branch(conn, tmp_path / f"{VALID_SYNC_UUID}.jsonl", {}, MagicMock())
+
+        assert mock_embed.call_count == 0
+        conn.close()
+
     def test_no_branch_for_session_embeds_nothing(self, tmp_path):
         conn = make_vec_conn()
         conn.execute("INSERT INTO sessions (uuid) VALUES (?)", (VALID_SYNC_UUID,))

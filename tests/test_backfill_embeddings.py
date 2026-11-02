@@ -652,6 +652,29 @@ class TestBackfillLockTimeout:
         assert _branch_embedding_version(conn, bad) != CONTENT_ERROR_VERSION
         assert _branch_embedding_version(conn, later) == EMBEDDING_VERSION
 
+    def test_consecutive_lock_timeouts_abort_the_run(self):
+        conn = make_vec_conn()
+        ids = [_insert_branch_with_messages(conn) for _ in range(5)]
+
+        code, attempted = _run_backfill_with_embed_patch(conn, locked_error())
+
+        assert code == EXIT_ABORT
+        assert attempted == ids[:3]
+
+    def test_a_finished_branch_resets_the_lock_timeout_count(self):
+        conn = make_vec_conn()
+        ids = [_insert_branch_with_messages(conn) for _ in range(5)]
+
+        def embed(conn_arg, branch_id, **kwargs):
+            if branch_id == ids[2]:
+                return embed_branch_chunks(conn_arg, branch_id, **kwargs)
+            raise locked_error()
+
+        code, attempted = _run_backfill_with_embed_patch(conn, embed)
+
+        assert code == EXIT_OK
+        assert attempted == ids
+
     def test_other_database_errors_still_abort(self):
         conn = make_vec_conn()
         _insert_branch_with_messages(conn)
@@ -1069,6 +1092,18 @@ class TestBackfillFlags:
         assert _branch_has_chunk_vecs(conn, recent)
         assert not _branch_has_chunk_vecs(conn, old)
         assert _chunk_count(conn) == 1
+
+    def test_limit_counts_attempts_not_stamped_branches(self):
+        """--limit is a ceiling on work, so branches left unfinished use it up too."""
+        conn = make_vec_conn()
+        ids = [_insert_branch_with_messages(conn) for _ in range(5)]
+
+        code, attempted = _run_backfill_with_embed_patch(
+            conn, lambda *a, **k: EmbedOutcome(embedded=0, stamped=False), limit=2
+        )
+
+        assert code == EXIT_OK
+        assert attempted == ids[:2]
 
     def test_limit_caps_embeds_across_batches(self):
         """--limit N stops after N branches even though batches are BATCH_SIZE-wide."""

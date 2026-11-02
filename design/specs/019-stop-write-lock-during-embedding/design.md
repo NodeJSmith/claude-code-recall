@@ -1,7 +1,7 @@
 # Design: Stop holding the database write lock while embedding
 
 **Date:** 2026-11-02
-**Status:** ratified
+**Status:** built
 **Mode:** sketch
 **Issues:** #232
 **Prior art:** design/research/2026-11-02-sqlite-lock-during-embedding/prior-art.md
@@ -214,7 +214,7 @@ The hash has to be computable without the tokenizer, since `_prepare_exchange_da
 
 - [x] Implementation and tests committed
 - [x] Docs: CLAUDE.md invariant 3 and the architecture notes; no user-facing docs change
-- [ ] Ship-time challenge
+- [x] Ship-time challenge
 
 **Calls made during the build:**
 - `updated` means stamped: a backfill branch counts as updated only when the write stamped it, so the new "not updated" count covers content errors, lock timeouts, and a branch that changed or vanished during inference. The ledger left "updated" undefined, and this is the reading that keeps `remaining` honest.
@@ -222,4 +222,8 @@ The hash has to be computable without the tokenizer, since `_prepare_exchange_da
 - `--json` backfill output gains `not_updated`, alongside the completion line the posture names, since both report the same run.
 - A zero-exchange branch now also prunes its leftover chunks, because every path shares the write step and pruning uses the fresh exchange set (D2). Today's code left them.
 - The backfill PID key moved to `config.py` as `PID_KEY_BACKFILL_EMBEDDINGS`, where that module's comment says job keys live, since `embed_ops` needs it for D7.
+- Ship-time challenge, user's choice: a call with nothing to infer skips the write step when it would neither stamp nor prune, so a no-op Stop takes no second lock. This narrows the Summary's "go through step 5" to the calls that would write; every stamp is still re-checked under the lock.
+- Ship-time challenge, user's choice: backfill aborts after 3 consecutive lock timeouts. This narrows the Posture's "costs one item" to a transient holder, because a stuck writer would otherwise cost about 30 s per eligible branch and still report success.
+- Ship-time challenge, user's choice: `--limit` counts attempts, so it stays a ceiling on work when `updated` means stamped.
+- Ship-time challenge, user's choice: every embed logs the branch before inference, which D4 had gone without, and `embed_branch_chunks` refuses an open transaction instead of committing it.
 - A lock timeout on sync's embed logs a WARNING with no traceback, matching how backfill and repair report contention.

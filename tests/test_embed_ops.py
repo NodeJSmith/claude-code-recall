@@ -776,6 +776,42 @@ class TestWriteStepRecheck:
 
 @VEC_SKIP
 class TestLockContention:
+    def test_write_lock_is_held_before_the_re_read(self, file_db):
+        """Nothing can commit between the check and the stamp. WAL matches production,
+        where a deferred transaction would read a snapshot and fail on upgrade."""
+        file_db.conn.execute("PRAGMA journal_mode = WAL")
+        file_db.set_messages(("q", "a"))
+        other_got_lock = []
+
+        def probe(sql):
+            if "SELECT 1 FROM branches" not in sql:
+                return
+            try:
+                file_db.other.execute("BEGIN IMMEDIATE")
+            except sqlite3.OperationalError:
+                other_got_lock.append(False)
+            else:
+                file_db.other.rollback()
+                other_got_lock.append(True)
+
+        file_db.conn.set_trace_callback(probe)
+        file_db.embed()
+        file_db.conn.set_trace_callback(None)
+
+        assert other_got_lock == [False]
+
+    def test_open_transaction_is_refused_without_committing_it(self, file_db):
+        file_db.set_messages(("q", "a"))
+        file_db.conn.execute("UPDATE branches SET leaf_uuid = 'uncommitted' WHERE id = ?", (file_db.branch_id,))
+
+        with pytest.raises(sqlite3.ProgrammingError):
+            embed_branch_chunks(file_db.conn, file_db.branch_id)
+
+        assert file_db.conn.in_transaction is True
+        file_db.conn.rollback()
+        leaf = file_db.conn.execute("SELECT leaf_uuid FROM branches WHERE id = ?", (file_db.branch_id,)).fetchone()[0]
+        assert leaf == "test-leaf-uuid"
+
     def test_clear_timing_out_runs_no_inference(self, file_db):
         file_db.set_messages(("q", "a"))
         file_db.conn.execute("PRAGMA busy_timeout = 0")
@@ -892,6 +928,43 @@ class TestPathsWithoutInference:
         assert seen == [EMBEDDING_VERSION]
         assert outcome == (0, True)
         assert set(file_db.chunks()) == {0}
+
+    @pytest.mark.parametrize("cap_limit", [MODEL_TOKEN_LIMIT, SYNC_PATH_TOKEN_LIMIT])
+    def test_no_op_takes_no_lock(self, file_db, cap_limit):
+        """A stamped branch, or a draft-quality one sync can't stamp, has nothing to write."""
+        file_db.set_messages(("q", "a"))
+        file_db.embed(cap_limit=cap_limit)
+        stamped = file_db.watermark() == EMBEDDING_VERSION
+        file_db.conn.execute("PRAGMA busy_timeout = 0")
+        file_db.other.execute("BEGIN IMMEDIATE")
+
+        with (
+            patch("ccrecall.embed_ops.cap_for_embedding", side_effect=AssertionError("tokenizer used")),
+            patch("ccrecall.embed_ops.embed_batch", side_effect=AssertionError("model used")),
+        ):
+            outcome = embed_branch_chunks(file_db.conn, file_db.branch_id, cap_limit=SYNC_PATH_TOKEN_LIMIT)
+
+        file_db.other.rollback()
+        assert outcome == (0, stamped)
+        assert stamped is (cap_limit == MODEL_TOKEN_LIMIT)
+
+    @pytest.mark.parametrize("shrink", [False, True])
+    def test_a_needed_stamp_or_prune_still_takes_the_lock(self, file_db, shrink):
+        file_db.set_messages(("q0", "a0"), ("q1", "a1"))
+        file_db.embed()
+        if shrink:
+            file_db.set_messages(("q0", "a0"))
+        else:
+            file_db.conn.execute("UPDATE branches SET embedding_version = 0 WHERE id = ?", (file_db.branch_id,))
+            file_db.conn.commit()
+        file_db.conn.execute("PRAGMA busy_timeout = 0")
+        file_db.other.execute("BEGIN IMMEDIATE")
+
+        with pytest.raises(sqlite3.OperationalError) as exc_info:
+            embed_branch_chunks(file_db.conn, file_db.branch_id)
+
+        file_db.other.rollback()
+        assert is_database_locked(exc_info.value)
 
     def test_zero_exchange_branch_stamps_and_loses_stale_chunks(self, file_db):
         file_db.set_messages(("q", "a"))

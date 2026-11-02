@@ -11,7 +11,7 @@ import sqlite3
 from typing import NamedTuple
 
 from ccrecall.config import PID_KEY_BACKFILL_EMBEDDINGS, live_pid_holder
-from ccrecall.db_base import commit_single_write
+from ccrecall.db_base import commit_single_write, is_database_locked
 from ccrecall.db_vec import fetch_branch_messages, write_chunk_embedding
 from ccrecall.embeddings import (
     EMBEDDING_MODEL,
@@ -105,6 +105,12 @@ def _stamp_branch_watermark(cursor: sqlite3.Cursor, branch_db_id: int) -> None:
         "UPDATE branches SET embedding_version = ?, embedding_model = ? WHERE id = ?",
         (EMBEDDING_VERSION, EMBEDDING_MODEL, branch_db_id),
     )
+
+
+def _branch_is_stamped(cursor: sqlite3.Cursor, branch_db_id: int) -> bool:
+    """Does the watermark hold what ``_stamp_branch_watermark`` writes?"""
+    cursor.execute("SELECT embedding_version, embedding_model FROM branches WHERE id = ?", (branch_db_id,))
+    return cursor.fetchone() == (EMBEDDING_VERSION, EMBEDDING_MODEL)
 
 
 def _combined_text(exchange: dict) -> str:
@@ -360,13 +366,28 @@ def _write_step(conn: sqlite3.Connection, branch_db_id: int, prepared: list[dict
     return outcome
 
 
-def _select_exchanges(cursor: sqlite3.Cursor, branch_db_id: int, cap_limit: int, replace_stale: bool) -> list[dict]:
-    """Read and diff with no write transaction: which of this branch's exchanges need inference?"""
+def _read_branch_state(cursor: sqlite3.Cursor, branch_db_id: int) -> tuple[list[dict], dict[int, dict]]:
+    """Read a branch's hashed exchanges and stored chunks, with no write transaction."""
     exchanges = build_exchange_pairs(fetch_branch_messages(cursor, branch_db_id, include_notifications=False))
     hashed = [{**ex, "content_hash": _content_hash(ex)} for ex in exchanges]
-    return _diff_exchanges(
-        hashed, _read_chunks(cursor, branch_db_id), target_cap=cap_limit, replace_stale=replace_stale
-    )
+    return hashed, _read_chunks(cursor, branch_db_id)
+
+
+def _finish_without_inference(
+    conn: sqlite3.Connection, branch_db_id: int, exchanges: list[dict], chunks: dict[int, dict]
+) -> EmbedOutcome:
+    """Take the write lock only if the write step would change something.
+
+    Anything it would write is re-checked there, so a stale read here can at
+    worst delay a stamp or prune until the next call.
+    """
+    stamped = _branch_is_stamped(conn.cursor(), branch_db_id)
+    hashes = {ex["index"]: ex["content_hash"] for ex in exchanges}
+    needs_prune = bool(set(chunks) - set(hashes))
+    needs_stamp = not stamped and _should_stamp_watermark(hashes, chunks)
+    if needs_prune or needs_stamp:
+        return _write_step(conn, branch_db_id, [], [])
+    return EmbedOutcome(embedded=0, stamped=stamped)
 
 
 def embed_branch_chunks(
@@ -389,8 +410,9 @@ def embed_branch_chunks(
        inference peaks don't stack. The clear stands, which is what keeps the
        branch eligible.
     4. Infer, with no transaction open.
-    5. Run the write transaction (``_write_step``). Paths with nothing to infer
-       still come here, so a stamp is only ever set by re-checking the current state.
+    5. Run the write transaction (``_write_step``). With nothing to infer, this
+       runs only if it would stamp or prune, so a stamp is only ever set by
+       re-checking the current state, and a no-op takes no lock.
 
     ``max_embeds`` bounds per-call inference cost; backfill passes None so one
     call fully embeds a branch. ``cap_limit`` bounds the per-exchange token cap
@@ -400,11 +422,17 @@ def embed_branch_chunks(
 
     Raises on failure, leaving existing chunks and vectors intact. A lock timeout
     is a ``sqlite3.OperationalError`` that ``is_database_locked`` recognizes, and
-    a clear that times out means no inference runs for this call.
+    a clear that times out means no inference runs for this call. An open
+    transaction raises ``sqlite3.ProgrammingError`` rather than being committed.
     """
-    needing_embed = _select_exchanges(conn.cursor(), branch_db_id, cap_limit, replace_stale)
+    if conn.in_transaction:
+        # A sqlite3.Error, so backfill aborts rather than marking a healthy branch as a content error.
+        raise sqlite3.ProgrammingError("embed_branch_chunks needs no transaction open: it commits on this connection")
+
+    exchanges, chunks = _read_branch_state(conn.cursor(), branch_db_id)
+    needing_embed = _diff_exchanges(exchanges, chunks, target_cap=cap_limit, replace_stale=replace_stale)
     if not needing_embed:
-        return _write_step(conn, branch_db_id, [], [])
+        return _finish_without_inference(conn, branch_db_id, exchanges, chunks)
 
     commit_single_write(conn, "UPDATE branches SET embedding_version = 0 WHERE id = ?", (branch_db_id,))
 
@@ -428,5 +456,15 @@ def embed_branch_chunks(
         if ed["cap_tokens"] is not None:
             log.warning("exchange truncated for embedding", extra={"cap": cap_limit})
 
+    # Before inference, so an OOM kill's last log line names the branch.
+    log.info("embedding branch", extra={"branch_id": branch_db_id, "selected": len(prepared)})
     vecs = embed_batch([ed["text"] for ed in prepared], max_token_cap=cap_limit)
-    return _write_step(conn, branch_db_id, prepared, vecs)
+    try:
+        return _write_step(conn, branch_db_id, prepared, vecs)
+    except sqlite3.OperationalError as exc:
+        if is_database_locked(exc):
+            log.warning(
+                "embed write lost to a lock; inference discarded",
+                extra={"branch_id": branch_db_id, "selected": len(prepared)},
+            )
+        raise

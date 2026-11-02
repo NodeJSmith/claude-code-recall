@@ -109,6 +109,9 @@ _PRINT_PREFIX = "ccrecall backfill embeddings"
 _LOG_PREFIX = "Backfill embeddings"
 _WARMUP_BRANCHES = 5
 _RATE_WINDOW = 30
+# A lock timeout costs one branch, but this many in a row means a writer is stuck,
+# and walking the rest of the backlog would only wait out each branch's timeout.
+_MAX_CONSECUTIVE_LOCK_TIMEOUTS = 3
 
 
 def run(
@@ -161,6 +164,7 @@ def run(
     last_progress = 0
     work_done = 0
     last_selected_id = 0
+    consecutive_lock_timeouts = 0
     rate_samples: deque[tuple[float, int]] = deque(maxlen=_RATE_WINDOW)
     started = time.monotonic()
 
@@ -230,13 +234,13 @@ def run(
                 rows = cursor.fetchall()
                 # Honor --limit precisely even though batches are BATCH_SIZE-wide.
                 if limit is not None:
-                    rows = rows[: limit - total_updated]
+                    rows = rows[: limit - total_processed]
                 if rows:
                     last_selected_id = rows[-1][0]
                 return rows
 
             def is_limit_reached() -> bool:
-                return limit_reached(limit, total_updated)
+                return limit_reached(limit, total_processed)
 
             def on_stuck(_current_ids: list[int]) -> bool:
                 # A required callback, but selection only moves forward, so a
@@ -250,6 +254,7 @@ def run(
 
             def process_batch(rows: list[tuple]) -> bool:
                 nonlocal total_updated, total_processed, total_inferences, last_progress, work_done
+                nonlocal consecutive_lock_timeouts
                 try:
                     for (branch_id,) in rows:
                         result = _embed_one_branch(conn, branch_id, logger)
@@ -258,6 +263,14 @@ def run(
                         total_processed += 1
                         work_done += result.message_count
                         rate_samples.append((time.monotonic(), work_done))
+
+                        consecutive_lock_timeouts = consecutive_lock_timeouts + 1 if result.lock_timed_out else 0
+                        if consecutive_lock_timeouts >= _MAX_CONSECUTIVE_LOCK_TIMEOUTS:
+                            logger.error(
+                                "%s: %s lock timeouts in a row, aborting", _LOG_PREFIX, consecutive_lock_timeouts
+                            )
+                            print(f"{_PRINT_PREFIX}: database stayed locked, aborting", file=sys.stderr)
+                            return False
 
                         if total_processed - last_progress >= progress_every:
                             msg = _format_embed_progress(
@@ -368,6 +381,7 @@ class _EmbedResult(NamedTuple):
     message_count: int
     updated: int
     inferences: int
+    lock_timed_out: bool = False
 
 
 def _model_still_healthy(logger: logging.Logger) -> bool:
@@ -434,7 +448,7 @@ def _embed_one_branch(
         if not is_database_locked(exc):
             raise
         logger.warning("%s: database locked on branch %s, next run retries", _LOG_PREFIX, branch_id)
-        return not_updated
+        return not_updated._replace(lock_timed_out=True)
     except (sqlite3.Error, OSError):
         # Both are Exception subclasses, so this clause exists only to shadow the
         # broader `except Exception` below and keep an infra failure from
@@ -452,12 +466,12 @@ def _embed_one_branch(
                 branch_id,
             )
             raise
-        _mark_content_error(conn, branch_id, logger)
-        return not_updated
+        marked = _mark_content_error(conn, branch_id, logger)
+        return not_updated._replace(lock_timed_out=not marked)
     return _EmbedResult(message_count=message_count, updated=int(outcome.stamped), inferences=outcome.embedded)
 
 
-def _mark_content_error(conn: sqlite3.Connection, branch_id: int, logger: logging.Logger) -> None:
+def _mark_content_error(conn: sqlite3.Connection, branch_id: int, logger: logging.Logger) -> bool:
     """Mark the sentinel so this row is skipped next run. A lock timeout leaves it unmarked, to be retried."""
     try:
         commit_single_write(
@@ -469,6 +483,8 @@ def _mark_content_error(conn: sqlite3.Connection, branch_id: int, logger: loggin
         if not is_database_locked(exc):
             raise
         logger.warning("%s: database locked marking branch %s, next run retries", _LOG_PREFIX, branch_id)
+        return False
+    return True
 
 
 def _format_embed_progress(
