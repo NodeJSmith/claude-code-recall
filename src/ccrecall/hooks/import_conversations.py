@@ -118,7 +118,6 @@ def import_session(
         filepath.parent,
         file_hash=file_hash,
         _project_id=project_id,
-        embed=False,
         file_size=file_size,
         file_mtime=file_mtime,
         force=force,
@@ -248,7 +247,6 @@ def import_session_group(
         file_hashes=file_hashes,
         file_stats=file_stats,
         _project_id=project_id,
-        embed=False,
     )
 
     session_uuid = extract_session_uuid(ordered[0])
@@ -579,8 +577,7 @@ def _run(
     t_start = time.monotonic()
 
     # load_vec=True so the chunks_vec_ad cascade trigger works during empty-session
-    # cleanup (DELETE FROM branches fires triggers that touch chunk_vec). embed=False
-    # on sync_session keeps the expensive embedding model unloaded.
+    # cleanup (DELETE FROM branches fires triggers that touch chunk_vec).
     try:
         with get_connection(settings, load_vec=True) as conn:
             t_conn = time.monotonic()

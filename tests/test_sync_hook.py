@@ -14,8 +14,19 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-from conftest import FIXTURE_DIR, patched_clear, patched_record
+from conftest import (
+    FIXTURE_DIR,
+    VEC_SKIP,
+    locked_error,
+    make_jsonl_entry,
+    make_vec_conn,
+    patched_clear,
+    patched_record,
+    write_jsonl,
+)
 
+from ccrecall import config
+from ccrecall.embeddings import EMBEDDING_DIM, EMBEDDING_VERSION
 from ccrecall.health import REASON_MODEL_UNAVAILABLE, REASON_VEC_UNAVAILABLE
 from ccrecall.hooks import memory_setup, memory_sync, sync_current
 from ccrecall.hooks.sync_current import sync_session, validate_session_id
@@ -1223,53 +1234,6 @@ class TestSyncCurrentTranscriptDiscovery:
         assert json.loads(captured.getvalue()) == {"continue": True}
         assert seen_project_dirs == [project_dir]
 
-    def test_run_passes_settings_to_sync_session(self, tmp_path, monkeypatch):
-        """run() must pass settings=settings through to
-        sync_session so sync_path_token_limit reaches sync_branch's clamp."""
-        projects_dir = tmp_path / "projects"
-        project_dir = projects_dir / "project-a"
-        session_file = project_dir / f"{VALID_SYNC_UUID}.jsonl"
-        session_file.parent.mkdir(parents=True)
-        session_file.write_text("{}", encoding="utf-8")
-
-        settings = {"exclude_projects": [], "logging_enabled": False, "sync_path_token_limit": 2048}
-
-        monkeypatch.setattr("ccrecall.config.pid_file_path", lambda key: tmp_path / f".pid-{key}")
-        monkeypatch.setattr(sync_current, "DEFAULT_PROJECTS_DIR", projects_dir)
-        monkeypatch.setattr(sync_current, "remove_pid_file", lambda key: None)
-        monkeypatch.setattr(sync_current, "load_settings", lambda: settings)
-        monkeypatch.setattr(sync_current, "setup_logging", lambda *_a, **_k: MagicMock())
-        monkeypatch.setattr(sync_current, "_warn_cold_model", lambda: None)
-        monkeypatch.setattr(sync_current, "record_embedding_failure", lambda *a, **k: None)
-        monkeypatch.setattr(sync_current, "clear_embedding_failure", lambda: None)
-        monkeypatch.setattr(sync_current, "get_session_file", lambda *a, **k: session_file)
-        monkeypatch.setattr(sync_current, "chunk_vec_queryable", lambda conn: True)
-
-        seen_settings = []
-
-        def fake_sync_session(*_args, **kwargs):
-            seen_settings.append(kwargs.get("settings"))
-            return 0
-
-        class _ConnContext:
-            def __enter__(self):
-                return MagicMock()
-
-            def __exit__(self, exc_type, exc, tb):
-                return False
-
-        monkeypatch.setattr(sync_current, "sync_session", fake_sync_session)
-        monkeypatch.setattr(sync_current, "get_connection", lambda *a, **k: _ConnContext())
-
-        input_file = tmp_path / "hook.json"
-        input_file.write_text(json.dumps({"session_id": VALID_SYNC_UUID}), encoding="utf-8")
-        captured = io.StringIO()
-        with patch("sys.stdout", captured):
-            sync_current.run(input_file=input_file)
-
-        assert json.loads(captured.getvalue()) == {"continue": True}
-        assert seen_settings == [settings]
-
 
 class TestSyncCurrentCompletionLogging:
     """sync_current.run() logs an INFO 'sync complete' line with
@@ -1365,3 +1329,107 @@ class TestSyncCurrentCompletionLogging:
         assert json.loads(captured.getvalue()) == {"continue": True}
         error_records = [r for r in caplog.records if r.levelno == logging.ERROR]
         assert error_records, "the OSError from stat() must be caught and logged, not propagate uncaught"
+
+
+@VEC_SKIP
+class TestSyncCurrentEmbedStep:
+    """Embedding runs after sync commits, on the same run() a Stop hook drives."""
+
+    @pytest.fixture
+    def sync_env(self, tmp_path, monkeypatch):
+        projects_dir = tmp_path / "projects"
+        session_file = projects_dir / "project-a" / f"{VALID_SYNC_UUID}.jsonl"
+        session_file.parent.mkdir(parents=True)
+        write_jsonl(
+            session_file,
+            [
+                make_jsonl_entry("u1", None, "2026-01-01T10:00:00Z", "user", "the question"),
+                make_jsonl_entry("a1", "u1", "2026-01-01T10:01:00Z", "assistant", "the answer"),
+            ],
+        )
+        db_path = tmp_path / "conversations.db"
+        settings = {
+            "db_path": str(db_path),
+            "exclude_projects": [],
+            "logging_enabled": False,
+            "sync_path_token_limit": 2048,
+        }
+        monkeypatch.setattr(sync_current, "DEFAULT_PROJECTS_DIR", projects_dir)
+        monkeypatch.setattr(sync_current, "load_settings", lambda: settings)
+        monkeypatch.setattr(sync_current, "_warn_cold_model", lambda: None)
+        monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps({"session_id": VALID_SYNC_UUID})))
+        monkeypatch.setattr("ccrecall.embed_ops.cap_for_embedding", lambda text, max_tokens=None: (text, False))
+        return db_path
+
+    def test_messages_are_committed_and_lock_free_during_inference(self, sync_env, monkeypatch):
+        seen = {}
+
+        def fake_embed(texts, **kwargs):
+            seen["cap"] = kwargs["max_token_cap"]
+            with sqlite3.connect(sync_env, timeout=0) as other:
+                seen["messages"] = other.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+                other.execute("BEGIN IMMEDIATE")
+                other.rollback()
+            return [[0.1] * EMBEDDING_DIM] * len(texts)
+
+        monkeypatch.setattr("ccrecall.embed_ops.embed_batch", fake_embed)
+
+        sync_current.run()
+
+        assert seen == {"cap": 2048, "messages": 2}
+        with sqlite3.connect(sync_env) as conn:
+            assert conn.execute("SELECT embedding_version FROM branches").fetchone()[0] == EMBEDDING_VERSION
+
+    def test_failed_embed_keeps_messages_and_leaves_branch_for_backfill(self, sync_env, monkeypatch, capsys):
+        def boom(_texts, **_kwargs):
+            raise RuntimeError("no model")
+
+        monkeypatch.setattr("ccrecall.embed_ops.embed_batch", boom)
+
+        sync_current.run()
+
+        assert json.loads(capsys.readouterr().out)["continue"] is True
+        with sqlite3.connect(sync_env) as conn:
+            assert conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 2
+            assert conn.execute("SELECT embedding_version FROM branches").fetchone()[0] == 0
+
+    def test_live_backfill_skips_inference_but_still_syncs(self, sync_env, monkeypatch):
+        marker = config.pid_file_path(config.PID_KEY_BACKFILL_EMBEDDINGS)
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(str(os.getppid()))
+
+        def no_inference(_texts, **_kwargs):
+            raise AssertionError("inference ran while a backfill holds the marker")
+
+        monkeypatch.setattr("ccrecall.embed_ops.embed_batch", no_inference)
+
+        sync_current.run()
+
+        with sqlite3.connect(sync_env) as conn:
+            assert conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 2
+            assert conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0] == 0
+
+    @pytest.mark.parametrize("error", [locked_error(), sqlite3.OperationalError("disk I/O error"), RuntimeError("x")])
+    def test_embed_failure_never_reaches_the_hook(self, tmp_path, error):
+        conn = make_vec_conn()
+        conn.execute("INSERT INTO sessions (uuid) VALUES (?)", (VALID_SYNC_UUID,))
+        session_id = conn.execute("SELECT id FROM sessions").fetchone()[0]
+        conn.execute("INSERT INTO branches (session_id, leaf_uuid, is_active) VALUES (?, 'leaf', 1)", (session_id,))
+        conn.commit()
+
+        with patch("ccrecall.hooks.sync_current.embed_branch_chunks", side_effect=error) as mock_embed:
+            sync_current.embed_session_branch(conn, tmp_path / f"{VALID_SYNC_UUID}.jsonl", {}, MagicMock())
+
+        assert mock_embed.call_count == 1
+        conn.close()
+
+    def test_no_branch_for_session_embeds_nothing(self, tmp_path):
+        conn = make_vec_conn()
+        conn.execute("INSERT INTO sessions (uuid) VALUES (?)", (VALID_SYNC_UUID,))
+        conn.commit()
+
+        with patch("ccrecall.hooks.sync_current.embed_branch_chunks") as mock_embed:
+            sync_current.embed_session_branch(conn, tmp_path / f"{VALID_SYNC_UUID}.jsonl", {}, MagicMock())
+
+        assert mock_embed.call_count == 0
+        conn.close()

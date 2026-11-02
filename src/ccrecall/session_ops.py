@@ -27,7 +27,6 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from ccrecall.branch_ops import sync_branch
-from ccrecall.db_vec import chunk_vec_queryable
 from ccrecall.formatting import normalize_project_key
 from ccrecall.import_log_ops import import_log_skip_check, pending_tool_content_uuids, upsert_import_log
 from ccrecall.message_ops import insert_new_messages, update_missing_tool_content, upsert_session
@@ -73,8 +72,6 @@ def _sync_branches_and_messages(
     messages: list[dict],
     project_dir: Path,
     _project_id: int | None,
-    embed: bool,
-    settings: dict | None,
 ) -> tuple[int, int, int]:
     """Core branch/message sync given already-extracted branches/messages/meta.
 
@@ -140,24 +137,8 @@ def _sync_branches_and_messages(
     )
     uuid_to_msg_id = {row[1]: row[0] for row in cursor.fetchall()}
 
-    # Probe vec persistence once: if sqlite-vec didn't load, chunk_vec doesn't
-    # exist and embed_branch_chunks would raise. Skip embed-on-write entirely
-    # in that case rather than paying for embed_text inference on every active
-    # leaf just to have the write swallowed. The import path passes embed=False
-    # to load vec (for trigger support) without paying for inference.
-    vec_writable = embed and chunk_vec_queryable(conn)
-    sync_path_token_limit = settings.get("sync_path_token_limit") if settings else None
-
     for branch in branches:
-        sync_branch(
-            cursor,
-            branch,
-            messages,
-            uuid_to_msg_id,
-            session_id,
-            vec_writable,
-            sync_path_token_limit=sync_path_token_limit,
-        )
+        sync_branch(cursor, branch, messages, uuid_to_msg_id, session_id)
 
     return session_id, new_count, repaired_tool_content
 
@@ -168,10 +149,8 @@ def sync_session(
     project_dir: Path,
     file_hash: str | None = None,
     _project_id: int | None = None,
-    embed: bool = True,
     file_size: int | None = None,
     file_mtime: float | None = None,
-    settings: dict | None = None,
     *,
     force: bool = False,
 ) -> int:
@@ -190,14 +169,7 @@ def sync_session(
     transcript.
     ``_project_id``, when provided by the import_conversations.py adapter, is
     used directly so the project upsert step is skipped and no second DB lookup
-    runs. ``embed`` controls whether chunk embeddings are written — the import
-    path passes False to load vec (for trigger support) without paying for
-    inference.
-    ``settings``, when provided, supplies the raw ``sync_path_token_limit``
-    config value threaded to ``sync_branch``. This module must not import from
-    ``embeddings.py`` (the hook hot path — see architecture invariant 2), so
-    the value is passed through unclamped; ``branch_ops.sync_branch`` (which
-    already imports ``embeddings``) does the clamping.
+    runs. Embedding is not part of this: the sync hook embeds after committing.
 
     This function only ever sees one file's entries. For a multi-file
     candidate (a parent session plus its ``agent-*.jsonl`` subagent
@@ -238,7 +210,7 @@ def sync_session(
     branches, messages, meta = extracted
 
     session_id, new_count, repaired_tool_content = _sync_branches_and_messages(
-        conn, session_uuid, meta, branches, messages, project_dir, _project_id, embed, settings
+        conn, session_uuid, meta, branches, messages, project_dir, _project_id
     )
 
     upsert_import_log(cursor, filepath, session_id, file_hash, log_row, file_size, file_mtime)
@@ -255,8 +227,6 @@ def sync_session_group(
     file_hashes: Mapping[Path, str | None],
     file_stats: Mapping[Path, tuple[int | None, float | None]],
     _project_id: int | None = None,
-    embed: bool = True,
-    settings: dict | None = None,
 ) -> int:
     """Force-reimport a multi-file session transcript as one merged unit.
 
@@ -306,7 +276,7 @@ def sync_session_group(
     branches, messages, meta = extracted
 
     session_id, new_count, repaired_tool_content = _sync_branches_and_messages(
-        conn, session_uuid, meta, branches, messages, project_dir, _project_id, embed, settings
+        conn, session_uuid, meta, branches, messages, project_dir, _project_id
     )
 
     write_import_logs(session_id)

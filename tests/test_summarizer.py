@@ -925,14 +925,12 @@ class TestSummaryMaintenance:
         conn, branch_id, session_id, uuid_to_msg_id, messages, branch = self._make_conn_for_sync_branch()
         cursor = conn.cursor()
 
-        monkeypatch.setattr("ccrecall.branch_ops.embed_branch_chunks", lambda *_args, **_kwargs: None)
-
         def boom(_cursor, _branch_id):
             raise ValueError("malformed summary")
 
         monkeypatch.setattr("ccrecall.embed_ops.compute_context_summary", boom)
 
-        sync_branch(cursor, branch, messages, uuid_to_msg_id, session_id, vec_writable=False)
+        sync_branch(cursor, branch, messages, uuid_to_msg_id, session_id)
 
         row = cursor.execute(
             "SELECT aggregated_content, summary_version FROM branches WHERE id = ?",

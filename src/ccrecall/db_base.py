@@ -45,6 +45,21 @@ def is_database_locked(exc: sqlite3.OperationalError) -> bool:
     return (getattr(exc, "sqlite_errorcode", 0) & 0xFF) == sqlite3.SQLITE_BUSY
 
 
+def commit_single_write(conn: sqlite3.Connection, sql: str, params: tuple) -> None:
+    """Commit one statement on its own.
+
+    A single statement has no earlier read to upgrade from, so ``busy_timeout``
+    applies to it. A failed statement would otherwise leave the implicit
+    transaction open, and the next ``BEGIN IMMEDIATE`` on this connection would raise.
+    """
+    try:
+        conn.execute(sql, params)
+        conn.commit()
+    except sqlite3.Error:
+        conn.rollback()
+        raise
+
+
 def apply_base_pragmas(conn: sqlite3.Connection) -> None:
     """Set WAL mode, busy_timeout, and foreign-key enforcement for concurrent-safe access."""
     conn.execute("PRAGMA journal_mode = WAL")
