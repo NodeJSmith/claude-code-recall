@@ -15,6 +15,7 @@ import sqlite_vec
 from ccrecall.db import CHUNK_DRAFT_QUALITY_FILTER, CHUNK_EMBEDDABLE_BRANCH_FILTER
 from ccrecall.embeddings import EMBEDDING_DIM, EMBEDDING_MODEL, EMBEDDING_VERSION, MODEL_TOKEN_LIMIT
 from ccrecall.models import LOGGER_NAME
+from ccrecall.summarizer import build_exchange_pairs
 
 log = logging.getLogger(LOGGER_NAME)
 
@@ -243,3 +244,37 @@ def branch_embedding_coverage(conn: sqlite3.Connection) -> tuple[int, int, int]:
     else:
         embedded_draft = 0
     return embedded_full, embedded_draft, total
+
+
+def find_stamped_branches_missing_chunks(cursor: sqlite3.Cursor) -> dict[int, int]:
+    """Return {branch_id: missing exchange count} for branches falsely stamped as embedded.
+
+    The watermark claims every exchange has a chunk, but ``build_selection`` can
+    only see problems with chunks that exist, so an exchange that never got one
+    is invisible to the backfill. This compares the exchanges the embedding
+    pipeline would produce with the stored chunks; ``branches.exchange_count``
+    can't stand in for that because it doesn't always match the pipeline's count.
+
+    The expected exchanges must stay the set ``embed_branch_chunks`` writes a chunk
+    for. If that path ever skips an exchange, this reports it forever and every
+    backfill clears the branch's watermark again.
+
+    A branch with no exchanges expects no chunks, so it's never reported.
+    Read-only and vec-free: it writes nothing and never touches ``chunk_vec``.
+    """
+    cursor.execute(
+        f"SELECT id FROM branches WHERE {CHUNK_EMBEDDABLE_BRANCH_FILTER} "
+        "AND embedding_version = ? AND embedding_model = ?",
+        (EMBEDDING_VERSION, EMBEDDING_MODEL),
+    )
+    branch_ids = [row[0] for row in cursor.fetchall()]
+
+    missing: dict[int, int] = {}
+    for branch_id in branch_ids:
+        exchanges = build_exchange_pairs(fetch_branch_messages(cursor, branch_id, include_notifications=False))
+        cursor.execute("SELECT exchange_index FROM chunks WHERE branch_id = ?", (branch_id,))
+        stored = {row[0] for row in cursor.fetchall()}
+        absent = {ex["index"] for ex in exchanges} - stored
+        if absent:
+            missing[branch_id] = len(absent)
+    return missing

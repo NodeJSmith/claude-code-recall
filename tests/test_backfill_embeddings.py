@@ -24,7 +24,7 @@ from conftest import VEC_SKIP, make_vec_conn, patched_clear, patched_record
 from ccrecall.cli.commands import cmd_backfill_embeddings
 from ccrecall.config import remove_pid_file, try_acquire_pid_file
 from ccrecall.db import CONTENT_ERROR_VERSION
-from ccrecall.db_vec import upsert_chunk_vec
+from ccrecall.db_vec import find_stamped_branches_missing_chunks, upsert_chunk_vec
 from ccrecall.embed_ops import MAX_WRITE_PATH_EMBEDS_PER_SYNC
 from ccrecall.embeddings import EMBEDDING_DIM, EMBEDDING_MODEL, EMBEDDING_VERSION
 from ccrecall.health import REASON_VEC_UNAVAILABLE
@@ -621,6 +621,7 @@ class TestBackfillHealsStampedBranches:
 
         assert _embedded_exchange_indices(conn, bid) == {0, 1}
         assert _branch_embedding_version(conn, bid) == EMBEDDING_VERSION
+        assert find_stamped_branches_missing_chunks(conn.cursor()) == {}
 
     def test_stamped_branch_missing_newest_exchange_gets_embedded(self):
         conn = make_vec_conn()
