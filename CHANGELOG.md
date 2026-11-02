@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.26.3](https://github.com/NodeJSmith/claude-code-recall/compare/v0.26.2...v0.26.3) (2026-11-02)
+
+
+### Bug Fixes
+
+* recover search vectors for sessions wrongly marked as embedded ([#243](https://github.com/NodeJSmith/claude-code-recall/issues/243)) ([44a91ab](https://github.com/NodeJSmith/claude-code-recall/commit/44a91abeda67913fc20a5de68d9fc05976fd4695))
+* stop a locked database from aborting imports ([#245](https://github.com/NodeJSmith/claude-code-recall/issues/245)) ([e415d5b](https://github.com/NodeJSmith/claude-code-recall/commit/e415d5b8be84e6f44fbbaa8b28994b6f74692179))
+* stop database lock failures while embeddings run ([#246](https://github.com/NodeJSmith/claude-code-recall/issues/246)) ([635e4db](https://github.com/NodeJSmith/claude-code-recall/commit/635e4db1cc30f7f147277bed8cc95bfae9ce6475))
+
 ## [0.26.2](https://github.com/NodeJSmith/claude-code-recall/compare/v0.26.1...v0.26.2) (2026-11-01)
 
 
