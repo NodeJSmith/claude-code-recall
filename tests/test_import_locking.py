@@ -41,7 +41,10 @@ def locked_error() -> sqlite3.OperationalError:
 
 @pytest.fixture
 def db_conn(tmp_path) -> Iterator[sqlite3.Connection]:
-    """A real on-disk WAL database. Locking can't be reproduced on :memory:."""
+    """A real on-disk WAL database, since locking can't be reproduced on :memory:.
+
+    No busy_timeout, so a test that hits a lock fails at once instead of waiting.
+    """
     with get_connection({"db_path": str(tmp_path / "memory.db")}) as conn:
         conn.execute("PRAGMA busy_timeout = 0")
         yield conn
@@ -66,12 +69,15 @@ def imported_sessions(conn: sqlite3.Connection) -> set[str]:
     return {row[0] for row in conn.execute("SELECT uuid FROM sessions")}
 
 
-@pytest.mark.xfail(strict=True, reason="#233: deferred BEGIN fails without waiting")
 def test_commit_by_another_process_during_the_scan_does_not_fail_the_import(
     db_conn, competitor, project_dir, monkeypatch
 ):
     """A commit landing between the import's reads and its first write used to fail
-    that write immediately, because the transaction's read snapshot had gone stale."""
+    that write immediately, because the transaction's read snapshot had gone stale.
+
+    has_pending_tool_content is the first read after upsert_project, so it marks
+    that window. The inserted row is arbitrary: only the other process's commit matters.
+    """
     write_session(project_dir, "sess-known")
     assert import_project_contained(db_conn, project_dir, None) is not None
     write_session(project_dir, "sess-new")
@@ -106,7 +112,6 @@ def test_unchanged_project_imports_while_another_process_holds_the_write_lock(db
         competitor.execute("ROLLBACK")
 
 
-@pytest.mark.xfail(strict=True, reason="#233: a held lock still aborts the run")
 def test_locked_project_fails_alone_and_imports_on_the_next_run(db_conn, competitor, project_dir):
     """Running out of busy_timeout costs that project, not the rest of the run."""
     write_session(project_dir, "sess-new")
@@ -157,7 +162,6 @@ def fail_first_session(monkeypatch, error: Exception) -> None:
     monkeypatch.setattr(import_conversations, "import_session", fail_once)
 
 
-@pytest.mark.xfail(strict=True, reason="#233: a lock aborts the whole repair batch")
 def test_locked_repair_candidate_is_counted_failed_and_the_batch_continues(
     memory_db, project_id, tmp_path, monkeypatch
 ):
@@ -167,7 +171,6 @@ def test_locked_repair_candidate_is_counted_failed_and_the_batch_continues(
     assert repair_sessions(memory_db, candidates) == (1, 1, 1, 0)
 
 
-@pytest.mark.xfail(strict=True, reason="#233: an aborted repair loses its counts")
 def test_other_database_errors_abort_the_repair_batch_with_its_counts(memory_db, project_id, tmp_path, monkeypatch):
     candidates = seed_two_repair_candidates(memory_db, project_id, tmp_path)
     real_import = import_conversations.import_session
@@ -181,20 +184,24 @@ def test_other_database_errors_abort_the_repair_batch_with_its_counts(memory_db,
 
     monkeypatch.setattr(import_conversations, "import_session", fail_second)
 
+    messages_before = memory_db.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+
     with pytest.raises(import_repair.RepairAborted, match="disk is full") as excinfo:
         repair_sessions(memory_db, candidates)
 
     assert excinfo.value.counts == (1, 1, 0, 0)
-    assert isinstance(excinfo.value, sqlite3.OperationalError)
+    # What get_connection does when the abort propagates. The reported work must survive.
+    memory_db.rollback()
+    assert memory_db.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == messages_before + 1
 
 
 class TestRun:
-    """The whole-run behaviour: the overlap guard and the final summary."""
+    """Whole runs: the overlap guard and the summary. Projects import in sorted order."""
 
     @pytest.fixture
     def projects_dir(self, tmp_path) -> Path:
         path = tmp_path / "projects"
-        for key in ("-aaa-good", "-zzz-bad"):
+        for key in ("-aaa-first", "-zzz-second"):
             (path / key).mkdir(parents=True)
             write_session(path / key, f"sess{key}")
         return path
@@ -208,11 +215,10 @@ class TestRun:
         monkeypatch.setattr(import_conversations, "get_connection", fake_connection)
         monkeypatch.setattr(import_conversations, "lower_scheduling_priority", lambda _level: None)
 
-    @pytest.mark.xfail(strict=True, reason="#233: plain imports take no guard")
     def test_plain_import_skips_while_another_import_runs(self, memory_db, tmp_path, projects_dir, capsys):
         marker = pid_file_path(PID_KEY_IMPORT)
         marker.parent.mkdir(parents=True, exist_ok=True)
-        marker.write_text(str(os.getppid()))
+        marker.write_text(str(os.getppid()))  # a live process that isn't this one
         try:
             run(db=tmp_path / "memory.db", projects_dir=projects_dir)
 
@@ -225,15 +231,14 @@ class TestRun:
     def test_plain_import_releases_the_guard_when_done(self, memory_db, tmp_path, projects_dir):
         run(db=tmp_path / "memory.db", projects_dir=projects_dir)
 
-        assert imported_sessions(memory_db) == {"sess-aaa-good", "sess-zzz-bad"}
+        assert imported_sessions(memory_db) == {"sess-aaa-first", "sess-zzz-second"}
         assert not pid_file_path(PID_KEY_IMPORT).exists()
 
-    @pytest.mark.xfail(strict=True, reason="#233: an abort skips the summary")
     def test_aborted_run_still_reports_what_it_imported(self, tmp_path, projects_dir, monkeypatch, capsys):
         real_import = import_conversations.import_session
 
         def fail_on_second_project(conn, filepath, project_id, *, force=False):
-            if "zzz" in str(filepath):
+            if filepath.parent.name == "-zzz-second":
                 raise sqlite3.OperationalError("database or disk is full")
             return real_import(conn, filepath, project_id, force=force)
 
@@ -246,7 +251,6 @@ class TestRun:
         assert "Total: 1 branches, 2 messages imported" in out
         assert "aborted" in out
 
-    @pytest.mark.xfail(strict=True, reason="#233: an abort skips the repair summary")
     def test_aborted_repair_still_reports_what_it_repaired(self, tmp_path, projects_dir, monkeypatch, capsys):
         def abort_after_one(_conn, candidates, on_reclaim):
             raise import_repair.RepairAborted("database or disk is full", (1, 3, 0, 0))
@@ -259,14 +263,27 @@ class TestRun:
 
         assert "Repaired 1 session(s), recovered 3 message(s)" in capsys.readouterr().out
 
-    @pytest.mark.xfail(strict=True, reason="#233: a held lock still aborts the run")
+    def test_locked_repair_scan_skips_repair_and_reports_it(self, tmp_path, projects_dir, monkeypatch, capsys):
+        def locked_scan(_conn):
+            raise locked_error()
+
+        monkeypatch.setattr(import_conversations.ingestion_status, "find_repairable_sessions", locked_scan)
+
+        with pytest.raises(SystemExit) as excinfo:
+            run(db=tmp_path / "memory.db", projects_dir=projects_dir, repair_gaps=True)
+
+        assert excinfo.value.code == 1
+        out = capsys.readouterr().out
+        assert "Skipped gap repair" in out
+        assert "Total: 2 branches, 4 messages imported" in out
+
     def test_locked_project_is_reported_and_later_projects_still_import(
         self, memory_db, tmp_path, projects_dir, monkeypatch, capsys
     ):
         real_import = import_conversations.import_session
 
         def lock_first_project(conn, filepath, project_id, *, force=False):
-            if "aaa" in str(filepath):
+            if filepath.parent.name == "-aaa-first":
                 raise locked_error()
             return real_import(conn, filepath, project_id, force=force)
 
@@ -276,7 +293,7 @@ class TestRun:
             run(db=tmp_path / "memory.db", projects_dir=projects_dir)
 
         assert excinfo.value.code == 1
-        assert imported_sessions(memory_db) == {"sess-zzz-bad"}
+        assert imported_sessions(memory_db) == {"sess-zzz-second"}
         out = capsys.readouterr().out
-        assert "Failed to import -aaa-good" in out
+        assert "Failed to import -aaa-first" in out
         assert "1 project(s) failed" in out
