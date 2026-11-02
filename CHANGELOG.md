@@ -5,9 +5,9 @@
 
 ### Bug Fixes
 
-* recover search vectors for sessions wrongly marked as embedded ([#243](https://github.com/NodeJSmith/claude-code-recall/issues/243)) ([44a91ab](https://github.com/NodeJSmith/claude-code-recall/commit/44a91abeda67913fc20a5de68d9fc05976fd4695))
-* stop a locked database from aborting imports ([#245](https://github.com/NodeJSmith/claude-code-recall/issues/245)) ([e415d5b](https://github.com/NodeJSmith/claude-code-recall/commit/e415d5b8be84e6f44fbbaa8b28994b6f74692179))
-* stop database lock failures while embeddings run ([#246](https://github.com/NodeJSmith/claude-code-recall/issues/246)) ([635e4db](https://github.com/NodeJSmith/claude-code-recall/commit/635e4db1cc30f7f147277bed8cc95bfae9ce6475))
+- **Embedding no longer locks the database.** Sync and `ccrecall backfill embeddings` held the write lock during inference, so other writers failed with `database is locked`. Inference now runs with no transaction open: on 8 branches with the real model, the longest lock fell from 524.6 s to 0.11 s, and backfill took about the same time. A failed embed now leaves existing vectors intact. Sync skips inference while a backfill is running, and a later sync or backfill fills those vectors in. In backfill, `--limit` now counts branches attempted, `embedded` counts only branches that finished, and the completion line and `--json` output add `not_updated`. Three lock timeouts in a row abort the run. (#246)
+- **A locked database no longer aborts imports.** `ccrecall import` could fail immediately if another process committed while it ran. It now waits for the lock, and only takes it when it has something to write. A lock that outlasts the 30 s wait costs one project or repair candidate, which the next run retries, and the run exits 1 with a summary. Other database errors, such as a full disk, still stop the run. An import started while another is running now skips with a message and exits 0, and every run prints its totals, even on an early exit. (#245)
+- **Sessions wrongly marked as embedded can now recover their search vectors.** A session could be marked as fully embedded with exchanges that never got a vector, which left them out of semantic search while `ccrecall status` still counted them. `ccrecall backfill embeddings` now finds these at the start of each run and embeds them. Recovery needs that manual run: until then, `status` and `backfill --status` keep counting these sessions as embedded. (#243)
 
 ## [0.26.2](https://github.com/NodeJSmith/claude-code-recall/compare/v0.26.1...v0.26.2) (2026-11-01)
 
@@ -31,28 +31,28 @@
 
 ### Features
 
-* show invoked skills in ccrecall tail ([#217](https://github.com/NodeJSmith/claude-code-recall/issues/217)) ([99d2b64](https://github.com/NodeJSmith/claude-code-recall/commit/99d2b64ed0ae53ba784ce2825117bfc0b4d74dc4))
+- **`ccrecall tail` now shows which skills the prior session invoked.** A new SKILLS INVOKED block lists them most recent first, with repeat count, last load time and last args. `/ccr-resume` uses it to name the workflow skill the prior session was in and re-invoke it after `/clear`, rather than continuing from memory. (#217)
 
 ## [0.25.1](https://github.com/NodeJSmith/claude-code-recall/compare/v0.25.0...v0.25.1) (2026-09-18)
 
 
 ### Bug Fixes
 
-* count sessions with no import_log entry as missing in status ([#214](https://github.com/NodeJSmith/claude-code-recall/issues/214)) ([3d22d2e](https://github.com/NodeJSmith/claude-code-recall/commit/3d22d2e96911842c3ecadbc39aeac01b49b591d7))
+- **`ccrecall status` no longer overcounts backfillable sessions when transcripts are gone.** A session synced by the hook whose transcript was later deleted was reported as backfillable, even though the backfill could never resolve it. These sessions now count as missing. (#214)
 
 ## [0.25.0](https://github.com/NodeJSmith/claude-code-recall/compare/v0.24.2...v0.25.0) (2026-09-17)
 
 
 ### Features
 
-* add ccrecall import --repair-gaps to fix stale-tail sessions ([#212](https://github.com/NodeJSmith/claude-code-recall/issues/212)) ([6e60dcb](https://github.com/NodeJSmith/claude-code-recall/commit/6e60dcb758fd0232b8afc7a95304feaf96bfa140))
+- **`ccrecall import --repair-gaps` repairs sessions that have fallen behind their transcripts.** A plain import skips any file whose size and modified time match its import record, so a session missing messages stayed that way however often you imported. The new opt-in flag force-reimports the sessions that `ccrecall status --check-ingestion` reports as `stale_tail` or `ingestion_gap`, across all projects, and reports repaired, unrepairable and failed totals. One bad transcript doesn't lose the other repairs, and the run skips with a notice if another import is active. (#212)
 
 ## [0.24.2](https://github.com/NodeJSmith/claude-code-recall/compare/v0.24.1...v0.24.2) (2026-09-16)
 
 
 ### Bug Fixes
 
-* tool-content status no longer overcounts backfillable sessions ([#207](https://github.com/NodeJSmith/claude-code-recall/issues/207)) ([eb2687c](https://github.com/NodeJSmith/claude-code-recall/commit/eb2687cf610717dad692fa78ca0b0366b5579f6f))
+- **Tool-content status no longer overcounts backfillable sessions.** `ccrecall status` and `ccrecall backfill tool-content --status` counted sessions whose transcript exists but has no usable branch, which the backfill can only skip. They now report these separately, including a new `pending_no_usable_branch_sessions` field in `--json` output. (#207)
 
 ## [0.24.1](https://github.com/NodeJSmith/claude-code-recall/compare/v0.24.0...v0.24.1) (2026-09-03)
 
