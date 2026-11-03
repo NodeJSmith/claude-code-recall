@@ -2334,6 +2334,10 @@ assert not found, f'Heavy modules loaded: {{found}}'
     def test_config_does_not_import_heavy_deps(self):
         self._assert_no_heavy_imports("ccrecall.config")
 
+    def test_job_lock_does_not_import_heavy_deps(self):
+        """Every hook takes or probes a job lock, so job_lock.py stays off the vector stack."""
+        self._assert_no_heavy_imports("ccrecall.job_lock")
+
     def test_health_does_not_import_heavy_deps(self):
         """health.py imports only from config.py, not db.py."""
         self._assert_no_heavy_imports("ccrecall.health")
@@ -2349,9 +2353,9 @@ assert not found, f'Heavy modules loaded: {{found}}'
         assert result.returncode == 0, result.stderr
 
     def test_memory_setup_does_not_import_heavy_deps(self):
-        """memory_setup.py's PID keys must come from config.py, not from importing
+        """memory_setup.py's job keys must come from config.py, not from importing
         import_conversations.py (-> db_vec) or warm_model.py (-> embeddings) just
-        to read their PID_KEY constant (#169)."""
+        to read their JOB_KEY constant (#169)."""
         self._assert_no_heavy_imports("ccrecall.hooks.memory_setup")
 
     def test_clear_handoff_does_not_import_heavy_deps(self):

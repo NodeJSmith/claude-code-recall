@@ -4,15 +4,15 @@ parameterization.
 
 import hashlib
 import logging
-import os
 import sqlite3
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-from conftest import VEC_SKIP, embed_messages, make_vec_conn, set_branch_messages
+from conftest import VEC_SKIP, embed_messages, leave_killed_lock, make_vec_conn, set_branch_messages
 
-from ccrecall.config import PID_KEY_BACKFILL_EMBEDDINGS, pid_file_path
+from ccrecall import job_lock
+from ccrecall.config import JOB_KEY_BACKFILL_EMBEDDINGS
 from ccrecall.db_base import is_database_locked
 from ccrecall.db_vec import _ensure_vec_schema, vec_available
 from ccrecall.embed_ops import (
@@ -845,13 +845,12 @@ class TestLockContention:
 
 @VEC_SKIP
 class TestYieldToBackfill:
-    def test_live_backfill_skips_inference_after_committing_the_clear(self, file_db, live_ccrecall_pid):
+    def test_live_backfill_skips_inference_after_committing_the_clear(self, file_db, hold_job_lock):
         file_db.conn.execute(
             "UPDATE branches SET embedding_version = ? WHERE id = ?", (EMBEDDING_VERSION, file_db.branch_id)
         )
         file_db.set_messages(("q", "a"))
-        pid_file_path(PID_KEY_BACKFILL_EMBEDDINGS).parent.mkdir(parents=True, exist_ok=True)
-        pid_file_path(PID_KEY_BACKFILL_EMBEDDINGS).write_text(str(live_ccrecall_pid))
+        hold_job_lock(JOB_KEY_BACKFILL_EMBEDDINGS)
 
         with patch("ccrecall.embed_ops.embed_batch") as mock_embed:
             outcome = embed_branch_chunks(file_db.conn, file_db.branch_id, yield_to_backfill=True)
@@ -860,24 +859,20 @@ class TestYieldToBackfill:
         assert mock_embed.call_count == 0
         assert file_db.watermark() == 0
 
-    def test_dead_backfill_marker_does_not_skip_and_is_left_in_place(self, file_db):
+    def test_killed_backfill_record_does_not_skip_and_is_left_in_place(self, file_db):
         file_db.set_messages(("q", "a"))
-        marker = pid_file_path(PID_KEY_BACKFILL_EMBEDDINGS)
-        marker.parent.mkdir(parents=True, exist_ok=True)
-        marker.write_text("99999999")
+        leave_killed_lock(JOB_KEY_BACKFILL_EMBEDDINGS)
+        before = job_lock.lock_path(JOB_KEY_BACKFILL_EMBEDDINGS).read_text()
 
         outcome = file_db.embed(yield_to_backfill=True)
 
         assert outcome.embedded == 1
-        assert marker.read_text() == "99999999"
+        assert job_lock.lock_path(JOB_KEY_BACKFILL_EMBEDDINGS).read_text() == before
 
-    def test_backfill_itself_does_not_yield_to_its_own_marker(self, file_db):
+    def test_backfill_itself_does_not_yield_to_its_own_lock(self, file_db):
         file_db.set_messages(("q", "a"))
-        marker = pid_file_path(PID_KEY_BACKFILL_EMBEDDINGS)
-        marker.parent.mkdir(parents=True, exist_ok=True)
-        marker.write_text(str(os.getpid()))
-
-        assert file_db.embed(max_embeds=None, replace_stale=True).embedded == 1
+        with job_lock.acquire(JOB_KEY_BACKFILL_EMBEDDINGS):
+            assert file_db.embed(max_embeds=None, replace_stale=True).embedded == 1
 
 
 @VEC_SKIP

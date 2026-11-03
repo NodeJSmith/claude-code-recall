@@ -10,7 +10,8 @@ import logging
 import sqlite3
 from typing import NamedTuple
 
-from ccrecall.config import PID_KEY_BACKFILL_EMBEDDINGS, live_pid_holder
+from ccrecall import job_lock
+from ccrecall.config import JOB_KEY_BACKFILL_EMBEDDINGS
 from ccrecall.db_base import commit_single_write, is_database_locked
 from ccrecall.db_vec import fetch_branch_messages, write_chunk_embedding
 from ccrecall.embeddings import (
@@ -437,11 +438,11 @@ def embed_branch_chunks(
     commit_single_write(conn, "UPDATE branches SET embedding_version = 0 WHERE id = ?", (branch_db_id,))
 
     if yield_to_backfill:
-        backfill_pid = live_pid_holder(PID_KEY_BACKFILL_EMBEDDINGS)
-        if backfill_pid is not None:
+        backfill = job_lock.probe(JOB_KEY_BACKFILL_EMBEDDINGS)
+        if backfill is not None and backfill.running:
             log.info(
                 "skipping inference while a backfill runs",
-                extra={"branch_id": branch_db_id, "backfill_pid": backfill_pid},
+                extra={"branch_id": branch_db_id, "backfill_pid": backfill.pid},
             )
             return EmbedOutcome(embedded=0, stamped=False)
 

@@ -10,9 +10,9 @@ one database never appear in another's history:
     the source fingerprint it was tested against. Written only by repair, and
     present only while non-empty.
 
-A run that never finished leaves no record; it is read from the PID marker it
-left behind (``read_marker``): a marker naming a live ccrecall process is a
-running job, and one naming a dead process is a killed one.
+A run that never finished leaves no record here; it is read from its kind's
+job lock (``job_lock.probe`` on its ``KIND_JOB_KEYS`` key): a held lock is a running job, and a
+free lock with a record left in it is a killed one.
 
 Recording is best-effort: a failure is logged and never fails the run. This
 module imports no vector or embedding modules, so the hooks can record on their
@@ -30,12 +30,10 @@ from pathlib import Path
 from whenever import Instant
 
 from ccrecall.config import (
-    PID_KEY_BACKFILL_EMBEDDINGS,
-    PID_KEY_IMPORT,
-    PID_KEY_SYNC,
+    JOB_KEY_BACKFILL_EMBEDDINGS,
+    JOB_KEY_IMPORT,
+    JOB_KEY_SYNC,
     atomic_write_json,
-    pid_file_path,
-    read_marker_holder,
 )
 from ccrecall.db_base import is_database_locked
 from ccrecall.health import locked_sidecar
@@ -50,12 +48,12 @@ KIND_SYNC = "sync"
 KIND_BACKFILL = "backfill"
 RUN_KINDS = (KIND_IMPORT, KIND_REPAIR, KIND_SYNC, KIND_BACKFILL)
 
-# Kinds with a PID marker of their own. Repair runs inside `import --repair-gaps`,
+# Kinds with a job lock of their own. Repair runs inside `import --repair-gaps`,
 # so a killed repair reads as a killed import.
-KIND_PID_KEYS = {
-    KIND_IMPORT: PID_KEY_IMPORT,
-    KIND_SYNC: PID_KEY_SYNC,
-    KIND_BACKFILL: PID_KEY_BACKFILL_EMBEDDINGS,
+KIND_JOB_KEYS = {
+    KIND_IMPORT: JOB_KEY_IMPORT,
+    KIND_SYNC: JOB_KEY_SYNC,
+    KIND_BACKFILL: JOB_KEY_BACKFILL_EMBEDDINGS,
 }
 
 OUTCOME_OK = "ok"
@@ -195,36 +193,3 @@ def write_unfixable(db_path: Path, sessions: dict[str, str], *, replace: bool) -
                 path.unlink(missing_ok=True)
     except Exception:
         log.exception("could not record unfixable sessions", extra={"path": str(path)})
-
-
-@dataclass(frozen=True)
-class MarkerState:
-    """A run that hasn't finished, read from its PID marker."""
-
-    kind: str
-    running: bool  # False: the marker names a dead process, so the run was killed
-    pid: int
-    # The marker is written when the run (or its spawn) starts and never touched
-    # again, so its modified time is when the run started, never when it died.
-    started_at: Instant
-
-
-def read_marker(kind: str) -> MarkerState | None:
-    """Return the unfinished run of ``kind``, or None when there's no readable marker.
-
-    An empty or corrupt marker (``_spawn_background`` creates it empty and writes
-    the PID after the spawn returns) reads as no marker.
-    """
-    path = pid_file_path(KIND_PID_KEYS[kind])
-    try:
-        started_at = Instant.from_timestamp(path.stat().st_mtime)
-        pid = read_marker_holder(path)
-    except ProcessLookupError:
-        try:
-            pid = int(path.read_text().strip())
-        except (ValueError, OSError):
-            return None
-        return MarkerState(kind=kind, running=False, pid=pid, started_at=started_at)
-    except (ValueError, OverflowError, OSError):
-        return None
-    return MarkerState(kind=kind, running=True, pid=pid, started_at=started_at)

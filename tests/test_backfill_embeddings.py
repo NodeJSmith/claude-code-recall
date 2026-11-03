@@ -21,16 +21,16 @@ from unittest.mock import MagicMock, patch
 import pytest
 from conftest import VEC_SKIP, locked_error, make_vec_conn, patched_clear, patched_record
 
-from ccrecall import config, run_history
+from ccrecall import config, job_lock, run_history
 from ccrecall.cli.commands import cmd_backfill_embeddings
-from ccrecall.config import remove_pid_file, try_acquire_pid_file
+from ccrecall.config import JOB_KEY_BACKFILL_EMBEDDINGS as JOB_KEY
 from ccrecall.db import CONTENT_ERROR_VERSION
 from ccrecall.db_vec import find_stamped_branches_missing_chunks, upsert_chunk_vec
 from ccrecall.embed_ops import MAX_WRITE_PATH_EMBEDS_PER_SYNC, EmbedOutcome, embed_branch_chunks
 from ccrecall.embeddings import EMBEDDING_DIM, EMBEDDING_MODEL, EMBEDDING_VERSION
 from ccrecall.health import REASON_VEC_UNAVAILABLE
 from ccrecall.hooks.backfill_embeddings import run
-from ccrecall.hooks.backfill_query import BATCH_SIZE, EXIT_ABORT, EXIT_OK, PID_KEY, build_selection
+from ccrecall.hooks.backfill_query import BATCH_SIZE, EXIT_ABORT, EXIT_OK, build_selection
 
 # A fixed EMBEDDING_DIM-dim float vector for stubbing embed_text.
 _FIXED_VEC = [0.001] * EMBEDDING_DIM
@@ -1427,118 +1427,69 @@ class TestBackfillEmbeddingStatusRecording:
         )
 
 
-class TestBackfillPidGuard:
+class TestBackfillJobLock:
     """Self-concurrency guard for the manual embeddings backfill.
 
-    The CLI acquires the PID marker before run() and cleans it up on exit, so a
-    second instance (a systemd timer firing while a previous run is alive, or a
+    The CLI takes the job lock before run() and releases it on exit, so a second
+    instance (a systemd timer firing while a previous run is alive, or a
     double-invoked manual run) skips instead of doubling the onnxruntime memory
-    peak. --status is read-only and never touches the marker.
+    peak. --status is read-only and never touches the lock.
     """
 
-    def test_marker_held_by_another_live_process_refuses(self, monkeypatch, tmp_path, live_ccrecall_pid):
-        monkeypatch.setattr("ccrecall.config.pid_file_path", lambda key: tmp_path / f".pid-{key}")
-        (tmp_path / f".pid-{PID_KEY}").write_text(str(live_ccrecall_pid))
-        assert try_acquire_pid_file(PID_KEY) is False
-        assert (tmp_path / f".pid-{PID_KEY}").read_text() == str(live_ccrecall_pid)
-
-    def test_marker_holding_own_pid_counts_as_acquired(self, monkeypatch, tmp_path):
-        """_spawn_background writes the child's PID before the child gets to acquire."""
-        monkeypatch.setattr("ccrecall.config.pid_file_path", lambda key: tmp_path / f".pid-{key}")
-        (tmp_path / f".pid-{PID_KEY}").write_text(str(os.getpid()))
-        assert try_acquire_pid_file(PID_KEY) is True
-        assert (tmp_path / f".pid-{PID_KEY}").read_text() == str(os.getpid())
-
-    def test_stale_pid_reaped(self, monkeypatch, tmp_path):
-        monkeypatch.setattr("ccrecall.config.pid_file_path", lambda key: tmp_path / f".pid-{key}")
-        # 99999999 exceeds Linux's max pid (2^22) — guaranteed dead.
-        (tmp_path / f".pid-{PID_KEY}").write_text("99999999")
-        assert try_acquire_pid_file(PID_KEY) is True
-        assert (tmp_path / f".pid-{PID_KEY}").read_text() == str(os.getpid())
-
-    def test_unreadable_pid_file_reaped(self, monkeypatch, tmp_path):
-        monkeypatch.setattr("ccrecall.config.pid_file_path", lambda key: tmp_path / f".pid-{key}")
-        (tmp_path / f".pid-{PID_KEY}").write_text("not-a-pid")
-        assert try_acquire_pid_file(PID_KEY) is True
-
-    def test_out_of_range_pid_reaped(self, monkeypatch, tmp_path):
-        monkeypatch.setattr("ccrecall.config.pid_file_path", lambda key: tmp_path / f".pid-{key}")
-        # int() parses arbitrarily large values, but os.kill raises
-        # OverflowError for anything outside C's pid range — that must be
-        # treated as corrupt and reaped, not escape the guard.
-        (tmp_path / f".pid-{PID_KEY}").write_text("9" * 40)
-        assert try_acquire_pid_file(PID_KEY) is True
-
-    def test_nonpositive_pid_reaped(self, monkeypatch, tmp_path):
-        monkeypatch.setattr("ccrecall.config.pid_file_path", lambda key: tmp_path / f".pid-{key}")
-        # kill(0, 0) probes the caller's own process group — a non-positive PID
-        # would read as permanently alive; it must be treated as corrupt.
-        (tmp_path / f".pid-{PID_KEY}").write_text("0")
-        assert try_acquire_pid_file(PID_KEY) is True
-
-    def test_unreapable_marker_raises(self, monkeypatch, tmp_path):
-        monkeypatch.setattr("ccrecall.config.pid_file_path", lambda key: tmp_path / f".pid-{key}")
-        # A marker that can't be unlinked (here: it's a directory) must raise —
-        # a suppressed failure would spin the reap-retry loop forever.
-        (tmp_path / f".pid-{PID_KEY}").mkdir()
-        with pytest.raises(RuntimeError, match="cannot reap"):
-            try_acquire_pid_file(PID_KEY)
-
-    def test_release_allows_reacquire(self, monkeypatch, tmp_path):
-        monkeypatch.setattr("ccrecall.config.pid_file_path", lambda key: tmp_path / f".pid-{key}")
-        assert try_acquire_pid_file(PID_KEY) is True
-        remove_pid_file(PID_KEY)
-        assert try_acquire_pid_file(PID_KEY) is True
-
-    def test_cli_skips_when_instance_alive(self, capsys):
+    def test_cli_skips_when_another_instance_holds_the_lock(self, capsys, hold_job_lock):
+        holder = hold_job_lock(JOB_KEY)
         with (
-            patch("ccrecall.cli.commands.try_acquire_pid_file", return_value=False),
             patch("ccrecall.cli.commands.backfill_embeddings_mod.run") as mock_run,
-            patch("ccrecall.cli.commands.backfill_query_mod.cleanup_pid") as mock_cleanup,
             pytest.raises(SystemExit) as exc_info,
         ):
             cmd_backfill_embeddings()
 
         assert exc_info.value.code == EXIT_OK, "skip is not a failure — a scheduler shouldn't see non-zero"
         mock_run.assert_not_called()
-        # We never owned the marker, so we must not remove the live run's sentinel.
-        mock_cleanup.assert_not_called()
         assert "already running" in capsys.readouterr().err
+        state = job_lock.probe(JOB_KEY)
+        assert state is not None
+        assert (state.running, state.pid) == (True, holder)
 
-    def test_cli_acquires_and_cleans_up(self):
+    def test_cli_holds_the_lock_with_its_scope_while_running_then_releases(self):
+        seen: list[job_lock.JobState | None] = []
         with (
-            patch("ccrecall.cli.commands.try_acquire_pid_file", return_value=True),
-            patch("ccrecall.cli.commands.backfill_embeddings_mod.run", return_value=EXIT_OK),
-            patch("ccrecall.cli.commands.backfill_query_mod.cleanup_pid") as mock_cleanup,
+            patch(
+                "ccrecall.cli.commands.backfill_embeddings_mod.run",
+                side_effect=lambda **_kw: seen.append(job_lock.probe(JOB_KEY)) or EXIT_OK,
+            ),
             pytest.raises(SystemExit) as exc_info,
         ):
-            cmd_backfill_embeddings()
+            cmd_backfill_embeddings(days=14)
 
         assert exc_info.value.code == EXIT_OK
-        mock_cleanup.assert_called_once_with()
+        assert seen[0] is not None
+        assert (seen[0].running, seen[0].pid) == (True, os.getpid())
+        assert seen[0].scope == {"days": 14, "limit": None, "db": str(config.DEFAULT_DB_PATH.resolve())}
+        assert job_lock.probe(JOB_KEY) is None
 
-    def test_cli_cleans_up_on_run_exception(self):
+    @pytest.mark.parametrize("exc", [RuntimeError("boom"), KeyboardInterrupt()])
+    def test_cli_releases_on_an_exception_or_ctrl_c(self, exc):
         with (
-            patch("ccrecall.cli.commands.try_acquire_pid_file", return_value=True),
-            patch("ccrecall.cli.commands.backfill_embeddings_mod.run", side_effect=RuntimeError("boom")),
-            patch("ccrecall.cli.commands.backfill_query_mod.cleanup_pid") as mock_cleanup,
-            pytest.raises(RuntimeError),
+            patch("ccrecall.cli.commands.backfill_embeddings_mod.run", side_effect=exc),
+            pytest.raises(type(exc)),
         ):
             cmd_backfill_embeddings()
 
-        mock_cleanup.assert_called_once_with()
+        assert job_lock.probe(JOB_KEY) is None
 
-    def test_cli_status_never_touches_marker(self):
+    def test_cli_status_never_touches_the_lock(self, hold_job_lock):
+        holder = hold_job_lock(JOB_KEY)
         with (
-            patch("ccrecall.cli.commands.try_acquire_pid_file") as mock_acquire,
-            patch("ccrecall.cli.commands.backfill_embeddings_mod.run", return_value=EXIT_OK),
-            patch("ccrecall.cli.commands.backfill_query_mod.cleanup_pid") as mock_cleanup,
+            patch("ccrecall.cli.commands.backfill_embeddings_mod.run", return_value=EXIT_OK) as mock_run,
             pytest.raises(SystemExit),
         ):
             cmd_backfill_embeddings(status=True)
 
-        mock_acquire.assert_not_called()
-        mock_cleanup.assert_not_called()
+        mock_run.assert_called_once()
+        state = job_lock.probe(JOB_KEY)
+        assert state is not None
+        assert (state.running, state.pid) == (True, holder)
 
 
 class TestBackfillETAProgress:

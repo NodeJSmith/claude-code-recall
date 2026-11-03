@@ -8,8 +8,8 @@ from pathlib import Path
 import pytest
 from conftest import locked_error, make_jsonl_entry, seed_stale_tail_session, write_jsonl
 
-from ccrecall import run_history
-from ccrecall.config import PID_KEY_IMPORT, pid_file_path, remove_pid_file
+from ccrecall import job_lock, run_history
+from ccrecall.config import JOB_KEY_IMPORT
 from ccrecall.db import get_connection
 from ccrecall.hooks import import_conversations, import_repair
 from ccrecall.hooks.import_conversations import ProjectFailed, import_project_contained, run
@@ -212,25 +212,37 @@ class TestRun:
         monkeypatch.setattr(import_conversations, "lower_scheduling_priority", lambda _level: None)
 
     def test_plain_import_skips_while_another_import_runs(
-        self, memory_db, tmp_path, projects_dir, capsys, live_ccrecall_pid
+        self, memory_db, tmp_path, projects_dir, capsys, hold_job_lock
     ):
-        marker = pid_file_path(PID_KEY_IMPORT)
-        marker.parent.mkdir(parents=True, exist_ok=True)
-        marker.write_text(str(live_ccrecall_pid))  # a live process that isn't this one
-        try:
-            run(db=tmp_path / "memory.db", projects_dir=projects_dir)
+        holder = hold_job_lock(JOB_KEY_IMPORT)
 
-            assert "another import is already running" in capsys.readouterr().out
-            assert imported_sessions(memory_db) == set()
-            assert marker.exists(), "run() must not delete a marker it did not acquire"
-        finally:
-            remove_pid_file(PID_KEY_IMPORT)
+        run(db=tmp_path / "memory.db", projects_dir=projects_dir)
 
-    def test_plain_import_releases_the_guard_when_done(self, memory_db, tmp_path, projects_dir):
+        assert "another import is already running" in capsys.readouterr().out
+        assert imported_sessions(memory_db) == set()
+        state = job_lock.probe(JOB_KEY_IMPORT)
+        assert state is not None
+        assert (state.running, state.pid) == (True, holder), "run() must not touch a lock it did not acquire"
+
+    def test_plain_import_holds_the_lock_with_its_scope_then_releases(
+        self, memory_db, tmp_path, projects_dir, monkeypatch
+    ):
+        seen: list[job_lock.JobState | None] = []
+        real_import = import_conversations.import_project_contained
+
+        def probing_import(*args, **kwargs):
+            seen.append(job_lock.probe(JOB_KEY_IMPORT))
+            return real_import(*args, **kwargs)
+
+        monkeypatch.setattr(import_conversations, "import_project_contained", probing_import)
+
         run(db=tmp_path / "memory.db", projects_dir=projects_dir)
 
         assert imported_sessions(memory_db) == {"sess-aaa-first", "sess-zzz-second"}
-        assert not pid_file_path(PID_KEY_IMPORT).exists()
+        assert seen[0] is not None
+        assert seen[0].running
+        assert seen[0].scope == {"repair_gaps": False, "db": str((tmp_path / "memory.db").resolve())}
+        assert job_lock.probe(JOB_KEY_IMPORT) is None
 
     def test_aborted_run_still_reports_what_it_imported(self, tmp_path, projects_dir, monkeypatch, capsys):
         real_import = import_conversations.import_session
@@ -318,14 +330,10 @@ class TestRunRecording:
         assert self.last(tmp_path, "import")["outcome"] == "ok"
         assert self.last(tmp_path, "repair")["outcome"] == "ok"
 
-    def test_skipped_import_records_nothing(self, tmp_path, projects_dir, live_ccrecall_pid):
-        marker = pid_file_path(PID_KEY_IMPORT)
-        marker.parent.mkdir(parents=True, exist_ok=True)
-        marker.write_text(str(live_ccrecall_pid))
-        try:
-            run(db=tmp_path / "memory.db", projects_dir=projects_dir)
-        finally:
-            remove_pid_file(PID_KEY_IMPORT)
+    def test_skipped_import_records_nothing(self, tmp_path, projects_dir, hold_job_lock):
+        hold_job_lock(JOB_KEY_IMPORT)
+
+        run(db=tmp_path / "memory.db", projects_dir=projects_dir)
 
         assert run_history.read_runs(tmp_path / "memory.db") == {}
 

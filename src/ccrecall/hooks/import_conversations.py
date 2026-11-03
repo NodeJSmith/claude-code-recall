@@ -7,7 +7,6 @@ v3 schema: messages stored once per session, branches as separate index.
 """
 
 import logging
-import os
 import resource
 import sqlite3
 import time
@@ -15,17 +14,14 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import NamedTuple
 
-from ccrecall import ingestion_status, run_history
+from ccrecall import ingestion_status, job_lock, run_history
 from ccrecall.config import (
     DEFAULT_DB_PATH,
     get_db_path,
     load_settings,
-    pid_file_path,
-    remove_pid_file,
     setup_logging,
-    try_acquire_pid_file,
 )
-from ccrecall.config import PID_KEY_IMPORT as PID_KEY
+from ccrecall.config import JOB_KEY_IMPORT as JOB_KEY
 from ccrecall.db import DEFAULT_PROJECTS_DIR, get_connection
 from ccrecall.db_base import is_database_locked
 from ccrecall.db_vec import TRIGGER_CHUNKS_VEC_AD, vec_available
@@ -457,10 +453,8 @@ def run(
 
     Exits non-zero when any project import or gap repair failed.
     """
-    total_failures = 0
-    another_import_running = False
     try:
-        total_failures, another_import_running = _run(
+        total_failures = _run(
             db=db, projects_dir=projects_dir, project=project, verbose=verbose, repair_gaps=repair_gaps
         )
     except Exception:
@@ -475,23 +469,6 @@ def run(
         # still lands in the log even though _run itself failed.
         log.exception("Import process failed with an uncaught exception")
         raise
-    finally:
-        # Delete PID file so _spawn_background can spawn again next session,
-        # but only if this process owns it. A concurrent holder (e.g. a
-        # manual import, or the SessionStart auto-import) wrote
-        # its own PID; deleting their marker would let a third process start
-        # unguarded. When another_import_running is True we already know we don't
-        # own it; otherwise, verify by comparing the file's PID to ours.
-        if not another_import_running:
-            marker = pid_file_path(PID_KEY)
-            try:
-                stored_pid = int(marker.read_text().strip())
-            except (OSError, ValueError):
-                # Missing or corrupt marker — nothing to preserve.
-                remove_pid_file(PID_KEY)
-            else:
-                if stored_pid == os.getpid():
-                    remove_pid_file(PID_KEY)
     if total_failures:
         raise SystemExit(1)
 
@@ -572,22 +549,37 @@ def _run(
     project: str | None,
     verbose: bool,
     repair_gaps: bool,
-) -> tuple[int, bool]:
-    """Run the import and return ``(total_failures, another_import_running)``.
+) -> int:
+    """Run the import under the import job lock and return ``total_failures``.
 
-    ``total_failures`` counts failed projects plus failed gap repairs.
+    ``total_failures`` counts failed projects plus failed gap repairs. Only one
+    import runs at a time: when another holds the lock, this one skips (0).
     """
     settings = load_settings()
     logger = setup_logging(settings, process_name="import", verbose=verbose)
 
-    # Only one import runs at a time. The PID guard is acquired here, before the
-    # import loop starts, and held for the entire invocation (released by run()'s
-    # finally). A spawned child finds its own PID here, which counts as acquired.
-    if not try_acquire_pid_file(PID_KEY):
+    # A spawned child adopts the lock its spawner handed over (see job_lock.spawn).
+    lock = job_lock.acquire(JOB_KEY, scope=job_lock.import_scope(repair_gaps=repair_gaps, db=db))
+    if lock is None:
         print("ccrecall import: another import is already running — skipping this run")
-        logger.info("Import skipped — PID_KEY_IMPORT already held by a live process")
-        return 0, True
+        logger.info("Import skipped — another import holds the import job lock")
+        return 0
+    with lock:
+        return _import_locked(
+            settings, logger, db=db, projects_dir=projects_dir, project=project, repair_gaps=repair_gaps
+        )
 
+
+def _import_locked(
+    settings: dict,
+    logger: logging.Logger,
+    *,
+    db: Path,
+    projects_dir: Path,
+    project: str | None,
+    repair_gaps: bool,
+) -> int:
+    """The import itself; the caller holds the import job lock."""
     # Repair scans every transcript, usually spawned at SessionStart next to the
     # session that just started, so yield under CPU contention like the backfills.
     if repair_gaps:
@@ -713,4 +705,4 @@ def _run(
                 run_history.OUTCOME_PARTIAL,
                 run_history.REASON_DATABASE_BUSY if busy else run_history.REASON_ERROR,
             )
-    return total_failures, False
+    return total_failures

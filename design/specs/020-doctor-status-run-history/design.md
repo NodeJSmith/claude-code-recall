@@ -12,7 +12,7 @@ A user can't tell from ccrecall whether it's healthy, what's wrong, or what to d
 
 This change adds three things that depend on each other:
 
-1. **A record of background runs (#234).** Import, repair, sync and embedding backfill each write a finish record to a small per-database file that keeps the newest run and the last success of each kind. A run that never finished is read from the PID marker it left behind.
+1. **A record of background runs (#234).** Import, repair, sync and embedding backfill each write a finish record to a small per-database file that keeps the newest run and the last success of each kind. A run that never finished is read from the job lock's record it left behind (D4).
 2. **`ccrecall doctor` (#235).** It reads the database without changing it and reports findings grouped by what the user should do, with exact commands.
 3. **A terse `ccrecall status` (#237).** A verdict line and a few plain numbers, rendered from the same findings as `doctor`.
 
@@ -22,14 +22,15 @@ The already-decided split: `doctor` is the diagnosis, `status` is the glance, an
 
 **Where things live:**
 
-- `src/ccrecall/run_history.py` (new): both sidecars' paths and read/write (`<db>.runs.json` and `<db>.unrepairable.json`), the finish record, and deriving `running` or `killed` from a kind's PID marker. The `backfill` kind means embedding backfill only; `backfill tool-content` and `backfill summaries` record nothing. Imports no vector or embedding modules. Called from `hooks/import_conversations.py`, `hooks/sync_current.py` and `hooks/backfill_embeddings.py`.
+- `src/ccrecall/run_history.py` (new): both sidecars' paths and read/write (`<db>.runs.json` and `<db>.unrepairable.json`), the finish record, and deriving `running` or `killed` from a kind's job lock (D4). The `backfill` kind means embedding backfill only; `backfill tool-content` and `backfill summaries` record nothing. Imports no vector or embedding modules. Called from `hooks/import_conversations.py`, `hooks/sync_current.py` and `hooks/backfill_embeddings.py`.
 - `src/ccrecall/findings.py` (new): the `Finding` type, the catalog of checks, per-check isolation, and reducing findings to a verdict. It decides what a state means for `doctor` and `status`; SessionStart alerts keep their own hot-path checks.
 - `src/ccrecall/health.py`: owns, as constants, the fix commands alerts and findings share, and `findings.py` imports them. The direction is forced: `health.py` can't import `findings.py`, which imports `db_vec` (invariant 3). Alert behavior doesn't change.
 - `src/ccrecall/status.py`: renders both commands from findings: the verdict and second line for `status`, the full report, listing and exit codes for `doctor`, and their shared `--json` shape. `collect_status` and `print_status_report` are removed (D11); `findings.py` gathers what it needs through the existing counters, and `_readonly_connection` moves there, since `status.py` imports `findings.py`.
 - `src/ccrecall/ingestion_status.py`: `summarize_ingestion` stops writing the ok-verdict cache (D1), so it can run on a read-only connection. `find_repairable_sessions` keeps writing it.
 - `src/ccrecall/hooks/import_repair.py`: `repair_sessions` also returns the ids of sessions it couldn't fix, and the repair path writes them to `<db>.unrepairable.json`, through `run_history.py` (D9).
-- `src/ccrecall/config.py`: the `backfill_stale_hours` setting (D7), and the ccrecall-process check in `read_marker_holder` (D4).
-- `src/ccrecall/hooks/memory_setup.py`: `_spawn_background` reads its marker through `read_marker_holder` (D4).
+- `src/ccrecall/config.py`: the `backfill_stale_hours` setting (D7). The PID-marker functions (`try_acquire_pid_file`, `remove_pid_file`, `live_pid_holder`, `read_marker_holder`, `is_ccrecall_process`) are removed (D4).
+- `src/ccrecall/job_lock.py` (new): the single-instance job lock that replaces the PID markers: acquire, adopt a lock handed over by the spawner, release, and the read-only probe `doctor` and sync use (D4). Standard library only, so the hook path can import it.
+- `src/ccrecall/hooks/memory_setup.py`: `_spawn_background` takes the job's lock and hands it to the child (D4).
 - `src/ccrecall/cli/commands.py`: the `doctor` command and the changed `status` flags. `cli/__init__.py` and `recent_chats.py` update their references.
 
 ## Posture
@@ -113,19 +114,28 @@ A recording failure is logged and never fails the run. The read, merge and write
 
 **Deciding factor:** keep #234's "killed is detectable" with no new PID state.
 
-| | A: Finish records only, killed not reported | B: Start and finish records with a PID | C: Finish records; `running` or `killed` read from the PID marker |
-|---|---|---|---|
-| #234 "killed is detectable" | Fails | Met | Met |
-| Sidecar writes per recorded run | 1 | 2 | 1 |
-| New PID state | None | PID in every record | None |
-| Killed run against a `--db` copy | Not reported | Stays in the copy's history | Shows in every database's `doctor` until the next run of that kind |
-| PID-reuse exposure | Existing guard only | Guard and record | Only another ccrecall process on that PID, once the holder must be ccrecall: any other reused PID reads as dead, and the next acquire reaps it |
-| What peers do | Kopia writes on finish, no start marker | Healthchecks takes a start ping | restic's PID lock is the closest match |
+| | A: Finish records only, killed not reported | B: Start and finish records with a PID | C: Finish records; `running` or `killed` read from the PID marker | D: Finish records; `running` from a kernel-held lock, `killed` from the record a dead holder left in it |
+|---|---|---|---|---|
+| #234 "killed is detectable" | Fails | Met | Met | Met |
+| Sidecar writes per recorded run | 1 | 2 | 1 | 1 |
+| New PID state | None | PID in every record | None | A small record in the lock file: PID, start time, scope |
+| Killed run against a `--db` copy | Not reported | Stays in the copy's history | Shows in every database's `doctor` until the next run of that kind | Same as C |
+| PID-reuse exposure | Existing guard only | Guard and record | Only another ccrecall process on that PID, once the holder must be ccrecall: any other reused PID reads as dead, and the next acquire reaps it | None: the kernel releases the lock when the holder dies, and no reader probes a PID |
+| What peers do | Kopia writes on finish, no start marker | Healthchecks takes a start ping | restic's PID lock is the closest match | filelock's `UnixFileLock` and the flock(1) cron idiom; the record-in-the-lock recipe has no shipped implementation (prior-art 2026-11-03) |
 
-**Recommendation:** C. A marker with a live PID reads as `running`, and one with a dead PID reads as `killed`. The marker's modified time is when the run started (it's written at acquire, or at spawn, and never touched again), so findings say "started at", never a kill time. Only a parseable, dead PID reads as `killed`; an empty or corrupt marker (`_spawn_background` creates it empty and writes the PID after `Popen` returns) reads as no marker, using `read_marker_holder`'s existing exception types. A PID counts as live only when it's a ccrecall process. When the signal-0 probe finds the PID alive and it isn't the caller's own (the own-PID case skips every probe, as today, since `_spawn_background` writes the child's PID first), `read_marker_holder` runs `ps -p <pid> -o command=` and looks for a whitespace-separated token whose basename is one of the package's console scripts: `ccrecall`, or `ccrecall-` followed by letters and hyphens only (so `.../bin/ccrecall import` and `ccrecall-warm-model`, which holds its own marker, match, and `tail -f ccrecall-import.log` doesn't). When `ps` succeeds and prints a command line with no such token, the holder raises `ProcessLookupError`, as a dead holder does, so `try_acquire_pid_file` reaps it and `live_pid_holder` returns None. When `ps` fails, is missing, or prints nothing, the PID stays live, as a `PermissionError` does today: a guard that can't identify its holder must not let a second backfill start. Tests that stand in a live holder need one whose command line has a `ccrecall` token. `_spawn_background` uses `read_marker_holder` instead of its own `os.kill` probe, so the guard, the spawn path and `doctor` share one liveness rule; today the spawn path counts `PermissionError` as dead while the others count it as alive. The finish record carries `started_at`, which with the marker's time is how #234's "record start" is met. `repair` has no marker of its own: it runs inside `import --repair-gaps`, so a killed one reads as one killed import. No heartbeat: the age limit in D6 and D7 covers a live run that stopped making progress.
+**Recommendation:** D, superseding C after the ship-time challenge found five more findings against C's PID inference (`ps` output clipped by `COLUMNS`, the regex matching coincidental arguments or missing `python -m`, a triple read racing re-acquire, an unreadable marker blocking spawns, and `doctor` claiming a running job will fix work it won't), on top of four at the sketch challenge. Prior art: design/research/2026-11-03-job-lock-liveness/prior-art.md.
+
+Each job kind has a lock file in the runtime directory, `.lock-<key>`, created once and not deleted in normal operation (deleting a locked file splits waiters across inodes); the one exception is below. A job runs only while it holds an exclusive, nonblocking `flock` on it; a job that can't get it skips, as today. On acquiring, the holder writes a JSON record into the file: its PID, the kind, when it started, and its scope (an import's `repair_gaps`; a backfill's `days` and `limit`; and the database it works on). On a clean exit, including Ctrl-C, it empties the file before closing it. So:
+
+- **Running:** the lock is held. A reader learns this from the kernel by trying a shared, nonblocking `flock` and releasing it at once; no reader probes a PID or runs `ps`.
+- **Killed:** the lock is free and a record is left. The record's `started_at` is when the run started, so findings say "started at", never a kill time.
+- **Finished, or never run:** the lock is free and the file is empty or missing.
+- **What a run covers:** read from the record's scope, so `fixable-sessions` counts a running import as repairing only when its scope has `repair_gaps`, and the backlog counts a running backfill as draining it only when it is unscoped. Either counts only when the scope's database is the one `doctor` is diagnosing.
+
+A record that doesn't parse while the lock is held reads as running with no details; one that doesn't parse while the lock is free reads as no run. `_spawn_background` takes the lock itself, writes a record naming the spawn (no PID yet), and passes the open descriptor to the child with `pass_fds`, naming it in an environment variable; the child adopts that descriptor instead of acquiring, rewrites the record with its own PID and scope, and the parent closes its copy. Since the lock belongs to the open file description, it passes to the child without a gap, so two SessionStarts can't spawn two copies. A lock file that can't be opened (owned by another user, say) is unlinked and recreated, since the runtime directory is the user's own. `repair` has no lock of its own: it runs inside `import --repair-gaps`. No heartbeat: the age limit in D6 and D7 covers a live run that stopped making progress.
 **Pick B instead if** killed runs must be attributed to a specific database. **Pick A instead if** you'd amend #234 and rely on D7's clock alone.
 **Reversibility:** easy
-**Ratified:** Chose finish records with `running` and `killed` read from the existing PID marker over start records or not reporting kills, to keep killed runs detectable with one write and no new PID state, accepting that a killed run against a `--db` copy shows in the live `doctor` until that kind's next run. A live PID must be a ccrecall process, checked with `ps` in the one shared liveness reader, over rewording the stuck fix or accepting reuse, so a PID reused by anything but another ccrecall process never reads as running, never blocks that kind's runs, and never gets a kill instruction, accepting a `ps` call whenever a marker's PID is alive, including on the hook path, and that a `ps` failure leaves the PID read as live. Also accepted as known limitations: a spawned job that dies before reaching its own code reads as `killed`, and a repeating one stays "working on it" while its harm shows through `fixable-sessions`; and a kill between a finish record and the marker's removal reads as `killed` until that kind's next run.
+**Ratified:** Chose finish records with `running` read from a kernel-held `flock` and `killed` from the record a dead holder leaves in the lock file, over C's PID marker with `kill -0` and a `ps` command-line check, to stop every reader inferring a job's liveness, identity and scope from a bare PID, accepting a rewrite of the job guard, the spawn path and their tests on this branch; that `doctor`'s probe briefly holds a shared lock, so a job starting in that instant skips and the next trigger runs it; that a job still running an older version during an upgrade holds no lock the new version sees; and that a killed run against a `--db` copy shows in the live `doctor` until that kind's next run. Also accepted as known limitations: a spawned job that dies before reaching its own code reads as `killed`, and a repeating one stays "working on it" while its harm shows through `fixable-sessions`; and a kill between a finish record and the lock's release reads as `killed` until that kind's next run.
 
 ### D5: What shape is a finding, and how does the verdict come from findings?
 
@@ -149,22 +159,22 @@ A recording failure is logged and never fails the run. The read, merge and write
 
 **Situation:** This catalog is what makes the verdict mean something. The live question is ordinary backlog: on a normal install, a few sessions are nearly always queued for embedding, so if queued work counts as "working on it", that becomes the usual verdict during the day. #235's example lists queued sessions under "Working on it". The catalog below applies the recommended option. Sessions in progress are kept out of the backlog either way, because `status` is usually run from inside one.
 
-`<kind>` is `import`, `repair`, `sync` or `backfill` for failed runs. Marker-derived findings cover the kinds with a marker (D4): `import`, `sync` and `backfill` for killed runs, and `import` and `backfill` for running and stuck, since a sync is over in seconds. Findings marked listed name sessions (D12).
+`<kind>` is `import`, `repair`, `sync` or `backfill` for failed runs. Job-lock-derived findings cover the kinds with a job lock (D4): `import`, `sync` and `backfill` for killed runs, and `import` and `backfill` for running and stuck, since a sync is over in seconds. Findings marked listed name sessions (D12).
 
 | Finding | `id` | Group | Fix |
 |---|---|---|---|
 | No database yet | `no-database` | Needs action | `ccrecall import` |
 | Schema behind (`user_version` below this install's); database checks skip because they can't read an old shape | `schema-behind` | Needs action | `ccrecall import` |
 | Schema ahead (`describe_schema_ahead`); checks still run best-effort | `schema-ahead` | Needs action | upgrade ccrecall |
-| Fixable incomplete sessions (see D9), listed | `fixable-sessions` | Needs action; working on it while an import holds its PID guard | `ccrecall import --repair-gaps` |
+| Fixable incomplete sessions (see D9), listed | `fixable-sessions` | Needs action; working on it while an import that repairs gaps on this database holds its job lock | `ccrecall import --repair-gaps` |
 | Embedding unavailable: vector extension won't load, the `embedding-status.json` record says failing, or the model isn't cached on disk. Read from those sources only; `doctor` never loads the model | `embedding-unavailable` | Needs action | named per cause |
 | Backlog past the limit, unless a live run applies (see D7), listed | `embedding-backlog` | Needs action | `ccrecall backfill embeddings` |
 | Failed run (see D8) | `<kind>-failed` | Needs action or working on it | rerun that command |
 | Runtime dir or database not writable (`os.access`; no write probe) | `not-writable` | Needs action | check permissions and disk |
 | More than one active branch for a session | `duplicate-active-branch` | Needs action | none; report a bug |
-| Run looks stuck (import or backfill PID live, older than `backfill_stale_hours`). Says when it started and its PID, without claiming it's dead | `<kind>-stuck` | Needs action | kill that PID and rerun, if it's no longer making progress |
-| Job running now (import or backfill PID live, younger than `backfill_stale_hours`) | `<kind>-running` | Working on it | none |
-| Killed run (dead PID marker, see D8) | `<kind>-killed` | Working on it; nothing to do once the marker is older than `backfill_stale_hours` | rerun that command |
+| Run looks stuck (import or backfill job lock held, older than `backfill_stale_hours`). Says when it started and its PID, without claiming it's dead | `<kind>-stuck` | Needs action | kill that PID and rerun, if it's no longer making progress |
+| Job running now (import or backfill job lock held, younger than `backfill_stale_hours`) | `<kind>-running` | Working on it | none |
+| Killed run (a record left in a free job lock, see D4 and D8) | `<kind>-killed` | Working on it; nothing to do once the killed run started longer ago than `backfill_stale_hours` | rerun that command |
 | Backlog within the limit: queued sessions, repaired sessions awaiting embedding, and exchanges missing vectors, each named separately, listed | `embedding-backlog` | Working on it | none |
 | Sessions in progress (`pending_tail`, or queued and active within the last 15 minutes), listed | `sessions-in-progress` | Nothing to do | none |
 | Deleted transcripts, messages still stored and searchable, listed | `deleted-transcripts` | Nothing to do | none |
@@ -209,7 +219,7 @@ The right limit differs by install, so it's a `backfill_stale_hours` setting in 
 | Cost | One `MIN(ended_at)` query | None | One `MIN(ended_at)` query |
 | What peers do | unknown | Healthchecks' period and grace time are closest | unknown |
 
-**Recommendation:** A. A backlog is "needs action" when no successful backfill has finished within the limit (including none recorded) and a backlog session (queued, repaired awaiting embedding, or with exchanges missing vectors) ended longer ago than the limit. An install with a working nightly job can see "needs action" right after upgrade until its first recorded run; the fix shown is harmless, and no baseline timestamp is stored to soften this. A `partial`, `failed` or `killed` backfill doesn't count as successful, and neither does a scoped one: a run with `--limit` or `--days` writes `last` but never advances `last_ok`. The finding names the last backfill's outcome and when it started ("last run, started 01:15, was killed"); a killed run's marker records only its start (D4). A live backfill PID means "working on it" until the run is older than the limit, when D6's stuck row applies instead: the longest real backfill on the maintainer's machine took 2.45h, and a full re-embed is estimated at 11-13h. Draft-only sessions use the last-successful-backfill clock alone (`last_ok`), since they never need action; D6 gives both sides of it.
+**Recommendation:** A. A backlog is "needs action" when no successful backfill has finished within the limit (including none recorded) and a backlog session (queued, repaired awaiting embedding, or with exchanges missing vectors) ended longer ago than the limit. An install with a working nightly job can see "needs action" right after upgrade until its first recorded run; the fix shown is harmless, and no baseline timestamp is stored to soften this. A `partial`, `failed` or `killed` backfill doesn't count as successful, and neither does a scoped one: a run with `--limit` or `--days` writes `last` but never advances `last_ok`. The finding names the last backfill's outcome and when it started ("last run, started 01:15, was killed"); a killed run's record says only when it started (D4). A held backfill job lock, for an unscoped run on this database, means "working on it" until the run is older than the limit, when D6's stuck row applies instead: the longest real backfill on the maintainer's machine took 2.45h, and a full re-embed is estimated at 11-13h. Draft-only sessions use the last-successful-backfill clock alone (`last_ok`), since they never need action; D6 gives both sides of it.
 **Pick B instead if** you'd accept the false alarm after a machine was off for a simpler rule. **Pick C instead if** you think of this as "nothing waits longer than N hours" and repaired old sessions flagging is fine.
 
 A scoped run (`--limit`, `--days`, both in the README's seeding section) can finish `ok` after touching a sliver of the backlog:
@@ -226,7 +236,7 @@ How long a live run counts as working on it, with A chosen because it needs no s
 |---|---|---|---|---|
 | Hung run flagged | At the limit | At the limit | Never | At 24h |
 | Real long run | Flagged only past the limit, which no real run here approaches | False alarm on every first backfill, with a fix the guard skips | Never flagged | A machine about twice as slow could false-alarm on a full re-embed |
-| New state | None; the marker's modified time | None | None | One constant |
+| New state | None; the job lock record's start time | None | None | One constant |
 
 **Reversibility:** easy for the clock; the setting's name is a contract once released
 **Ratified:** Chose a `backfill_stale_hours` setting (default 72) with both clocks past the limit over a single clock, to fit each install's schedule with no false alarm after downtime, accepting one more documented setting, likely changed by few installs, and one extra query. A live run counts as working on it only under the same limit, so a hung job surfaces with no second number, accepting that a run legitimately longer than the limit is reported by `<kind>-stuck`. Only an unscoped backfill advances `last_ok`, over recording the scope or counting scoped runs, so `last_ok` means the whole backlog was worked, accepting that a scoped schedule alone keeps the alarm up.
@@ -245,7 +255,7 @@ How long a live run counts as working on it, with A chosen because it needs no s
 | A busy failure with no retry coming | State findings catch it: gaps stay fixable (D6), backlog passes the limit (D7) | Reported directly | Never reported |
 | What peers do | restic splits locked from other failures | Homebrew's non-zero-on-anything, later softened | Healthchecks' grace time is similar in spirit |
 
-**Recommendation:** A, because a run failing is only worth action when no later run or state finding will take care of it, and those findings already catch a retry that never comes. A later success of that kind clears it, and the next run's acquire removes a dead marker. Outcomes are `ok`, `partial` (finished with some failures) and `failed`, plus `running` and `killed`, read from the marker (D4). Failure reasons are plain categories: `database_busy`, `vector_unavailable`, `model_unavailable`, `error`. A `partial` import or repair follows the same rule by its reason. A backfill is `partial` when a branch failed for a reason the next run can retry, such as a lock timeout. A per-row content error is marked and never retried, so it doesn't make a run `partial`: otherwise `last_ok` could never advance and D7's alarm would point at a command that can't clear it.
+**Recommendation:** A, because a run failing is only worth action when no later run or state finding will take care of it, and those findings already catch a retry that never comes. A later success of that kind clears it, and the next run's acquire replaces a killed run's record. Outcomes are `ok`, `partial` (finished with some failures) and `failed`, plus `running` and `killed`, read from the job lock (D4). Failure reasons are plain categories: `database_busy`, `vector_unavailable`, `model_unavailable`, `error`. A `partial` import or repair follows the same rule by its reason. A backfill is `partial` when a branch failed for a reason the next run can retry, such as a lock timeout. A per-row content error is marked and never retried, so it doesn't make a run `partial`: otherwise `last_ok` could never advance and D7's alarm would point at a command that can't clear it.
 **Pick B instead if** you'd rather see every failure and clear it by rerunning. **Pick C instead if** repeated failure is the only signal you care about.
 A killed run only stays "working on it" while a retry is plausible:
 
@@ -255,7 +265,7 @@ A killed run only stays "working on it" while a retry is plausible:
 | Killed backfill with sessions queued | D7 flags it and names the kill | Two needs-action findings for one cause | D7 flags it and names the kill |
 | New rule | One comparison | One comparison | None |
 
-A Ctrl-C (`KeyboardInterrupt`) runs `finally` and removes the marker, so it never reads as killed. Only attended runs get one; spawned jobs run detached with stdin on DEVNULL (`subprocess_utils.py:14-21`):
+A Ctrl-C (`KeyboardInterrupt`) runs `finally` and empties the job lock's record, so it never reads as killed. Only attended runs get one; spawned jobs run detached with stdin on DEVNULL (`subprocess_utils.py:14-21`):
 
 | Ctrl-C on a manual run | A: Records nothing | B: Records `partial`, reason `interrupted` | C: Records `failed` |
 |---|---|---|---|
@@ -365,8 +375,8 @@ An `Exception` records `failed` with reason `error`, including the one sync swal
 - `get_connection` applies migrations, so `doctor` and `status` must use `_readonly_connection`. Removing `--check-ingestion` from `status` also resolves #182 item 1. Evidence: `status.py:29`, #182.
 - `cli` already imports the vector stack, so `findings.py` importing `db_vec` costs nothing new on these commands, and neither command is on a hook path. `run_history.py` must stay free of those imports, per #234. Evidence: `CLAUDE.md` invariant 2; `status.py:16`.
 - `import_conversations.run`, `sync_current.run` and `backfill_embeddings.run` each have one entry point where a run's start is known, though not one exit (abort paths pass their reason, D8), and `report_repair` already sees the repair counts, including an aborted batch through `RepairAborted.counts`. Evidence: `import_conversations.py:441`, `:492`, `:530`; `sync_current.py:157`; `backfill_embeddings.py:117`.
-- Every job removes its PID marker when it finishes, and only the next acquire reaps a dead one, so a marker with a dead PID means that run never finished. Evidence: `hooks/sync_current.py:285`, `hooks/import_conversations.py:472-487`, `hooks/backfill_query.py:27`, `config.py:129-134`; no markers present in `~/.ccrecall` on 2026-11-02 with no job running.
-- `ps -p <pid> -o command=` works with the same flags on Linux (procps) and macOS (BSD ps), needs no elevation for the user's own processes (markers are written only by ccrecall jobs the user runs), and costs about 13ms. Evidence: ten calls took 0.13s on this machine, 2026-11-03; `/proc/1/cmdline` (root's) was readable unprivileged; spawned jobs run the `ccrecall` console script (`pyproject.toml` `[project.scripts]`; `memory_setup.py:74`).
+- An exclusive `flock` taken by a parent and handed to a child with `subprocess.Popen(pass_fds=...)` stays held after the parent closes its copy, and is released when the child exits or is killed with `SIGKILL`; a shared nonblocking `flock` from another process reports it held. Descriptors Python opens are non-inheritable by default, so the child's own subprocesses don't keep the lock. Evidence: a probe script on this machine (Linux, Python 3), 2026-11-03. On macOS `flock` is BSD's own call with the same open-file-description semantics; not run there.
+- The runtime directory is local to the machine, since it sits beside the database in `~/.ccrecall` by default, so `flock`'s weak semantics on NFS and CIFS don't apply. Windows is unsupported (CLAUDE.md).
 - `backfill embeddings --status` returns before any work, so it records nothing. Evidence: `backfill_embeddings.py:141`.
 - Hook stdout stays untouched: recording prints nothing. Evidence: `CLAUDE.md` invariant 1.
 - No `doctor` command exists yet. Evidence: `cli/commands.py`; grep of `src/`.
@@ -386,7 +396,7 @@ An `Exception` records `failed` with reason `error`, including the one sync swal
 - `doctor --list` exits 0 whatever the verdict: a listing isn't a gate.
 - A WAL database in a directory ccrecall can't write to can't be opened even read-only, because SQLite must create its `-shm` file. `doctor` then exits 2 and `status` exits 1, with the not-writable reason in the error, instead of a `not-writable` finding. A read-only open also recreates the `-wal` and `-shm` files when they're missing; the database file itself is untouched.
 - To tell a busy run from a failed one, `RepairCounts` gained `locked` and `unfixable`, and `import_project_contained` returns `ProjectFailed(locked)` instead of `None`.
-- Sync's PID key moved into `config.py` as `PID_KEY_SYNC`, beside the other jobs' keys, so `run_history.py` can name it without importing the sync hook. `health._locked_status_file` became the public `locked_sidecar`, since the run-history files share it.
+- Sync's job lock key moved into `config.py` as `JOB_KEY_SYNC`, beside the other jobs' keys, so `run_history.py` can name it without importing the sync hook. `health._locked_status_file` became the public `locked_sidecar`, since the run-history files share it.
 - `embedding-unavailable` is one finding listing every cause, with the first cause's fix.
 - `skipped-by-design` is always present, in "nothing to do".
 - An `import --repair-gaps` whose repair fails records a `partial` import as well as a failed repair, as D8 states, so one cause can show as both `import-failed` and `repair-failed`.

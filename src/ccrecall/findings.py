@@ -26,7 +26,7 @@ from typing import NamedTuple, TypeVar
 
 from whenever import Instant
 
-from ccrecall import config, health, run_history
+from ccrecall import config, health, job_lock, run_history
 from ccrecall.config import resolve_backfill_stale_hours
 from ccrecall.db import CHUNK_DRAFT_QUALITY_FILTER, CHUNK_EMBEDDABLE_BRANCH_FILTER, CONTENT_ERROR_VERSION
 from ccrecall.db_base import SCHEMA_VERSION, describe_schema_ahead
@@ -112,7 +112,7 @@ FINDING_IDS = frozenset(
         "tool-content-pending",
         "check-failed",
         *(f"{kind}-failed" for kind in run_history.RUN_KINDS),
-        *(f"{kind}-killed" for kind in run_history.KIND_PID_KEYS),
+        *(f"{kind}-killed" for kind in run_history.KIND_JOB_KEYS),
         *(f"{kind}-running" for kind in _LONG_RUNNING_KINDS),
         *(f"{kind}-stuck" for kind in _LONG_RUNNING_KINDS),
     }
@@ -187,7 +187,7 @@ class Scan:
     now: Instant
     stale_seconds: float
     runs: Mapping[str, dict]
-    markers: Mapping[str, run_history.MarkerState | None]
+    job_states: Mapping[str, job_lock.JobState | None]
 
 
 @dataclass
@@ -246,7 +246,7 @@ def diagnose(db_path: Path, settings: dict) -> Diagnosis:
         now=now,
         stale_seconds=resolve_backfill_stale_hours(settings.get("backfill_stale_hours")) * health.SECONDS_PER_HOUR,
         runs=run_history.read_runs(db_path),
-        markers={kind: run_history.read_marker(kind) for kind in run_history.KIND_PID_KEYS},
+        job_states={kind: job_lock.probe(key) for kind, key in run_history.KIND_JOB_KEYS.items()},
     )
     results = Results()
     summary: dict[str, object] = {"sessions": 0, "embedded_pct": None, "last_sync": last_sync_iso(scan.runs)}
@@ -382,7 +382,7 @@ def last_sync_iso(runs: Mapping[str, dict]) -> str | None:
 
 
 def run_findings(scan: Scan) -> list[Found]:
-    """Failed, killed, running and stuck runs, from the run history and the PID markers."""
+    """Failed, killed, running and stuck runs, from the run history and the job locks."""
     found: list[Found] = []
     for kind in run_history.RUN_KINDS:
         last = scan.runs.get(kind, {}).get("last")
@@ -409,47 +409,52 @@ def run_findings(scan: Scan) -> list[Found]:
             )
         )
 
-    for kind, marker in scan.markers.items():
-        if marker is None:
+    for kind, state in scan.job_states.items():
+        if state is None:
             continue
-        age = (scan.now - marker.started_at).total("seconds")
         label = _KIND_LABELS[kind]
-        started = format_when(marker.started_at)
-        if not marker.running:
+        a_label = f"{'An' if label[0] in 'aeiou' else 'A'} {label}"
+        started = "at an unknown time" if state.started_at is None else format_when(state.started_at)
+        pid_note = "" if state.pid is None else f" (PID {state.pid})"
+        # A running job whose record doesn't parse has no start time, so it can't be stuck.
+        age = None if state.started_at is None else (scan.now - state.started_at).total("seconds")
+        if not state.running:
             found.append(
                 Found(
                     Finding(
                         id=f"{kind}-killed",
-                        group=GROUP_WORKING if age < scan.stale_seconds else GROUP_NONE,
+                        group=GROUP_WORKING if age is None or age < scan.stale_seconds else GROUP_NONE,
                         message=(
-                            f"A {label} started {started} (PID {marker.pid}) was killed before it finished. "
+                            f"{a_label} started {started}{pid_note} was killed before it finished. "
                             "The next run of that kind starts over cleanly."
                         ),
                         fix=_KIND_FIXES[kind],
                     )
                 )
             )
-        elif kind in _LONG_RUNNING_KINDS and age >= scan.stale_seconds:
+        elif kind in _LONG_RUNNING_KINDS and age is not None and age >= scan.stale_seconds:
+            stop = f"kill {state.pid}" if state.pid is not None else f"stop the running {label}"
             found.append(
                 Found(
                     Finding(
                         id=f"{kind}-stuck",
                         group=GROUP_ACTION,
                         message=(
-                            f"A {label} has been running since {started} (PID {marker.pid}), "
+                            f"{a_label} has been running since {started}{pid_note}, "
                             f"longer than backfill_stale_hours. It may still be making progress."
                         ),
-                        fix=f"if it's no longer making progress, kill {marker.pid}, then run `{_KIND_FIXES[kind]}`",
+                        fix=f"if it's no longer making progress, {stop}, then run `{_KIND_FIXES[kind]}`",
                     )
                 )
             )
         elif kind in _LONG_RUNNING_KINDS:
+            running_since = "" if state.started_at is None else f", started {started}"
             found.append(
                 Found(
                     Finding(
                         id=f"{kind}-running",
                         group=GROUP_WORKING,
-                        message=f"A {label} is running, started {started} (PID {marker.pid}).",
+                        message=f"{a_label} is running{running_since}{pid_note}.",
                     )
                 )
             )
@@ -559,19 +564,24 @@ def ingestion_findings(
 
     found: list[Found] = []
     if fixable:
-        import_marker = scan.markers.get(run_history.KIND_IMPORT)
-        importing = import_marker is not None and import_marker.running
+        import_state = scan.job_states.get(run_history.KIND_IMPORT)
+        repairing = job_lock.repairs_gaps(import_state, scan.db_path)
+        if repairing:
+            note = "; the running import repairs them."
+        elif import_state is not None and import_state.running and import_state.scope is None:
+            note = ". An import is running, but what it covers can't be read."
+        elif job_lock.scope_on(import_state, scan.db_path) is not None:
+            note = ". An import is running, but it doesn't repair gaps."
+        else:
+            note = "."
         found.append(
             Found(
                 Finding(
                     id="fixable-sessions",
-                    group=GROUP_WORKING if importing else GROUP_ACTION,
-                    message=(
-                        f"{plural(len(fixable), 'session')} missing messages their transcripts still have"
-                        + ("; the running import repairs them." if importing else ".")
-                    ),
+                    group=GROUP_WORKING if repairing else GROUP_ACTION,
+                    message=f"{plural(len(fixable), 'session')} missing messages their transcripts still have{note}",
                     count=len(fixable),
-                    fix=None if importing else health.FIX_REPAIR,
+                    fix=None if repairing else health.FIX_REPAIR,
                     listable=True,
                 ),
                 rows_for(fixable, lookup),
@@ -785,12 +795,19 @@ def backlog_finding(
     detail = ", ".join(part for part in parts if not part.startswith("0 "))
     message = f"{plural(total, 'session')} waiting for embedding ({detail})."
 
-    backfill_marker = scan.markers.get(run_history.KIND_BACKFILL)
-    if backfill_marker is not None and backfill_marker.running:
+    backfill_state = scan.job_states.get(run_history.KIND_BACKFILL)
+    # A backfill on another database (--db) does nothing for this one, so it reads as no backfill.
+    scope_unknown = backfill_state is not None and backfill_state.running and backfill_state.scope is None
+    backfilling = scope_unknown or job_lock.scope_on(backfill_state, scan.db_path) is not None
+    if job_lock.drains_backlog(backfill_state, scan.db_path):
         group = GROUP_WORKING
         message += " The running backfill is working through them."
         fix = None
     else:
+        if scope_unknown:
+            message += " A backfill is running, but what it covers can't be read."
+        elif backfilling:
+            message += " A backfill limited with --days or --limit is running; it may not reach them all."
         ended = [parse_instant(ended_at) for entries in backlog.values() for _, ended_at in entries]
         oldest = min((instant for instant in ended if instant is not None), default=None)
         overdue = oldest is not None and (scan.now - oldest).total("seconds") > scan.stale_seconds
@@ -798,7 +815,7 @@ def backlog_finding(
             group = GROUP_ACTION
             message += (
                 f" No full backfill has succeeded in the last {scan.stale_seconds / health.SECONDS_PER_HOUR:g} hours"
-                f" ({describe_last_backfill(scan)}), so nothing is draining them."
+                f" ({describe_last_backfill(scan)})" + ("." if backfilling else ", so nothing is draining them.")
             )
             fix = health.FIX_BACKFILL_EMBEDDINGS
         else:
@@ -818,9 +835,9 @@ def backfill_succeeded_within(scan: Scan, seconds: float) -> bool:
 
 
 def describe_last_backfill(scan: Scan) -> str:
-    marker = scan.markers.get(run_history.KIND_BACKFILL)
-    if marker is not None and not marker.running:
-        return f"last run, started {format_when(marker.started_at)}, was killed"
+    state = scan.job_states.get(run_history.KIND_BACKFILL)
+    if state is not None and not state.running:
+        return f"last run, started {format_when(state.started_at)}, was killed"
     last = scan.runs.get(run_history.KIND_BACKFILL, {}).get("last")
     if not isinstance(last, dict):
         return "no backfill has been recorded"

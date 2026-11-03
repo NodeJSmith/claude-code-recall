@@ -1,8 +1,8 @@
 """ccrecall subcommand definitions.
 
 Each command is a thin cyclopts wrapper that parses typed parameters and calls
-the ``run(...)`` logic function in the owning module. Output, exit codes, and
-PID-file lifecycle are preserved from the former cm-* entry points; only the
+the ``run(...)`` logic function in the owning module. Output and exit codes are
+preserved from the former cm-* entry points; only the
 argument-parsing layer changed (argparse -> cyclopts).
 """
 
@@ -15,14 +15,14 @@ from typing import Annotated, Literal
 from cyclopts import App, Argument, ArgumentCollection, Group, Parameter
 from cyclopts.validators import Number
 
-from ccrecall import health
+from ccrecall import health, job_lock
 from ccrecall import recent_chats as recent_chats_mod
 from ccrecall import search_cli as search_mod
 from ccrecall import session_tail as session_tail_mod
 from ccrecall import status as status_mod
 from ccrecall.cli import app, backfill_app
 from ccrecall.cli.context import DEFAULT_CLI_CONTEXT, CLIContextParam
-from ccrecall.config import DEFAULT_DB_PATH, load_settings_for_db, try_acquire_pid_file
+from ccrecall.config import DEFAULT_DB_PATH, JOB_KEY_BACKFILL_EMBEDDINGS, load_settings_for_db
 from ccrecall.db import DEFAULT_PROJECTS_DIR, get_connection
 from ccrecall.embeddings import DEFAULT_EMBED_THREADS
 from ccrecall.hooks import backfill_embeddings as backfill_embeddings_mod
@@ -292,7 +292,7 @@ def cmd_backfill_embeddings(
     ctx: CLIContextParam = DEFAULT_CLI_CONTEXT,
 ) -> None:
     """Seed historical embeddings for active-leaf branch summaries (opt-in)."""
-    # --dismiss short-circuits before the PID guard and any backfill work: it
+    # --dismiss short-circuits before the job lock and any backfill work: it
     # only records a marker so the SessionStart alert stops firing.
     if dismiss:
         health.write_schedule_marker("dismissed_at")
@@ -304,15 +304,21 @@ def cmd_backfill_embeddings(
 
     # Self-concurrency guard: at most one embeddings backfill at a time — a
     # second instance doubles the onnxruntime memory peak on the same machine.
-    # Skip (not queue) when another instance is alive; exit 0 so a scheduler
-    # (systemd timer) doesn't see a failure. --status is read-only: it neither
-    # acquires nor disturbs the marker.
-    if not status and not try_acquire_pid_file(backfill_query_mod.PID_KEY):
-        print(
-            "ccrecall backfill embeddings: another instance is already running — skipping",
-            file=sys.stderr,
+    # Skip (not queue) when another instance holds the lock; exit 0 so a
+    # scheduler (systemd timer) doesn't see a failure. The scope tells `doctor`
+    # whether this run drains the whole backlog. --status is read-only: it
+    # neither takes the lock nor disturbs a running backfill's record.
+    lock = None
+    if not status:
+        lock = job_lock.acquire(
+            JOB_KEY_BACKFILL_EMBEDDINGS, scope=job_lock.backfill_scope(days=days, limit=limit, db=db)
         )
-        raise SystemExit(backfill_query_mod.EXIT_OK)
+        if lock is None:
+            print(
+                "ccrecall backfill embeddings: another instance is already running — skipping",
+                file=sys.stderr,
+            )
+            raise SystemExit(backfill_query_mod.EXIT_OK)
     try:
         code = backfill_embeddings_mod.run(
             status=status,
@@ -325,9 +331,8 @@ def cmd_backfill_embeddings(
             db=db,
         )
     finally:
-        # Status is read-only: never disturb a concurrent backfill's PID marker.
-        if not status:
-            backfill_query_mod.cleanup_pid()
+        if lock is not None:
+            lock.release()
     raise SystemExit(code)
 
 
@@ -352,7 +357,7 @@ def cmd_backfill_tool_content(
     ctx: CLIContextParam = DEFAULT_CLI_CONTEXT,
 ) -> None:
     """Re-parse existing sessions' JSONL files to populate tool_content (opt-in)."""
-    # No PID guard here, unlike cmd_backfill_embeddings above: that guard exists
+    # No job lock here, unlike cmd_backfill_embeddings above: that guard exists
     # because a second instance would double the onnxruntime memory peak. This
     # command loads no model — its worst case is DB write contention, which the
     # SAVEPOINT retry + busy_timeout already handle.

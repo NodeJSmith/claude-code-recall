@@ -1,20 +1,10 @@
 """Tests for ccrecall.config — logging formatter and default settings."""
 
 import logging
-import subprocess
-import sys
 
 import pytest
 
-from ccrecall.config import (
-    DEFAULT_SETTINGS,
-    _ExtraFieldsFormatter,
-    is_ccrecall_process,
-    live_pid_holder,
-    pid_file_path,
-    resolve_backfill_stale_hours,
-    try_acquire_pid_file,
-)
+from ccrecall.config import DEFAULT_SETTINGS, _ExtraFieldsFormatter, resolve_backfill_stale_hours
 
 
 def _format(record_kwargs: dict, extra: dict | None = None) -> str:
@@ -70,114 +60,3 @@ class TestResolveBackfillStaleHours:
     def test_anything_else_falls_back_to_the_default_with_a_warning(self, value, caplog):
         assert resolve_backfill_stale_hours(value) == 72.0
         assert "invalid backfill_stale_hours" in caplog.text
-
-
-class TestLivePidHolder:
-    """A read-only liveness check: it reports a running job and never touches the marker."""
-
-    KEY = "some-job"
-
-    def _write_marker(self, content: str) -> None:
-        marker = pid_file_path(self.KEY)
-        marker.parent.mkdir(parents=True, exist_ok=True)
-        marker.write_text(content)
-
-    def test_no_marker(self):
-        assert live_pid_holder(self.KEY) is None
-
-    def test_live_holder_returns_its_pid(self, live_ccrecall_pid):
-        self._write_marker(str(live_ccrecall_pid))
-        assert live_pid_holder(self.KEY) == live_ccrecall_pid
-
-    @pytest.mark.parametrize("content", ["99999999", "not-a-pid", "0", "-1", "9" * 40])
-    def test_dead_or_corrupt_marker_is_not_live_and_is_left_in_place(self, content):
-        self._write_marker(content)
-        assert live_pid_holder(self.KEY) is None
-        assert pid_file_path(self.KEY).read_text() == content
-
-    def test_holder_we_cannot_signal_counts_as_live(self, monkeypatch):
-        self._write_marker("12345")
-
-        def deny(_pid, _signal):
-            raise PermissionError
-
-        monkeypatch.setattr("ccrecall.config.os.kill", deny)
-        assert live_pid_holder(self.KEY) == 12345
-
-
-class TestIsCcrecallProcess:
-    def _ps_prints(self, monkeypatch, stdout: str, returncode: int = 0) -> None:
-        def fake_run(*_args, **_kwargs):
-            return subprocess.CompletedProcess(args=[], returncode=returncode, stdout=stdout, stderr="")
-
-        monkeypatch.setattr("ccrecall.config.subprocess.run", fake_run)
-
-    @pytest.mark.parametrize(
-        "command",
-        [
-            "/home/u/.local/bin/ccrecall import --repair-gaps",
-            "/usr/bin/python3 /home/u/.venv/bin/ccrecall backfill embeddings",
-            "ccrecall-warm-model",
-            "/opt/bin/ccrecall-sync",
-        ],
-    )
-    def test_ccrecall_console_scripts_match(self, monkeypatch, command):
-        self._ps_prints(monkeypatch, command + "\n")
-        assert is_ccrecall_process(4242) is True
-
-    @pytest.mark.parametrize(
-        "command",
-        ["tail -f /home/u/.ccrecall/ccrecall-import.log", "sleep 60", "vim ccrecall.py", "ccrecallx"],
-    )
-    def test_other_commands_do_not(self, monkeypatch, command):
-        self._ps_prints(monkeypatch, command)
-        assert is_ccrecall_process(4242) is False
-
-    def test_unreadable_command_line_is_unknown(self, monkeypatch):
-        self._ps_prints(monkeypatch, "", returncode=1)
-        assert is_ccrecall_process(4242) is None
-
-    def test_missing_ps_is_unknown(self, monkeypatch):
-        def no_ps(*_args, **_kwargs):
-            raise FileNotFoundError("ps")
-
-        monkeypatch.setattr("ccrecall.config.subprocess.run", no_ps)
-        assert is_ccrecall_process(4242) is None
-
-
-class TestReusedPid:
-    """A marker whose PID now belongs to something other than ccrecall reads as dead."""
-
-    KEY = "some-job"
-
-    @pytest.fixture
-    def other_process(self):
-        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
-        try:
-            yield proc.pid
-        finally:
-            proc.kill()
-            proc.wait()
-
-    def _write_marker(self, content: str) -> None:
-        marker = pid_file_path(self.KEY)
-        marker.parent.mkdir(parents=True, exist_ok=True)
-        marker.write_text(content)
-
-    def test_is_not_live(self, other_process):
-        self._write_marker(str(other_process))
-        assert live_pid_holder(self.KEY) is None
-
-    def test_guard_reaps_it_and_acquires(self, other_process):
-        self._write_marker(str(other_process))
-        assert try_acquire_pid_file(self.KEY) is True
-
-    def test_guard_still_refuses_a_live_ccrecall_holder(self, live_ccrecall_pid):
-        self._write_marker(str(live_ccrecall_pid))
-        assert try_acquire_pid_file(self.KEY) is False
-
-    def test_holder_stays_live_when_ps_cannot_identify_it(self, other_process, monkeypatch):
-        """A guard that can't identify its holder must not let a second instance start."""
-        monkeypatch.setattr("ccrecall.config.is_ccrecall_process", lambda _pid: None)
-        self._write_marker(str(other_process))
-        assert live_pid_holder(self.KEY) == other_process

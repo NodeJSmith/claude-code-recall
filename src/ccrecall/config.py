@@ -1,4 +1,4 @@
-"""Paths, config/settings loading, PID files, and logging.
+"""Paths, config/settings loading, and logging.
 
 Zero heavy dependencies — no fastembed, onnxruntime, or sqlite_vec. This is
 the module hooks that don't touch the DB (health checks, handoff writers,
@@ -10,8 +10,6 @@ import contextlib
 import json
 import logging
 import os
-import re
-import subprocess
 import sys
 import tempfile
 from logging.handlers import RotatingFileHandler
@@ -56,29 +54,23 @@ DEFAULT_SETTINGS = {
 # `ccrecall doctor` calls it overdue or stuck. Overridable per install.
 DEFAULT_BACKFILL_STALE_HOURS = DEFAULT_SETTINGS["backfill_stale_hours"]
 
-# A live marker holder must be one of ccrecall's console scripts: `ccrecall`, or
-# `ccrecall-` followed by letters and hyphens (`ccrecall-warm-model`). Matched
-# against each whitespace-separated token's basename, so a log path such as
-# `ccrecall-import.log` never matches.
-_CCRECALL_SCRIPT_RE = re.compile(r"^ccrecall(-[A-Za-z-]+)?$")
-
 # Rotating memory-log handler sizing.
 LOG_MAX_BYTES = 1_000_000
 LOG_BACKUP_COUNT = 2
 
-# PID sentinel file permissions: owner read/write only.
-PID_FILE_MODE = 0o600
+# Permissions for the runtime dir's private files (job locks, the write probe): owner read/write only.
+PRIVATE_FILE_MODE = 0o600
 
-# Background-job PID keys, centralized here (not in the owning hook module) so
-# memory_setup.py's spawn-if-needed logic can reference them without importing
-# a module that transitively pulls in the heavy fastembed/onnxruntime/sqlite_vec
-# stack (see TestTransitiveImportIsolation in test_db.py). Each owning module
-# still imports its own key from here for its remove_pid_file() call on exit.
-PID_KEY_IMPORT = "ccrecall-import"
-PID_KEY_BACKFILL_SUMMARIES = "ccrecall-backfill-summaries"
-PID_KEY_BACKFILL_EMBEDDINGS = "ccrecall-backfill-embeddings"
-PID_KEY_WARM_MODEL = "ccrecall-warm-model"
-PID_KEY_SYNC = "ccrecall-sync-current"
+# Background-job lock keys (see job_lock.py), centralized here (not in the
+# owning hook module) so memory_setup.py's spawn-if-needed logic can reference
+# them without importing a module that transitively pulls in the heavy
+# fastembed/onnxruntime/sqlite_vec stack (see TestTransitiveImportIsolation in
+# test_db.py). Each owning module imports its own key from here to take its lock.
+JOB_KEY_IMPORT = "ccrecall-import"
+JOB_KEY_BACKFILL_SUMMARIES = "ccrecall-backfill-summaries"
+JOB_KEY_BACKFILL_EMBEDDINGS = "ccrecall-backfill-embeddings"
+JOB_KEY_WARM_MODEL = "ccrecall-warm-model"
+JOB_KEY_SYNC = "ccrecall-sync-current"
 
 
 def ensure_parent_dir(path: Path) -> None:
@@ -111,66 +103,6 @@ def atomic_write_json(path: Path, data: dict) -> None:
         raise
 
 
-def pid_file_path(pid_key: str) -> Path:
-    """Path to a background job's PID sentinel (lives in the runtime dir, beside the DB)."""
-    return RUNTIME_DIR / f".pid-{pid_key}"
-
-
-def remove_pid_file(pid_key: str) -> None:
-    """Delete a job's PID sentinel so the next session can spawn again (best-effort)."""
-    with contextlib.suppress(OSError):
-        pid_file_path(pid_key).unlink(missing_ok=True)
-
-
-def read_marker_holder(pid_path: Path) -> int:
-    """Return the PID a marker names, if that process is a live ccrecall process (or the caller).
-
-    The single liveness rule shared by the PID guard, the SessionStart spawn
-    path, and `ccrecall doctor`. A PID that is alive but running something other
-    than ccrecall (the PID was reused after the holder died) reads as dead, so it
-    gets reaped rather than blocking that job forever. When the holder's command
-    line can't be read, the PID stays live: a guard that can't identify its holder
-    must not let a second instance start. A holder we lack permission to signal
-    counts as alive, subject to the same check.
-
-    Raises ValueError or OverflowError on a corrupt marker, ProcessLookupError on a
-    dead or non-ccrecall holder, and another OSError on a marker that can't be read.
-    """
-    pid = int(pid_path.read_text().strip())
-    if pid <= 0:
-        # 0/negative would probe the caller's own process group and
-        # read as permanently "alive" — treat as a corrupt marker.
-        raise ValueError(f"bogus pid: {pid}")
-    if pid == os.getpid():
-        return pid
-    with contextlib.suppress(PermissionError):
-        os.kill(pid, 0)  # signal 0: liveness probe, no signal sent
-    if is_ccrecall_process(pid) is False:
-        raise ProcessLookupError(f"pid {pid} is not a ccrecall process")
-    return pid
-
-
-def is_ccrecall_process(pid: int) -> bool | None:
-    """Whether ``pid`` runs a ccrecall console script; None when its command line can't be read.
-
-    `ps -p <pid> -o command=` takes the same flags on Linux (procps) and macOS.
-    """
-    try:
-        result = subprocess.run(  # noqa: S603 — fixed argv, pid is an int
-            ["ps", "-p", str(pid), "-o", "command="],  # noqa: S607 — ps is resolved from PATH on every supported platform
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=5,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    command = result.stdout.strip()
-    if result.returncode != 0 or not command:
-        return None
-    return any(_CCRECALL_SCRIPT_RE.match(Path(token).name) for token in command.split())
-
-
 def resolve_backfill_stale_hours(raw_setting: object) -> float:
     """Return the ``backfill_stale_hours`` setting, or the default (with a warning) when it isn't a positive number."""
     if isinstance(raw_setting, bool) or not isinstance(raw_setting, int | float) or raw_setting <= 0:
@@ -180,81 +112,6 @@ def resolve_backfill_stale_hours(raw_setting: object) -> float:
         )
         return float(DEFAULT_BACKFILL_STALE_HOURS)
     return float(raw_setting)
-
-
-def live_pid_holder(pid_key: str) -> int | None:
-    """Return the PID of ``pid_key``'s running job, or None. Read-only: never reaps a stale marker."""
-    try:
-        return read_marker_holder(pid_file_path(pid_key))
-    except (ValueError, OverflowError, OSError):
-        return None
-
-
-def try_acquire_pid_file(pid_key: str) -> bool:
-    """Attempt to become the sole running instance of ``pid_key``'s job.
-
-    Atomic write-then-link acquisition with a liveness probe on any existing
-    sentinel: a live holder means False (caller must skip, not queue); a dead
-    or unreadable sentinel is reaped and acquisition retried. A marker already
-    holding the caller's own PID counts as acquired, because _spawn_background
-    writes its child's PID before the child gets here. On success the
-    marker holds the caller's PID and True is returned — the caller MUST later
-    call remove_pid_file(pid_key), including on error paths. A holder we lack
-    permission to signal counts as live (PermissionError → False).
-
-    Acquisition is os.link() of a fully written temp file rather than
-    O_CREAT|O_EXCL create-then-write: link fails with EEXIST only when the
-    marker already exists, so a contender can never observe the empty file of
-    an O_EXCL create caught before its PID write (and reap its way into a
-    second concurrent holder). The temp file is per-PID and unlinked in all
-    outcomes.
-    """
-    pid_path = pid_file_path(pid_key)
-    ensure_parent_dir(pid_path)
-    while True:
-        tmp_path = pid_path.with_name(f"{pid_path.name}.tmp-{os.getpid()}")
-        try:
-            fd = os.open(str(tmp_path), os.O_CREAT | os.O_WRONLY | os.O_TRUNC, PID_FILE_MODE)
-            try:
-                os.write(fd, str(os.getpid()).encode())
-            finally:
-                os.close(fd)
-            os.link(tmp_path, pid_path)
-        except FileExistsError:
-            try:
-                return read_marker_holder(pid_path) == os.getpid()
-            except (ValueError, OverflowError):
-                # Unreadable/corrupt PID file (OverflowError: an in-range int()
-                # result that os.kill can't convert to a C pid) — reap and
-                # retry. An unreapable marker (a directory, EACCES, ...) must
-                # raise, not be suppressed: retrying it would spin forever.
-                # FileNotFoundError means a concurrent contender already
-                # reaped it — nothing left to do, just retry.
-                try:
-                    pid_path.unlink()
-                except FileNotFoundError:
-                    pass
-                except OSError as e:
-                    raise RuntimeError(f"cannot reap corrupt PID marker: {pid_path}") from e
-                continue
-            except PermissionError:
-                # A marker we can't read — treat its holder as alive
-                return False
-            except OSError:
-                # Dead holder (ESRCH from the probe), a marker that vanished
-                # between the link failure and the read, or another OS-level
-                # read/probe failure — reap and retry (same rules as the
-                # corrupt branch).
-                try:
-                    pid_path.unlink()
-                except FileNotFoundError:
-                    pass
-                except OSError as e:
-                    raise RuntimeError(f"cannot reap stale PID marker: {pid_path}") from e
-                continue
-        finally:
-            tmp_path.unlink(missing_ok=True)
-        return True
 
 
 def load_config() -> dict:

@@ -15,11 +15,13 @@ from unittest.mock import patch
 import pytest
 
 import ccrecall.health as health
+import ccrecall.job_lock as job_lock
 from ccrecall.cli.commands import cmd_backfill_embeddings, cmd_schedule_clear, cmd_schedule_status, cmd_schedule_write
 from ccrecall.cli.context import CLIContext
-from ccrecall.config import load_settings_for_db
+from ccrecall.config import DEFAULT_DB_PATH, load_settings_for_db
+from ccrecall.config import JOB_KEY_BACKFILL_EMBEDDINGS as JOB_KEY
 from ccrecall.db import get_connection
-from ccrecall.hooks.backfill_query import EXIT_OK, PID_KEY
+from ccrecall.hooks.backfill_query import EXIT_OK
 
 
 @pytest.fixture(autouse=True)
@@ -105,7 +107,7 @@ class TestScheduleStatus:
 class TestBackfillEmbeddingsDismiss:
     def test_dismiss_writes_marker_and_returns_without_running_backfill(self, capsys):
         with (
-            patch("ccrecall.cli.commands.try_acquire_pid_file") as mock_acquire,
+            patch("ccrecall.cli.commands.job_lock.acquire") as mock_acquire,
             patch("ccrecall.cli.commands.backfill_embeddings_mod.run") as mock_run,
         ):
             cmd_backfill_embeddings(dismiss=True)
@@ -122,17 +124,18 @@ class TestBackfillEmbeddingsDismiss:
             cmd_backfill_embeddings(dismiss=True)  # must not raise
 
     def test_non_dismiss_run_untouched(self):
-        """dismiss=False (the default) preserves the existing PID-guard/run wiring."""
+        """dismiss=False (the default) preserves the existing job-lock/run wiring."""
         with (
-            patch("ccrecall.cli.commands.try_acquire_pid_file", return_value=True) as mock_acquire,
+            patch("ccrecall.cli.commands.job_lock.acquire", wraps=job_lock.acquire) as mock_acquire,
             patch("ccrecall.cli.commands.backfill_embeddings_mod.run", return_value=EXIT_OK) as mock_run,
-            patch("ccrecall.cli.commands.backfill_query_mod.cleanup_pid"),
             pytest.raises(SystemExit) as exc_info,
         ):
             cmd_backfill_embeddings(dismiss=False)
 
         assert exc_info.value.code == EXIT_OK
-        mock_acquire.assert_called_once_with(PID_KEY)
+        mock_acquire.assert_called_once_with(
+            JOB_KEY, scope={"days": None, "limit": None, "db": str(DEFAULT_DB_PATH.resolve())}
+        )
         mock_run.assert_called_once()
         assert not health.BACKFILL_SCHEDULE_PATH.exists()
 
@@ -171,7 +174,7 @@ class TestScheduleJsonMode:
 
     def test_dismiss_json(self, capsys):
         with (
-            patch("ccrecall.cli.commands.try_acquire_pid_file"),
+            patch("ccrecall.cli.commands.job_lock.acquire"),
             patch("ccrecall.cli.commands.backfill_embeddings_mod.run"),
         ):
             cmd_backfill_embeddings(dismiss=True, ctx=JSON_CTX)

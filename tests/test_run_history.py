@@ -1,20 +1,20 @@
 """Tests for the per-database run history and unfixable-sessions sidecars."""
 
 import json
-import os
 import sqlite3
 import subprocess
 import sys
-import time
 
 import pytest
-from conftest import locked_error
+from conftest import job_record, leave_killed_lock, locked_error
+from whenever import Instant
 
-from ccrecall import run_history
-from ccrecall.config import PID_KEY_BACKFILL_EMBEDDINGS, pid_file_path
+from ccrecall import job_lock, run_history
+from ccrecall.config import JOB_KEY_BACKFILL_EMBEDDINGS
 from ccrecall.run_history import (
     KIND_BACKFILL,
     KIND_IMPORT,
+    KIND_JOB_KEYS,
     KIND_SYNC,
     OUTCOME_FAILED,
     OUTCOME_OK,
@@ -22,7 +22,6 @@ from ccrecall.run_history import (
     REASON_DATABASE_BUSY,
     REASON_ERROR,
     REASON_MODEL_UNAVAILABLE,
-    read_marker,
     read_runs,
     read_unfixable,
     record_run,
@@ -182,57 +181,29 @@ def test_malformed_unfixable_file_reads_as_empty(db_path):
     assert read_unfixable(db_path) == {}
 
 
-class TestReadMarker:
-    def marker(self):
-        return pid_file_path(PID_KEY_BACKFILL_EMBEDDINGS)
+class TestKindJobKeys:
+    """Each kind's unfinished run is read from its own job lock (design 020, D4)."""
 
-    def test_no_marker(self):
-        assert read_marker(KIND_BACKFILL) is None
+    def test_held_backfill_lock_reads_as_a_running_backfill(self, hold_job_lock):
+        pid = hold_job_lock(
+            JOB_KEY_BACKFILL_EMBEDDINGS,
+            record=job_record(JOB_KEY_BACKFILL_EMBEDDINGS, age_seconds=60, scope={"days": None, "limit": 5}),
+        )
 
-    def test_live_ccrecall_holder_is_running(self, live_ccrecall_pid):
-        self.marker().parent.mkdir(parents=True, exist_ok=True)
-        self.marker().write_text(str(live_ccrecall_pid))
-
-        state = read_marker(KIND_BACKFILL)
+        state = job_lock.probe(KIND_JOB_KEYS[KIND_BACKFILL])
 
         assert state is not None
-        assert (state.running, state.pid) == (True, live_ccrecall_pid)
+        assert (state.running, state.pid, state.scope) == (True, pid, {"days": None, "limit": 5})
 
-    def test_dead_holder_is_killed_and_dated_by_the_marker(self):
-        proc = subprocess.Popen([sys.executable, "-c", ""])
-        proc.wait()
-        self.marker().parent.mkdir(parents=True, exist_ok=True)
-        self.marker().write_text(str(proc.pid))
-        started = time.time() - 3600
-        os.utime(self.marker(), (started, started))
+    def test_record_left_in_a_free_lock_is_killed_and_dated_by_the_record(self):
+        leave_killed_lock(JOB_KEY_BACKFILL_EMBEDDINGS, pid=4242, age_seconds=3600)
 
-        state = read_marker(KIND_BACKFILL)
+        state = job_lock.probe(KIND_JOB_KEYS[KIND_BACKFILL])
 
         assert state is not None
-        assert (state.running, state.pid) == (False, proc.pid)
-        assert abs(state.started_at.timestamp() - started) < 2
-
-    def test_reused_pid_running_something_else_reads_as_killed(self):
-        # A live process that isn't ccrecall: the holder died and its PID was reused.
-        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
-        try:
-            self.marker().parent.mkdir(parents=True, exist_ok=True)
-            self.marker().write_text(str(proc.pid))
-
-            state = read_marker(KIND_BACKFILL)
-        finally:
-            proc.kill()
-            proc.wait()
-
-        assert state is not None
-        assert state.running is False
-
-    @pytest.mark.parametrize("content", ["", "garbage"])
-    def test_empty_or_corrupt_marker_reads_as_no_marker(self, content):
-        self.marker().parent.mkdir(parents=True, exist_ok=True)
-        self.marker().write_text(content)
-
-        assert read_marker(KIND_BACKFILL) is None
+        assert (state.running, state.pid) == (False, 4242)
+        assert state.started_at is not None
+        assert abs((Instant.now() - state.started_at).total("seconds") - 3600) < 5
 
 
 def test_module_imports_no_vector_or_embedding_modules():
@@ -246,5 +217,5 @@ def test_module_imports_no_vector_or_embedding_modules():
     assert result.stdout.strip() == ""
 
 
-def test_run_history_module_exposes_every_kind_with_a_marker():
-    assert set(run_history.KIND_PID_KEYS) == {KIND_IMPORT, KIND_SYNC, KIND_BACKFILL}
+def test_run_history_module_exposes_every_kind_with_a_job_lock():
+    assert set(run_history.KIND_JOB_KEYS) == {KIND_IMPORT, KIND_SYNC, KIND_BACKFILL}

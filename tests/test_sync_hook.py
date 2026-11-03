@@ -17,6 +17,7 @@ import pytest
 from conftest import (
     FIXTURE_DIR,
     VEC_SKIP,
+    leave_killed_lock,
     locked_error,
     make_jsonl_entry,
     make_vec_conn,
@@ -25,10 +26,10 @@ from conftest import (
     write_jsonl,
 )
 
-from ccrecall import config, run_history
+from ccrecall import config, job_lock, run_history
 from ccrecall.embeddings import EMBEDDING_DIM, EMBEDDING_VERSION
 from ccrecall.health import REASON_MODEL_UNAVAILABLE, REASON_VEC_UNAVAILABLE
-from ccrecall.hooks import memory_setup, memory_sync, sync_current
+from ccrecall.hooks import backfill_summaries, memory_setup, memory_sync, sync_current, warm_model
 from ccrecall.hooks.sync_current import sync_session, validate_session_id
 from ccrecall.recent_chats import run as recent_chats_run
 from ccrecall.schema import SCHEMA
@@ -410,107 +411,61 @@ class TestSyncBranchMessagesDiff:
             )
 
 
-class TestPidGuard:
-    """Tests for _spawn_background() PID-file guard in memory_setup.py."""
+class TestSpawnBackground:
+    """_spawn_background() in memory_setup.py takes the job's lock and hands it to the child."""
 
-    def test_pid_guard_prevents_concurrent_spawn(self, tmp_path, monkeypatch):
-        """When a live PID file exists, _spawn_background skips spawning."""
+    KEY = "cm-test-cmd"
 
-        pid_path = tmp_path / ".pid-cm-test-cmd"
-        monkeypatch.setattr(memory_setup, "pid_file_path", lambda pid_key: tmp_path / f".pid-{pid_key}")
-
-        # Write our own PID (current process) as a "live" PID
-        pid_path.write_text(str(os.getpid()))
+    def test_skips_while_the_job_holds_its_lock(self, hold_job_lock):
+        holder = hold_job_lock(self.KEY)
 
         with patch("subprocess.Popen") as mock_popen:
-            memory_setup._spawn_background(["cm-test-cmd"], "cm-test-cmd", MagicMock())
-            mock_popen.assert_not_called()
+            memory_setup._spawn_background(["cm-test-cmd"], self.KEY, MagicMock())
 
-    def test_pid_guard_reaps_stale_pid(self, tmp_path, monkeypatch):
-        """When PID file holds a dead PID, _spawn_background reaps it and spawns."""
+        mock_popen.assert_not_called()
+        state = job_lock.probe(self.KEY)
+        assert state is not None
+        assert (state.running, state.pid) == (True, holder)
 
-        pid_path = tmp_path / ".pid-cm-test-cmd"
-        monkeypatch.setattr(memory_setup, "pid_file_path", lambda pid_key: tmp_path / f".pid-{pid_key}")
+    def test_spawns_over_a_killed_record(self):
+        leave_killed_lock(self.KEY)
 
-        # We need a real PID that is guaranteed dead. Spawn a trivial subprocess
-        # and reap it. Deliberately NOT os.fork(): by the time this test runs the
-        # process has usually started threads (the embedding model's onnxruntime
-        # pool), and forking a multi-threaded process can deadlock the child — an
-        # intermittent CI hang. Popen+wait gives the same dead PID with no fork.
-        proc = subprocess.Popen([sys.executable, "-c", ""])
-        proc.wait()
-        dead_pid = proc.pid
+        with patch("subprocess.Popen") as mock_popen:
+            memory_setup._spawn_background(["cm-test-cmd"], self.KEY, MagicMock())
 
-        # Write the dead PID to the file
-        pid_path.write_text(str(dead_pid))
+        mock_popen.assert_called_once()
 
-        mock_proc = MagicMock()
-        mock_proc.pid = 99999
+    def test_child_holds_the_lock_and_names_the_spawn_scope(self):
+        """A real child that never adopts still holds the lock through the inherited descriptor."""
+        real_popen = subprocess.Popen
+        children: list[subprocess.Popen] = []
 
-        with patch("subprocess.Popen", return_value=mock_proc) as mock_popen, patch("os.write"):
-            memory_setup._spawn_background(["cm-test-cmd"], "cm-test-cmd", MagicMock())
-            mock_popen.assert_called_once()
+        def recording_popen(*args, **kwargs):
+            children.append(real_popen(*args, **kwargs))
+            return children[-1]
 
-        # PID file should have been reaped (it no longer exists or has been rewritten)
-        # Since we patched os.write, the file won't be written with the new PID
-        # but the stale file should have been unlinked before the spawn attempt
-
-    def test_pid_guard_reaps_a_reused_pid_running_something_else(self, tmp_path, monkeypatch):
-        """A live PID that isn't ccrecall means the holder died and its PID was reused: spawn anyway."""
-        pid_path = tmp_path / ".pid-cm-test-cmd"
-        monkeypatch.setattr(memory_setup, "pid_file_path", lambda pid_key: tmp_path / f".pid-{pid_key}")
-        other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+        with patch("subprocess.Popen", side_effect=recording_popen):
+            memory_setup._spawn_background(
+                [sys.executable, "-c", "import time; time.sleep(120)"], self.KEY, MagicMock(), {"repair_gaps": True}
+            )
         try:
-            pid_path.write_text(str(other.pid))
-
-            memory_setup._spawn_background([sys.executable, "-c", ""], "cm-test-cmd", MagicMock())
-
-            spawned = int(pid_path.read_text())
-            assert spawned != other.pid
-            os.waitpid(spawned, 0)
+            state = job_lock.probe(self.KEY)
+            assert state is not None
+            assert (state.running, state.pid, state.scope) == (True, None, {"repair_gaps": True})
+            assert job_lock.acquire(self.KEY) is None
         finally:
-            other.kill()
-            other.wait()
+            for child in children:
+                child.kill()
+                child.wait()
 
-    def test_pid_guard_skips_a_live_ccrecall_holder(self, tmp_path, monkeypatch, live_ccrecall_pid):
-        pid_path = tmp_path / ".pid-cm-test-cmd"
-        monkeypatch.setattr(memory_setup, "pid_file_path", lambda pid_key: tmp_path / f".pid-{pid_key}")
-        pid_path.write_text(str(live_ccrecall_pid))
+    def test_spawns_detached(self):
+        with patch("subprocess.Popen") as mock_popen:
+            memory_setup._spawn_background(["cm-test-cmd"], self.KEY, MagicMock())
 
-        # A real, harmless command: had the guard let it spawn, the marker would name the new child.
-        memory_setup._spawn_background([sys.executable, "-c", ""], "cm-test-cmd", MagicMock())
-
-        assert pid_path.read_text() == str(live_ccrecall_pid)
-
-    def test_pid_guard_atomic_create(self, tmp_path, monkeypatch):
-        """PID file creation uses O_CREAT | O_EXCL to prevent TOCTOU races."""
-
-        monkeypatch.setattr(memory_setup, "pid_file_path", lambda pid_key: tmp_path / f".pid-{pid_key}")
-
-        created_flags = []
-
-        original_open = os.open
-
-        def capturing_open(path, flags, mode=0o777):
-            if ".pid-cm-test-cmd" in str(path):
-                created_flags.append(flags)
-            return original_open(path, flags, mode)
-
-        mock_proc = MagicMock()
-        mock_proc.pid = 12345
-
-        with (
-            patch("os.open", side_effect=capturing_open),
-            patch("subprocess.Popen", return_value=mock_proc),
-            patch("os.write"),
-            patch("os.close"),
-        ):
-            memory_setup._spawn_background(["cm-test-cmd"], "cm-test-cmd", MagicMock())
-
-        assert created_flags, "os.open must have been called for the PID file"
-        flags = created_flags[0]
-        assert flags & os.O_CREAT, "O_CREAT must be set"
-        assert flags & os.O_EXCL, "O_EXCL must be set for atomic create"
+        kwargs = mock_popen.call_args.kwargs
+        assert kwargs["start_new_session"] is True
+        assert kwargs["stdin"] == subprocess.DEVNULL
+        assert kwargs["env"][job_lock.LOCK_FD_ENV] == str(kwargs["pass_fds"][0])
 
 
 class TestBackgroundImportSpawn:
@@ -521,12 +476,63 @@ class TestBackgroundImportSpawn:
         monkeypatch.setattr(memory_setup, "_needs_reimport", lambda *a: True)
         monkeypatch.setattr(memory_setup, "_needs_backfill", lambda *a: False)
         monkeypatch.setattr(memory_setup, "_reap_stale_temp_files", lambda: None)
-        monkeypatch.setattr(memory_setup, "_spawn_background", lambda argv, key, logger: spawned.append((argv, key)))
+        monkeypatch.setattr(
+            memory_setup, "_spawn_background", lambda argv, key, logger, scope=None: spawned.append((argv, key, scope))
+        )
 
         with patch("builtins.print"):
             memory_setup.main()
 
-        assert (["ccrecall", "import", "--repair-gaps"], memory_setup.PID_KEY_IMPORT) in spawned
+        assert (
+            ["ccrecall", "import", "--repair-gaps"],
+            memory_setup.JOB_KEY_IMPORT,
+            {"repair_gaps": True, "db": str(config.DEFAULT_DB_PATH.resolve())},
+        ) in spawned
+
+
+class TestSpawnedJobsTakeTheirSpawnersKey:
+    """The summaries backfill and model warm skip while their job lock is held.
+
+    Holding the lock under the config key ``_spawn_background`` passes pins that
+    each job acquires that same key: under any other key it would run anyway.
+    """
+
+    def test_warm_model_skips_while_its_lock_is_held(self, hold_job_lock, monkeypatch):
+        hold_job_lock(config.JOB_KEY_WARM_MODEL)
+        warmed: list[bool] = []
+        monkeypatch.setattr(warm_model, "model_available", lambda: warmed.append(True))
+
+        warm_model.main()
+
+        assert warmed == []
+
+    def test_warm_model_runs_and_releases_when_free(self, monkeypatch):
+        warmed: list[bool] = []
+        monkeypatch.setattr(warm_model, "model_available", lambda: warmed.append(True))
+
+        warm_model.main()
+
+        assert warmed == [True]
+        assert job_lock.probe(config.JOB_KEY_WARM_MODEL) is None
+
+    def test_summaries_backfill_skips_while_its_lock_is_held(self, hold_job_lock, monkeypatch, capsys):
+        hold_job_lock(config.JOB_KEY_BACKFILL_SUMMARIES)
+        ran: list[bool] = []
+        monkeypatch.setattr(backfill_summaries, "_main", lambda **_kw: ran.append(True) or 1)
+
+        assert backfill_summaries.run() == backfill_summaries.EXIT_OK
+        assert ran == []
+        assert "already running" in capsys.readouterr().out
+
+    def test_summaries_backfill_releases_after_an_exception(self, monkeypatch):
+        def boom(**_kw):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(backfill_summaries, "_main", boom)
+
+        with pytest.raises(RuntimeError):
+            backfill_summaries.run()
+        assert job_lock.probe(config.JOB_KEY_BACKFILL_SUMMARIES) is None
 
 
 class TestNeedsCheckDbError:
@@ -743,8 +749,6 @@ class TestSyncCurrentExcludeProjects:
     """sync_current.run honors exclude_projects for the live session (matches import)."""
 
     def _run_with_excludes(self, tmp_path, monkeypatch, *, settings, cwd):
-        monkeypatch.setattr("ccrecall.config.pid_file_path", lambda key: tmp_path / f".pid-{key}")
-        monkeypatch.setattr(sync_current, "remove_pid_file", lambda key: None)
         monkeypatch.setattr(sync_current, "load_settings", lambda: settings)
         synced = []
         monkeypatch.setattr(sync_current, "sync_session", lambda *a, **k: synced.append(1) or 0)
@@ -789,8 +793,6 @@ class TestSyncCurrentConcurrencyGuard:
         return p
 
     def _run_with_lock_path(self, tmp_path, monkeypatch, *, session_id=VALID_SYNC_UUID, extra_patches=None):
-        monkeypatch.setattr("ccrecall.config.pid_file_path", lambda key: tmp_path / f".pid-{key}")
-        monkeypatch.setattr(sync_current, "remove_pid_file", lambda key: None)
         monkeypatch.setattr(sync_current, "load_settings", lambda: {"exclude_projects": [], "logging_enabled": False})
         monkeypatch.setattr(sync_current, "get_session_file", lambda *a, **k: None)
         if extra_patches:
@@ -802,13 +804,9 @@ class TestSyncCurrentConcurrencyGuard:
             sync_current.run(input_file=input_file)
         return json.loads(captured.getvalue())
 
-    def test_second_sync_skips_when_lock_held_by_live_pid(self, tmp_path, monkeypatch, live_ccrecall_pid):
-        """When a live PID file exists, a second sync-current skips without embedding."""
-        monkeypatch.setattr("ccrecall.config.pid_file_path", lambda key: tmp_path / f".pid-{key}")
-        monkeypatch.setattr(sync_current, "remove_pid_file", lambda key: None)
-
-        # Another live process holds the marker
-        (tmp_path / f".pid-{sync_current.PID_KEY}").write_text(str(live_ccrecall_pid))
+    def test_second_sync_skips_when_lock_held(self, tmp_path, monkeypatch, hold_job_lock):
+        """When another process holds the sync lock, a second sync-current skips without syncing."""
+        holder = hold_job_lock(sync_current.JOB_KEY)
 
         sync_called = []
         monkeypatch.setattr(sync_current, "sync_session", lambda *a, **k: sync_called.append(1) or 0)
@@ -821,12 +819,13 @@ class TestSyncCurrentConcurrencyGuard:
         out = json.loads(captured.getvalue())
         assert out == {"continue": True}
         assert sync_called == [], "sync_session must NOT be called when lock is held"
+        state = job_lock.probe(sync_current.JOB_KEY)
+        assert state is not None
+        assert (state.running, state.pid) == (True, holder), "the skip must not touch the holder's lock"
 
-    def test_skip_outputs_exactly_continue_true(self, tmp_path, monkeypatch, live_ccrecall_pid):
+    def test_skip_outputs_exactly_continue_true(self, tmp_path, hold_job_lock):
         """Skip path prints exactly the hook-contract JSON: {\"continue\": true}."""
-        monkeypatch.setattr("ccrecall.config.pid_file_path", lambda key: tmp_path / f".pid-{key}")
-        monkeypatch.setattr(sync_current, "remove_pid_file", lambda key: None)
-        (tmp_path / f".pid-{sync_current.PID_KEY}").write_text(str(live_ccrecall_pid))
+        hold_job_lock(sync_current.JOB_KEY)
 
         input_file = self._make_input(tmp_path)
         captured = io.StringIO()
@@ -836,25 +835,11 @@ class TestSyncCurrentConcurrencyGuard:
         # Must be exactly the string the hook harness expects
         assert captured.getvalue().strip() == '{"continue": true}'
 
-    def test_stale_lock_is_reaped_and_run_proceeds(self, tmp_path, monkeypatch):
-        """A stale lock (dead PID) is reaped and the sync continues."""
-        monkeypatch.setattr("ccrecall.config.pid_file_path", lambda key: tmp_path / f".pid-{key}")
-        # Let remove_pid_file actually delete from tmp_path
-        monkeypatch.setattr(
-            sync_current,
-            "remove_pid_file",
-            lambda key: (tmp_path / f".pid-{key}").unlink(missing_ok=True),
-        )
+    def test_killed_record_is_taken_over_and_released(self, tmp_path, monkeypatch):
+        """A record a killed sync left behind doesn't block the next one, which empties it on exit."""
         monkeypatch.setattr(sync_current, "load_settings", lambda: {"exclude_projects": [], "logging_enabled": False})
         monkeypatch.setattr(sync_current, "get_session_file", lambda *a, **k: None)
-
-        # Spawn a real subprocess and reap it to get a guaranteed-dead PID
-        proc = subprocess.Popen([sys.executable, "-c", ""])
-        proc.wait()
-        dead_pid = proc.pid
-
-        lock_file = tmp_path / f".pid-{sync_current.PID_KEY}"
-        lock_file.write_text(str(dead_pid))
+        leave_killed_lock(sync_current.JOB_KEY)
 
         input_file = self._make_input(tmp_path)
         captured = io.StringIO()
@@ -863,8 +848,18 @@ class TestSyncCurrentConcurrencyGuard:
 
         out = json.loads(captured.getvalue())
         assert out == {"continue": True}
-        # Lock was reaped and cleaned up by the successful run's finally block
-        assert not lock_file.exists(), "stale lock file should be gone after run"
+        assert job_lock.probe(sync_current.JOB_KEY) is None, "a finished sync leaves no record"
+
+    def test_sync_error_exit_releases_the_lock(self, tmp_path, monkeypatch):
+        """The swallowed-error path exits through sys.exit(0) and must still release."""
+        monkeypatch.setattr(sync_current, "load_settings", lambda: {"exclude_projects": [], "logging_enabled": False})
+        monkeypatch.setattr(sync_current, "get_session_file", lambda *a, **k: tmp_path / "missing.jsonl")
+
+        input_file = self._make_input(tmp_path)
+        with patch("sys.stdout", io.StringIO()), pytest.raises(SystemExit):
+            sync_current.run(input_file=input_file)
+
+        assert job_lock.probe(sync_current.JOB_KEY) is None
 
     def test_first_sync_completes_normally_without_lock(self, tmp_path, monkeypatch):
         """When no lock file exists, sync-current runs normally (no skip)."""
@@ -879,13 +874,9 @@ class TestSyncCurrentConcurrencyGuard:
 
     def test_missing_runtime_dir_is_created(self, tmp_path, monkeypatch):
         """Stop hook firing before ~/.ccrecall/ exists must not crash — run() creates it."""
-        # runtime_dir is where the pid file lives; it does not exist yet (only
-        # tmp_path does), so run() must create it before opening the lock.
-        # Can't reuse _run_with_lock_path here: it pins pid_file_path to tmp_path, which always
-        # exists and so wouldn't exercise the missing-dir path.
-        runtime_dir = tmp_path / "absent"
-        monkeypatch.setattr("ccrecall.config.pid_file_path", lambda key: runtime_dir / f".pid-{key}")
-        monkeypatch.setattr(sync_current, "remove_pid_file", lambda key: None)
+        # The isolated runtime dir does not exist yet, so run() must create it
+        # before opening the lock.
+        assert not config.RUNTIME_DIR.exists()
         monkeypatch.setattr(sync_current, "load_settings", lambda: {"exclude_projects": [], "logging_enabled": False})
         monkeypatch.setattr(sync_current, "get_session_file", lambda *a, **k: None)
 
@@ -895,20 +886,20 @@ class TestSyncCurrentConcurrencyGuard:
             sync_current.run(input_file=input_file)
 
         assert json.loads(captured.getvalue()) == {"continue": True}
-        assert runtime_dir.is_dir(), "run() should create the missing runtime dir"
+        assert config.RUNTIME_DIR.is_dir(), "run() should create the missing runtime dir"
 
 
 class TestModelWarmOnSetup:
-    """M22: model warm is spawned at setup, PID-guarded, non-blocking."""
+    """M22: model warm is spawned at setup, lock-guarded, non-blocking."""
 
-    WARM_PID_KEY = "ccrecall-warm-model"
+    WARM_JOB_KEY = "ccrecall-warm-model"
 
     def test_setup_spawns_warm_model_command(self, tmp_path, monkeypatch):
         """memory_setup.main() spawns ccrecall-warm-model after DB setup."""
         spawned: list[tuple[list[str], str]] = []
 
-        def mock_spawn(argv, pid_key, logger):
-            spawned.append((argv, pid_key))
+        def mock_spawn(argv, job_key, logger, scope=None):
+            spawned.append((argv, job_key))
 
         monkeypatch.setattr(memory_setup, "_spawn_background", mock_spawn)
         monkeypatch.setattr(memory_setup, "DEFAULT_DB_PATH", tmp_path / "conversations.db")
@@ -924,12 +915,12 @@ class TestModelWarmOnSetup:
         warm_calls = [a for a, _ in spawned if a and a[0] == "ccrecall-warm-model"]
         assert warm_calls, f"ccrecall-warm-model was not spawned; all spawns: {spawned}"
 
-    def test_warm_spawn_pid_guarded_by_spawn_background(self, tmp_path, monkeypatch):
-        """The warm spawn uses _spawn_background (which has the atomic PID guard)."""
+    def test_warm_spawn_lock_guarded_by_spawn_background(self, tmp_path, monkeypatch):
+        """The warm spawn uses _spawn_background (which takes the job lock)."""
         spawn_keys: list[str] = []
 
-        def recording_spawn(argv, pid_key, logger):
-            spawn_keys.append(pid_key)
+        def recording_spawn(argv, job_key, logger, scope=None):
+            spawn_keys.append(job_key)
 
         monkeypatch.setattr(memory_setup, "_spawn_background", recording_spawn)
         monkeypatch.setattr(memory_setup, "DEFAULT_DB_PATH", tmp_path / "conversations.db")
@@ -941,10 +932,10 @@ class TestModelWarmOnSetup:
         with patch("sys.stdout", io.StringIO()):
             memory_setup.main()
 
-        # The warm spawn must pass "ccrecall-warm-model" as the pid_key so the
-        # atomic O_CREAT|O_EXCL guard in _spawn_background prevents concurrent warms.
-        assert self.WARM_PID_KEY in spawn_keys, (
-            f"expected pid_key {self.WARM_PID_KEY!r} in spawn calls; got: {spawn_keys}"
+        # The warm spawn must pass "ccrecall-warm-model" as the job key so the
+        # job lock in _spawn_background prevents concurrent warms.
+        assert self.WARM_JOB_KEY in spawn_keys, (
+            f"expected job key {self.WARM_JOB_KEY!r} in spawn calls; got: {spawn_keys}"
         )
 
     def test_setup_non_blocking_returns_continue_true(self, tmp_path, monkeypatch):
@@ -992,13 +983,13 @@ class TestModelWarmOnSetup:
 class TestSetupLoggingBestEffort:
     """A setup_logging() failure (bad log path) must not block the rest of main()."""
 
-    WARM_PID_KEY = "ccrecall-warm-model"
+    WARM_JOB_KEY = "ccrecall-warm-model"
 
     def test_setup_logging_failure_does_not_block_spawns(self, tmp_path, monkeypatch):
         spawned: list[str] = []
 
-        def mock_spawn(argv, pid_key, logger):
-            spawned.append(pid_key)
+        def mock_spawn(argv, job_key, logger, scope=None):
+            spawned.append(job_key)
 
         def raise_bad_log_path(*_a, **_k):
             raise OSError("bad log path")
@@ -1015,7 +1006,7 @@ class TestSetupLoggingBestEffort:
         with patch("sys.stdout", captured):
             memory_setup.main()
 
-        assert self.WARM_PID_KEY in spawned, f"setup_logging() failure blocked the rest of main(); spawns: {spawned}"
+        assert self.WARM_JOB_KEY in spawned, f"setup_logging() failure blocked the rest of main(); spawns: {spawned}"
         out = json.loads(captured.getvalue())
         assert out.get("continue") is True
 
@@ -1040,8 +1031,6 @@ class TestSyncEmbeddingStatusRecording:
         extra_patches=None,
     ):
         """Run sync_current.run() with mocked infrastructure; return parsed stdout JSON."""
-        monkeypatch.setattr("ccrecall.config.pid_file_path", lambda key: tmp_path / f".pid-{key}")
-        monkeypatch.setattr(sync_current, "remove_pid_file", lambda key: None)
         monkeypatch.setattr(
             sync_current,
             "load_settings",
@@ -1225,9 +1214,7 @@ class TestSyncCurrentTranscriptDiscovery:
         session_file.parent.mkdir(parents=True)
         session_file.write_text("{}", encoding="utf-8")
 
-        monkeypatch.setattr("ccrecall.config.pid_file_path", lambda key: tmp_path / f".pid-{key}")
         monkeypatch.setattr(sync_current, "DEFAULT_PROJECTS_DIR", projects_dir)
-        monkeypatch.setattr(sync_current, "remove_pid_file", lambda key: None)
         monkeypatch.setattr(sync_current, "load_settings", lambda: {"exclude_projects": [], "logging_enabled": False})
         monkeypatch.setattr(sync_current, "setup_logging", lambda *_a, **_k: MagicMock())
         monkeypatch.setattr(sync_current, "_warn_cold_model", lambda: None)
@@ -1274,9 +1261,7 @@ class TestSyncCurrentCompletionLogging:
         session_content = b'{"some": "transcript content"}'
         session_file.write_bytes(session_content)
 
-        monkeypatch.setattr("ccrecall.config.pid_file_path", lambda key: tmp_path / f".pid-{key}")
         monkeypatch.setattr(sync_current, "DEFAULT_PROJECTS_DIR", projects_dir)
-        monkeypatch.setattr(sync_current, "remove_pid_file", lambda key: None)
         monkeypatch.setattr(sync_current, "load_settings", lambda: {"exclude_projects": [], "logging_enabled": True})
         # Use the real "ccrecall" logger object (no file handlers attached) so
         # caplog — which attaches its own handler to that logger name — can
@@ -1334,9 +1319,7 @@ class TestSyncCurrentCompletionLogging:
             return original_stat(self, *args, **kwargs)
 
         monkeypatch.setattr(Path, "stat", raising_stat)
-        monkeypatch.setattr("ccrecall.config.pid_file_path", lambda key: tmp_path / f".pid-{key}")
         monkeypatch.setattr(sync_current, "DEFAULT_PROJECTS_DIR", projects_dir)
-        monkeypatch.setattr(sync_current, "remove_pid_file", lambda key: None)
         monkeypatch.setattr(sync_current, "load_settings", lambda: {"exclude_projects": [], "logging_enabled": True})
         monkeypatch.setattr(sync_current, "setup_logging", lambda *_a, **_k: logging.getLogger("ccrecall"))
         monkeypatch.setattr(sync_current, "_warn_cold_model", lambda: None)
@@ -1450,13 +1433,11 @@ class TestSyncCurrentEmbedStep:
 
         assert run_history.read_runs(sync_env) == {}
 
-    def test_live_backfill_skips_inference_but_still_syncs(self, sync_env, monkeypatch, live_ccrecall_pid):
-        marker = config.pid_file_path(config.PID_KEY_BACKFILL_EMBEDDINGS)
-        marker.parent.mkdir(parents=True, exist_ok=True)
-        marker.write_text(str(live_ccrecall_pid))
+    def test_live_backfill_skips_inference_but_still_syncs(self, sync_env, monkeypatch, hold_job_lock):
+        hold_job_lock(config.JOB_KEY_BACKFILL_EMBEDDINGS)
 
         def no_inference(_texts, **_kwargs):
-            raise AssertionError("inference ran while a backfill holds the marker")
+            raise AssertionError("inference ran while a backfill holds its lock")
 
         monkeypatch.setattr("ccrecall.embed_ops.embed_batch", no_inference)
 

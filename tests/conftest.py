@@ -10,10 +10,12 @@ from pathlib import Path
 
 import pytest
 import sqlite_vec
+from whenever import Instant
 
 import ccrecall.config as config
 import ccrecall.health as health
 import ccrecall.hooks.sync_current as sync_current
+import ccrecall.job_lock as job_lock
 import ccrecall.run_history as run_history
 from ccrecall.db_vec import _ensure_vec_schema
 from ccrecall.embed_ops import EmbedOutcome, embed_branch_chunks
@@ -46,7 +48,7 @@ def _isolated_runtime_dir(tmp_path, monkeypatch) -> None:
     /`snooze_path` defaults dynamically — see health.py — so this monkeypatch
     reaches them even when a caller omits the argument) plus the two other
     concrete known real-file-write sites: config.py's own RUNTIME_DIR-reading
-    functions (setup_logging, pid_file_path) and sync_current.py's
+    functions (setup_logging, and job_lock.lock_path through it) and sync_current.py's
     by-value-imported DEFAULT_LOG_PATH (_warn_cold_model's cold-start log).
 
     Deliberately NOT covered: DEFAULT_DB_PATH is imported by value into ~9
@@ -173,19 +175,66 @@ def jsonl_fixture(request):
     return request.param
 
 
-@pytest.fixture
-def live_ccrecall_pid():
-    """PID of a live process whose command line has a `ccrecall` token.
+# Holds a job lock from another process until killed: flocks the file, writes
+# the record (filling in its own PID when the record has none), then sleeps.
+_HOLD_LOCK_SCRIPT = """
+import fcntl, json, os, sys, time
+fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o600)
+fcntl.flock(fd, fcntl.LOCK_EX)
+content = sys.argv[2]
+if content.startswith("{"):
+    record = json.loads(content)
+    if "pid" not in record:
+        record["pid"] = os.getpid()
+    content = json.dumps(record)
+os.ftruncate(fd, 0)
+os.write(fd, content.encode())
+print("held", flush=True)
+time.sleep(120)
+"""
 
-    A marker holder only counts as live when it's a ccrecall process (see
-    config.read_marker_holder), so a test standing in a live holder needs one.
+
+def job_record(key: str, *, age_seconds: float = 0, scope: dict | None = None, **fields) -> dict:
+    """A job lock record as job_lock writes it, started ``age_seconds`` ago."""
+    started = Instant.now().subtract(seconds=age_seconds)
+    return {"key": key, "started_at": started.format_iso(), "scope": scope or {}, **fields}
+
+
+@pytest.fixture
+def hold_job_lock():
+    """Hold a job's lock from another process; returns that process's PID.
+
+    ``hold(key, record=...)`` writes that record (its ``pid`` defaults to the
+    holder's); ``hold(key, raw="...")`` writes raw content instead. Every holder
+    is killed at teardown.
     """
-    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)", "ccrecall"])
-    try:
-        yield proc.pid
-    finally:
+    procs: list[subprocess.Popen] = []
+
+    def hold(key: str, *, record: dict | None = None, raw: str | None = None) -> int:
+        path = job_lock.lock_path(key)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        content = raw if raw is not None else json.dumps(record if record is not None else job_record(key))
+        proc = subprocess.Popen(
+            [sys.executable, "-c", _HOLD_LOCK_SCRIPT, str(path), content], stdout=subprocess.PIPE, text=True
+        )
+        procs.append(proc)
+        assert proc.stdout is not None
+        assert proc.stdout.readline().strip() == "held"
+        return proc.pid
+
+    yield hold
+    for proc in procs:
         proc.kill()
         proc.wait()
+        if proc.stdout is not None:
+            proc.stdout.close()
+
+
+def leave_killed_lock(key: str, *, pid: int | None = 4242, age_seconds: float = 0, scope: dict | None = None) -> None:
+    """Leave the record a killed holder would: the lock free, the record still in the file."""
+    path = job_lock.lock_path(key)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(job_record(key, age_seconds=age_seconds, scope=scope, pid=pid)))
 
 
 def locked_error() -> sqlite3.OperationalError:

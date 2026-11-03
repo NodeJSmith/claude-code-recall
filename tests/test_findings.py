@@ -3,18 +3,16 @@
 import hashlib
 import json
 import os
-import subprocess
-import sys
 import time
 from pathlib import Path
 
 import pytest
 import sqlite_vec
-from conftest import VEC_SKIP, write_four_turns
+from conftest import VEC_SKIP, job_record, leave_killed_lock, write_four_turns
 from whenever import Instant
 
-from ccrecall import findings, health, run_history
-from ccrecall.config import PID_KEY_BACKFILL_EMBEDDINGS, PID_KEY_IMPORT, pid_file_path
+from ccrecall import findings, health, job_lock, run_history
+from ccrecall.config import JOB_KEY_BACKFILL_EMBEDDINGS, JOB_KEY_IMPORT
 from ccrecall.db import CONTENT_ERROR_VERSION, get_connection
 from ccrecall.db_base import SCHEMA_VERSION
 from ccrecall.embeddings import EMBEDDING_DIM, EMBEDDING_MODEL, EMBEDDING_VERSION
@@ -49,6 +47,14 @@ def db_path(tmp_path):
     with get_connection({"db_path": str(path)}, load_vec=True):
         pass
     return path
+
+
+def hold_backfill(hold_job_lock, scope: dict) -> int:
+    return hold_job_lock(JOB_KEY_BACKFILL_EMBEDDINGS, record=job_record(JOB_KEY_BACKFILL_EMBEDDINGS, scope=scope))
+
+
+def hold_import(hold_job_lock, scope: dict) -> int:
+    return hold_job_lock(JOB_KEY_IMPORT, record=job_record(JOB_KEY_IMPORT, scope=scope))
 
 
 def iso_ago(seconds: float) -> str:
@@ -113,20 +119,6 @@ def record_backfill(db_path: Path, *, finished_ago: float, outcome: str = run_hi
     }
     last_ok = entry if outcome == run_history.OUTCOME_OK else None
     run_history.runs_path(db_path).write_text(json.dumps({"backfill": {"last": entry, "last_ok": last_ok}}))
-
-
-def write_marker(pid_key: str, pid: int, *, age_seconds: float = 0) -> None:
-    marker = pid_file_path(pid_key)
-    marker.parent.mkdir(parents=True, exist_ok=True)
-    marker.write_text(str(pid))
-    then = time.time() - age_seconds
-    os.utime(marker, (then, then))
-
-
-def dead_pid() -> int:
-    proc = subprocess.Popen([sys.executable, "-c", ""])
-    proc.wait()
-    return proc.pid
 
 
 def by_id(diagnosis) -> dict[str, Finding]:
@@ -229,18 +221,67 @@ class TestEmbeddingBacklog:
 
         assert by_id(diagnose(db_path, settings()))["embedding-backlog"].group == GROUP_WORKING
 
-    def test_live_backfill_keeps_it_working(self, db_path, live_ccrecall_pid):
+    def test_live_unscoped_backfill_keeps_it_working(self, db_path, hold_job_lock):
         add_session(db_path, "queued", chunked=0)
-        write_marker(PID_KEY_BACKFILL_EMBEDDINGS, live_ccrecall_pid)
+        hold_backfill(hold_job_lock, job_lock.backfill_scope(days=None, limit=None, db=db_path))
 
         found = by_id(diagnose(db_path, settings()))
 
         assert found["embedding-backlog"].group == GROUP_WORKING
+        assert found["embedding-backlog"].fix is None
         assert found["backfill-running"].group == GROUP_WORKING
+
+    def test_live_backfill_on_the_same_database_by_another_path_counts(self, db_path, tmp_path, hold_job_lock):
+        add_session(db_path, "queued", chunked=0)
+        (tmp_path / "link").symlink_to(db_path.parent)
+        hold_backfill(
+            hold_job_lock, job_lock.backfill_scope(days=None, limit=None, db=tmp_path / "link" / db_path.name)
+        )
+
+        assert by_id(diagnose(db_path, settings()))["embedding-backlog"].group == GROUP_WORKING
+
+    def test_live_backfill_on_another_database_does_not_count(self, db_path, tmp_path, hold_job_lock):
+        add_session(db_path, "queued", chunked=0)
+        hold_backfill(hold_job_lock, job_lock.backfill_scope(days=None, limit=None, db=tmp_path / "copy.db"))
+
+        backlog = by_id(diagnose(db_path, settings()))["embedding-backlog"]
+
+        assert backlog.group == GROUP_ACTION
+        assert backlog.fix == "ccrecall backfill embeddings"
+        assert "nothing is draining them" in backlog.message
+        assert "--days or --limit" not in backlog.message
+
+    def test_live_backfill_whose_scope_names_no_database_does_not_count(self, db_path, hold_job_lock):
+        add_session(db_path, "queued", chunked=0)
+        hold_backfill(hold_job_lock, {"days": None, "limit": None})
+
+        assert by_id(diagnose(db_path, settings()))["embedding-backlog"].group == GROUP_ACTION
+
+    @pytest.mark.parametrize("scope", [{"days": 14, "limit": None}, {"days": None, "limit": 1}])
+    def test_live_scoped_backfill_does_not_count_as_draining(self, db_path, hold_job_lock, scope):
+        add_session(db_path, "queued", chunked=0)
+        hold_backfill(hold_job_lock, job_lock.backfill_scope(**scope, db=db_path))
+
+        found = by_id(diagnose(db_path, settings()))
+
+        assert found["embedding-backlog"].group == GROUP_ACTION
+        assert found["embedding-backlog"].fix == "ccrecall backfill embeddings"
+        assert "--days or --limit is running" in found["embedding-backlog"].message
+        assert found["backfill-running"].group == GROUP_WORKING
+
+    def test_live_backfill_with_an_unreadable_record_does_not_count_as_draining(self, db_path, hold_job_lock):
+        add_session(db_path, "queued", chunked=0)
+        hold_job_lock(JOB_KEY_BACKFILL_EMBEDDINGS, raw="garbage")
+
+        found = by_id(diagnose(db_path, settings()))
+
+        assert found["embedding-backlog"].group == GROUP_ACTION
+        assert "what it covers can't be read" in found["embedding-backlog"].message
+        assert found["backfill-running"].message == "An embedding backfill is running."
 
     def test_killed_backfill_is_named_when_it_needs_action(self, db_path):
         add_session(db_path, "queued", chunked=0)
-        write_marker(PID_KEY_BACKFILL_EMBEDDINGS, dead_pid(), age_seconds=50 * HOURS)
+        leave_killed_lock(JOB_KEY_BACKFILL_EMBEDDINGS, age_seconds=50 * HOURS)
 
         backlog = by_id(diagnose(db_path, settings()))["embedding-backlog"]
 
@@ -347,13 +388,41 @@ class TestIngestion:
         assert fixable.fix == "ccrecall import --repair-gaps"
         assert [row.session_id for row in diagnosis.sessions["fixable-sessions"]] == ["sess-gap"]
 
-    def test_running_import_makes_it_working(self, db_path, gapped, live_ccrecall_pid):
-        write_marker(PID_KEY_IMPORT, live_ccrecall_pid)
+    def test_running_repair_import_makes_it_working(self, db_path, gapped, hold_job_lock):
+        hold_import(hold_job_lock, job_lock.import_scope(repair_gaps=True, db=db_path))
 
         fixable = by_id(diagnose(db_path, settings()))["fixable-sessions"]
 
         assert fixable.group == GROUP_WORKING
         assert fixable.fix is None
+
+    def test_repair_import_on_another_database_still_needs_action(self, db_path, gapped, tmp_path, hold_job_lock):
+        hold_import(hold_job_lock, job_lock.import_scope(repair_gaps=True, db=tmp_path / "copy.db"))
+
+        fixable = by_id(diagnose(db_path, settings()))["fixable-sessions"]
+
+        assert fixable.group == GROUP_ACTION
+        assert fixable.fix == "ccrecall import --repair-gaps"
+        assert "import is running" not in fixable.message
+
+    def test_running_import_with_an_unreadable_record_does_not_claim_its_scope(self, db_path, gapped, hold_job_lock):
+        hold_job_lock(JOB_KEY_IMPORT, raw="garbage")
+
+        fixable = by_id(diagnose(db_path, settings()))["fixable-sessions"]
+
+        assert fixable.group == GROUP_ACTION
+        assert fixable.fix == "ccrecall import --repair-gaps"
+        assert "An import is running, but what it covers can't be read" in fixable.message
+        assert "doesn't repair gaps" not in fixable.message
+
+    def test_running_import_without_repair_still_needs_action(self, db_path, gapped, hold_job_lock):
+        hold_import(hold_job_lock, job_lock.import_scope(repair_gaps=False, db=db_path))
+
+        fixable = by_id(diagnose(db_path, settings()))["fixable-sessions"]
+
+        assert fixable.group == GROUP_ACTION
+        assert fixable.fix == "ccrecall import --repair-gaps"
+        assert "An import is running, but it doesn't repair gaps" in fixable.message
 
     def test_session_repair_could_not_fix_is_listed_apart_with_no_fix(self, db_path, gapped):
         run_history.write_unfixable(db_path, {"sess-gap": source_fingerprint([gapped])}, replace=True)
@@ -407,26 +476,47 @@ class TestRuns:
         assert "sync-failed" not in by_id(diagnose(db_path, settings()))
 
     def test_recent_kill_is_working_on_it(self, db_path):
-        write_marker(PID_KEY_IMPORT, dead_pid(), age_seconds=HOURS)
+        leave_killed_lock(JOB_KEY_IMPORT, pid=4242, age_seconds=HOURS)
 
         killed = by_id(diagnose(db_path, settings()))["import-killed"]
 
         assert killed.group == GROUP_WORKING
         assert killed.fix == "ccrecall import"
+        assert "(PID 4242)" in killed.message
+
+    def test_kill_of_a_spawn_that_never_started_names_no_pid(self, db_path):
+        leave_killed_lock(JOB_KEY_IMPORT, pid=None, age_seconds=HOURS)
+
+        killed = by_id(diagnose(db_path, settings()))["import-killed"]
+
+        assert "PID" not in killed.message
+        assert "None" not in killed.message
 
     def test_old_kill_needs_nothing(self, db_path):
-        write_marker(PID_KEY_IMPORT, dead_pid(), age_seconds=40 * HOURS)
+        leave_killed_lock(JOB_KEY_IMPORT, age_seconds=40 * HOURS)
 
         assert by_id(diagnose(db_path, settings()))["import-killed"].group == GROUP_NONE
 
-    def test_run_older_than_the_limit_is_stuck(self, db_path, live_ccrecall_pid):
-        write_marker(PID_KEY_BACKFILL_EMBEDDINGS, live_ccrecall_pid, age_seconds=40 * HOURS)
+    def test_run_older_than_the_limit_is_stuck(self, db_path, hold_job_lock):
+        pid = hold_job_lock(
+            JOB_KEY_BACKFILL_EMBEDDINGS, record=job_record(JOB_KEY_BACKFILL_EMBEDDINGS, age_seconds=40 * HOURS)
+        )
 
         stuck = by_id(diagnose(db_path, settings()))["backfill-stuck"]
 
         assert stuck.group == GROUP_ACTION
-        assert str(live_ccrecall_pid) in stuck.message
-        assert str(live_ccrecall_pid) in stuck.fix
+        assert str(pid) in stuck.message
+        assert stuck.fix is not None
+        assert f"kill {pid}" in stuck.fix
+
+    def test_stuck_spawn_with_no_pid_yet_names_no_pid(self, db_path, hold_job_lock):
+        hold_job_lock(JOB_KEY_IMPORT, record=job_record(JOB_KEY_IMPORT, age_seconds=40 * HOURS, pid=None))
+
+        stuck = by_id(diagnose(db_path, settings()))["import-stuck"]
+
+        assert "None" not in stuck.message
+        assert stuck.fix is not None
+        assert "stop the running import" in stuck.fix
 
     def test_last_sync_comes_from_the_last_success(self, db_path):
         entry = {"outcome": "ok", "reason": None, "started_at": iso_ago(70), "finished_at": iso_ago(60)}

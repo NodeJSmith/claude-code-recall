@@ -23,8 +23,8 @@ from conftest import (
     write_jsonl,
 )
 
-from ccrecall import ingestion_status
-from ccrecall.config import PID_KEY_IMPORT, pid_file_path, remove_pid_file
+from ccrecall import ingestion_status, job_lock
+from ccrecall.config import JOB_KEY_IMPORT
 from ccrecall.embeddings import EMBEDDING_DIM
 from ccrecall.hooks.backfill_query import BACKFILL_NICE_LEVEL
 from ccrecall.hooks.import_conversations import (
@@ -791,7 +791,6 @@ class TestImportPoisonContainment:
             raise RuntimeError("simulated catastrophic failure outside the per-file loop")
 
         monkeypatch.setattr("ccrecall.hooks.import_conversations._run", _raise)
-        monkeypatch.setattr("ccrecall.hooks.import_conversations.remove_pid_file", lambda _key: None)
 
         with (
             caplog.at_level(logging.ERROR, logger="ccrecall"),
@@ -911,7 +910,7 @@ class TestImportProjectContainment:
             self._fail_after_writing("-aaa-bad", RuntimeError("simulated project failure")),
         )
 
-        failures, _ = _run(db=db_path, projects_dir=projects_dir, project=None, verbose=False, repair_gaps=False)
+        failures = _run(db=db_path, projects_dir=projects_dir, project=None, verbose=False, repair_gaps=False)
 
         assert failures == 1
         out = capsys.readouterr().out
@@ -932,7 +931,6 @@ class TestImportProjectContainment:
             "ccrecall.hooks.import_conversations.import_project",
             self._fail_after_writing("-only", RuntimeError("simulated project failure")),
         )
-        monkeypatch.setattr("ccrecall.hooks.import_conversations.remove_pid_file", lambda _key: None)
 
         with pytest.raises(SystemExit) as excinfo:
             run(db=db_path, projects_dir=projects_dir, project="-only")
@@ -1458,7 +1456,7 @@ class TestImportRepairGapsEndToEnd:
     more than once against the same DB), while load_settings/setup_logging/
     get_db_path run for real — RUNTIME_DIR/CONFIG_PATH are already isolated to
     tmp_path by the autouse `_isolated_runtime_dir` fixture in conftest.py, so
-    PID markers and log files never touch a real ~/.ccrecall.
+    job locks and log files never touch a real ~/.ccrecall.
     """
 
     def _run_import(
@@ -1615,12 +1613,11 @@ class TestImportRepairGapsEndToEnd:
             == 1
         )
 
-    def test_repair_gaps_skips_when_pid_marker_already_held(self, memory_db, tmp_path, monkeypatch, live_ccrecall_pid):
-        """--repair-gaps skips (not fails) when PID_KEY_IMPORT is already
-        held, without raising, and the other holder's marker survives run()'s own
-        finally cleanup.
+    def test_repair_gaps_skips_when_the_import_lock_is_held(self, memory_db, tmp_path, monkeypatch, hold_job_lock):
+        """--repair-gaps skips (not fails) when JOB_KEY_IMPORT is already
+        held, without raising, and the other holder's lock and record are untouched.
 
-        The PID guard covers the whole invocation, not just the repair step —
+        The job lock covers the whole invocation, not just the repair step —
         a brand-new, never-imported session file dropped into the project dir
         before the guarded run must also NOT get picked up by the ordinary
         per-project import loop, proving the entire invocation was skipped
@@ -1651,34 +1648,28 @@ class TestImportRepairGapsEndToEnd:
         )
 
         # Simulate a concurrently-running import (e.g. the SessionStart background
-        # auto-import) already holding the PID marker.
-        pid_file_path(PID_KEY_IMPORT).parent.mkdir(parents=True, exist_ok=True)
-        pid_file_path(PID_KEY_IMPORT).write_text(str(live_ccrecall_pid))
+        # auto-import) already holding the import job lock.
+        holder = hold_job_lock(JOB_KEY_IMPORT)
 
-        try:
-            self._run_import(memory_db, monkeypatch, tmp_path, projects_dir, repair_gaps=True)
+        self._run_import(memory_db, monkeypatch, tmp_path, projects_dir, repair_gaps=True)
 
-            assert (
-                memory_db.execute(
-                    "SELECT COUNT(*) FROM messages WHERE session_id = ? AND uuid = 'a2'", (session_id,)
-                ).fetchone()[0]
-                == 0
-            ), "repair must have been skipped, not silently no-op'd for an unrelated reason"
-            assert (
-                memory_db.execute("SELECT COUNT(*) FROM sessions WHERE uuid = ?", ("sess-never-imported",)).fetchone()[
-                    0
-                ]
-                == 0
-            ), "the ordinary per-project import loop must also have been skipped, not just the repair step"
-            assert pid_file_path(PID_KEY_IMPORT).exists(), (
-                "run() must not delete a PID marker it did not itself acquire"
-            )
-        finally:
-            remove_pid_file(PID_KEY_IMPORT)
+        assert (
+            memory_db.execute(
+                "SELECT COUNT(*) FROM messages WHERE session_id = ? AND uuid = 'a2'", (session_id,)
+            ).fetchone()[0]
+            == 0
+        ), "repair must have been skipped, not silently no-op'd for an unrelated reason"
+        assert (
+            memory_db.execute("SELECT COUNT(*) FROM sessions WHERE uuid = ?", ("sess-never-imported",)).fetchone()[0]
+            == 0
+        ), "the ordinary per-project import loop must also have been skipped, not just the repair step"
+        state = job_lock.probe(JOB_KEY_IMPORT)
+        assert state is not None
+        assert (state.running, state.pid) == (True, holder), "run() must not touch a lock it did not acquire"
 
-    def test_spawned_import_repairs_past_its_own_marker(self, memory_db, tmp_path, monkeypatch):
-        """ccrecall-setup writes the child's PID into the marker before the child
-        runs, so the child finds its own PID, repairs, and removes the marker."""
+    def test_spawned_import_adopts_the_handed_over_lock_and_repairs(self, memory_db, tmp_path, monkeypatch):
+        """ccrecall-setup takes the import lock and hands its descriptor to the
+        child, so the child adopts it, repairs, and releases it."""
         projects_dir = tmp_path / "projects"
         projects_dir.mkdir()
         project_dir = projects_dir / "-Users-sam-project"
@@ -1693,8 +1684,12 @@ class TestImportRepairGapsEndToEnd:
         memory_db.commit()
         age_past_grace_window(filepath)
 
-        pid_file_path(PID_KEY_IMPORT).parent.mkdir(parents=True, exist_ok=True)
-        pid_file_path(PID_KEY_IMPORT).write_text(str(os.getpid()))
+        # What job_lock.spawn leaves for the child: the lock held on a descriptor
+        # named in the environment, and a record with no PID yet.
+        handed_over = job_lock.lock_exclusive(JOB_KEY_IMPORT)
+        assert handed_over is not None
+        job_lock.write_record(handed_over, JOB_KEY_IMPORT, None, {"repair_gaps": True})
+        monkeypatch.setenv(job_lock.LOCK_FD_ENV, str(handed_over))
 
         self._run_import(memory_db, monkeypatch, tmp_path, projects_dir, repair_gaps=True)
 
@@ -1704,7 +1699,9 @@ class TestImportRepairGapsEndToEnd:
             ).fetchone()[0]
             == 1
         )
-        assert not pid_file_path(PID_KEY_IMPORT).exists()
+        assert job_lock.LOCK_FD_ENV not in os.environ
+        # Free only if the adopted descriptor was the one released.
+        assert job_lock.probe(JOB_KEY_IMPORT) is None
 
     def test_only_repair_runs_lower_their_priority(self, memory_db, tmp_path, monkeypatch):
         projects_dir = tmp_path / "projects"
@@ -1716,45 +1713,17 @@ class TestImportRepairGapsEndToEnd:
         self._run_import(memory_db, monkeypatch, tmp_path, projects_dir, repair_gaps=True)
         assert self.nice_levels == [BACKFILL_NICE_LEVEL]
 
-    def test_failed_run_removes_its_own_marker(self, tmp_path, monkeypatch):
-        def _raise_after_acquisition(**_kwargs):
-            pid_file_path(PID_KEY_IMPORT).parent.mkdir(parents=True, exist_ok=True)
-            pid_file_path(PID_KEY_IMPORT).write_text(str(os.getpid()))
+    def test_failed_run_releases_its_lock(self, tmp_path, monkeypatch):
+        def _raise_after_acquisition(*_args, **_kwargs):
+            assert job_lock.probe(JOB_KEY_IMPORT) is not None
             raise RuntimeError("simulated failure mid-import")
 
-        monkeypatch.setattr("ccrecall.hooks.import_conversations._run", _raise_after_acquisition)
+        monkeypatch.setattr("ccrecall.hooks.import_conversations._import_locked", _raise_after_acquisition)
 
         with pytest.raises(RuntimeError, match="simulated failure"):
             run(db=tmp_path / "memory.db", projects_dir=tmp_path, repair_gaps=True)
 
-        assert not pid_file_path(PID_KEY_IMPORT).exists()
-
-    def test_repair_gaps_preserves_other_holders_marker_on_early_exception(
-        self, tmp_path, monkeypatch, live_ccrecall_pid
-    ):
-        """If _run() raises before it ever reaches its own PID_KEY acquisition
-        attempt (e.g. load_settings() blows up), run()'s finally block must NOT
-        delete a marker this invocation never acquired — otherwise it un-guards
-        a genuinely live holder (e.g. the SessionStart background auto-import)."""
-
-        def _raise_before_acquisition(**_kwargs):
-            raise RuntimeError("simulated load_settings() failure before PID acquisition")
-
-        monkeypatch.setattr("ccrecall.hooks.import_conversations._run", _raise_before_acquisition)
-
-        # Simulate a concurrently-running import already holding the marker.
-        pid_file_path(PID_KEY_IMPORT).parent.mkdir(parents=True, exist_ok=True)
-        pid_file_path(PID_KEY_IMPORT).write_text(str(live_ccrecall_pid))
-
-        try:
-            with pytest.raises(RuntimeError, match="simulated load_settings"):
-                run(db=tmp_path / "memory.db", projects_dir=tmp_path, repair_gaps=True)
-
-            assert pid_file_path(PID_KEY_IMPORT).exists(), (
-                "run() must not delete a PID marker it never had the chance to acquire"
-            )
-        finally:
-            remove_pid_file(PID_KEY_IMPORT)
+        assert job_lock.probe(JOB_KEY_IMPORT) is None
 
     def test_repair_gaps_reports_unrepairable_candidate_distinctly(self, memory_db, tmp_path, monkeypatch, capsys):
         """A candidate whose transcript genuinely lacks the expected

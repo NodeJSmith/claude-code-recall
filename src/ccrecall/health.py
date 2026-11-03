@@ -23,7 +23,7 @@ from pathlib import Path
 
 from whenever import Instant
 
-from ccrecall.config import PID_FILE_MODE, RUNTIME_DIR, atomic_write_json, ensure_parent_dir
+from ccrecall.config import PRIVATE_FILE_MODE, RUNTIME_DIR, atomic_write_json, ensure_parent_dir
 from ccrecall.db_base import is_database_locked
 from ccrecall.models import LOGGER_NAME
 
@@ -123,7 +123,7 @@ def probe_filesystem(marker_path: Path | None = None) -> ProbeResult:
     if marker_path is None:
         marker_path = _PROBE_MARKER_PATH
     try:
-        fd = os.open(str(marker_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, PID_FILE_MODE)
+        fd = os.open(str(marker_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, PRIVATE_FILE_MODE)
         try:
             os.write(fd, b"\x00")
         finally:
@@ -193,7 +193,7 @@ def locked_sidecar(path: Path) -> Iterator[None]:
 
     Both writers of the embedding-status sidecar — the Stop-hook-spawned
     sync-current process and a manually- or scheduler-invoked backfill run —
-    use different PID guards, so both can be alive at once. Without a shared
+    use different job locks, so both can be alive at once. Without a shared
     lock, ``clear_embedding_failure``'s read-then-conditional-unlink is a
     TOCTOU race: a clear can read one writer's record, then unlink a second
     writer's fresher record written in between (#197). ``fcntl.flock`` is
