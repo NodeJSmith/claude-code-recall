@@ -1,7 +1,7 @@
 # Design: Doctor, a terse status, and a record of background runs
 
 **Date:** 2026-11-02
-**Status:** ratified
+**Status:** built
 **Mode:** sketch
 **Issues:** #234, #235, #237
 **Prior art:** design/research/2026-11-02-doctor-and-run-history/prior-art.md
@@ -385,7 +385,7 @@ An `Exception` records `failed` with reason `error`, including the one sync swal
 
 - [x] Implementation and tests committed
 - [x] Docs
-- [ ] Ship-time challenge
+- [x] Ship-time challenge
 
 **Calls made during the build:**
 - A backfill is `partial` only when a branch hit a lock timeout. A branch that changed or vanished during inference also isn't stamped and is retried, but that happens whenever a session is active, so counting it would keep `last_ok` from advancing on ordinary days.
