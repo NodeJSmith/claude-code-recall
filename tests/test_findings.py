@@ -12,7 +12,7 @@ import sqlite_vec
 from conftest import VEC_SKIP, job_record, leave_killed_lock, write_four_turns
 from whenever import Instant
 
-from ccrecall import findings, health, job_lock, run_history
+from ccrecall import config, findings, health, job_lock, run_history
 from ccrecall.config import JOB_KEY_BACKFILL_EMBEDDINGS, JOB_KEY_IMPORT
 from ccrecall.db import CONTENT_ERROR_VERSION, get_connection
 from ccrecall.db_base import SCHEMA_VERSION
@@ -40,6 +40,12 @@ LONG_AGO = "2026-01-01T10:00:00.000Z"
 def _model_cached(monkeypatch):
     """The model's disk cache depends on the machine; findings tests assume it's there."""
     monkeypatch.setattr(findings, "is_model_cached_on_disk", lambda: True)
+
+
+@pytest.fixture(autouse=True)
+def _default_db(monkeypatch, tmp_path):
+    """The tests' database is the default one, so fixes read as bare commands."""
+    monkeypatch.setattr(config, "DEFAULT_DB_PATH", tmp_path / "conversations.db")
 
 
 @pytest.fixture
@@ -147,7 +153,7 @@ def test_fresh_database_is_healthy(db_path):
 
 
 def test_missing_database_is_a_finding_and_is_never_created(tmp_path):
-    db_path = tmp_path / "missing.db"
+    db_path = tmp_path / "conversations.db"
 
     diagnosis = diagnose(db_path, settings())
 
@@ -685,3 +691,27 @@ def test_a_recorded_run_reaches_the_report(db_path):
 
     assert failed.group == GROUP_ACTION
     assert failed.fix == "ccrecall backfill embeddings"
+
+
+def test_fixes_for_another_database_name_it(tmp_path):
+    db_path = tmp_path / "my copy.db"
+    with get_connection({"db_path": str(db_path)}, load_vec=True):
+        pass
+    add_session(db_path, "queued", chunked=0)
+
+    backlog = by_id(diagnose(db_path, settings()))["embedding-backlog"]
+
+    assert backlog.fix == f"ccrecall backfill embeddings --db '{db_path}'"
+
+
+def test_database_without_a_vector_table_counts_its_chunks_as_unvectored(db_path):
+    """Only a vector-loading connection creates chunk_vec, so a current database can lack it."""
+    add_session(db_path, "chunked", vectors=False)
+    with get_connection({"db_path": str(db_path)}, load_vec=True) as conn:
+        conn.execute("DROP TABLE chunk_vec")
+
+    diagnosis = diagnose(db_path, settings())
+
+    assert "check-failed" not in by_id(diagnosis)
+    assert by_id(diagnosis)["embedding-backlog"].count == 1
+    assert diagnosis.sessions["embedding-backlog"][0].reason == findings.BACKLOG_MISSING_VECTORS

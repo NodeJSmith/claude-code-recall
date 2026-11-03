@@ -18,6 +18,7 @@ imports the vector stack, which the hook path must not.
 import contextlib
 import logging
 import os
+import shlex
 import sqlite3
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
@@ -30,7 +31,12 @@ from ccrecall import config, health, job_lock, run_history
 from ccrecall.config import resolve_backfill_stale_hours
 from ccrecall.db import CHUNK_DRAFT_QUALITY_FILTER, CHUNK_EMBEDDABLE_BRANCH_FILTER, CONTENT_ERROR_VERSION
 from ccrecall.db_base import SCHEMA_VERSION, describe_schema_ahead
-from ccrecall.db_vec import count_exchanges_without_chunks, find_stamped_branches_missing_chunks, vec_available
+from ccrecall.db_vec import (
+    chunk_vec_queryable,
+    count_exchanges_without_chunks,
+    find_stamped_branches_missing_chunks,
+    vec_available,
+)
 from ccrecall.embeddings import (
     EMBEDDING_MODEL,
     EMBEDDING_VERSION,
@@ -238,6 +244,13 @@ def verdict_for(findings: Iterable[Finding]) -> str:
     return VERDICT_HEALTHY
 
 
+def for_db(command: str, db_path: Path) -> str:
+    """``command`` aimed at ``db_path``: a fix run without ``--db`` would act on the default database."""
+    if db_path == config.DEFAULT_DB_PATH:
+        return command
+    return f"{command} --db {shlex.quote(str(db_path))}"
+
+
 def diagnose(db_path: Path, settings: dict) -> Diagnosis:
     """Collect every finding about the install whose database is ``db_path``.
 
@@ -266,7 +279,7 @@ def diagnose(db_path: Path, settings: dict) -> Diagnosis:
                     id="no-database",
                     group=GROUP_ACTION,
                     message=f"No database at {db_path} yet, so no history is stored.",
-                    fix=health.FIX_IMPORT,
+                    fix=for_db(health.FIX_IMPORT, db_path),
                 )
             )
         )
@@ -290,7 +303,9 @@ def diagnose(db_path: Path, settings: dict) -> Diagnosis:
             raise DatabaseUnreadableError(f"{exc}{hint}") from exc
         vec_loaded = load_vec(conn)
 
-        results.run_check("embedding availability", lambda: (embedding_availability_findings(vec_loaded), None))
+        results.run_check(
+            "embedding availability", lambda: (embedding_availability_findings(vec_loaded, db_path), None)
+        )
 
         ahead = describe_schema_ahead(db_path)
         if ahead:
@@ -314,7 +329,7 @@ def diagnose(db_path: Path, settings: dict) -> Diagnosis:
                             f"The database is at schema v{user_version}, but this install expects "
                             f"v{SCHEMA_VERSION}. Database checks were skipped until it's migrated."
                         ),
-                        fix=health.FIX_IMPORT,
+                        fix=for_db(health.FIX_IMPORT, db_path),
                     )
                 )
             )
@@ -364,7 +379,7 @@ def run_database_checks(
                 )
             )
 
-    results.run_check("tool content", lambda: (tool_content_findings(conn, sources), None))
+    results.run_check("tool content", lambda: (tool_content_findings(conn, sources, scan.db_path), None))
     results.run_check("active branches", lambda: (duplicate_branch_findings(conn), None))
     stored = results.run_check(
         "session count", lambda: ([], conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0])
@@ -386,6 +401,11 @@ def last_sync_iso(runs: Mapping[str, dict]) -> str | None:
     return last_ok.get("finished_at") if isinstance(last_ok, dict) else None
 
 
+def kind_fix(kind: str, scan: Scan) -> str | None:
+    command = KIND_FIXES[kind]
+    return None if command is None else for_db(command, scan.db_path)
+
+
 def run_findings(scan: Scan) -> list[Found]:
     """Failed, killed, running and stuck runs, from the run history and the job locks."""
     found: list[Found] = []
@@ -399,7 +419,7 @@ def run_findings(scan: Scan) -> list[Found]:
         reason = last.get("reason") or run_history.REASON_ERROR
         busy = reason == run_history.REASON_DATABASE_BUSY
         # Rerunning can't fix a missing sqlite-vec, so that cause gets the reinstall fix.
-        rerun = REINSTALL_FOR_VEC if reason == run_history.REASON_VECTOR_UNAVAILABLE else KIND_FIXES[kind]
+        rerun = REINSTALL_FOR_VEC if reason == run_history.REASON_VECTOR_UNAVAILABLE else kind_fix(kind, scan)
         how = "failed" if last.get("outcome") == run_history.OUTCOME_FAILED else "finished with failures"
         started = format_when(parse_instant(last.get("started_at")))
         found.append(
@@ -434,7 +454,7 @@ def run_findings(scan: Scan) -> list[Found]:
                             f"{a_label} started {started}{pid_note} was killed before it finished. "
                             "The next run of that kind starts over cleanly."
                         ),
-                        fix=KIND_FIXES[kind],
+                        fix=kind_fix(kind, scan),
                     )
                 )
             )
@@ -449,7 +469,7 @@ def run_findings(scan: Scan) -> list[Found]:
                             f"{a_label} has been running since {started}{pid_note}, "
                             f"longer than backfill_stale_hours. It may still be making progress."
                         ),
-                        fix=f"if it's no longer making progress, {stop}, then run `{KIND_FIXES[kind]}`",
+                        fix=f"if it's no longer making progress, {stop}, then run `{kind_fix(kind, scan)}`",
                     )
                 )
             )
@@ -497,7 +517,7 @@ def skipped_by_design(settings: dict) -> Found:
     )
 
 
-def embedding_availability_findings(vec_loaded: bool) -> list[Found]:
+def embedding_availability_findings(vec_loaded: bool, db_path: Path) -> list[Found]:
     """Read from the extension load, the embedding-status record, and the model's disk cache. Never loads the model."""
     causes: list[tuple[str, str]] = []
     if not vec_loaded:
@@ -505,7 +525,11 @@ def embedding_availability_findings(vec_loaded: bool) -> list[Found]:
     status = health.read_embedding_status()
     if status is not None:
         reason = str(status.get("reason") or "")
-        fix = REINSTALL_FOR_VEC if reason == health.REASON_VEC_UNAVAILABLE else health.FIX_BACKFILL_EMBEDDINGS
+        fix = (
+            REINSTALL_FOR_VEC
+            if reason == health.REASON_VEC_UNAVAILABLE
+            else for_db(health.FIX_BACKFILL_EMBEDDINGS, db_path)
+        )
         since = format_when(parse_instant(status.get("since")))
         causes.append((f"the last embedding run reported {health.describe_embedding_reason(reason)} ({since})", fix))
     if not is_model_cached_on_disk():
@@ -596,7 +620,7 @@ def ingestion_findings(
                     group=GROUP_WORKING if repairing else GROUP_ACTION,
                     message=f"{plural(len(fixable), 'session')} missing messages their transcripts still have{note}",
                     count=len(fixable),
-                    fix=None if repairing else health.FIX_REPAIR,
+                    fix=None if repairing else for_db(health.FIX_REPAIR, scan.db_path),
                     listable=True,
                 ),
                 rows_for(fixable, lookup),
@@ -660,8 +684,15 @@ def embedding_findings(
     """Classify every embeddable session's vectors; report the backlog, drafts and unembeddable sessions."""
     cursor = conn.cursor()
     # Without the extension, chunk_vec can't be read; a chunk then counts as
-    # vectored, and embedding-unavailable reports the real problem.
-    no_vector = "OR NOT EXISTS (SELECT 1 FROM chunk_vec WHERE chunk_id = c.id)" if vec_loaded else ""
+    # vectored, and embedding-unavailable reports the real problem. With it but
+    # no chunk_vec table (only a vector-loading connection creates one), no
+    # chunk has a vector yet.
+    if not vec_loaded:
+        no_vector = ""
+    elif chunk_vec_queryable(conn):
+        no_vector = "OR NOT EXISTS (SELECT 1 FROM chunk_vec WHERE chunk_id = c.id)"
+    else:
+        no_vector = "OR 1"
     branches = cursor.execute(
         f"""
         SELECT branches.id, s.uuid, branches.ended_at, branches.embedding_version, branches.embedding_model,
@@ -731,7 +762,7 @@ def embedding_findings(
                         )
                     ),
                     count=len(drafts),
-                    fix=None if recent_backfill else health.FIX_BACKFILL_EMBEDDINGS,
+                    fix=None if recent_backfill else for_db(health.FIX_BACKFILL_EMBEDDINGS, scan.db_path),
                     listable=True,
                 ),
                 rows_for(drafts, lookup),
@@ -837,7 +868,7 @@ def backlog_finding(
                 f" No full backfill has succeeded in the last {scan.stale_seconds / health.SECONDS_PER_HOUR:g} hours"
                 f" ({describe_last_backfill(scan)})" + ("." if backfilling else ", so nothing is draining them.")
             )
-            fix = health.FIX_BACKFILL_EMBEDDINGS
+            fix = for_db(health.FIX_BACKFILL_EMBEDDINGS, scan.db_path)
         else:
             group = GROUP_WORKING
             message += " The next backfill embeds them."
@@ -877,7 +908,9 @@ def describe_last_backfill(scan: Scan) -> str:
     return f"last run, started {started}, failed"
 
 
-def tool_content_findings(conn: sqlite3.Connection, sources: dict[str, dict[str, list[Path]]] | None) -> list[Found]:
+def tool_content_findings(
+    conn: sqlite3.Connection, sources: dict[str, dict[str, list[Path]]] | None, db_path: Path
+) -> list[Found]:
     """Older sessions whose tool-call content isn't indexed yet, counting only ones a backfill can fill."""
     cursor = conn.cursor()
     pending = count_tool_content_pending(cursor, None)
@@ -899,7 +932,7 @@ def tool_content_findings(conn: sqlite3.Connection, sources: dict[str, dict[str,
                     "Indexing it is optional."
                 ),
                 count=backfillable,
-                fix=health.FIX_BACKFILL_TOOL_CONTENT,
+                fix=for_db(health.FIX_BACKFILL_TOOL_CONTENT, db_path),
             )
         )
     ]
