@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.27.0](https://github.com/NodeJSmith/claude-code-recall/compare/v0.26.3...v0.27.0) (2026-11-03)
+
+
+### ⚠ BREAKING CHANGES
+
+* `ccrecall status --json` now returns `verdict`, `findings` and `summary`, the same shape as `ccrecall doctor --json`.
+    #### Removed fields
+    - `database`, `schema`, `ingestion`, `tool_content` and `embeddings` are
+    gone, along with `db_path`, `db_size_bytes` and `days`. Nothing replaces
+    the path or the size. The session count, percent embedded and last sync
+    are in `summary`.
+    - A missing database no longer prints `{"error": "database_not_found",
+    ...}`. It now reports a `no-database` finding with verdict
+    `needs-attention`, and still exits 1. Scripts testing `.error` should
+    test for that finding instead.
+    #### Removed flags
+    - `ccrecall status --days` and `--check-ingestion` are removed, and
+    passing either one is an unknown-option error. Run `ccrecall doctor` for
+    the ingestion check.
+
+### Features
+
+* add ccrecall doctor, a terse status, and a record of background runs ([#247](https://github.com/NodeJSmith/claude-code-recall/issues/247)) ([73cb44f](https://github.com/NodeJSmith/claude-code-recall/commit/73cb44fb3ee8ba8229c808369b351162b83dc25c))
+
 ## [0.26.3](https://github.com/NodeJSmith/claude-code-recall/compare/v0.26.2...v0.26.3) (2026-11-02)
 
 
