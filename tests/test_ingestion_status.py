@@ -1,12 +1,14 @@
 """Tests for transcript-vs-DB ingestion diagnostics."""
 
 import os
+import sqlite3
 from pathlib import Path
 from unittest.mock import patch
 
 from conftest import age_past_grace_window, delete_message, make_jsonl_entry, write_four_turns, write_jsonl
 
 from ccrecall import ingestion_status, parsing
+from ccrecall.db import get_connection
 from ccrecall.import_log_ops import import_log_source_index
 from ccrecall.ingestion_status import (
     _db_coverage_fingerprint,
@@ -154,6 +156,7 @@ def test_ok_session_records_cache_and_unchanged_second_run_skips_parsing(memory_
     write_four_turns(filepath)
     _seed_session(memory_db, filepath, ["u1", "a1", "u2", "a2"])
 
+    find_repairable_sessions(memory_db)  # the repair scan warms the ok cache
     first = summarize_ingestion(memory_db)
 
     cached = _cache_row(memory_db, "sess-cache")
@@ -176,6 +179,7 @@ def test_transcript_change_invalidates_cache_and_reparses(memory_db, tmp_path):
     write_four_turns(filepath)
     _seed_session(memory_db, filepath, ["u1", "a1", "u2", "a2"])
 
+    find_repairable_sessions(memory_db)  # the repair scan warms the ok cache
     summarize_ingestion(memory_db)
     first_cache = _cache_row(memory_db, "sess-cache-change")
     assert first_cache is not None
@@ -195,6 +199,7 @@ def test_transcript_change_invalidates_cache_and_reparses(memory_db, tmp_path):
 
     assert parse_all.call_count == 1
     assert status["ok_sessions"] == 1
+    find_repairable_sessions(memory_db)
     assert _cache_row(memory_db, "sess-cache-change")[1] != first_cache[1]
 
 
@@ -203,6 +208,7 @@ def test_mtime_only_change_invalidates_cache_and_reparses(memory_db, tmp_path):
     write_four_turns(filepath)
     _seed_session(memory_db, filepath, ["u1", "a1", "u2", "a2"])
 
+    find_repairable_sessions(memory_db)  # the repair scan warms the ok cache
     summarize_ingestion(memory_db)
     first_cache = _cache_row(memory_db, "sess-cache-mtime")
     assert first_cache is not None
@@ -215,6 +221,7 @@ def test_mtime_only_change_invalidates_cache_and_reparses(memory_db, tmp_path):
 
     assert parse_all.call_count == 1
     assert status["ok_sessions"] == 1
+    find_repairable_sessions(memory_db)
     assert _cache_row(memory_db, "sess-cache-mtime")[1] != first_cache[1]
 
 
@@ -223,6 +230,7 @@ def test_deleted_db_message_invalidates_ok_cache_and_reports_gap(memory_db, tmp_
     write_four_turns(filepath)
     _seed_session(memory_db, filepath, ["u1", "a1", "u2", "a2"])
 
+    find_repairable_sessions(memory_db)  # the repair scan warms the ok cache
     first = summarize_ingestion(memory_db)
 
     assert first["ok_sessions"] == 1
@@ -248,6 +256,7 @@ def test_changed_db_uuid_membership_invalidates_ok_cache_and_reports_gap(memory_
     write_four_turns(filepath)
     _seed_session(memory_db, filepath, ["u1", "a1", "u2", "a2"])
 
+    find_repairable_sessions(memory_db)  # the repair scan warms the ok cache
     first = summarize_ingestion(memory_db)
 
     assert first["ok_sessions"] == 1
@@ -415,6 +424,7 @@ def test_branch_link_substitution_invalidates_ok_cache(memory_db, tmp_path):
         )
     memory_db.commit()
 
+    find_repairable_sessions(memory_db)  # the repair scan warms the ok cache
     first = summarize_ingestion(memory_db)
     assert first["ok_sessions"] == 1
     first_cache = _cache_row(memory_db, "sess-cache-link-substitution")
@@ -440,11 +450,30 @@ def test_branch_link_substitution_invalidates_ok_cache(memory_db, tmp_path):
     assert parse_all.call_count == 1
     assert second["ok_sessions"] == 0
     assert second["ingestion_gap_sessions"] == 1
-    # summarize_ingestion only (re-)writes ingestion_check_cache for an "ok"
-    # verdict — the corrupted session is no longer "ok", so the cache is left
+    # summarize_ingestion never writes ingestion_check_cache, and the repair
+    # scan only (re-)writes it for an "ok" verdict — the corrupted session is no longer "ok", so the cache is left
     # untouched rather than being overwritten with a false "ok" of the
     # corrupted state.
     assert _cache_row(memory_db, "sess-cache-link-substitution") == first_cache
+
+
+def test_summarize_ingestion_writes_nothing_so_it_runs_read_only(tmp_path):
+    db_path = tmp_path / "ro.db"
+    filepath = tmp_path / "sess-ro.jsonl"
+    write_four_turns(filepath)
+    with get_connection({"db_path": str(db_path)}, load_vec=False) as conn:
+        _seed_session(conn, filepath, ["u1", "a1", "u2", "a2"])
+
+    ro = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        ro.execute("PRAGMA query_only = ON")
+        status = summarize_ingestion(ro)
+        assert ro.execute("SELECT COUNT(*) FROM ingestion_check_cache").fetchone()[0] == 0
+    finally:
+        ro.close()
+
+    assert status["ok_sessions"] == 1
+    assert status["sessions"] == {"pending_tail": [], "stale_tail": [], "ingestion_gap": [], "missing_source": []}
 
 
 def test_problem_session_is_not_cached_and_is_reparsed(memory_db, tmp_path):
@@ -582,6 +611,7 @@ def test_partial_multifile_source_loss_stays_missing_source_after_prior_ok_cache
     _insert_import_log(memory_db, parent, 2)
     _insert_import_log(memory_db, agent, 2)
 
+    find_repairable_sessions(memory_db)  # the repair scan warms the ok cache
     first = summarize_ingestion(memory_db)
 
     assert first["ok_sessions"] == 1
@@ -668,7 +698,7 @@ def test_reclassify_session_reflects_db_catch_up(memory_db, tmp_path):
 
 
 def test_toctou_deleted_file_during_expected_uuids_yields_missing_source_and_continues(memory_db, tmp_path):
-    """A file that vanishes between the initial _source_fingerprint() stat and
+    """A file that vanishes between the initial source_fingerprint() stat and
     the later _expected_uuids() read (a TOCTOU race — e.g. a concurrent import
     or a user deleting old transcripts) must be contained to that one session's
     classify_sessions() iteration, not raise out of the generator and abort

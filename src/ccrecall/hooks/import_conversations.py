@@ -13,8 +13,9 @@ import sqlite3
 import time
 from collections.abc import Callable
 from pathlib import Path
+from typing import NamedTuple
 
-from ccrecall import ingestion_status
+from ccrecall import ingestion_status, run_history
 from ccrecall.config import (
     DEFAULT_DB_PATH,
     get_db_path,
@@ -398,13 +399,19 @@ def import_project(
     return sessions_imported, messages_imported, sessions_skipped
 
 
+class ProjectFailed(NamedTuple):
+    """A project import that was rolled back. ``locked``: another process outlasted busy_timeout."""
+
+    locked: bool
+
+
 def import_project_contained(
     conn: sqlite3.Connection,
     project_dir: Path,
     exclude_projects: list[str] | None,
     on_reclaim: Callable[[], None] = _noop,
-) -> tuple[int, int, int] | None:
-    """Import and commit one project; return None if it failed and was rolled back.
+) -> tuple[int, int, int] | ProjectFailed:
+    """Import and commit one project; return ProjectFailed if it failed and was rolled back.
 
     One bad project must not block every project that sorts after it. On any
     exception other than sqlite3.OperationalError (an infrastructure failure
@@ -427,14 +434,14 @@ def import_project_contained(
             "database locked; rolled back this project and continuing with the remaining projects",
             extra={"project_key": normalize_project_key(project_dir.name), "project_dir": str(project_dir)},
         )
-        return None
+        return ProjectFailed(locked=True)
     except Exception:
         conn.rollback()
         log.exception(
             "project import failed; rolled back and continuing with the remaining projects",
             extra={"project_key": normalize_project_key(project_dir.name), "project_dir": str(project_dir)},
         )
-        return None
+        return ProjectFailed(locked=False)
     return result
 
 
@@ -491,7 +498,12 @@ def run(
 
 def report_repair(logger: logging.Logger, candidate_count: int, counts: import_repair.RepairCounts) -> None:
     """Print and log what a repair batch did, whether it finished or aborted."""
-    repaired, messages, failed, unrepairable = counts
+    repaired, messages, failed, unrepairable = (
+        counts.repaired,
+        counts.messages_recovered,
+        counts.failed,
+        counts.unrepairable,
+    )
     summary = f"Repaired {repaired} session(s), recovered {messages} message(s)"
     if unrepairable:
         summary += f", {unrepairable} could not be repaired (source transcript is missing the required message(s))"
@@ -511,27 +523,45 @@ def report_repair(logger: logging.Logger, candidate_count: int, counts: import_r
     )
 
 
-def run_repair(conn: sqlite3.Connection, logger: logging.Logger, on_reclaim: Callable[[], None]) -> int:
-    """Find and repair gapped sessions, report the outcome, and return how many failed."""
-    try:
-        candidates = ingestion_status.find_repairable_sessions(conn)
-    except sqlite3.OperationalError as exc:
-        conn.rollback()
-        if not is_database_locked(exc):
-            raise
-        # The scan writes ok verdicts, so it can lose a lock wait too. It commits
-        # them in batches, so the next run resumes instead of starting over.
-        print("Skipped gap repair: database is locked — the next import retries it")
-        logger.warning("Gap repair skipped — database locked during the candidate scan")
-        return 1  # counts as a failure so the run exits non-zero
+def run_repair(
+    conn: sqlite3.Connection, logger: logging.Logger, on_reclaim: Callable[[], None], db_path: Path
+) -> tuple[int, int]:
+    """Find and repair gapped sessions, report and record the outcome.
 
-    try:
-        counts = import_repair.repair_sessions(conn, candidates, on_reclaim=on_reclaim)
-    except import_repair.RepairAborted as aborted:
-        report_repair(logger, len(candidates), aborted.counts)
-        raise
-    report_repair(logger, len(candidates), counts)
-    return counts.failed
+    Returns ``(failed, locked)``: how many repairs failed, and how many of those
+    hit a locked database. A completed repair replaces the unfixable-sessions
+    file; an aborted one only adds to it.
+    """
+    with run_history.record_run(db_path, run_history.KIND_REPAIR) as recorder:
+        try:
+            candidates = ingestion_status.find_repairable_sessions(conn)
+        except sqlite3.OperationalError as exc:
+            conn.rollback()
+            if not is_database_locked(exc):
+                raise
+            # The scan writes ok verdicts, so it can lose a lock wait too. It commits
+            # them in batches, so the next run resumes instead of starting over.
+            print("Skipped gap repair: database is locked — the next import retries it")
+            logger.warning("Gap repair skipped — database locked during the candidate scan")
+            recorder.finish(run_history.OUTCOME_FAILED, run_history.REASON_DATABASE_BUSY)
+            return 1, 1  # counts as a failure so the run exits non-zero
+
+        try:
+            counts = import_repair.repair_sessions(conn, candidates, on_reclaim=on_reclaim)
+        except import_repair.RepairAborted as aborted:
+            report_repair(logger, len(candidates), aborted.counts)
+            if aborted.counts.unfixable:
+                run_history.write_unfixable(db_path, dict(aborted.counts.unfixable), replace=False)
+            raise
+        report_repair(logger, len(candidates), counts)
+        run_history.write_unfixable(db_path, dict(counts.unfixable), replace=True)
+        if counts.failed:
+            busy = counts.locked == counts.failed
+            recorder.finish(
+                run_history.OUTCOME_PARTIAL,
+                run_history.REASON_DATABASE_BUSY if busy else run_history.REASON_ERROR,
+            )
+        return counts.failed, counts.locked
 
 
 def _run(
@@ -567,108 +597,119 @@ def _run(
     db_path = get_db_path(settings)
     exclude_projects = settings.get("exclude_projects", [])
 
-    total_sessions = 0
-    total_messages = 0
-    total_skipped = 0
-    project_failures = 0
-    repair_failures = 0
-    finished = False
+    with run_history.record_run(db_path, run_history.KIND_IMPORT) as recorder:
+        total_sessions = 0
+        total_messages = 0
+        total_skipped = 0
+        project_failures = 0
+        lock_failures = 0
+        repair_failures = 0
+        finished = False
 
-    t_start = time.monotonic()
+        t_start = time.monotonic()
 
-    # load_vec=True so the chunks_vec_ad cascade trigger works during empty-session
-    # cleanup (DELETE FROM branches fires triggers that touch chunk_vec).
-    try:
-        with get_connection(settings, load_vec=True) as conn:
-            t_conn = time.monotonic()
-            logger.debug("connection opened in %.2fs", t_conn - t_start)
+        # load_vec=True so the chunks_vec_ad cascade trigger works during empty-session
+        # cleanup (DELETE FROM branches fires triggers that touch chunk_vec).
+        try:
+            with get_connection(settings, load_vec=True) as conn:
+                t_conn = time.monotonic()
+                logger.debug("connection opened in %.2fs", t_conn - t_start)
 
-            libc = try_load_libc()
-            t_gc_total = 0.0
+                libc = try_load_libc()
+                t_gc_total = 0.0
 
-            def _reclaim() -> None:
-                nonlocal t_gc_total
-                t0 = time.monotonic()
-                reclaim_memory(libc)
-                t_gc_total += time.monotonic() - t0
+                def _reclaim() -> None:
+                    nonlocal t_gc_total
+                    t0 = time.monotonic()
+                    reclaim_memory(libc)
+                    t_gc_total += time.monotonic() - t0
 
-            if project:
-                project_dir = projects_dir / project
-                if not project_dir.exists():
-                    print(f"Project not found: {project_dir}")
-                elif not is_safe_project_dir(project_dir, projects_dir):
-                    print(f"Unsafe project path: {project_dir}")
-                else:
-                    project_counts = import_project_contained(conn, project_dir, exclude_projects, _reclaim)
-                    if project_counts is None:
-                        project_failures += 1
-                        print(f"Failed to import {project} — see ccrecall-import.log")
+                if project:
+                    project_dir = projects_dir / project
+                    if not project_dir.exists():
+                        print(f"Project not found: {project_dir}")
+                    elif not is_safe_project_dir(project_dir, projects_dir):
+                        print(f"Unsafe project path: {project_dir}")
                     else:
+                        project_counts = import_project_contained(conn, project_dir, exclude_projects, _reclaim)
+                        if isinstance(project_counts, ProjectFailed):
+                            project_failures += 1
+                            lock_failures += project_counts.locked
+                            print(f"Failed to import {project} — see ccrecall-import.log")
+                        else:
+                            sessions, messages, skipped = project_counts
+                            total_sessions += sessions
+                            total_messages += messages
+                            total_skipped += skipped
+                            print(f"Imported {project}: {sessions} branches, {messages} messages")
+                else:
+                    t_import_total = 0.0
+                    project_count = 0
+
+                    for project_dir in sorted(projects_dir.iterdir()):
+                        if project_dir.is_symlink() or not project_dir.is_dir() or project_dir.name.startswith("."):
+                            continue
+
+                        project_count += 1
+                        t0 = time.monotonic()
+                        project_counts = import_project_contained(conn, project_dir, exclude_projects, _reclaim)
+                        t_import_total += time.monotonic() - t0
+
+                        if isinstance(project_counts, ProjectFailed):
+                            project_failures += 1
+                            lock_failures += project_counts.locked
+                            print(f"Failed to import {project_dir.name} — see ccrecall-import.log")
+                            continue
+
                         sessions, messages, skipped = project_counts
                         total_sessions += sessions
                         total_messages += messages
                         total_skipped += skipped
-                        print(f"Imported {project}: {sessions} branches, {messages} messages")
-            else:
-                t_import_total = 0.0
-                project_count = 0
 
-                for project_dir in sorted(projects_dir.iterdir()):
-                    if project_dir.is_symlink() or not project_dir.is_dir() or project_dir.name.startswith("."):
-                        continue
+                        if sessions > 0 or messages > 0:
+                            print(f"Imported {project_dir.name}: {sessions} branches, {messages} messages")
 
-                    project_count += 1
-                    t0 = time.monotonic()
-                    project_counts = import_project_contained(conn, project_dir, exclude_projects, _reclaim)
-                    t_import_total += time.monotonic() - t0
+                    logger.debug(
+                        "timing: %d projects, import+commit=%.2fs, gc=%.2fs",
+                        project_count,
+                        t_import_total,
+                        t_gc_total,
+                    )
 
-                    if project_counts is None:
-                        project_failures += 1
-                        print(f"Failed to import {project_dir.name} — see ccrecall-import.log")
-                        continue
+                if repair_gaps:
+                    repair_failures, repair_lock_failures = run_repair(conn, logger, _reclaim, db_path)
+                    lock_failures += repair_lock_failures
 
-                    sessions, messages, skipped = project_counts
-                    total_sessions += sessions
-                    total_messages += messages
-                    total_skipped += skipped
+            finished = True
+        finally:
+            t_end = time.monotonic()
+            logger.debug("total wall time: %.2fs", t_end - t_start)
+            # Log as well as print: the SessionStart-spawned import has stdout on DEVNULL.
+            logger.log(
+                logging.INFO if finished else logging.ERROR,
+                "Import %s: %s branches, %s messages",
+                "complete" if finished else "aborted",
+                total_sessions,
+                total_messages,
+            )
+            totals_line = (
+                f"\nTotal: {total_sessions} branches, {total_messages} messages imported ({total_skipped} unchanged)"
+            )
+            if project_failures:
+                totals_line += f", {project_failures} project(s) failed — see ccrecall-import.log"
+            if not finished:
+                totals_line += ", aborted early — see ccrecall-import.log"
+            print(totals_line)
 
-                    if sessions > 0 or messages > 0:
-                        print(f"Imported {project_dir.name}: {sessions} branches, {messages} messages")
+        if db_path.exists():
+            db_size = db_path.stat().st_size
+            print(f"Database size: {db_size / BYTES_PER_MB:.2f} MB")
 
-                logger.debug(
-                    "timing: %d projects, import+commit=%.2fs, gc=%.2fs",
-                    project_count,
-                    t_import_total,
-                    t_gc_total,
-                )
-
-            if repair_gaps:
-                repair_failures = run_repair(conn, logger, _reclaim)
-
-        finished = True
-    finally:
-        t_end = time.monotonic()
-        logger.debug("total wall time: %.2fs", t_end - t_start)
-        # Log as well as print: the SessionStart-spawned import has stdout on DEVNULL.
-        logger.log(
-            logging.INFO if finished else logging.ERROR,
-            "Import %s: %s branches, %s messages",
-            "complete" if finished else "aborted",
-            total_sessions,
-            total_messages,
-        )
-        totals_line = (
-            f"\nTotal: {total_sessions} branches, {total_messages} messages imported ({total_skipped} unchanged)"
-        )
-        if project_failures:
-            totals_line += f", {project_failures} project(s) failed — see ccrecall-import.log"
-        if not finished:
-            totals_line += ", aborted early — see ccrecall-import.log"
-        print(totals_line)
-
-    if db_path.exists():
-        db_size = db_path.stat().st_size
-        print(f"Database size: {db_size / BYTES_PER_MB:.2f} MB")
-
-    total_failures = repair_failures + project_failures
+        total_failures = repair_failures + project_failures
+        if total_failures:
+            busy = lock_failures == total_failures
+            recorder.finish(
+                run_history.OUTCOME_PARTIAL,
+                run_history.REASON_DATABASE_BUSY if busy else run_history.REASON_ERROR,
+            )
     return total_failures, False

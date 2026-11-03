@@ -373,8 +373,20 @@ An `Exception` records `failed` with reason `error`, including the one sync swal
 
 ## Build
 
-- [ ] Implementation and tests committed
-- [ ] Docs
+- [x] Implementation and tests committed
+- [x] Docs
 - [ ] Ship-time challenge
 
 **Calls made during the build:**
+- A backfill is `partial` only when a branch hit a lock timeout. A branch that changed or vanished during inference also isn't stamped and is retried, but that happens whenever a session is active, so counting it would keep `last_ok` from advancing on ordinary days.
+- Sync records `ok` when its messages were committed, even when sqlite-vec is unavailable or its embed step failed and was logged. `embedding-unavailable` and the backlog report the embedding side. A swallowed lock error records `database_busy` rather than `error`, matching the other kinds.
+- The backlog's `repaired` reason means a branch that has chunks but some exchanges without one. Repair produces that, but so does a sync whose embed step didn't finish, so the message says "with new messages since they were embedded" rather than naming repair.
+- `summarize_ingestion` returns each category's session ids alongside its counts, since `--list` needs them. It no longer writes the ok-verdict cache (D1); tests that relied on it to warm the cache now warm it with `find_repairable_sessions`.
+- Without the sqlite-vec extension, the coverage check counts any chunk as having its vector, since `chunk_vec` can't be read. `embedding-unavailable` reports the real problem.
+- `doctor --list` exits 0 whatever the verdict: a listing isn't a gate.
+- A WAL database in a directory ccrecall can't write to can't be opened even read-only, because SQLite must create its `-shm` file. `doctor` then exits 2 and `status` exits 1, with the not-writable reason in the error, instead of a `not-writable` finding. A read-only open also recreates the `-wal` and `-shm` files when they're missing; the database file itself is untouched.
+- To tell a busy run from a failed one, `RepairCounts` gained `locked` and `unfixable`, and `import_project_contained` returns `ProjectFailed(locked)` instead of `None`.
+- Sync's PID key moved into `config.py` as `PID_KEY_SYNC`, beside the other jobs' keys, so `run_history.py` can name it without importing the sync hook. `health._locked_status_file` became the public `locked_sidecar`, since the run-history files share it.
+- `embedding-unavailable` is one finding listing every cause, with the first cause's fix.
+- `skipped-by-design` is always present, in "nothing to do".
+- An `import --repair-gaps` whose repair fails records a `partial` import as well as a failed repair, as D8 states, so one cause can show as both `import-failed` and `repair-failed`.

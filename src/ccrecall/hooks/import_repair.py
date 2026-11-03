@@ -50,6 +50,12 @@ class RepairCounts(NamedTuple):
     messages_recovered: int
     failed: int
     unrepairable: int
+    # Of `failed`, how many were a locked database: busy, not broken.
+    locked: int = 0
+    # (session_uuid, source_fingerprint) for each unrepairable session whose
+    # transcript could be fingerprinted, so `ccrecall doctor` can tell them from
+    # the sessions a repair could still fix (see run_history.write_unfixable).
+    unfixable: tuple[tuple[str, str], ...] = ()
 
 
 class RepairAborted(sqlite3.OperationalError):
@@ -73,8 +79,9 @@ def repair_sessions(
     """Force-reimport every (session_uuid, session_id, project_id, filepaths)
     candidate — matching ingestion_status.find_repairable_sessions's return
     shape, where project_id is None when the session's project_id column is
-    nullable and unset. Returns (sessions_repaired, messages_recovered,
-    sessions_failed, sessions_unrepairable).
+    nullable and unset. Returns a RepairCounts: sessions repaired, messages
+    recovered, sessions failed (of which ``locked`` hit a locked database),
+    sessions unrepairable, and the unrepairable sessions' fingerprints.
 
     force=True (via import_session/import_session_group) bypasses the stat/hash
     skip gates; sync_session's/sync_session_group's UUID-dedup insert
@@ -147,7 +154,27 @@ def repair_sessions(
     messages_recovered = 0
     sessions_failed = 0
     sessions_unrepairable = 0
+    sessions_locked = 0
+    unfixable: list[tuple[str, str]] = []
     total_candidates = len(candidates)
+
+    def mark_unfixable(session_uuid: str, filepaths: list[Path]) -> None:
+        try:
+            fingerprint = ingestion_status.source_fingerprint(filepaths)
+        except OSError:
+            fingerprint = None
+        if fingerprint is not None:
+            unfixable.append((session_uuid, fingerprint))
+
+    def counts() -> RepairCounts:
+        return RepairCounts(
+            sessions_repaired,
+            messages_recovered,
+            sessions_failed,
+            sessions_unrepairable,
+            sessions_locked,
+            tuple(unfixable),
+        )
 
     try:
         for index, (session_uuid, session_id, project_id, filepaths) in enumerate(candidates, start=1):
@@ -162,6 +189,7 @@ def repair_sessions(
                     session_uuid,
                 )
                 sessions_unrepairable += 1
+                mark_unfixable(session_uuid, filepaths)
                 _log_progress(index, total_candidates, sessions_repaired, sessions_failed, sessions_unrepairable)
                 continue
 
@@ -197,6 +225,7 @@ def repair_sessions(
                     )
                     raise
                 log.warning("Database locked while repairing session %s — counting as failed", session_uuid)
+                sessions_locked += 1
                 candidate_failed = True
             except Exception:
                 conn.execute("ROLLBACK TO SAVEPOINT import_candidate")
@@ -284,13 +313,13 @@ def repair_sessions(
                 sessions_repaired += 1
             else:
                 sessions_unrepairable += 1
+                mark_unfixable(session_uuid, filepaths)
 
             _log_progress(index, total_candidates, sessions_repaired, sessions_failed, sessions_unrepairable)
     except sqlite3.OperationalError as exc:
-        counts = RepairCounts(sessions_repaired, messages_recovered, sessions_failed, sessions_unrepairable)
-        raise RepairAborted(str(exc), counts) from exc
+        raise RepairAborted(str(exc), counts()) from exc
 
-    return RepairCounts(sessions_repaired, messages_recovered, sessions_failed, sessions_unrepairable)
+    return counts()
 
 
 def _log_progress(index: int, total: int, repaired: int, failed: int, unrepairable: int) -> None:

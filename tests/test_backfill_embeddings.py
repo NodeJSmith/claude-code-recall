@@ -21,6 +21,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from conftest import VEC_SKIP, locked_error, make_vec_conn, patched_clear, patched_record
 
+from ccrecall import config, run_history
 from ccrecall.cli.commands import cmd_backfill_embeddings
 from ccrecall.config import remove_pid_file, try_acquire_pid_file
 from ccrecall.db import CONTENT_ERROR_VERSION
@@ -1435,11 +1436,11 @@ class TestBackfillPidGuard:
     peak. --status is read-only and never touches the marker.
     """
 
-    def test_marker_held_by_another_live_process_refuses(self, monkeypatch, tmp_path):
+    def test_marker_held_by_another_live_process_refuses(self, monkeypatch, tmp_path, live_ccrecall_pid):
         monkeypatch.setattr("ccrecall.config.pid_file_path", lambda key: tmp_path / f".pid-{key}")
-        (tmp_path / f".pid-{PID_KEY}").write_text(str(os.getppid()))
+        (tmp_path / f".pid-{PID_KEY}").write_text(str(live_ccrecall_pid))
         assert try_acquire_pid_file(PID_KEY) is False
-        assert (tmp_path / f".pid-{PID_KEY}").read_text() == str(os.getppid())
+        assert (tmp_path / f".pid-{PID_KEY}").read_text() == str(live_ccrecall_pid)
 
     def test_marker_holding_own_pid_counts_as_acquired(self, monkeypatch, tmp_path):
         """_spawn_background writes the child's PID before the child gets to acquire."""
@@ -1619,3 +1620,113 @@ class TestBackfillETAProgress:
         captured = capsys.readouterr()
         eta_lines = [line for line in captured.err.splitlines() if "ETA" in line]
         assert len(eta_lines) > 0, "progress line should print even though every branch content-errored"
+
+
+def _backfill_runs() -> dict:
+    # load_settings_for_db is patched to {}, so the run records against the default
+    # database, whose sidecars conftest redirects into the isolated runtime dir.
+    return run_history.read_runs(config.DEFAULT_DB_PATH).get("backfill", {})
+
+
+@_VEC_SKIP
+class TestBackfillRunRecording:
+    """Every backfill records its outcome; only an unscoped success advances last_ok (#234)."""
+
+    def test_unscoped_success_advances_last_ok(self):
+        conn = make_vec_conn()
+        _insert_branch_with_messages(conn)
+
+        _run_backfill_with_stub(conn)
+
+        runs = _backfill_runs()
+        assert runs["last"]["outcome"] == "ok"
+        assert runs["last_ok"] == runs["last"]
+
+    @pytest.mark.parametrize("scope", [{"limit": 1}, {"days": 7}])
+    def test_scoped_success_never_advances_last_ok(self, scope):
+        conn = make_vec_conn()
+        _insert_branch_with_messages(conn)
+
+        _run_backfill_with_stub(conn, **scope)
+
+        runs = _backfill_runs()
+        assert runs["last"]["outcome"] == "ok"
+        assert runs["last_ok"] is None
+
+    def test_a_lock_timeout_records_partial_database_busy(self):
+        conn = make_vec_conn()
+        contended = _insert_branch_with_messages(conn)
+        _insert_branch_with_messages(conn)
+
+        def embed(conn_arg, branch_id, **kwargs):
+            if branch_id == contended:
+                raise locked_error()
+            return embed_branch_chunks(conn_arg, branch_id, **kwargs)
+
+        _run_backfill_with_embed_patch(conn, embed)
+
+        runs = _backfill_runs()
+        assert (runs["last"]["outcome"], runs["last"]["reason"]) == ("partial", "database_busy")
+        assert runs["last_ok"] is None
+
+    def test_a_content_error_still_records_ok(self):
+        conn = make_vec_conn()
+        bad = _insert_branch_with_messages(conn)
+
+        def embed(conn_arg, branch_id, **kwargs):
+            if branch_id == bad:
+                raise ValueError("simulated tokenizer overflow")
+            return embed_branch_chunks(conn_arg, branch_id, **kwargs)
+
+        _run_backfill_with_embed_patch(conn, embed)
+
+        assert _backfill_runs()["last"]["outcome"] == "ok"
+
+    def test_repeated_lock_timeouts_record_failed_database_busy(self):
+        conn = make_vec_conn()
+        for _ in range(4):
+            _insert_branch_with_messages(conn)
+
+        _run_backfill_with_embed_patch(conn, locked_error())
+
+        last = _backfill_runs()["last"]
+        assert (last["outcome"], last["reason"]) == ("failed", "database_busy")
+
+    def test_other_database_errors_record_failed_error(self):
+        conn = make_vec_conn()
+        _insert_branch_with_messages(conn)
+
+        _run_backfill_with_embed_patch(conn, sqlite3.OperationalError("disk I/O error"))
+
+        last = _backfill_runs()["last"]
+        assert (last["outcome"], last["reason"]) == ("failed", "error")
+
+    def test_model_failing_its_probe_records_model_unavailable(self):
+        conn = make_vec_conn()
+        _insert_branch_with_messages(conn)
+
+        with patch("ccrecall.hooks.backfill_embeddings._model_still_healthy", return_value=False):
+            _run_backfill_with_embed_patch(conn, RuntimeError("model session broke"))
+
+        last = _backfill_runs()["last"]
+        assert (last["outcome"], last["reason"]) == ("failed", "model_unavailable")
+
+    def test_model_unavailable_at_start_is_recorded(self):
+        with (
+            patch("ccrecall.hooks.backfill_embeddings.model_available", return_value=False),
+            patch("ccrecall.hooks.backfill_embeddings.load_settings_for_db", return_value={}),
+            patch("ccrecall.hooks.backfill_embeddings.record_embedding_failure"),
+        ):
+            assert run() == EXIT_ABORT
+
+        last = _backfill_runs()["last"]
+        assert (last["outcome"], last["reason"]) == ("failed", "model_unavailable")
+
+    def test_status_records_nothing(self):
+        with (
+            patch("ccrecall.hooks.backfill_embeddings.load_settings_for_db", return_value={}),
+            patch("ccrecall.hooks.backfill_embeddings.run_status", return_value=EXIT_OK),
+        ):
+            run(status=True)
+
+        assert _backfill_runs() == {}

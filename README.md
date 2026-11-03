@@ -100,6 +100,15 @@ ccrecall is meant to be invisible — it runs in the background and Claude consu
 
 When any of these holds, the next session injects a short alert for Claude to relay to you in plain language. It's **told once, then goes quiet for ~24h** (tunable via `alert_snooze_hours` in the config file) even if still broken, and **clears itself the moment the condition resolves**. Coverage that's merely catching up is never surfaced this way — only genuine, unrecoverable failures earn the interruption.
 
+## Checking on ccrecall
+
+- **`ccrecall status`** is the glance: a verdict (healthy, working on it, or needs attention) and a line of numbers, such as `7,514 sessions · 98% embedded · last sync 2 min ago`. It exits 0 for any verdict, and 1 only when the database is missing or unreadable.
+- **`ccrecall doctor`** is the diagnosis. It reads without changing anything and lists every finding under what to do about it (needs action, working on it, nothing to do), each with the exact command that fixes it. `ccrecall doctor --list <finding-id>` lists the sessions behind a finding. It exits 0 when healthy or working on it, 1 when something needs attention, and 2 when the database can't be read at all, so scripts can gate on it.
+
+Both take the global `--json` flag and print the same shape: `verdict`, `findings` (each with `id`, `group`, `message`, `count`, `fix`, `listable`) and `summary` (`sessions`, `embedded_pct`, `last_sync`). Each checks every session against its transcript, so they take a few seconds, and longer on a large database that isn't in the OS cache.
+
+Queued embedding work counts as overdue once no full backfill has succeeded in `backfill_stale_hours` and a waiting session ended longer ago than that. Set it a little above how often your backfill runs: with a nightly job, 36.
+
 ## Skills
 
 | Skill | Trigger | What it does |
@@ -178,6 +187,7 @@ Session starts
 | `logging_enabled` | bool | `true` | Write hook diagnostics (including swallowed hook exceptions) to per-process files such as `~/.ccrecall/ccrecall-sync.log`. Set to `false` to suppress logging. |
 | `log_level` | str | `"INFO"` | Logging verbosity when `logging_enabled` is true. Accepts standard Python level names: `DEBUG`, `INFO`, `WARNING`, `ERROR`. |
 | `alert_snooze_hours` | int | `24` | After surfacing an alert (unwritable DB, embedding failure), suppress the same alert for this many hours. |
+| `backfill_stale_hours` | number | `72` | How long `ccrecall doctor` lets queued embedding work wait, and a running import or backfill run, before calling it overdue or stuck. |
 
 Example config:
 
@@ -202,6 +212,8 @@ Example config:
 - `import_log` — tracks which JSONL files have been imported and their hashes
 - `chunks` — one row per exchange (user turn + following assistant turns), carrying bounded display text and embedding bookkeeping
 - `chunk_vec` — sqlite-vec virtual table storing 512-dim jina embeddings keyed by chunk rowid, used for KNN search
+
+Two small files sit beside it, both safe to delete: `conversations.db.runs.json` records the newest and the last successful import, gap repair, sync and embedding backfill, and `conversations.db.unrepairable.json` lists sessions whose transcript is itself missing messages, so `doctor` doesn't offer a repair that can't help.
 
 ## Development
 

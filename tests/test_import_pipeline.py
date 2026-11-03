@@ -27,7 +27,14 @@ from ccrecall import ingestion_status
 from ccrecall.config import PID_KEY_IMPORT, pid_file_path, remove_pid_file
 from ccrecall.embeddings import EMBEDDING_DIM
 from ccrecall.hooks.backfill_query import BACKFILL_NICE_LEVEL
-from ccrecall.hooks.import_conversations import _run, import_project, import_project_contained, import_session, run
+from ccrecall.hooks.import_conversations import (
+    ProjectFailed,
+    _run,
+    import_project,
+    import_project_contained,
+    import_session,
+    run,
+)
 from ccrecall.import_log_ops import import_log_source_index
 
 _STALE_IMPORT_LOG_SQL = (
@@ -947,7 +954,7 @@ class TestImportProjectContainment:
 
         monkeypatch.setattr("ccrecall.hooks.import_conversations.import_project", import_then_break_commit)
 
-        assert import_project_contained(memory_db, projects_dir / "-proj", []) is None
+        assert import_project_contained(memory_db, projects_dir / "-proj", []) == ProjectFailed(locked=False)
         assert not memory_db.in_transaction
         assert memory_db.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 0
         assert memory_db.execute("SELECT COUNT(*) FROM import_log").fetchone()[0] == 0, (
@@ -1608,7 +1615,7 @@ class TestImportRepairGapsEndToEnd:
             == 1
         )
 
-    def test_repair_gaps_skips_when_pid_marker_already_held(self, memory_db, tmp_path, monkeypatch):
+    def test_repair_gaps_skips_when_pid_marker_already_held(self, memory_db, tmp_path, monkeypatch, live_ccrecall_pid):
         """--repair-gaps skips (not fails) when PID_KEY_IMPORT is already
         held, without raising, and the other holder's marker survives run()'s own
         finally cleanup.
@@ -1646,7 +1653,7 @@ class TestImportRepairGapsEndToEnd:
         # Simulate a concurrently-running import (e.g. the SessionStart background
         # auto-import) already holding the PID marker.
         pid_file_path(PID_KEY_IMPORT).parent.mkdir(parents=True, exist_ok=True)
-        pid_file_path(PID_KEY_IMPORT).write_text(str(os.getppid()))
+        pid_file_path(PID_KEY_IMPORT).write_text(str(live_ccrecall_pid))
 
         try:
             self._run_import(memory_db, monkeypatch, tmp_path, projects_dir, repair_gaps=True)
@@ -1722,7 +1729,9 @@ class TestImportRepairGapsEndToEnd:
 
         assert not pid_file_path(PID_KEY_IMPORT).exists()
 
-    def test_repair_gaps_preserves_other_holders_marker_on_early_exception(self, tmp_path, monkeypatch):
+    def test_repair_gaps_preserves_other_holders_marker_on_early_exception(
+        self, tmp_path, monkeypatch, live_ccrecall_pid
+    ):
         """If _run() raises before it ever reaches its own PID_KEY acquisition
         attempt (e.g. load_settings() blows up), run()'s finally block must NOT
         delete a marker this invocation never acquired — otherwise it un-guards
@@ -1735,7 +1744,7 @@ class TestImportRepairGapsEndToEnd:
 
         # Simulate a concurrently-running import already holding the marker.
         pid_file_path(PID_KEY_IMPORT).parent.mkdir(parents=True, exist_ok=True)
-        pid_file_path(PID_KEY_IMPORT).write_text(str(os.getppid()))
+        pid_file_path(PID_KEY_IMPORT).write_text(str(live_ccrecall_pid))
 
         try:
             with pytest.raises(RuntimeError, match="simulated load_settings"):

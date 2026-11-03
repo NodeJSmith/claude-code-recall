@@ -10,6 +10,8 @@ import contextlib
 import json
 import logging
 import os
+import re
+import subprocess
 import sys
 import tempfile
 from logging.handlers import RotatingFileHandler
@@ -47,7 +49,18 @@ DEFAULT_SETTINGS = {
     "log_level": "INFO",
     "alert_snooze_hours": 24,
     "sync_path_token_limit": 4096,
+    "backfill_stale_hours": 72,
 }
+
+# How long queued embedding work may wait, and how long a job may run, before
+# `ccrecall doctor` calls it overdue or stuck. Overridable per install.
+DEFAULT_BACKFILL_STALE_HOURS = DEFAULT_SETTINGS["backfill_stale_hours"]
+
+# A live marker holder must be one of ccrecall's console scripts: `ccrecall`, or
+# `ccrecall-` followed by letters and hyphens (`ccrecall-warm-model`). Matched
+# against each whitespace-separated token's basename, so a log path such as
+# `ccrecall-import.log` never matches.
+_CCRECALL_SCRIPT_RE = re.compile(r"^ccrecall(-[A-Za-z-]+)?$")
 
 # Rotating memory-log handler sizing.
 LOG_MAX_BYTES = 1_000_000
@@ -65,6 +78,7 @@ PID_KEY_IMPORT = "ccrecall-import"
 PID_KEY_BACKFILL_SUMMARIES = "ccrecall-backfill-summaries"
 PID_KEY_BACKFILL_EMBEDDINGS = "ccrecall-backfill-embeddings"
 PID_KEY_WARM_MODEL = "ccrecall-warm-model"
+PID_KEY_SYNC = "ccrecall-sync-current"
 
 
 def ensure_parent_dir(path: Path) -> None:
@@ -109,21 +123,63 @@ def remove_pid_file(pid_key: str) -> None:
 
 
 def read_marker_holder(pid_path: Path) -> int:
-    """Return the PID a marker names, if that process is alive (which may be the caller).
+    """Return the PID a marker names, if that process is a live ccrecall process (or the caller).
 
-    A holder we lack permission to signal counts as alive. Raises ValueError or
-    OverflowError on a corrupt marker, ProcessLookupError on a dead holder, and
-    another OSError on a marker that can't be read.
+    The single liveness rule shared by the PID guard, the SessionStart spawn
+    path, and `ccrecall doctor`. A PID that is alive but running something other
+    than ccrecall (the PID was reused after the holder died) reads as dead, so it
+    gets reaped rather than blocking that job forever. When the holder's command
+    line can't be read, the PID stays live: a guard that can't identify its holder
+    must not let a second instance start. A holder we lack permission to signal
+    counts as alive, subject to the same check.
+
+    Raises ValueError or OverflowError on a corrupt marker, ProcessLookupError on a
+    dead or non-ccrecall holder, and another OSError on a marker that can't be read.
     """
     pid = int(pid_path.read_text().strip())
     if pid <= 0:
         # 0/negative would probe the caller's own process group and
         # read as permanently "alive" — treat as a corrupt marker.
         raise ValueError(f"bogus pid: {pid}")
-    if pid != os.getpid():
-        with contextlib.suppress(PermissionError):
-            os.kill(pid, 0)  # signal 0: liveness probe, no signal sent
+    if pid == os.getpid():
+        return pid
+    with contextlib.suppress(PermissionError):
+        os.kill(pid, 0)  # signal 0: liveness probe, no signal sent
+    if is_ccrecall_process(pid) is False:
+        raise ProcessLookupError(f"pid {pid} is not a ccrecall process")
     return pid
+
+
+def is_ccrecall_process(pid: int) -> bool | None:
+    """Whether ``pid`` runs a ccrecall console script; None when its command line can't be read.
+
+    `ps -p <pid> -o command=` takes the same flags on Linux (procps) and macOS.
+    """
+    try:
+        result = subprocess.run(  # noqa: S603 — fixed argv, pid is an int
+            ["ps", "-p", str(pid), "-o", "command="],  # noqa: S607 — ps is resolved from PATH on every supported platform
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    command = result.stdout.strip()
+    if result.returncode != 0 or not command:
+        return None
+    return any(_CCRECALL_SCRIPT_RE.match(Path(token).name) for token in command.split())
+
+
+def resolve_backfill_stale_hours(raw_setting: object) -> float:
+    """Return the ``backfill_stale_hours`` setting, or the default (with a warning) when it isn't a positive number."""
+    if isinstance(raw_setting, bool) or not isinstance(raw_setting, int | float) or raw_setting <= 0:
+        logging.getLogger(LOGGER_NAME).warning(
+            "invalid backfill_stale_hours setting; using the default",
+            extra={"value": repr(raw_setting), "default": DEFAULT_BACKFILL_STALE_HOURS},
+        )
+        return float(DEFAULT_BACKFILL_STALE_HOURS)
+    return float(raw_setting)
 
 
 def live_pid_holder(pid_key: str) -> int | None:

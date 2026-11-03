@@ -3,6 +3,8 @@
 import json
 import os
 import sqlite3
+import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -12,6 +14,7 @@ import sqlite_vec
 import ccrecall.config as config
 import ccrecall.health as health
 import ccrecall.hooks.sync_current as sync_current
+import ccrecall.run_history as run_history
 from ccrecall.db_vec import _ensure_vec_schema
 from ccrecall.embed_ops import EmbedOutcome, embed_branch_chunks
 from ccrecall.health import clear_embedding_failure, record_embedding_failure
@@ -64,6 +67,18 @@ def _isolated_runtime_dir(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(health, "BACKFILL_SCHEDULE_PATH", isolated / "backfill-schedule.json")
     monkeypatch.setattr(health, "_PROBE_MARKER_PATH", isolated / ".write-probe")
     monkeypatch.setattr(sync_current, "DEFAULT_LOG_PATH", isolated / "ccrecall.log")
+
+    # Run-history sidecars live beside the database, and many tests run a job
+    # with settings that resolve to the real DEFAULT_DB_PATH, so redirect that
+    # one database's sidecars into the isolated dir.
+    real_db = config.DEFAULT_DB_PATH
+    runs_path, unrepairable_path = run_history.runs_path, run_history.unrepairable_path
+    monkeypatch.setattr(run_history, "runs_path", lambda db: runs_path(isolated / db.name if db == real_db else db))
+    monkeypatch.setattr(
+        run_history,
+        "unrepairable_path",
+        lambda db: unrepairable_path(isolated / db.name if db == real_db else db),
+    )
 
 
 def patched_record(sidecar: Path):
@@ -156,6 +171,21 @@ def project_id(memory_db):
 def jsonl_fixture(request):
     """Parameterized fixture yielding each JSONL file path."""
     return request.param
+
+
+@pytest.fixture
+def live_ccrecall_pid():
+    """PID of a live process whose command line has a `ccrecall` token.
+
+    A marker holder only counts as live when it's a ccrecall process (see
+    config.read_marker_holder), so a test standing in a live holder needs one.
+    """
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)", "ccrecall"])
+    try:
+        yield proc.pid
+    finally:
+        proc.kill()
+        proc.wait()
 
 
 def locked_error() -> sqlite3.OperationalError:

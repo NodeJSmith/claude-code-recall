@@ -270,10 +270,18 @@ def find_stamped_branches_missing_chunks(cursor: sqlite3.Cursor) -> dict[int, in
 
     missing: dict[int, int] = {}
     for branch_id in branch_ids:
-        exchanges = build_exchange_pairs(fetch_branch_messages(cursor, branch_id, include_notifications=False))
-        cursor.execute("SELECT exchange_index FROM chunks WHERE branch_id = ?", (branch_id,))
-        stored = {row[0] for row in cursor.fetchall()}
-        absent = {ex["index"] for ex in exchanges} - stored
+        absent = count_exchanges_without_chunks(cursor, branch_id)
         if absent:
-            missing[branch_id] = len(absent)
+            missing[branch_id] = absent
     return missing
+
+
+def count_exchanges_without_chunks(cursor: sqlite3.Cursor, branch_id: int) -> int:
+    """How many of the branch's exchanges, as the embedding pipeline builds them, have no chunk row.
+
+    Read-only and vec-free.
+    """
+    exchanges = build_exchange_pairs(fetch_branch_messages(cursor, branch_id, include_notifications=False))
+    cursor.execute("SELECT exchange_index FROM chunks WHERE branch_id = ?", (branch_id,))
+    stored = {row[0] for row in cursor.fetchall()}
+    return len({ex["index"] for ex in exchanges} - stored)

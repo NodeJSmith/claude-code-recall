@@ -137,8 +137,8 @@ def cmd_import(
         bool,
         _FLAG,
         Parameter(
-            help="Force-reimport sessions with a stale-tail or ingestion-gap "
-            "(see `ccrecall status --check-ingestion`). The SessionStart background import already does this."
+            help="Force-reimport sessions missing messages their transcripts still have "
+            "(see `ccrecall doctor`). The SessionStart background import already does this."
         ),
     ] = False,
     ctx: CLIContextParam = DEFAULT_CLI_CONTEXT,
@@ -151,19 +151,42 @@ def cmd_import(
 def cmd_status(
     *,
     db: _DB = DEFAULT_DB_PATH,
-    days: Annotated[
-        int | None,
-        Parameter(validator=Number(gte=1), help="Only scope tool-content and embedding status to the last N days."),
-    ] = None,
-    check_ingestion: Annotated[
-        bool,
-        _FLAG,
-        Parameter(help="Deep-check JSONL transcripts and cache confirmed-OK sessions."),
-    ] = False,
     ctx: CLIContextParam = DEFAULT_CLI_CONTEXT,
 ) -> None:
-    """Show consolidated health and backfill status."""
-    status_mod.run(db=db, days=days, check_ingestion=check_ingestion, output_format=ctx.output_format)
+    """Show a one-line verdict and a few numbers; `ccrecall doctor` explains them.
+
+    Exits 0 for any verdict, and 1 only when the database is missing or unreadable.
+    Scripts read `verdict` from `--json`, or gate on `ccrecall doctor`.
+
+    With --json: {verdict, findings: [{id, group, message, count, fix, listable}],
+    summary: {sessions, embedded_pct, last_sync}}
+    """
+    status_mod.run_status(db=db, output_format=ctx.output_format)
+
+
+@app.command(name="doctor")
+def cmd_doctor(
+    *,
+    list_id: Annotated[
+        str | None,
+        Parameter(
+            name=["--list"],
+            validator=lambda _type, value: status_mod.validate_list_id(value) if value is not None else None,
+            help="List the sessions behind one finding, by its id (e.g. embedding-backlog).",
+        ),
+    ] = None,
+    db: _DB = DEFAULT_DB_PATH,
+    ctx: CLIContextParam = DEFAULT_CLI_CONTEXT,
+) -> None:
+    """Diagnose the install: what's wrong, whether it's normal, and the exact command to fix it.
+
+    Reads without changing anything. Exits 0 when healthy or working on it, 1 when
+    something needs attention, 2 when the database can't be read at all.
+
+    With --json: the same shape as `ccrecall --json status`; with --list, that
+    finding also carries sessions: [{session_id, project, date, reason?}].
+    """
+    status_mod.run_doctor(db=db, output_format=ctx.output_format, list_id=list_id)
 
 
 @backfill_app.command(name="summaries")
@@ -243,7 +266,7 @@ def cmd_backfill_embeddings(
     status: Annotated[
         bool,
         _FLAG,
-        Parameter(help="Report legacy embedding-only progress and exit; prefer `ccrecall status`."),
+        Parameter(help="Report legacy embedding-only progress and exit; prefer `ccrecall doctor`."),
     ] = False,
     dismiss: Annotated[
         bool,

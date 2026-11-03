@@ -10,12 +10,13 @@ from unittest.mock import patch
 
 import pytest
 from conftest import stamp_user_version
-from cyclopts.exceptions import ValidationError
+from cyclopts.exceptions import CycloptsError, ValidationError
 
 from ccrecall.cli import app, launcher
 from ccrecall.cli.commands import (
     cmd_backfill_summaries,
     cmd_backfill_tool_content,
+    cmd_doctor,
     cmd_import,
     cmd_recent,
     cmd_search,
@@ -116,14 +117,27 @@ class TestCmdImport:
 
 class TestCmdStatus:
     def test_calls_run_with_parsed_arguments(self):
-        with patch("ccrecall.cli.commands.status_mod.run") as mock_run:
-            cmd_status(db=DEFAULT_DB_PATH, days=None, check_ingestion=False, ctx=DEFAULT_CLI_CONTEXT)
-        mock_run.assert_called_once_with(
-            db=DEFAULT_DB_PATH,
-            days=None,
-            check_ingestion=False,
-            output_format="markdown",
-        )
+        with patch("ccrecall.cli.commands.status_mod.run_status") as mock_run:
+            cmd_status(db=DEFAULT_DB_PATH, ctx=DEFAULT_CLI_CONTEXT)
+        mock_run.assert_called_once_with(db=DEFAULT_DB_PATH, output_format="markdown")
+
+    @pytest.mark.parametrize("removed_flag", ["--days", "--check-ingestion"])
+    def test_removed_flags_are_usage_errors(self, removed_flag):
+        with patch("ccrecall.cli.commands.status_mod.run_status") as mock_run, pytest.raises(CycloptsError):
+            app(["status", removed_flag], exit_on_error=False, print_error=False)
+        mock_run.assert_not_called()
+
+
+class TestCmdDoctor:
+    def test_calls_run_with_parsed_arguments(self):
+        with patch("ccrecall.cli.commands.status_mod.run_doctor") as mock_run:
+            cmd_doctor(list_id="embedding-backlog", db=DEFAULT_DB_PATH, ctx=DEFAULT_CLI_CONTEXT)
+        mock_run.assert_called_once_with(db=DEFAULT_DB_PATH, output_format="markdown", list_id="embedding-backlog")
+
+    def test_unknown_list_id_is_a_usage_error(self):
+        with patch("ccrecall.cli.commands.status_mod.run_doctor") as mock_run, pytest.raises(ValidationError):
+            app(["doctor", "--list", "nope"], exit_on_error=False, print_error=False)
+        mock_run.assert_not_called()
 
 
 class TestCmdBackfillSummaries:

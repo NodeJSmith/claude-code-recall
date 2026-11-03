@@ -1,6 +1,5 @@
 """How `ccrecall import` behaves when another process is using the database (#233)."""
 
-import os
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -9,10 +8,11 @@ from pathlib import Path
 import pytest
 from conftest import locked_error, make_jsonl_entry, seed_stale_tail_session, write_jsonl
 
+from ccrecall import run_history
 from ccrecall.config import PID_KEY_IMPORT, pid_file_path, remove_pid_file
 from ccrecall.db import get_connection
 from ccrecall.hooks import import_conversations, import_repair
-from ccrecall.hooks.import_conversations import import_project_contained, run
+from ccrecall.hooks.import_conversations import ProjectFailed, import_project_contained, run
 from ccrecall.hooks.import_repair import repair_sessions
 from ccrecall.import_log_ops import import_log_source_index
 from ccrecall.ingestion_status import find_repairable_sessions
@@ -112,7 +112,7 @@ def test_locked_project_fails_alone_and_imports_on_the_next_run(db_conn, competi
 
     competitor.execute("BEGIN IMMEDIATE")
     try:
-        assert import_project_contained(db_conn, project_dir, None) is None
+        assert import_project_contained(db_conn, project_dir, None) == ProjectFailed(locked=True)
     finally:
         competitor.execute("ROLLBACK")
 
@@ -162,7 +162,9 @@ def test_locked_repair_candidate_is_counted_failed_and_the_batch_continues(
     candidates = seed_two_repair_candidates(memory_db, project_id, tmp_path)
     fail_first_session(monkeypatch, locked_error())
 
-    assert repair_sessions(memory_db, candidates) == (1, 1, 1, 0)
+    counts = repair_sessions(memory_db, candidates)
+    assert counts[:4] == (1, 1, 1, 0)
+    assert counts.locked == 1, "the lock failure is told apart from other failures"
 
 
 def test_other_database_errors_abort_the_repair_batch_with_its_counts(memory_db, project_id, tmp_path, monkeypatch):
@@ -183,7 +185,7 @@ def test_other_database_errors_abort_the_repair_batch_with_its_counts(memory_db,
     with pytest.raises(import_repair.RepairAborted, match="disk is full") as excinfo:
         repair_sessions(memory_db, candidates)
 
-    assert excinfo.value.counts == (1, 1, 0, 0)
+    assert excinfo.value.counts[:4] == (1, 1, 0, 0)
     # What get_connection does when the abort propagates. The reported work must survive.
     memory_db.rollback()
     assert memory_db.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == messages_before + 1
@@ -209,10 +211,12 @@ class TestRun:
         monkeypatch.setattr(import_conversations, "get_connection", fake_connection)
         monkeypatch.setattr(import_conversations, "lower_scheduling_priority", lambda _level: None)
 
-    def test_plain_import_skips_while_another_import_runs(self, memory_db, tmp_path, projects_dir, capsys):
+    def test_plain_import_skips_while_another_import_runs(
+        self, memory_db, tmp_path, projects_dir, capsys, live_ccrecall_pid
+    ):
         marker = pid_file_path(PID_KEY_IMPORT)
         marker.parent.mkdir(parents=True, exist_ok=True)
-        marker.write_text(str(os.getppid()))  # a live process that isn't this one
+        marker.write_text(str(live_ccrecall_pid))  # a live process that isn't this one
         try:
             run(db=tmp_path / "memory.db", projects_dir=projects_dir)
 
@@ -291,3 +295,120 @@ class TestRun:
         out = capsys.readouterr().out
         assert "Failed to import -aaa-first" in out
         assert "1 project(s) failed" in out
+
+
+class TestRunRecording:
+    """Each import, and each repair inside it, leaves one record beside the database (#234)."""
+
+    projects_dir = TestRun.projects_dir
+    shared_connection = TestRun.shared_connection
+
+    def last(self, tmp_path, kind):
+        return run_history.read_runs(tmp_path / "memory.db")[kind]["last"]
+
+    def test_clean_import_records_ok(self, tmp_path, projects_dir):
+        run(db=tmp_path / "memory.db", projects_dir=projects_dir)
+
+        assert self.last(tmp_path, "import")["outcome"] == "ok"
+        assert "repair" not in run_history.read_runs(tmp_path / "memory.db")
+
+    def test_repair_gaps_records_import_and_repair(self, tmp_path, projects_dir):
+        run(db=tmp_path / "memory.db", projects_dir=projects_dir, repair_gaps=True)
+
+        assert self.last(tmp_path, "import")["outcome"] == "ok"
+        assert self.last(tmp_path, "repair")["outcome"] == "ok"
+
+    def test_skipped_import_records_nothing(self, tmp_path, projects_dir, live_ccrecall_pid):
+        marker = pid_file_path(PID_KEY_IMPORT)
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(str(live_ccrecall_pid))
+        try:
+            run(db=tmp_path / "memory.db", projects_dir=projects_dir)
+        finally:
+            remove_pid_file(PID_KEY_IMPORT)
+
+        assert run_history.read_runs(tmp_path / "memory.db") == {}
+
+    def test_only_lock_failures_record_partial_database_busy(self, tmp_path, projects_dir, monkeypatch):
+        real_import = import_conversations.import_session
+
+        def lock_first_project(conn, filepath, project_id, *, force=False):
+            if filepath.parent.name == "-aaa-first":
+                raise locked_error()
+            return real_import(conn, filepath, project_id, force=force)
+
+        monkeypatch.setattr(import_conversations, "import_session", lock_first_project)
+
+        with pytest.raises(SystemExit):
+            run(db=tmp_path / "memory.db", projects_dir=projects_dir)
+
+        last = self.last(tmp_path, "import")
+        assert (last["outcome"], last["reason"]) == ("partial", "database_busy")
+
+    def test_any_other_failure_records_partial_error(self, tmp_path, projects_dir, monkeypatch):
+        real_import = import_conversations.import_project
+
+        def break_first_project(conn, project_dir, *args, **kwargs):
+            if project_dir.name == "-aaa-first":
+                raise ValueError("bad project")
+            return real_import(conn, project_dir, *args, **kwargs)
+
+        monkeypatch.setattr(import_conversations, "import_project", break_first_project)
+
+        with pytest.raises(SystemExit):
+            run(db=tmp_path / "memory.db", projects_dir=projects_dir)
+
+        last = self.last(tmp_path, "import")
+        assert (last["outcome"], last["reason"]) == ("partial", "error")
+
+    def test_aborted_import_records_failed(self, tmp_path, projects_dir, monkeypatch):
+        def full_disk(*_args, **_kwargs):
+            raise sqlite3.OperationalError("database or disk is full")
+
+        monkeypatch.setattr(import_conversations, "import_session", full_disk)
+
+        with pytest.raises(sqlite3.OperationalError):
+            run(db=tmp_path / "memory.db", projects_dir=projects_dir)
+
+        last = self.last(tmp_path, "import")
+        assert (last["outcome"], last["reason"]) == ("failed", "error")
+
+    def test_locked_repair_scan_records_a_busy_repair(self, tmp_path, projects_dir, monkeypatch):
+        def locked_scan(_conn):
+            raise locked_error()
+
+        monkeypatch.setattr(import_conversations.ingestion_status, "find_repairable_sessions", locked_scan)
+
+        with pytest.raises(SystemExit):
+            run(db=tmp_path / "memory.db", projects_dir=projects_dir, repair_gaps=True)
+
+        repair = self.last(tmp_path, "repair")
+        assert (repair["outcome"], repair["reason"]) == ("failed", "database_busy")
+        assert self.last(tmp_path, "import")["reason"] == "database_busy"
+
+    def test_completed_repair_replaces_the_unfixable_list(self, tmp_path, projects_dir, monkeypatch):
+        run_history.write_unfixable(tmp_path / "memory.db", {"old": "fp"}, replace=True)
+
+        def one_unfixable(_conn, _candidates, on_reclaim):
+            return import_repair.RepairCounts(0, 0, 0, 1, unfixable=(("sess-x", "fp-x"),))
+
+        monkeypatch.setattr(import_repair, "repair_sessions", one_unfixable)
+
+        run(db=tmp_path / "memory.db", projects_dir=projects_dir, repair_gaps=True)
+
+        assert run_history.read_unfixable(tmp_path / "memory.db") == {"sess-x": "fp-x"}
+
+    def test_aborted_repair_only_adds_to_the_unfixable_list(self, tmp_path, projects_dir, monkeypatch):
+        run_history.write_unfixable(tmp_path / "memory.db", {"old": "fp"}, replace=True)
+
+        def abort(_conn, _candidates, on_reclaim):
+            counts = import_repair.RepairCounts(0, 0, 0, 1, unfixable=(("sess-x", "fp-x"),))
+            raise import_repair.RepairAborted("database or disk is full", counts)
+
+        monkeypatch.setattr(import_repair, "repair_sessions", abort)
+
+        with pytest.raises(sqlite3.OperationalError):
+            run(db=tmp_path / "memory.db", projects_dir=projects_dir, repair_gaps=True)
+
+        assert run_history.read_unfixable(tmp_path / "memory.db") == {"old": "fp", "sess-x": "fp-x"}
+        assert self.last(tmp_path, "repair")["outcome"] == "failed"

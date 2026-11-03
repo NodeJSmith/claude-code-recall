@@ -25,7 +25,7 @@ from conftest import (
     write_jsonl,
 )
 
-from ccrecall import config
+from ccrecall import config, run_history
 from ccrecall.embeddings import EMBEDDING_DIM, EMBEDDING_VERSION
 from ccrecall.health import REASON_MODEL_UNAVAILABLE, REASON_VEC_UNAVAILABLE
 from ccrecall.hooks import memory_setup, memory_sync, sync_current
@@ -455,6 +455,33 @@ class TestPidGuard:
         # Since we patched os.write, the file won't be written with the new PID
         # but the stale file should have been unlinked before the spawn attempt
 
+    def test_pid_guard_reaps_a_reused_pid_running_something_else(self, tmp_path, monkeypatch):
+        """A live PID that isn't ccrecall means the holder died and its PID was reused: spawn anyway."""
+        pid_path = tmp_path / ".pid-cm-test-cmd"
+        monkeypatch.setattr(memory_setup, "pid_file_path", lambda pid_key: tmp_path / f".pid-{pid_key}")
+        other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+        try:
+            pid_path.write_text(str(other.pid))
+
+            memory_setup._spawn_background([sys.executable, "-c", ""], "cm-test-cmd", MagicMock())
+
+            spawned = int(pid_path.read_text())
+            assert spawned != other.pid
+            os.waitpid(spawned, 0)
+        finally:
+            other.kill()
+            other.wait()
+
+    def test_pid_guard_skips_a_live_ccrecall_holder(self, tmp_path, monkeypatch, live_ccrecall_pid):
+        pid_path = tmp_path / ".pid-cm-test-cmd"
+        monkeypatch.setattr(memory_setup, "pid_file_path", lambda pid_key: tmp_path / f".pid-{pid_key}")
+        pid_path.write_text(str(live_ccrecall_pid))
+
+        # A real, harmless command: had the guard let it spawn, the marker would name the new child.
+        memory_setup._spawn_background([sys.executable, "-c", ""], "cm-test-cmd", MagicMock())
+
+        assert pid_path.read_text() == str(live_ccrecall_pid)
+
     def test_pid_guard_atomic_create(self, tmp_path, monkeypatch):
         """PID file creation uses O_CREAT | O_EXCL to prevent TOCTOU races."""
 
@@ -775,13 +802,13 @@ class TestSyncCurrentConcurrencyGuard:
             sync_current.run(input_file=input_file)
         return json.loads(captured.getvalue())
 
-    def test_second_sync_skips_when_lock_held_by_live_pid(self, tmp_path, monkeypatch):
+    def test_second_sync_skips_when_lock_held_by_live_pid(self, tmp_path, monkeypatch, live_ccrecall_pid):
         """When a live PID file exists, a second sync-current skips without embedding."""
         monkeypatch.setattr("ccrecall.config.pid_file_path", lambda key: tmp_path / f".pid-{key}")
         monkeypatch.setattr(sync_current, "remove_pid_file", lambda key: None)
 
         # Another live process holds the marker
-        (tmp_path / f".pid-{sync_current.PID_KEY}").write_text(str(os.getppid()))
+        (tmp_path / f".pid-{sync_current.PID_KEY}").write_text(str(live_ccrecall_pid))
 
         sync_called = []
         monkeypatch.setattr(sync_current, "sync_session", lambda *a, **k: sync_called.append(1) or 0)
@@ -795,11 +822,11 @@ class TestSyncCurrentConcurrencyGuard:
         assert out == {"continue": True}
         assert sync_called == [], "sync_session must NOT be called when lock is held"
 
-    def test_skip_outputs_exactly_continue_true(self, tmp_path, monkeypatch):
+    def test_skip_outputs_exactly_continue_true(self, tmp_path, monkeypatch, live_ccrecall_pid):
         """Skip path prints exactly the hook-contract JSON: {\"continue\": true}."""
         monkeypatch.setattr("ccrecall.config.pid_file_path", lambda key: tmp_path / f".pid-{key}")
         monkeypatch.setattr(sync_current, "remove_pid_file", lambda key: None)
-        (tmp_path / f".pid-{sync_current.PID_KEY}").write_text(str(os.getppid()))
+        (tmp_path / f".pid-{sync_current.PID_KEY}").write_text(str(live_ccrecall_pid))
 
         input_file = self._make_input(tmp_path)
         captured = io.StringIO()
@@ -1393,10 +1420,40 @@ class TestSyncCurrentEmbedStep:
             assert conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 2
             assert conn.execute("SELECT embedding_version FROM branches").fetchone()[0] == 0
 
-    def test_live_backfill_skips_inference_but_still_syncs(self, sync_env, monkeypatch):
+    def test_successful_sync_records_ok_beside_its_database(self, sync_env, monkeypatch):
+        monkeypatch.setattr("ccrecall.embed_ops.embed_batch", lambda texts, **_k: [[0.1] * EMBEDDING_DIM] * len(texts))
+
+        sync_current.run()
+
+        runs = run_history.read_runs(sync_env)["sync"]
+        assert runs["last"]["outcome"] == "ok"
+        assert runs["last_ok"] == runs["last"]
+
+    def test_a_swallowed_sync_error_records_failed_and_the_hook_still_continues(self, sync_env, monkeypatch, capsys):
+        def broken(*_args, **_kwargs):
+            raise RuntimeError("parse blew up")
+
+        monkeypatch.setattr(sync_current, "sync_session", broken)
+
+        with pytest.raises(SystemExit) as exc_info:
+            sync_current.run()
+
+        assert exc_info.value.code == 0
+        assert json.loads(capsys.readouterr().out) == {"continue": True}
+        last = run_history.read_runs(sync_env)["sync"]["last"]
+        assert (last["outcome"], last["reason"]) == ("failed", "error")
+
+    def test_a_sync_that_attempts_no_work_records_nothing(self, sync_env, monkeypatch):
+        monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps({"session_id": "not-a-uuid"})))
+
+        sync_current.run()
+
+        assert run_history.read_runs(sync_env) == {}
+
+    def test_live_backfill_skips_inference_but_still_syncs(self, sync_env, monkeypatch, live_ccrecall_pid):
         marker = config.pid_file_path(config.PID_KEY_BACKFILL_EMBEDDINGS)
         marker.parent.mkdir(parents=True, exist_ok=True)
-        marker.write_text(str(os.getppid()))
+        marker.write_text(str(live_ccrecall_pid))
 
         def no_inference(_texts, **_kwargs):
             raise AssertionError("inference ran while a backfill holds the marker")

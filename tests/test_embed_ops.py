@@ -845,13 +845,13 @@ class TestLockContention:
 
 @VEC_SKIP
 class TestYieldToBackfill:
-    def test_live_backfill_skips_inference_after_committing_the_clear(self, file_db):
+    def test_live_backfill_skips_inference_after_committing_the_clear(self, file_db, live_ccrecall_pid):
         file_db.conn.execute(
             "UPDATE branches SET embedding_version = ? WHERE id = ?", (EMBEDDING_VERSION, file_db.branch_id)
         )
         file_db.set_messages(("q", "a"))
         pid_file_path(PID_KEY_BACKFILL_EMBEDDINGS).parent.mkdir(parents=True, exist_ok=True)
-        pid_file_path(PID_KEY_BACKFILL_EMBEDDINGS).write_text(str(os.getppid()))
+        pid_file_path(PID_KEY_BACKFILL_EMBEDDINGS).write_text(str(live_ccrecall_pid))
 
         with patch("ccrecall.embed_ops.embed_batch") as mock_embed:
             outcome = embed_branch_chunks(file_db.conn, file_db.branch_id, yield_to_backfill=True)

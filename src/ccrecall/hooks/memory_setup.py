@@ -21,6 +21,7 @@ from ccrecall.config import (
     load_settings,
     log_hook_exception,
     pid_file_path,
+    read_marker_holder,
     setup_logging,
 )
 from ccrecall.db import CONTENT_ERROR_VERSION, get_connection
@@ -50,13 +51,16 @@ def _spawn_background(argv: list[str], pid_key: str, logger: logging.Logger) -> 
             # Atomic create — fails with FileExistsError if file already exists
             fd = os.open(str(pid_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, PID_FILE_MODE)
         except FileExistsError:  # noqa: PERF203 — PID-file liveness/retry loop; the try/except IS the mechanism, not incidental control flow
-            # File exists — check if the owning process is alive
+            # File exists — check if the owning process is alive, by the same
+            # rule the PID guard and `ccrecall doctor` use.
             try:
-                existing_pid = int(pid_path.read_text().strip())
-                os.kill(existing_pid, 0)  # Signal 0 checks liveness; raises if dead
+                read_marker_holder(pid_path)
                 # Process is alive — skip spawning
                 return
-            except (ValueError, OSError):
+            except PermissionError:
+                # A marker we can't read — treat its holder as alive, as the guard does.
+                return
+            except (ValueError, OverflowError, OSError):
                 # Dead process (OSError ESRCH) or unreadable PID — reap and retry
                 logger.warning(
                     "stale PID file, reaping and retrying spawn",
