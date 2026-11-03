@@ -103,11 +103,22 @@ When any of these holds, the next session injects a short alert for Claude to re
 ## Checking on ccrecall
 
 - **`ccrecall status`** is the glance: a verdict (healthy, working on it, or needs attention) and a line of numbers, such as `7,514 sessions · 98% embedded · last sync 2 min ago`. It exits 0 for any verdict, and 1 only when the database is missing or unreadable.
-- **`ccrecall doctor`** is the diagnosis. It reads without changing anything and lists every finding under what to do about it (needs action, working on it, nothing to do), each with the exact command that fixes it. `ccrecall doctor --list <finding-id>` lists the sessions behind a finding. It exits 0 when healthy or working on it, 1 when something needs attention, and 2 when the database can't be read at all, so scripts can gate on it.
+- **`ccrecall doctor`** is the diagnosis. It reads without changing anything and lists every finding under what to do about it (needs action, working on it, nothing to do), each with how to fix it. `ccrecall doctor --list <finding-id>` lists the sessions behind a finding. It exits 0 when healthy or working on it, 1 when something needs attention, and 2 when the database can't be read at all, so scripts can gate on it. `doctor --list` exits 0 whatever the verdict.
 
-Both take the global `--json` flag and print the same shape: `verdict`, `findings` (each with `id`, `group`, `message`, `count`, `fix`, `listable`) and `summary` (`sessions`, `embedded_pct`, `last_sync`). Each checks every session against its transcript, so they take a few seconds, and longer on a large database that isn't in the OS cache.
+Each checks every session against its transcript, so they take a few seconds, and longer on a large database that isn't in the OS cache.
 
 Queued embedding work counts as overdue once no full backfill has succeeded in `backfill_stale_hours` and a waiting session ended longer ago than that. Set it a little above how often your backfill runs: with a nightly job, 36.
+
+### JSON output
+
+`status` and `doctor` both take the global `--json` flag and print the same shape: `verdict`, `findings` (each with `id`, `group`, `message`, `count`, `fix`, `listable`) and `summary` (`sessions`, `embedded_pct`, `last_sync`). These values are stable; scripts can match on them.
+
+- **`verdict`**: `healthy`, `working`, or `needs-attention`. It is the worst `group` present.
+- **`group`**: `action` (needs action), `working` (working on it), or `none` (nothing to do). A finding's `id` is stable, but its `group` can change with circumstances. For example, `embedding-backlog` is `working` while a backfill drains it and `action` once it is overdue, and `<kind>-failed` is `working` when the cause was a busy database.
+- **`id`**: one of `no-database`, `schema-behind`, `schema-ahead`, `not-writable`, `embedding-unavailable`, `embedding-backlog`, `fixable-sessions`, `unfixable-sessions`, `sessions-in-progress`, `deleted-transcripts`, `draft-sessions`, `unembeddable-sessions`, `tool-content-pending`, `skipped-by-design`, `duplicate-active-branch`, `check-failed`, and per background run `<kind>-failed` (`import`, `repair`, `sync`, `backfill`), `<kind>-killed` (`import`, `sync`, `backfill`), and `<kind>-running` / `<kind>-stuck` (`import`, `backfill`). `check-failed` can appear more than once, one per check that raised.
+- **`fix`**: a command, a sentence of instructions, or `null` when there's nothing to do. Don't execute it blindly.
+- **`summary`**: `sessions`, `embedded_pct`, and `last_sync` are each `null` when unknown (for example, `sessions` before a pending schema upgrade has run). With no database, `sessions` is `0`.
+- **`sessions`**: present only with `doctor --list <id>`, on that finding, when the finding is present and `listable`. A missing array means the finding isn't there or names no sessions.
 
 ## Skills
 

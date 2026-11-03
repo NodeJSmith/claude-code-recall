@@ -31,7 +31,13 @@ from ccrecall.config import resolve_backfill_stale_hours
 from ccrecall.db import CHUNK_DRAFT_QUALITY_FILTER, CHUNK_EMBEDDABLE_BRANCH_FILTER, CONTENT_ERROR_VERSION
 from ccrecall.db_base import SCHEMA_VERSION, describe_schema_ahead
 from ccrecall.db_vec import count_exchanges_without_chunks, find_stamped_branches_missing_chunks, vec_available
-from ccrecall.embeddings import EMBEDDING_MODEL, EMBEDDING_VERSION, MODEL_TOKEN_LIMIT, is_model_cached_on_disk
+from ccrecall.embeddings import (
+    EMBEDDING_MODEL,
+    EMBEDDING_VERSION,
+    MODEL_TOKEN_LIMIT,
+    is_model_cached_on_disk,
+    model_cache_root,
+)
 from ccrecall.import_log_ops import import_log_source_index
 from ccrecall.ingestion_status import STALE_TAIL_SECONDS, source_fingerprint, summarize_ingestion
 from ccrecall.models import LOGGER_NAME
@@ -249,7 +255,7 @@ def diagnose(db_path: Path, settings: dict) -> Diagnosis:
         job_states={kind: job_lock.probe(key) for kind, key in run_history.KIND_JOB_KEYS.items()},
     )
     results = Results()
-    summary: dict[str, object] = {"sessions": 0, "embedded_pct": None, "last_sync": last_sync_iso(scan.runs)}
+    summary: dict[str, object] = {"sessions": None, "embedded_pct": None, "last_sync": last_sync_iso(scan.runs)}
 
     results.run_check("background runs", lambda: (run_findings(scan), None))
     results.run_check("permissions", lambda: (writable_findings(db_path), None))
@@ -266,7 +272,8 @@ def diagnose(db_path: Path, settings: dict) -> Diagnosis:
                 )
             )
         )
-        return Diagnosis(tuple(results.findings), summary, results.sessions)
+        # No database means nothing is stored: a known 0, not an unknown count.
+        return Diagnosis(tuple(results.findings), {**summary, "sessions": 0}, results.sessions)
 
     try:
         conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
@@ -393,6 +400,8 @@ def run_findings(scan: Scan) -> list[Found]:
             continue
         reason = last.get("reason") or run_history.REASON_ERROR
         busy = reason == run_history.REASON_DATABASE_BUSY
+        # Rerunning can't fix a missing sqlite-vec, so that cause gets the reinstall fix.
+        rerun = REINSTALL_FOR_VEC if reason == run_history.REASON_VECTOR_UNAVAILABLE else _KIND_FIXES[kind]
         how = "failed" if last.get("outcome") == run_history.OUTCOME_FAILED else "finished with failures"
         started = format_when(parse_instant(last.get("started_at")))
         found.append(
@@ -404,7 +413,7 @@ def run_findings(scan: Scan) -> list[Found]:
                         f"The last {_KIND_LABELS[kind]}, started {started}, {how}: "
                         f"{_REASON_PROSE.get(reason, reason)}. See {_KIND_LOGS[kind]}."
                     ),
-                    fix=None if busy else (_KIND_FIXES[kind] or f"check {_KIND_LOGS[kind]}"),
+                    fix=None if busy else (rerun or f"check {_KIND_LOGS[kind]}"),
                 )
             )
         )
@@ -416,7 +425,6 @@ def run_findings(scan: Scan) -> list[Found]:
         a_label = f"{'An' if label[0] in 'aeiou' else 'A'} {label}"
         started = "at an unknown time" if state.started_at is None else format_when(state.started_at)
         pid_note = "" if state.pid is None else f" (PID {state.pid})"
-        # A running job whose record doesn't parse has no start time, so it can't be stuck.
         age = None if state.started_at is None else (scan.now - state.started_at).total("seconds")
         if not state.running:
             found.append(
@@ -432,7 +440,7 @@ def run_findings(scan: Scan) -> list[Found]:
                     )
                 )
             )
-        elif kind in _LONG_RUNNING_KINDS and age is not None and age >= scan.stale_seconds:
+        elif kind in _LONG_RUNNING_KINDS and is_stuck(state, scan):
             stop = f"kill {state.pid}" if state.pid is not None else f"stop the running {label}"
             found.append(
                 Found(
@@ -503,7 +511,9 @@ def embedding_availability_findings(vec_loaded: bool) -> list[Found]:
         since = format_when(parse_instant(status.get("since")))
         causes.append((f"the last embedding run reported {health.describe_embedding_reason(reason)} ({since})", fix))
     if not is_model_cached_on_disk():
-        causes.append(("the embedding model isn't downloaded yet", health.FIX_WARM_MODEL))
+        causes.append(
+            (f"the embedding model isn't downloaded yet (not found under {model_cache_root()})", health.FIX_WARM_MODEL)
+        )
     if not causes:
         return []
     return [
@@ -565,9 +575,16 @@ def ingestion_findings(
     found: list[Found] = []
     if fixable:
         import_state = scan.job_states.get(run_history.KIND_IMPORT)
-        repairing = job_lock.repairs_gaps(import_state, scan.db_path)
+        # Past the age limit, `import-stuck` reports the run and the gaps need action again.
+        stuck = is_stuck(import_state, scan)
+        repairing = job_lock.repairs_gaps(import_state, scan.db_path) and not stuck
         if repairing:
             note = "; the running import repairs them."
+        elif stuck and job_lock.repairs_gaps(import_state, scan.db_path):
+            note = (
+                ". The running import repairs gaps but has been going longer than backfill_stale_hours"
+                " (see import-stuck)."
+            )
         elif import_state is not None and import_state.running and import_state.scope is None:
             note = ". An import is running, but what it covers can't be read."
         elif job_lock.scope_on(import_state, scan.db_path) is not None:
@@ -778,8 +795,10 @@ def backlog_finding(
     """The embedding backlog, which needs action once both clocks pass backfill_stale_hours.
 
     Those are: no unscoped backfill has succeeded within the limit, and some
-    backlog session ended longer ago than the limit. A live backfill keeps it
-    "working on it"; past the limit, `backfill-stuck` reports that run instead.
+    backlog session ended longer ago than the limit. A live, unscoped backfill on
+    this database keeps it "working on it" while it is younger than the limit;
+    past the limit, `backfill-stuck` reports that run and the backlog is judged
+    as if no backfill were running.
     """
     total = sum(len(rows) for rows in backlog.values())
     if not total:
@@ -799,12 +818,15 @@ def backlog_finding(
     # A backfill on another database (--db) does nothing for this one, so it reads as no backfill.
     scope_unknown = backfill_state is not None and backfill_state.running and backfill_state.scope is None
     backfilling = scope_unknown or job_lock.scope_on(backfill_state, scan.db_path) is not None
-    if job_lock.drains_backlog(backfill_state, scan.db_path):
+    draining = job_lock.drains_backlog(backfill_state, scan.db_path)
+    if draining and not is_stuck(backfill_state, scan):
         group = GROUP_WORKING
         message += " The running backfill is working through them."
         fix = None
     else:
-        if scope_unknown:
+        if draining:
+            message += " The running backfill has been going longer than backfill_stale_hours (see backfill-stuck)."
+        elif scope_unknown:
             message += " A backfill is running, but what it covers can't be read."
         elif backfilling:
             message += " A backfill limited with --days or --limit is running; it may not reach them all."
@@ -826,6 +848,13 @@ def backlog_finding(
         Finding(id="embedding-backlog", group=group, message=message, count=total, fix=fix, listable=True),
         rows,
     )
+
+
+def is_stuck(state: job_lock.JobState | None, scan: Scan) -> bool:
+    """A live job running longer than backfill_stale_hours. One with no readable start time can't be stuck."""
+    if state is None or not state.running or state.started_at is None:
+        return False
+    return (scan.now - state.started_at).total("seconds") >= scan.stale_seconds
 
 
 def backfill_succeeded_within(scan: Scan, seconds: float) -> bool:

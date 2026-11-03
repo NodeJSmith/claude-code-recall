@@ -23,7 +23,7 @@ from conftest import (
     write_jsonl,
 )
 
-from ccrecall import ingestion_status, job_lock
+from ccrecall import ingestion_status, job_lock, run_history
 from ccrecall.config import JOB_KEY_IMPORT
 from ccrecall.embeddings import EMBEDDING_DIM
 from ccrecall.hooks.backfill_query import BACKFILL_NICE_LEVEL
@@ -999,14 +999,18 @@ class TestImportRunPathSafety:
         monkeypatch.setattr("ccrecall.hooks.import_conversations.get_db_path", lambda _settings: db_path)
         monkeypatch.setattr("ccrecall.hooks.import_conversations.import_project", import_project_mock)
 
-        _run(db=db_path, projects_dir=projects_dir, project="linked-project", verbose=False, repair_gaps=False)
+        failures = _run(
+            db=db_path, projects_dir=projects_dir, project="linked-project", verbose=False, repair_gaps=False
+        )
 
+        assert failures == 1
         assert capsys.readouterr().out == (
             f"Unsafe project path: {projects_dir / 'linked-project'}\n"
             "\nTotal: 0 branches, 0 messages imported (0 unchanged)\n"
             "Database size: 0.00 MB\n"
         )
         import_project_mock.assert_not_called()
+        assert run_history.read_runs(db_path)[run_history.KIND_IMPORT]["last"]["outcome"] == run_history.OUTCOME_FAILED
 
 
 class TestAppendOnlyReimport:
@@ -1589,7 +1593,7 @@ class TestImportRepairGapsEndToEnd:
 
     def test_repair_gaps_runs_despite_bad_project_value(self, memory_db, tmp_path, monkeypatch):
         """--repair-gaps still repairs a DB-wide session even when
-        --project names a nonexistent directory."""
+        --project names a nonexistent directory; the rejected project still exits 1."""
         projects_dir = tmp_path / "projects"
         projects_dir.mkdir()
         project_dir = projects_dir / "-Users-sam-project"
@@ -1604,7 +1608,10 @@ class TestImportRepairGapsEndToEnd:
         memory_db.commit()
         age_past_grace_window(filepath)
 
-        self._run_import(memory_db, monkeypatch, tmp_path, projects_dir, project="does-not-exist", repair_gaps=True)
+        with pytest.raises(SystemExit) as exc_info:
+            self._run_import(memory_db, monkeypatch, tmp_path, projects_dir, project="does-not-exist", repair_gaps=True)
+
+        assert exc_info.value.code == 1
 
         assert (
             memory_db.execute(

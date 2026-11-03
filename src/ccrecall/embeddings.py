@@ -149,19 +149,28 @@ def get_model(threads: int | None = None):
     return _model
 
 
+def model_cache_root() -> Path:
+    """Return the fastembed cache root as this process's environment resolves it.
+
+    $FASTEMBED_CACHE_PATH, or <tempdir>/fastembed_cache/. Another process with a
+    different environment can resolve a different root.
+    """
+    default_cache = os.path.join(tempfile.gettempdir(), "fastembed_cache")
+    return Path(os.environ.get("FASTEMBED_CACHE_PATH", default_cache))
+
+
 def is_model_cached_on_disk() -> bool:
     """Return True iff the fastembed model's cache directory exists on disk.
 
     A True result means get_model() will load from disk (fast — milliseconds).
     A False result means get_model() may trigger a ~120 MB network download.
 
-    Cache root: $FASTEMBED_CACHE_PATH env var, or <tempdir>/fastembed_cache/.
+    Cache root: model_cache_root().
     Model subdir: any of EMBEDDING_MODEL_CACHE_SUBDIRS (see its definition for
     why more than one name can hold the model).
     """
     try:
-        default_cache = os.path.join(tempfile.gettempdir(), "fastembed_cache")
-        cache_root = Path(os.environ.get("FASTEMBED_CACHE_PATH", default_cache))
+        cache_root = model_cache_root()
         return any((cache_root / subdir).exists() for subdir in EMBEDDING_MODEL_CACHE_SUBDIRS)
     except Exception:
         log.debug("embedding cache check failed", exc_info=True)

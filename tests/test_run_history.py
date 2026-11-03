@@ -42,8 +42,8 @@ def test_sidecars_live_beside_the_database(db_path):
 
 
 def test_successful_run_sets_last_and_last_ok(db_path):
-    with record_run(db_path, KIND_SYNC):
-        pass
+    with record_run(db_path, KIND_SYNC) as recorder:
+        recorder.finish(OUTCOME_OK)
 
     entry = read_runs(db_path)[KIND_SYNC]
     assert entry["last"]["outcome"] == OUTCOME_OK
@@ -52,8 +52,8 @@ def test_successful_run_sets_last_and_last_ok(db_path):
 
 
 def test_failure_keeps_the_previous_success(db_path):
-    with record_run(db_path, KIND_IMPORT):
-        pass
+    with record_run(db_path, KIND_IMPORT) as recorder:
+        recorder.finish(OUTCOME_OK)
     first_ok = read_runs(db_path)[KIND_IMPORT]["last_ok"]
 
     with record_run(db_path, KIND_IMPORT) as recorder:
@@ -66,11 +66,21 @@ def test_failure_keeps_the_previous_success(db_path):
 
 
 def test_scoped_success_never_advances_last_ok(db_path):
-    with record_run(db_path, KIND_BACKFILL, advances_ok=False):
-        pass
+    with record_run(db_path, KIND_BACKFILL, advances_ok=False) as recorder:
+        recorder.finish(OUTCOME_OK)
 
     entry = read_runs(db_path)[KIND_BACKFILL]
     assert entry["last"]["outcome"] == OUTCOME_OK
+    assert entry["last_ok"] is None
+
+
+def test_run_that_never_sets_an_outcome_records_failed(db_path):
+    with record_run(db_path, KIND_SYNC):
+        pass
+
+    entry = read_runs(db_path)[KIND_SYNC]
+    assert entry["last"]["outcome"] == OUTCOME_FAILED
+    assert entry["last"]["reason"] == REASON_ERROR
     assert entry["last_ok"] is None
 
 
@@ -121,10 +131,10 @@ def test_system_exit_records_the_outcome_the_run_set(db_path):
 
 
 def test_each_kind_keeps_its_own_record(db_path):
-    with record_run(db_path, KIND_SYNC):
-        pass
-    with record_run(db_path, KIND_BACKFILL):
-        pass
+    with record_run(db_path, KIND_SYNC) as recorder:
+        recorder.finish(OUTCOME_OK)
+    with record_run(db_path, KIND_BACKFILL) as recorder:
+        recorder.finish(OUTCOME_OK)
 
     assert set(read_runs(db_path)) == {KIND_SYNC, KIND_BACKFILL}
 
@@ -132,8 +142,8 @@ def test_each_kind_keeps_its_own_record(db_path):
 def test_unparseable_file_is_rewritten_with_only_the_current_kind(db_path):
     runs_path(db_path).write_text("{not json")
 
-    with record_run(db_path, KIND_IMPORT):
-        pass
+    with record_run(db_path, KIND_IMPORT) as recorder:
+        recorder.finish(OUTCOME_OK)
 
     assert set(read_runs(db_path)) == {KIND_IMPORT}
 
@@ -141,15 +151,15 @@ def test_unparseable_file_is_rewritten_with_only_the_current_kind(db_path):
 def test_recording_failure_never_fails_the_run(db_path, caplog):
     runs_path(db_path).mkdir()  # a directory where the file should be
 
-    with record_run(db_path, KIND_SYNC):
-        pass
+    with record_run(db_path, KIND_SYNC) as recorder:
+        recorder.finish(OUTCOME_OK)
 
     assert "could not record the run" in caplog.text
 
 
 def test_runs_against_one_database_never_appear_in_another(tmp_path):
-    with record_run(tmp_path / "a.db", KIND_SYNC):
-        pass
+    with record_run(tmp_path / "a.db", KIND_SYNC) as recorder:
+        recorder.finish(OUTCOME_OK)
 
     assert read_runs(tmp_path / "b.db") == {}
 

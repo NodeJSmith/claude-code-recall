@@ -402,6 +402,8 @@ def _run(
     # count: it is marked and never retried, so it can never clear.
     if lock_timeouts:
         recorder.finish(run_history.OUTCOME_PARTIAL, run_history.REASON_DATABASE_BUSY)
+    else:
+        recorder.finish(run_history.OUTCOME_OK)
     return EXIT_OK
 
 

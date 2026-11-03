@@ -539,6 +539,8 @@ def run_repair(
                 run_history.OUTCOME_PARTIAL,
                 run_history.REASON_DATABASE_BUSY if busy else run_history.REASON_ERROR,
             )
+        else:
+            recorder.finish(run_history.OUTCOME_OK)
         return counts.failed, counts.locked
 
 
@@ -552,7 +554,7 @@ def _run(
 ) -> int:
     """Run the import under the import job lock and return ``total_failures``.
 
-    ``total_failures`` counts failed projects plus failed gap repairs. Only one
+    ``total_failures`` counts failed or rejected projects plus failed gap repairs. Only one
     import runs at a time: when another holds the lock, this one skips (0).
     """
     settings = load_settings()
@@ -598,6 +600,7 @@ def _import_locked(
         lock_failures = 0
         repair_failures = 0
         finished = False
+        project_rejected = False  # --project named a missing or unsafe directory
 
         t_start = time.monotonic()
 
@@ -621,8 +624,10 @@ def _import_locked(
                     project_dir = projects_dir / project
                     if not project_dir.exists():
                         print(f"Project not found: {project_dir}")
+                        project_rejected = True
                     elif not is_safe_project_dir(project_dir, projects_dir):
                         print(f"Unsafe project path: {project_dir}")
+                        project_rejected = True
                     else:
                         project_counts = import_project_contained(conn, project_dir, exclude_projects, _reclaim)
                         if isinstance(project_counts, ProjectFailed):
@@ -699,10 +704,15 @@ def _import_locked(
             print(f"Database size: {db_size / BYTES_PER_MB:.2f} MB")
 
         total_failures = repair_failures + project_failures
-        if total_failures:
+        if project_rejected:
+            recorder.finish(run_history.OUTCOME_FAILED, run_history.REASON_ERROR)
+        elif total_failures:
             busy = lock_failures == total_failures
             recorder.finish(
                 run_history.OUTCOME_PARTIAL,
                 run_history.REASON_DATABASE_BUSY if busy else run_history.REASON_ERROR,
             )
-    return total_failures
+        else:
+            recorder.finish(run_history.OUTCOME_OK)
+    # A rejected --project is a failure too, so the exit code agrees with the record.
+    return total_failures + int(project_rejected)

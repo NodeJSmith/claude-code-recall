@@ -1,5 +1,6 @@
 """Tests for the finding catalog `ccrecall doctor` and `ccrecall status` render."""
 
+import ast
 import hashlib
 import json
 import os
@@ -189,6 +190,14 @@ def test_schema_behind_skips_database_checks(db_path):
     assert "embedding-backlog" not in found
 
 
+def test_schema_behind_leaves_the_session_count_unknown(db_path):
+    add_session(db_path, "queued", chunked=0)
+    with get_connection({"db_path": str(db_path)}) as conn:
+        conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION - 1}")
+
+    assert diagnose(db_path, settings()).summary["sessions"] is None
+
+
 def test_schema_ahead_still_runs_checks(db_path):
     add_session(db_path, "queued", chunked=0)
     with get_connection({"db_path": str(db_path)}) as conn:
@@ -230,6 +239,22 @@ class TestEmbeddingBacklog:
         assert found["embedding-backlog"].group == GROUP_WORKING
         assert found["embedding-backlog"].fix is None
         assert found["backfill-running"].group == GROUP_WORKING
+
+    def test_stuck_full_backfill_leaves_the_backlog_needing_action(self, db_path, hold_job_lock):
+        add_session(db_path, "queued", chunked=0, ended_at=iso_ago(80 * HOURS))
+        scope = job_lock.backfill_scope(days=None, limit=None, db=db_path)
+        hold_job_lock(
+            JOB_KEY_BACKFILL_EMBEDDINGS,
+            record=job_record(JOB_KEY_BACKFILL_EMBEDDINGS, age_seconds=80 * HOURS, scope=scope),
+        )
+
+        found = by_id(diagnose(db_path, settings()))
+
+        assert found["embedding-backlog"].group == GROUP_ACTION
+        assert found["embedding-backlog"].fix == "ccrecall backfill embeddings"
+        assert "longer than backfill_stale_hours (see backfill-stuck)" in found["embedding-backlog"].message
+        assert "--days" not in found["embedding-backlog"].message
+        assert "backfill-stuck" in found
 
     def test_live_backfill_on_the_same_database_by_another_path_counts(self, db_path, tmp_path, hold_job_lock):
         add_session(db_path, "queued", chunked=0)
@@ -396,6 +421,17 @@ class TestIngestion:
         assert fixable.group == GROUP_WORKING
         assert fixable.fix is None
 
+    def test_stuck_repair_import_leaves_fixable_sessions_needing_action(self, db_path, gapped, hold_job_lock):
+        scope = job_lock.import_scope(repair_gaps=True, db=db_path)
+        hold_job_lock(JOB_KEY_IMPORT, record=job_record(JOB_KEY_IMPORT, age_seconds=80 * HOURS, scope=scope))
+
+        found = by_id(diagnose(db_path, settings()))
+
+        assert found["fixable-sessions"].group == GROUP_ACTION
+        assert found["fixable-sessions"].fix == "ccrecall import --repair-gaps"
+        assert "repairs gaps but has been going longer" in found["fixable-sessions"].message
+        assert "import-stuck" in found
+
     def test_repair_import_on_another_database_still_needs_action(self, db_path, gapped, tmp_path, hold_job_lock):
         hold_import(hold_job_lock, job_lock.import_scope(repair_gaps=True, db=tmp_path / "copy.db"))
 
@@ -453,6 +489,14 @@ class TestRuns:
     def write_runs(self, db_path, kind, outcome, reason):
         entry = {"outcome": outcome, "reason": reason, "started_at": iso_ago(120), "finished_at": iso_ago(60)}
         run_history.runs_path(db_path).write_text(json.dumps({kind: {"last": entry, "last_ok": None}}))
+
+    def test_backfill_failed_on_sqlite_vec_points_to_reinstall(self, db_path):
+        self.write_runs(db_path, "backfill", run_history.OUTCOME_FAILED, run_history.REASON_VECTOR_UNAVAILABLE)
+
+        failed = by_id(diagnose(db_path, settings()))["backfill-failed"]
+
+        assert failed.group == GROUP_ACTION
+        assert failed.fix == findings.REINSTALL_FOR_VEC
 
     def test_busy_failure_is_working_on_it(self, db_path):
         self.write_runs(db_path, "import", run_history.OUTCOME_PARTIAL, run_history.REASON_DATABASE_BUSY)
@@ -557,6 +601,15 @@ def test_model_missing_from_disk_points_to_warm_model(db_path, monkeypatch):
     assert by_id(diagnose(db_path, settings()))["embedding-unavailable"].fix == "ccrecall-warm-model"
 
 
+def test_model_missing_message_names_the_checked_path(db_path, monkeypatch, tmp_path):
+    monkeypatch.setattr(findings, "is_model_cached_on_disk", lambda: False)
+    monkeypatch.setenv("FASTEMBED_CACHE_PATH", str(tmp_path / "models"))
+
+    message = by_id(diagnose(db_path, settings()))["embedding-unavailable"].message
+
+    assert f"not found under {tmp_path / 'models'}" in message
+
+
 def test_unwritable_database_needs_action(db_path):
     db_path.chmod(0o400)
     try:
@@ -576,7 +629,59 @@ def test_unwritable_database_directory_explains_why_it_cant_be_read(db_path):
         db_path.parent.chmod(0o700)
 
 
-def test_every_id_a_finding_can_have_is_in_the_catalog(db_path):
-    assert {"backfill-stuck", "import-running", "sync-killed", "repair-failed"} <= findings.FINDING_IDS
-    assert "sync-running" not in findings.FINDING_IDS
-    assert "repair-killed" not in findings.FINDING_IDS
+def test_every_literal_finding_id_is_in_the_catalog():
+    """Every `Finding(id="...")` in findings.py is a catalog id, so `doctor --list` accepts it."""
+    tree = ast.parse(Path(findings.__file__).read_text())
+    literal_ids = {
+        keyword.value.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "Finding"
+        for keyword in node.keywords
+        if keyword.arg == "id" and isinstance(keyword.value, ast.Constant)
+    }
+
+    assert literal_ids
+    assert literal_ids <= findings.FINDING_IDS
+
+
+def test_finding_id_catalog_matches_the_pinned_list():
+    """The id catalog is a public contract: change it here and in README's JSON output section together."""
+    assert sorted(findings.FINDING_IDS) == [
+        "backfill-failed",
+        "backfill-killed",
+        "backfill-running",
+        "backfill-stuck",
+        "check-failed",
+        "deleted-transcripts",
+        "draft-sessions",
+        "duplicate-active-branch",
+        "embedding-backlog",
+        "embedding-unavailable",
+        "fixable-sessions",
+        "import-failed",
+        "import-killed",
+        "import-running",
+        "import-stuck",
+        "no-database",
+        "not-writable",
+        "repair-failed",
+        "schema-ahead",
+        "schema-behind",
+        "sessions-in-progress",
+        "skipped-by-design",
+        "sync-failed",
+        "sync-killed",
+        "tool-content-pending",
+        "unembeddable-sessions",
+        "unfixable-sessions",
+    ]
+
+
+def test_a_recorded_run_reaches_the_report(db_path):
+    with run_history.record_run(db_path, run_history.KIND_BACKFILL) as recorder:
+        recorder.finish(run_history.OUTCOME_FAILED, run_history.REASON_ERROR)
+
+    failed = by_id(diagnose(db_path, settings()))["backfill-failed"]
+
+    assert failed.group == GROUP_ACTION
+    assert failed.fix == "ccrecall backfill embeddings"

@@ -35,14 +35,13 @@ def db_path(tmp_path):
     return path
 
 
-def queue_old_session(db_path):
+def queue_old_session(db_path, ended_at: str = "2026-01-01T10:00:00.000Z"):
     """One session waiting for embedding, long past backfill_stale_hours, with no backfill recorded."""
     with get_connection({"db_path": str(db_path)}) as conn:
         session_id = conn.execute("INSERT INTO sessions (uuid) VALUES ('queued')").lastrowid
         branch_id = conn.execute(
-            "INSERT INTO branches (session_id, leaf_uuid, is_active, ended_at) "
-            "VALUES (?, 'leaf', 1, '2026-01-01T10:00:00.000Z')",
-            (session_id,),
+            "INSERT INTO branches (session_id, leaf_uuid, is_active, ended_at) VALUES (?, 'leaf', 1, ?)",
+            (session_id, ended_at),
         ).lastrowid
         message_id = conn.execute(
             "INSERT INTO messages (session_id, uuid, role, content, tool_content) VALUES (?, 'm', 'user', 'hi', '')",
@@ -65,6 +64,26 @@ class TestStatus:
 
         lines = capsys.readouterr().out.splitlines()
         assert lines == ["ccrecall: healthy", "0 sessions"]
+
+    def test_json_verdict_healthy_literal(self, db_path, capsys):
+        run_status(db=db_path, output_format="json")
+
+        assert json.loads(capsys.readouterr().out)["verdict"] == "healthy"
+
+    def test_json_verdict_working_literal(self, db_path, capsys):
+        # Ended within backfill_stale_hours (72 by default) but past the in-progress window.
+        queue_old_session(db_path, ended_at=Instant.now().subtract(hours=3).format_iso())
+
+        run_status(db=db_path, output_format="json")
+
+        assert json.loads(capsys.readouterr().out)["verdict"] == "working"
+
+    def test_json_verdict_needs_attention_literal(self, db_path, capsys):
+        queue_old_session(db_path)
+
+        run_status(db=db_path, output_format="json")
+
+        assert json.loads(capsys.readouterr().out)["verdict"] == "needs-attention"
 
     def test_not_healthy_points_to_doctor_and_still_exits_zero(self, db_path, capsys):
         queue_old_session(db_path)
@@ -192,6 +211,9 @@ class TestDoctor:
 class TestRendering:
     def test_summary_line_leaves_out_what_isnt_known(self):
         assert summary_line(diagnosis_of(embedded_pct=None)) == "7,514 sessions"
+
+    def test_summary_line_leaves_out_an_unknown_session_count(self):
+        assert summary_line(diagnosis_of(sessions=None)) == "98% embedded"
 
     def test_summary_line_shows_the_last_sync(self):
         now = Instant.now()

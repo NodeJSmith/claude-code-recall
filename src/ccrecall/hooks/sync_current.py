@@ -270,6 +270,7 @@ def run(input_file: Path | None = None) -> None:
                 if new_messages > 0:
                     output["suppressOutput"] = True  # Don't show in transcript
 
+                recorder.finish(run_history.OUTCOME_OK)
                 print(json.dumps(output))
 
             except Exception as e:

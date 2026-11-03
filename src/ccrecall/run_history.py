@@ -76,14 +76,18 @@ def unrepairable_path(db_path: Path) -> Path:
 
 @dataclass
 class RunRecorder:
-    """What one run will record when it finishes. The run sets its outcome before it returns."""
+    """What one run will record when it finishes.
+
+    The run sets its outcome before it returns, success included: a run that
+    leaves it unset records ``failed``, so a forgotten path never reads as ok.
+    """
 
     kind: str
     started_at: Instant
     # Only an unscoped run may advance `last_ok`: a scoped backfill (--days,
     # --limit) worked part of the backlog, so it can't prove the rest is done.
     advances_ok: bool = True
-    outcome: str = OUTCOME_OK
+    outcome: str | None = None
     reason: str | None = None
 
     def finish(self, outcome: str, reason: str | None = None) -> None:
@@ -106,7 +110,7 @@ def record_run(db_path: Path, kind: str, *, advances_ok: bool = True) -> Iterato
     outlasted the timeout, else the reason the body set, else ``error``) and
     re-raises. A Ctrl-C records nothing, so a deliberate interruption never reads
     as a failure. ``SystemExit`` isn't an interruption: it records whatever outcome
-    the body set.
+    the body set. A body that exits without setting one records ``failed``.
     """
     recorder = RunRecorder(kind=kind, started_at=Instant.now(), advances_ok=advances_ok)
     try:
@@ -114,7 +118,7 @@ def record_run(db_path: Path, kind: str, *, advances_ok: bool = True) -> Iterato
     except KeyboardInterrupt:
         raise
     except SystemExit:
-        write_record(db_path, recorder)
+        write_finished(db_path, recorder)
         raise
     except Exception as exc:
         reason = failure_reason(exc)
@@ -124,7 +128,15 @@ def record_run(db_path: Path, kind: str, *, advances_ok: bool = True) -> Iterato
         write_record(db_path, recorder)
         raise
     else:
-        write_record(db_path, recorder)
+        write_finished(db_path, recorder)
+
+
+def write_finished(db_path: Path, recorder: RunRecorder) -> None:
+    """Record a run that exited without raising, as failed if it never set an outcome."""
+    if recorder.outcome is None:
+        log.error("run exited without setting an outcome", extra={"kind": recorder.kind})
+        recorder.finish(OUTCOME_FAILED, REASON_ERROR)
+    write_record(db_path, recorder)
 
 
 def write_record(db_path: Path, recorder: RunRecorder) -> None:

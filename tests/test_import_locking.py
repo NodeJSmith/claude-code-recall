@@ -73,7 +73,7 @@ def test_commit_by_another_process_during_the_scan_does_not_fail_the_import(
     that window. The inserted row is arbitrary: only the other process's commit matters.
     """
     write_session(project_dir, "sess-known")
-    assert import_project_contained(db_conn, project_dir, None) is not None
+    assert not isinstance(import_project_contained(db_conn, project_dir, None), ProjectFailed)
     write_session(project_dir, "sess-new")
 
     real_check = import_conversations.has_pending_tool_content
@@ -89,7 +89,7 @@ def test_commit_by_another_process_during_the_scan_does_not_fail_the_import(
 
     monkeypatch.setattr(import_conversations, "has_pending_tool_content", commit_once_then_check)
 
-    assert import_project_contained(db_conn, project_dir, None) is not None
+    assert not isinstance(import_project_contained(db_conn, project_dir, None), ProjectFailed)
     assert commits, "the competing commit must actually have happened"
     assert imported_sessions(db_conn) == {"sess-known", "sess-new"}
 
@@ -97,7 +97,7 @@ def test_commit_by_another_process_during_the_scan_does_not_fail_the_import(
 def test_unchanged_project_imports_while_another_process_holds_the_write_lock(db_conn, competitor, project_dir):
     """A project with nothing new has nothing to write, so it must not need the lock."""
     write_session(project_dir, "sess-known")
-    assert import_project_contained(db_conn, project_dir, None) is not None
+    assert not isinstance(import_project_contained(db_conn, project_dir, None), ProjectFailed)
 
     competitor.execute("BEGIN IMMEDIATE")
     try:
@@ -119,7 +119,7 @@ def test_locked_project_fails_alone_and_imports_on_the_next_run(db_conn, competi
     assert not db_conn.in_transaction
     assert imported_sessions(db_conn) == set()
 
-    assert import_project_contained(db_conn, project_dir, None) is not None
+    assert not isinstance(import_project_contained(db_conn, project_dir, None), ProjectFailed)
     assert imported_sessions(db_conn) == {"sess-new"}
 
 

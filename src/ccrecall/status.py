@@ -68,7 +68,8 @@ def run_status(*, db: Path = DEFAULT_DB_PATH, output_format: str = "markdown") -
         print(json.dumps(diagnosis_json(diagnosis), indent=2))
     else:
         print(verdict_line(diagnosis, point_to_doctor=True))
-        print(summary_line(diagnosis))
+        if line := summary_line(diagnosis):
+            print(line)
     if not db_path.exists():
         raise SystemExit(EXIT_NEEDS_ATTENTION)
 
@@ -119,9 +120,12 @@ def verdict_line(diagnosis: Diagnosis, *, point_to_doctor: bool = False) -> str:
 
 
 def summary_line(diagnosis: Diagnosis, now: Instant | None = None) -> str:
-    """``7,514 sessions · 98% embedded · last sync 2 min ago``, leaving out what isn't known yet."""
+    """``7,514 sessions · 98% embedded · last sync 2 min ago``, leaving out what isn't known yet.
+
+    Returns an empty string when none of it is known.
+    """
     summary = diagnosis.summary
-    parts = [f"{summary['sessions']:,} sessions"]
+    parts = [] if summary["sessions"] is None else [f"{summary['sessions']:,} sessions"]
     if summary["embedded_pct"] is not None:
         parts.append(f"{summary['embedded_pct']}% embedded")
     last_sync = parse_instant(summary["last_sync"])
@@ -132,7 +136,8 @@ def summary_line(diagnosis: Diagnosis, now: Instant | None = None) -> str:
 
 def print_report(diagnosis: Diagnosis) -> None:
     print(verdict_line(diagnosis))
-    print(summary_line(diagnosis))
+    if line := summary_line(diagnosis):
+        print(line)
     for group, heading in _GROUP_HEADINGS:
         findings = [finding for finding in diagnosis.findings if finding.group == group]
         if not findings:
