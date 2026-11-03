@@ -33,10 +33,10 @@ from ccrecall.db import CHUNK_DRAFT_QUALITY_FILTER, CHUNK_EMBEDDABLE_BRANCH_FILT
 from ccrecall.db_base import SCHEMA_VERSION, describe_schema_ahead
 from ccrecall.db_vec import (
     chunk_vec_queryable,
-    count_exchanges_without_chunks,
     find_stamped_branches_missing_chunks,
     vec_available,
 )
+from ccrecall.embed_ops import count_exchanges_needing_chunks
 from ccrecall.embeddings import (
     EMBEDDING_MODEL,
     EMBEDDING_VERSION,
@@ -799,9 +799,9 @@ def vector_state(
 ) -> str:
     """One embeddable branch's vectors: a backlog reason, "draft", or "embedded".
 
-    A branch with no chunks was never embedded (queued). One with chunks but
-    exchanges that have none got new messages after it was embedded, which is
-    what repair produces. A chunk with no current vector needs re-embedding. A
+    A branch with no chunks was never embedded (queued). One with an exchange
+    that has no chunk, or a chunk embedded from different text, got new
+    messages after it was embedded, which is what repair produces. A chunk with no current vector needs re-embedding. A
     branch whose every exchange has a current vector is embedded, at draft
     quality if any chunk was capped.
     """
@@ -809,7 +809,7 @@ def vector_state(
         return BACKLOG_MISSING_VECTORS if stamped_missing or stale_chunks else "embedded"
     if not chunks:
         return BACKLOG_QUEUED
-    if count_exchanges_without_chunks(cursor, branch_id):
+    if count_exchanges_needing_chunks(cursor, branch_id):
         return BACKLOG_REPAIRED
     if stale_chunks:
         return BACKLOG_MISSING_VECTORS

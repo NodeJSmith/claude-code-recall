@@ -181,6 +181,18 @@ def _read_chunks(cursor: sqlite3.Cursor, branch_db_id: int) -> dict[int, dict]:
     }
 
 
+def count_exchanges_needing_chunks(cursor: sqlite3.Cursor, branch_db_id: int) -> int:
+    """How many of the branch's exchanges have no chunk, or a chunk embedded from different text.
+
+    Read-only and vec-free: it never touches ``chunk_vec``, so a vector's
+    presence is judged separately.
+    """
+    exchanges = build_exchange_pairs(fetch_branch_messages(cursor, branch_db_id, include_notifications=False))
+    cursor.execute("SELECT exchange_index, content_hash FROM chunks WHERE branch_id = ?", (branch_db_id,))
+    stored = dict(cursor.fetchall())
+    return sum(1 for ex in exchanges if stored.get(ex["index"]) != _content_hash(ex))
+
+
 def _chunk_is_current(chunk: dict, content_hash: str) -> bool:
     """The chunk holds a current-model vector of exactly this text. Quality tier is judged separately."""
     return (

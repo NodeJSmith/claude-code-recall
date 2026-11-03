@@ -16,6 +16,8 @@ from ccrecall import config, findings, health, job_lock, run_history
 from ccrecall.config import JOB_KEY_BACKFILL_EMBEDDINGS, JOB_KEY_IMPORT
 from ccrecall.db import CONTENT_ERROR_VERSION, get_connection
 from ccrecall.db_base import SCHEMA_VERSION
+from ccrecall.db_vec import fetch_branch_messages
+from ccrecall.embed_ops import _content_hash
 from ccrecall.embeddings import EMBEDDING_DIM, EMBEDDING_MODEL, EMBEDDING_VERSION
 from ccrecall.findings import (
     GROUP_ACTION,
@@ -29,6 +31,7 @@ from ccrecall.findings import (
     verdict_for,
 )
 from ccrecall.ingestion_status import source_fingerprint
+from ccrecall.summarizer import build_exchange_pairs
 
 pytestmark = VEC_SKIP
 
@@ -104,11 +107,12 @@ def add_session(
                 conn.execute(
                     "INSERT INTO branch_messages (branch_id, message_id) VALUES (?, ?)", (branch_id, message_id)
                 )
-        for i in range(exchanges if chunked is None else chunked):
+        pairs = build_exchange_pairs(fetch_branch_messages(conn.cursor(), branch_id, include_notifications=False))
+        for pair in pairs[: exchanges if chunked is None else chunked]:
             chunk_id = conn.execute(
                 "INSERT INTO chunks (branch_id, exchange_index, content_hash, embedding_version, embedding_model, "
-                "cap_tokens) VALUES (?, ?, 'h', ?, ?, ?)",
-                (branch_id, i, EMBEDDING_VERSION, EMBEDDING_MODEL, cap_tokens),
+                "cap_tokens) VALUES (?, ?, ?, ?, ?, ?)",
+                (branch_id, pair["index"], _content_hash(pair), EMBEDDING_VERSION, EMBEDDING_MODEL, cap_tokens),
             ).lastrowid
             if vectors:
                 conn.execute(
@@ -715,3 +719,17 @@ def test_database_without_a_vector_table_counts_its_chunks_as_unvectored(db_path
     assert "check-failed" not in by_id(diagnosis)
     assert by_id(diagnosis)["embedding-backlog"].count == 1
     assert diagnosis.sessions["embedding-backlog"][0].reason == findings.BACKLOG_MISSING_VECTORS
+
+
+def test_exchange_whose_text_changed_since_it_was_embedded_is_backlog(db_path):
+    """Repair can restore a message inside an exchange that already has a current chunk and vector."""
+    add_session(db_path, "restored")
+    with get_connection({"db_path": str(db_path)}) as conn:
+        conn.execute(
+            "UPDATE messages SET content = 'answer 0, with the restored part' WHERE uuid = 'restored-assistant-0'"
+        )
+
+    diagnosis = diagnose(db_path, settings())
+
+    assert diagnosis.sessions["embedding-backlog"][0].reason == findings.BACKLOG_REPAIRED
+    assert diagnosis.summary["embedded_pct"] == 0
