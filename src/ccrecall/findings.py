@@ -54,7 +54,6 @@ VERDICT_HEALTHY = "healthy"
 # same window that separates a pending tail from a stale one.
 IN_PROGRESS_SECONDS = STALE_TAIL_SECONDS
 
-SECONDS_PER_HOUR = 3600
 
 REPORT_A_BUG = "report a bug at https://github.com/NodeJSmith/claude-code-recall/issues"
 REINSTALL_FOR_VEC = "reinstall ccrecall so the sqlite-vec extension loads"
@@ -245,7 +244,7 @@ def diagnose(db_path: Path, settings: dict) -> Diagnosis:
         db_path=db_path,
         settings=settings,
         now=now,
-        stale_seconds=resolve_backfill_stale_hours(settings.get("backfill_stale_hours")) * SECONDS_PER_HOUR,
+        stale_seconds=resolve_backfill_stale_hours(settings.get("backfill_stale_hours")) * health.SECONDS_PER_HOUR,
         runs=run_history.read_runs(db_path),
         markers={kind: run_history.read_marker(kind) for kind in run_history.KIND_PID_KEYS},
     )
@@ -798,7 +797,7 @@ def backlog_finding(
         if overdue and not backfill_succeeded_within(scan, scan.stale_seconds):
             group = GROUP_ACTION
             message += (
-                f" No full backfill has succeeded in the last {scan.stale_seconds / SECONDS_PER_HOUR:g} hours"
+                f" No full backfill has succeeded in the last {scan.stale_seconds / health.SECONDS_PER_HOUR:g} hours"
                 f" ({describe_last_backfill(scan)}), so nothing is draining them."
             )
             fix = health.FIX_BACKFILL_EMBEDDINGS

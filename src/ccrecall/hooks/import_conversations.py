@@ -529,8 +529,9 @@ def run_repair(
     """Find and repair gapped sessions, report and record the outcome.
 
     Returns ``(failed, locked)``: how many repairs failed, and how many of those
-    hit a locked database. A completed repair replaces the unfixable-sessions
-    file; an aborted one only adds to it.
+    hit a locked database. A repair that completed with no failures replaces
+    the unfixable-sessions file; any other run only adds to it, since a session
+    that failed this run wasn't re-tested and keeps its earlier entry.
     """
     with run_history.record_run(db_path, run_history.KIND_REPAIR) as recorder:
         try:
@@ -554,7 +555,7 @@ def run_repair(
                 run_history.write_unfixable(db_path, dict(aborted.counts.unfixable), replace=False)
             raise
         report_repair(logger, len(candidates), counts)
-        run_history.write_unfixable(db_path, dict(counts.unfixable), replace=True)
+        run_history.write_unfixable(db_path, dict(counts.unfixable), replace=counts.failed == 0)
         if counts.failed:
             busy = counts.locked == counts.failed
             recorder.finish(

@@ -87,15 +87,17 @@ class RunRecorder:
     advances_ok: bool = True
     outcome: str = OUTCOME_OK
     reason: str | None = None
-    skipped: bool = False
 
     def finish(self, outcome: str, reason: str | None = None) -> None:
         self.outcome = outcome
         self.reason = reason
 
-    def skip(self) -> None:
-        """Record nothing: the run attempted no work."""
-        self.skipped = True
+
+def failure_reason(exc: BaseException) -> str:
+    """``database_busy`` for a lock that outlasted the busy timeout, else ``error``."""
+    if isinstance(exc, sqlite3.OperationalError) and is_database_locked(exc):
+        return REASON_DATABASE_BUSY
+    return REASON_ERROR
 
 
 @contextlib.contextmanager
@@ -117,10 +119,10 @@ def record_run(db_path: Path, kind: str, *, advances_ok: bool = True) -> Iterato
         write_record(db_path, recorder)
         raise
     except Exception as exc:
-        if isinstance(exc, sqlite3.OperationalError) and is_database_locked(exc):
-            recorder.finish(OUTCOME_FAILED, REASON_DATABASE_BUSY)
-        else:
-            recorder.finish(OUTCOME_FAILED, recorder.reason or REASON_ERROR)
+        reason = failure_reason(exc)
+        if reason == REASON_ERROR and recorder.reason:
+            reason = recorder.reason
+        recorder.finish(OUTCOME_FAILED, reason)
         write_record(db_path, recorder)
         raise
     else:
@@ -129,8 +131,6 @@ def record_run(db_path: Path, kind: str, *, advances_ok: bool = True) -> Iterato
 
 def write_record(db_path: Path, recorder: RunRecorder) -> None:
     """Merge one finished run into ``<db>.runs.json``. Best-effort: never raises."""
-    if recorder.skipped:
-        return
     entry = {
         "outcome": recorder.outcome,
         "reason": recorder.reason,
@@ -181,8 +181,9 @@ def read_unfixable(db_path: Path) -> dict[str, str]:
 def write_unfixable(db_path: Path, sessions: dict[str, str], *, replace: bool) -> None:
     """Store sessions repair couldn't fix. Best-effort: never raises.
 
-    A completed repair passes ``replace=True``: the file then holds exactly these
-    sessions, or is removed when there are none. An aborted repair only adds.
+    A repair that completed with no failures passes ``replace=True``: the file
+    then holds exactly these sessions, or is removed when there are none. Any
+    other repair only adds.
     """
     path = unrepairable_path(db_path)
     try:

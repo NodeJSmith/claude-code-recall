@@ -398,6 +398,20 @@ class TestRunRecording:
 
         assert run_history.read_unfixable(tmp_path / "memory.db") == {"sess-x": "fp-x"}
 
+    def test_repair_with_failures_only_adds_to_the_unfixable_list(self, tmp_path, projects_dir, monkeypatch):
+        # A session that failed this run wasn't re-tested, so its earlier entry must survive.
+        run_history.write_unfixable(tmp_path / "memory.db", {"old": "fp"}, replace=True)
+
+        def one_failed(_conn, _candidates, on_reclaim):
+            return import_repair.RepairCounts(0, 0, 1, 1, locked=1, unfixable=(("sess-x", "fp-x"),))
+
+        monkeypatch.setattr(import_repair, "repair_sessions", one_failed)
+
+        with pytest.raises(SystemExit):
+            run(db=tmp_path / "memory.db", projects_dir=projects_dir, repair_gaps=True)
+
+        assert run_history.read_unfixable(tmp_path / "memory.db") == {"old": "fp", "sess-x": "fp-x"}
+
     def test_aborted_repair_only_adds_to_the_unfixable_list(self, tmp_path, projects_dir, monkeypatch):
         run_history.write_unfixable(tmp_path / "memory.db", {"old": "fp"}, replace=True)
 

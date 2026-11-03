@@ -34,7 +34,6 @@ from ccrecall.findings import (
     parse_instant,
 )
 
-EXIT_OK = 0
 EXIT_NEEDS_ATTENTION = 1
 EXIT_UNREADABLE = 2
 
@@ -63,7 +62,7 @@ def run_status(*, db: Path = DEFAULT_DB_PATH, output_format: str = "markdown") -
         diagnosis = diagnose(db_path, settings)
     except DatabaseUnreadableError as exc:
         print(f"ccrecall status: can't read the database at {db_path} ({exc}); run `ccrecall doctor`", file=sys.stderr)
-        raise SystemExit(1) from exc
+        raise SystemExit(EXIT_NEEDS_ATTENTION) from exc
 
     if output_format == "json":
         print(json.dumps(diagnosis_json(diagnosis), indent=2))
@@ -71,7 +70,7 @@ def run_status(*, db: Path = DEFAULT_DB_PATH, output_format: str = "markdown") -
         print(verdict_line(diagnosis, point_to_doctor=True))
         print(summary_line(diagnosis))
     if not db_path.exists():
-        raise SystemExit(1)
+        raise SystemExit(EXIT_NEEDS_ATTENTION)
 
 
 def run_doctor(*, db: Path = DEFAULT_DB_PATH, output_format: str = "markdown", list_id: str | None = None) -> None:

@@ -390,3 +390,4 @@ An `Exception` records `failed` with reason `error`, including the one sync swal
 - `embedding-unavailable` is one finding listing every cause, with the first cause's fix.
 - `skipped-by-design` is always present, in "nothing to do".
 - An `import --repair-gaps` whose repair fails records a `partial` import as well as a failed repair, as D8 states, so one cause can show as both `import-failed` and `repair-failed`.
+- Only a repair that completed with no failures replaces the unfixable-sessions file. A session that failed this run, for example on a lock, wasn't re-tested, so replacing would drop its entry and `doctor` would offer a repair that can't help. A repair with failures only adds, so an entry for a session it did fix lingers until the next clean repair. That's harmless, since `doctor` only lists a session that's still a repair candidate.

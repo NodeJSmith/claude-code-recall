@@ -356,10 +356,7 @@ def _run(
                 recorder.finish(run_history.OUTCOME_FAILED, abort_reason)
                 return EXIT_ABORT
     except (sqlite3.Error, OSError) as e:
-        busy = isinstance(e, sqlite3.OperationalError) and is_database_locked(e)
-        recorder.finish(
-            run_history.OUTCOME_FAILED, run_history.REASON_DATABASE_BUSY if busy else run_history.REASON_ERROR
-        )
+        recorder.finish(run_history.OUTCOME_FAILED, run_history.failure_reason(e))
         logger.exception("%s: aborted", _LOG_PREFIX)
         print(
             f"{_PRINT_PREFIX}: aborted: {e}",

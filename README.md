@@ -213,7 +213,7 @@ Example config:
 - `chunks` — one row per exchange (user turn + following assistant turns), carrying bounded display text and embedding bookkeeping
 - `chunk_vec` — sqlite-vec virtual table storing 512-dim jina embeddings keyed by chunk rowid, used for KNN search
 
-Two small files sit beside it, both safe to delete: `conversations.db.runs.json` records the newest and the last successful import, gap repair, sync and embedding backfill, and `conversations.db.unrepairable.json` lists sessions whose transcript is itself missing messages, so `doctor` doesn't offer a repair that can't help.
+Two small files sit beside it, both safe to delete: `conversations.db.runs.json` records the newest and the last successful import, gap repair, sync and embedding backfill, and `conversations.db.unrepairable.json` lists sessions whose transcript is itself missing messages, so `doctor` doesn't offer a repair that can't help. Each can have a `.lock` file beside it, also safe to delete.
 
 ## Development
 

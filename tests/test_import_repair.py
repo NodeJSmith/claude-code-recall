@@ -7,6 +7,7 @@ import pytest
 from conftest import (
     age_past_grace_window,
     delete_message,
+    locked_error,
     make_jsonl_entry,
     seed_stale_tail_session,
     write_four_turns,
@@ -37,8 +38,10 @@ class _SavepointFailingConn:
         fail_sql: str,
         fail_on_occurrence: int = 1,
         fail_forever: bool = False,
+        error: sqlite3.OperationalError | None = None,
     ) -> None:
         self._real = real
+        self._error = error
         self._fail_sql = fail_sql
         self._fail_on_occurrence = fail_on_occurrence
         self._fail_forever = fail_forever
@@ -50,7 +53,7 @@ class _SavepointFailingConn:
             if self._occurrences == self._fail_on_occurrence or (
                 self._fail_forever and self._occurrences > self._fail_on_occurrence
             ):
-                raise sqlite3.OperationalError(f"simulated failure on: {sql}")
+                raise self._error or sqlite3.OperationalError(f"simulated failure on: {sql}")
         return self._real.execute(sql, *args, **kwargs)
 
     def __getattr__(self, name):
@@ -369,6 +372,22 @@ def test_savepoint_acquisition_failure_counts_as_failed_and_batch_continues(memo
     assert sessions_failed == 1, "the candidate whose SAVEPOINT failed must count as failed"
     assert sessions_repaired == 1, "the other candidate must still be repaired"
     assert sessions_unrepairable == 0
+    assert result.locked == 0, "a non-lock SAVEPOINT failure isn't a busy database"
+
+
+def test_locked_savepoint_acquisition_counts_as_locked(memory_db, project_id, tmp_path):
+    """A SAVEPOINT that loses a lock wait is a busy database, so the repair reads as busy, not broken."""
+    filepath = tmp_path / "sess-sp-locked.jsonl"
+    seed_stale_tail_session(memory_db, project_id, filepath, uuid="sess-sp-locked")
+    candidates = _stale_tail_candidates(memory_db)
+
+    fake_conn = _SavepointFailingConn(
+        memory_db, "SAVEPOINT import_candidate", fail_on_occurrence=1, error=locked_error()
+    )
+
+    result = repair_sessions(fake_conn, candidates)
+
+    assert (result.failed, result.locked) == (1, 1)
 
 
 def test_project_id_none_candidate_is_unrepairable_not_failed(memory_db, project_id, tmp_path):

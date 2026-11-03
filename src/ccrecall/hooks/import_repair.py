@@ -200,12 +200,14 @@ def repair_sessions(
 
             try:
                 conn.execute("SAVEPOINT import_candidate")
-            except sqlite3.OperationalError:
+            except sqlite3.OperationalError as exc:
                 log.exception(
                     "Failed to acquire SAVEPOINT while repairing session %s — counting as failed, continuing batch",
                     session_uuid,
                 )
                 sessions_failed += 1
+                if is_database_locked(exc):
+                    sessions_locked += 1
                 on_reclaim()
                 _log_progress(index, total_candidates, sessions_repaired, sessions_failed, sessions_unrepairable)
                 continue

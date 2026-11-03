@@ -121,13 +121,6 @@ def test_system_exit_records_the_outcome_the_run_set(db_path):
     assert read_runs(db_path)[KIND_SYNC]["last"]["outcome"] == OUTCOME_FAILED
 
 
-def test_skipped_run_records_nothing(db_path):
-    with record_run(db_path, KIND_SYNC) as recorder:
-        recorder.skip()
-
-    assert not runs_path(db_path).exists()
-
-
 def test_each_kind_keeps_its_own_record(db_path):
     with record_run(db_path, KIND_SYNC):
         pass

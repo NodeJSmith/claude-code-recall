@@ -280,11 +280,7 @@ def run(input_file: Path | None = None) -> None:
 
             except Exception as e:
                 logger.error("Sync error: %s", e)
-                busy = isinstance(e, sqlite3.OperationalError) and is_database_locked(e)
-                recorder.finish(
-                    run_history.OUTCOME_FAILED,
-                    run_history.REASON_DATABASE_BUSY if busy else run_history.REASON_ERROR,
-                )
+                recorder.finish(run_history.OUTCOME_FAILED, run_history.failure_reason(e))
                 # Don't block Claude on sync errors
                 print(_CONTINUE_OUTPUT)
                 sys.exit(0)
