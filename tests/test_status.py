@@ -1,420 +1,256 @@
-"""Tests for the consolidated ccrecall status reporter."""
+"""Tests for rendering `ccrecall status` and `ccrecall doctor` from findings."""
 
 import json
-import sqlite3
-from unittest.mock import patch
 
+import pytest
+from conftest import VEC_SKIP
+from whenever import Instant
+
+from ccrecall import findings, run_history
 from ccrecall.db import get_connection
-from ccrecall.embeddings import EMBEDDING_MODEL, EMBEDDING_VERSION
-from ccrecall.status import collect_status, run
-from ccrecall.tool_content_status import classify_pending_sessions
+from ccrecall.findings import GROUP_ACTION, GROUP_NONE, GROUP_WORKING, Diagnosis, Finding, SessionRow
+from ccrecall.status import (
+    diagnosis_json,
+    format_ago,
+    run_doctor,
+    run_status,
+    summary_line,
+    validate_list_id,
+    verdict_line,
+)
+
+pytestmark = VEC_SKIP
 
 
-def test_collect_status_skips_deep_ingestion_by_default(tmp_path):
-    db_path = tmp_path / "status.db"
-    with get_connection({"db_path": str(db_path)}, load_vec=False):
+@pytest.fixture(autouse=True)
+def _model_cached(monkeypatch):
+    monkeypatch.setattr(findings, "is_model_cached_on_disk", lambda: True)
+
+
+@pytest.fixture
+def db_path(tmp_path):
+    path = tmp_path / "conversations.db"
+    with get_connection({"db_path": str(path)}, load_vec=True):
         pass
-
-    with patch("ccrecall.status.summarize_ingestion") as summarize:
-        status = collect_status(db=db_path)
-
-    summarize.assert_not_called()
-    assert status["ingestion"] is None
-    assert "tool_content" in status
-    assert "embeddings" in status
+    return path
 
 
-def test_collect_status_does_not_create_missing_database(tmp_path):
-    db_path = tmp_path / "missing.db"
-
-    try:
-        collect_status(db=db_path)
-    except FileNotFoundError:
-        pass
-    else:  # pragma: no cover - assertion branch
-        raise AssertionError("collect_status should reject missing DB paths")
-
-    assert not db_path.exists()
-
-
-def test_collect_status_check_ingestion_does_not_create_missing_database(tmp_path):
-    db_path = tmp_path / "missing-check.db"
-
-    try:
-        collect_status(db=db_path, check_ingestion=True)
-    except FileNotFoundError:
-        pass
-    else:  # pragma: no cover - assertion branch
-        raise AssertionError("collect_status should reject missing DB paths")
-
-    assert not db_path.exists()
+def queue_old_session(db_path, ended_at: str = "2026-01-01T10:00:00.000Z"):
+    """One session waiting for embedding, long past backfill_stale_hours, with no backfill recorded."""
+    with get_connection({"db_path": str(db_path)}) as conn:
+        session_id = conn.execute("INSERT INTO sessions (uuid) VALUES ('queued')").lastrowid
+        branch_id = conn.execute(
+            "INSERT INTO branches (session_id, leaf_uuid, is_active, ended_at) VALUES (?, 'leaf', 1, ?)",
+            (session_id, ended_at),
+        ).lastrowid
+        message_id = conn.execute(
+            "INSERT INTO messages (session_id, uuid, role, content, tool_content) VALUES (?, 'm', 'user', 'hi', '')",
+            (session_id,),
+        ).lastrowid
+        conn.execute("INSERT INTO branch_messages (branch_id, message_id) VALUES (?, ?)", (branch_id, message_id))
 
 
-def test_collect_status_reports_outdated_schema_without_migrating(tmp_path):
-    db_path = tmp_path / "old.db"
-    conn = sqlite3.connect(db_path)
-    conn.executescript(
-        """
-        CREATE TABLE projects (id INTEGER PRIMARY KEY);
-        CREATE TABLE sessions (id INTEGER PRIMARY KEY, uuid TEXT);
-        CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id INTEGER, uuid TEXT);
-        CREATE TABLE branches (id INTEGER PRIMARY KEY, session_id INTEGER, is_active INTEGER);
-        """
+def diagnosis_of(*found: Finding, **summary) -> Diagnosis:
+    return Diagnosis(
+        findings=found,
+        summary={"sessions": 7514, "embedded_pct": 98, "last_sync": None, **summary},
+        sessions={},
     )
-    conn.close()
-
-    status = collect_status(db=db_path)
-
-    assert status["schema"]["current"] is False
-    assert "tool_content" in status["schema"]["reason"]
 
 
-def test_collect_status_check_ingestion_reports_outdated_schema_without_migrating(tmp_path):
-    db_path = tmp_path / "old-check.db"
-    conn = sqlite3.connect(db_path)
-    conn.executescript(
-        """
-        CREATE TABLE projects (id INTEGER PRIMARY KEY);
-        CREATE TABLE sessions (id INTEGER PRIMARY KEY, uuid TEXT);
-        CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id INTEGER, uuid TEXT);
-        CREATE TABLE branches (id INTEGER PRIMARY KEY, session_id INTEGER, is_active INTEGER);
-        """
-    )
-    conn.close()
+class TestStatus:
+    def test_healthy_is_one_verdict_line_and_one_line_of_numbers(self, db_path, capsys):
+        run_status(db=db_path)
 
-    with patch("ccrecall.status.summarize_ingestion") as summarize:
-        status = collect_status(db=db_path, check_ingestion=True)
+        lines = capsys.readouterr().out.splitlines()
+        assert lines == ["ccrecall: healthy", "0 sessions"]
 
-    summarize.assert_not_called()
-    assert status["schema"]["current"] is False
-    assert "tool_content" in status["schema"]["reason"]
+    def test_json_verdict_healthy_literal(self, db_path, capsys):
+        run_status(db=db_path, output_format="json")
 
-    probe = sqlite3.connect(db_path)
-    try:
-        columns = [row[1] for row in probe.execute("PRAGMA table_info(messages)").fetchall()]
-        assert "tool_content" not in columns
-    finally:
-        probe.close()
+        assert json.loads(capsys.readouterr().out)["verdict"] == "healthy"
+
+    def test_json_verdict_working_literal(self, db_path, capsys):
+        # Ended within backfill_stale_hours (72 by default) but past the in-progress window.
+        queue_old_session(db_path, ended_at=Instant.now().subtract(hours=3).format_iso())
+
+        run_status(db=db_path, output_format="json")
+
+        assert json.loads(capsys.readouterr().out)["verdict"] == "working"
+
+    def test_json_verdict_needs_attention_literal(self, db_path, capsys):
+        queue_old_session(db_path)
+
+        run_status(db=db_path, output_format="json")
+
+        assert json.loads(capsys.readouterr().out)["verdict"] == "needs-attention"
+
+    def test_not_healthy_points_to_doctor_and_still_exits_zero(self, db_path, capsys):
+        queue_old_session(db_path)
+
+        run_status(db=db_path)
+
+        assert capsys.readouterr().out.splitlines()[0] == "ccrecall: needs attention (run `ccrecall doctor`)"
+
+    def test_missing_database_renders_the_finding_and_exits_one(self, tmp_path, capsys):
+        db_path = tmp_path / "missing.db"
+
+        with pytest.raises(SystemExit) as exc_info:
+            run_status(db=db_path, output_format="json")
+
+        assert exc_info.value.code == 1
+        data = json.loads(capsys.readouterr().out)
+        assert data["verdict"] == "needs-attention"
+        assert "no-database" in {finding["id"] for finding in data["findings"]}
+        assert not db_path.exists()
+
+    def test_unreadable_database_exits_one_naming_doctor(self, tmp_path, capsys):
+        db_path = tmp_path / "bad.db"
+        db_path.write_text("not a database")
+
+        with pytest.raises(SystemExit) as exc_info:
+            run_status(db=db_path)
+
+        assert exc_info.value.code == 1
+        assert "ccrecall doctor" in capsys.readouterr().err
+
+    def test_json_shape_is_shared_with_doctor(self, db_path, capsys):
+        queue_old_session(db_path)
+
+        run_status(db=db_path, output_format="json")
+        status_data = json.loads(capsys.readouterr().out)
+        with pytest.raises(SystemExit):
+            run_doctor(db=db_path, output_format="json")
+        doctor_data = json.loads(capsys.readouterr().out)
+
+        assert set(status_data) == {"verdict", "findings", "summary"}
+        assert status_data == doctor_data
+        assert set(status_data["summary"]) == {"sessions", "embedded_pct", "last_sync"}
+        assert set(status_data["findings"][0]) == {"id", "group", "message", "count", "fix", "listable"}
 
 
-def test_collect_status_skips_missing_jsonl_scan_when_tool_content_complete(tmp_path):
-    db_path = tmp_path / "status.db"
-    with get_connection({"db_path": str(db_path)}, load_vec=False):
-        pass
+class TestDoctor:
+    def test_exits_zero_when_healthy(self, db_path, capsys):
+        run_doctor(db=db_path)
 
-    with patch("ccrecall.status.classify_pending_sessions") as classify:
-        status = collect_status(db=db_path)
+        assert capsys.readouterr().out.startswith("ccrecall: healthy\n")
 
-    classify.assert_not_called()
-    assert status["tool_content"]["pending_sessions"] == 0
-
-
-def test_collect_status_runs_deep_ingestion_when_requested(tmp_path):
-    db_path = tmp_path / "status.db"
-    with get_connection({"db_path": str(db_path)}, load_vec=False):
-        pass
-
-    expected = {"sessions_checked": 0, "ok_sessions": 0}
-    with patch("ccrecall.status.summarize_ingestion", return_value=expected) as summarize:
-        status = collect_status(db=db_path, check_ingestion=True)
-
-    summarize.assert_called_once()
-    assert status["ingestion"] == expected
-
-
-def test_collect_status_check_ingestion_uses_writable_connection_for_cache_metadata(tmp_path):
-    db_path = tmp_path / "status-cache.db"
-    with get_connection({"db_path": str(db_path)}, load_vec=False):
-        pass
-
-    expected = {"sessions_checked": 0, "ok_sessions": 0}
-    writable_sources = {"sess-cache": {"existing": [], "missing": []}}
-
-    def fake_summarize(conn, *, stale_tail_seconds=0, sources):
-        assert sources == writable_sources
-        conn.execute(
-            "INSERT OR REPLACE INTO ingestion_check_cache (session_uuid, source_fingerprint) VALUES (?, ?)",
-            ("sess-cache", "fp-1"),
+    def test_exits_zero_when_working_on_it(self, db_path, capsys, monkeypatch):
+        monkeypatch.setattr(
+            findings,
+            "skipped_by_design",
+            lambda _settings: findings.Found(Finding(id="x", group=GROUP_WORKING, message="busy")),
         )
-        return expected
 
-    with (
-        patch("ccrecall.status.import_log_source_index", return_value=writable_sources) as source_index,
-        patch("ccrecall.status.summarize_ingestion", side_effect=fake_summarize) as summarize,
-    ):
-        status = collect_status(db=db_path, check_ingestion=True)
+        run_doctor(db=db_path)
 
-    source_index.assert_called_once()
-    summarize.assert_called_once()
-    assert status["ingestion"] == expected
+        assert capsys.readouterr().out.startswith("ccrecall: working on it\n")
 
-    verify = sqlite3.connect(db_path)
-    try:
-        row = verify.execute(
-            "SELECT session_uuid, source_fingerprint FROM ingestion_check_cache WHERE session_uuid = 'sess-cache'"
-        ).fetchone()
-        assert row == ("sess-cache", "fp-1")
-    finally:
-        verify.close()
+    def test_exits_one_when_something_needs_action(self, db_path, capsys):
+        queue_old_session(db_path)
 
+        with pytest.raises(SystemExit) as exc_info:
+            run_doctor(db=db_path)
 
-def test_run_json_outputs_consolidated_payload(tmp_path, capsys):
-    db_path = tmp_path / "status.db"
-    with get_connection({"db_path": str(db_path)}, load_vec=False):
-        pass
-
-    run(db=db_path, output_format="json")
-
-    data = json.loads(capsys.readouterr().out)
-    assert data["database"]["sessions"] == 0
-    assert data["ingestion"] is None
-    assert "tool_content" in data
-    assert "embeddings" in data
-
-
-def test_run_human_mentions_consolidated_sections(tmp_path, capsys):
-    db_path = tmp_path / "status.db"
-    with get_connection({"db_path": str(db_path)}, load_vec=False):
-        pass
-
-    run(db=db_path)
-
-    out = capsys.readouterr().out
-    assert "Ingestion:" in out
-    assert "Tool content:" in out
-    assert "Embeddings:" in out
-
-
-def test_pending_missing_jsonl_counts_only_unrecoverable_pending_rows(memory_db, tmp_path):
-    parent = tmp_path / "sess-partial.jsonl"
-    missing_agent = tmp_path / "agent-sess-partial.jsonl"
-    parent.write_text(
-        json.dumps(
-            {
-                "uuid": "u1",
-                "parentUuid": None,
-                "type": "user",
-                "timestamp": "2026-01-01T10:00:00Z",
-                "message": {"role": "user", "content": "recoverable"},
-            }
-        )
-        + "\n"
-    )
-    memory_db.execute("INSERT INTO sessions (uuid) VALUES ('sess-partial')")
-    session_id = memory_db.execute("SELECT last_insert_rowid()").fetchone()[0]
-    memory_db.execute("INSERT INTO branches (session_id, leaf_uuid, is_active) VALUES (?, 'u1', 1)", (session_id,))
-    memory_db.execute(
-        "INSERT INTO messages (session_id, uuid, role, content, tool_content) VALUES (?, 'u1', 'user', 'x', NULL)",
-        (session_id,),
-    )
-    memory_db.execute(
-        "INSERT INTO import_log (file_path, file_hash, messages_imported) VALUES (?, 'hash', 1)",
-        (str(parent),),
-    )
-    memory_db.execute(
-        "INSERT INTO import_log (file_path, file_hash, messages_imported) VALUES (?, 'hash', 0)",
-        (str(missing_agent),),
-    )
-    memory_db.commit()
-
-    assert classify_pending_sessions(memory_db.cursor(), None)["missing"] == 0
-
-    memory_db.execute("UPDATE messages SET uuid = 'agent-only' WHERE session_id = ?", (session_id,))
-    memory_db.commit()
-
-    assert classify_pending_sessions(memory_db.cursor(), None)["missing"] == 1
-
-
-def test_pending_missing_jsonl_requires_all_pending_rows_recoverable(memory_db, tmp_path):
-    parent = tmp_path / "sess-mixed.jsonl"
-    missing_agent = tmp_path / "agent-sess-mixed.jsonl"
-    parent.write_text(
-        json.dumps(
-            {
-                "uuid": "u1",
-                "parentUuid": None,
-                "type": "user",
-                "timestamp": "2026-01-01T10:00:00Z",
-                "message": {"role": "user", "content": "recoverable"},
-            }
-        )
-        + "\n"
-    )
-    memory_db.execute("INSERT INTO sessions (uuid) VALUES ('sess-mixed')")
-    session_id = memory_db.execute("SELECT last_insert_rowid()").fetchone()[0]
-    memory_db.execute("INSERT INTO branches (session_id, leaf_uuid, is_active) VALUES (?, 'u1', 1)", (session_id,))
-    memory_db.execute(
-        "INSERT INTO messages (session_id, uuid, role, content, tool_content) VALUES (?, 'u1', 'user', 'x', NULL)",
-        (session_id,),
-    )
-    memory_db.execute(
-        "INSERT INTO messages (session_id, uuid, role, content, tool_content) VALUES (?, 'agent-only', 'assistant', 'x', NULL)",
-        (session_id,),
-    )
-    memory_db.execute(
-        "INSERT INTO import_log (file_path, file_hash, messages_imported) VALUES (?, 'hash', 1)",
-        (str(parent),),
-    )
-    memory_db.execute(
-        "INSERT INTO import_log (file_path, file_hash, messages_imported) VALUES (?, 'hash', 1)",
-        (str(missing_agent),),
-    )
-    memory_db.commit()
-
-    assert classify_pending_sessions(memory_db.cursor(), None)["missing"] == 1
-
-
-def test_session_with_no_import_log_entry_counts_as_missing(memory_db):
-    """A session synced via the hook (not the import CLI) has no import_log
-    entry. If its JSONL has since been deleted, classify_pending_sessions must
-    count it as ``missing`` — not silently skip it, which would inflate
-    ``pending_backfillable_sessions`` in the status report."""
-    memory_db.execute("INSERT INTO sessions (uuid) VALUES ('sess-no-log')")
-    session_id = memory_db.execute("SELECT last_insert_rowid()").fetchone()[0]
-    memory_db.execute("INSERT INTO branches (session_id, leaf_uuid, is_active) VALUES (?, 'u1', 1)", (session_id,))
-    memory_db.execute(
-        "INSERT INTO messages (session_id, uuid, role, content, tool_content) VALUES (?, 'u1', 'user', 'x', NULL)",
-        (session_id,),
-    )
-    memory_db.commit()
-
-    result = classify_pending_sessions(memory_db.cursor(), None)
-    assert result == {"missing": 1, "no_usable_branch": 0}
-
-
-def test_pending_no_usable_branch_counts_surviving_jsonl_that_parses_to_nothing(memory_db, tmp_path):
-    """A session whose JSONL survives on disk but parses to no uuid-bearing
-    entries (or no branch) is a real backfill no-op — the `missing` bucket
-    alone must not treat it as recoverable/backfillable."""
-    empty_path = tmp_path / "sess-empty.jsonl"
-    empty_path.write_text("\n")
-
-    memory_db.execute("INSERT INTO sessions (uuid) VALUES ('sess-empty')")
-    session_id = memory_db.execute("SELECT last_insert_rowid()").fetchone()[0]
-    memory_db.execute("INSERT INTO branches (session_id, leaf_uuid, is_active) VALUES (?, 'u1', 1)", (session_id,))
-    memory_db.execute(
-        "INSERT INTO messages (session_id, uuid, role, content, tool_content) VALUES (?, 'u1', 'user', 'x', NULL)",
-        (session_id,),
-    )
-    memory_db.execute(
-        "INSERT INTO import_log (file_path, file_hash, messages_imported) VALUES (?, 'hash', 1)",
-        (str(empty_path),),
-    )
-    memory_db.commit()
-
-    result = classify_pending_sessions(memory_db.cursor(), None)
-    assert result["missing"] == 0, "the JSONL file exists, so it isn't missing"
-    assert result["no_usable_branch"] == 1
-
-
-def test_missing_and_no_usable_branch_buckets_never_overlap(memory_db, tmp_path):
-    """A session with mixed source availability — one sibling file gone, the
-    surviving sibling empty/invalid — must land in exactly one bucket, not
-    both. Counting them independently let such a session inflate both
-    `missing` and `no_usable_branch`, driving `pending_backfillable_sessions`
-    negative (caught in PR #207 review)."""
-    gone_path = tmp_path / "sess-mixed.jsonl"  # recorded in import_log, deleted before this test runs
-    surviving_path = tmp_path / "agent-sess-mixed.jsonl"
-    surviving_path.write_text("\n")  # exists, but parses to no entries
-
-    memory_db.execute("INSERT INTO sessions (uuid) VALUES ('sess-mixed')")
-    session_id = memory_db.execute("SELECT last_insert_rowid()").fetchone()[0]
-    memory_db.execute("INSERT INTO branches (session_id, leaf_uuid, is_active) VALUES (?, 'u1', 1)", (session_id,))
-    memory_db.execute(
-        "INSERT INTO messages (session_id, uuid, role, content, tool_content) VALUES (?, 'u1', 'user', 'x', NULL)",
-        (session_id,),
-    )
-    memory_db.execute(
-        "INSERT INTO import_log (file_path, file_hash, messages_imported) VALUES (?, 'hash', 1)",
-        (str(gone_path),),
-    )
-    memory_db.execute(
-        "INSERT INTO import_log (file_path, file_hash, messages_imported) VALUES (?, 'hash', 0)",
-        (str(surviving_path),),
-    )
-    memory_db.commit()
-
-    result = classify_pending_sessions(memory_db.cursor(), None)
-    assert result == {"missing": 1, "no_usable_branch": 0}, (
-        "a session must land in exactly one bucket — never counted in both"
-    )
-
-
-def test_transcript_unreadable_after_index_counts_as_missing(memory_db, tmp_path):
-    """`import_log_source_index()` classifies a path as `existing` via
-    `Path.exists()`; if it vanishes or becomes unopenable before
-    `classify_pending_sessions` reads it (TOCTOU race, permissions change), that
-    must land in `missing` rather than raising `OSError` and aborting the whole
-    status report (#207 review)."""
-    unreadable_path = tmp_path / "sess-unreadable.jsonl"
-    unreadable_path.mkdir()  # exists per Path.exists(), but open() raises IsADirectoryError
-
-    memory_db.execute("INSERT INTO sessions (uuid) VALUES ('sess-unreadable')")
-    session_id = memory_db.execute("SELECT last_insert_rowid()").fetchone()[0]
-    memory_db.execute("INSERT INTO branches (session_id, leaf_uuid, is_active) VALUES (?, 'u1', 1)", (session_id,))
-    memory_db.execute(
-        "INSERT INTO messages (session_id, uuid, role, content, tool_content) VALUES (?, 'u1', 'user', 'x', NULL)",
-        (session_id,),
-    )
-    memory_db.execute(
-        "INSERT INTO import_log (file_path, file_hash, messages_imported) VALUES (?, 'hash', 1)",
-        (str(unreadable_path),),
-    )
-    memory_db.commit()
-
-    result = classify_pending_sessions(memory_db.cursor(), None)
-    assert result == {"missing": 1, "no_usable_branch": 0}
-
-
-class TestRunEmbeddingWatermarkCoverage:
-    """`ccrecall status` reports honest branch-grain embedding coverage."""
-
-    @staticmethod
-    def _seed_embeddable_branch(conn, i: int, *, embedded: bool, is_active: int = 1) -> None:
-        """Insert an active branch with one message (so it's CHUNK_EMBEDDABLE),
-        optionally stamped at the current embedding watermark. ``i`` keys the
-        unique columns so repeated calls don't collide."""
-        cur = conn.cursor()
-        cur.execute("INSERT INTO projects (path, key) VALUES (?, ?)", (f"/p/{i}", f"k-{i}"))
-        project_id = cur.lastrowid
-        cur.execute("INSERT INTO sessions (uuid, project_id) VALUES (?, ?)", (f"sess-{i}", project_id))
-        session_id = cur.lastrowid
-        version, model = (EMBEDDING_VERSION, EMBEDDING_MODEL) if embedded else (0, None)
-        cur.execute(
-            "INSERT INTO branches (session_id, leaf_uuid, is_active, embedding_version, embedding_model) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (session_id, f"leaf-{i}", is_active, version, model),
-        )
-        branch_id = cur.lastrowid
-        cur.execute(
-            "INSERT INTO messages (session_id, uuid, role, content, timestamp) VALUES (?, ?, 'user', 'hi', ?)",
-            (session_id, f"m-{i}", "2024-01-01T00:00:00Z"),
-        )
-        cur.execute("INSERT INTO branch_messages (branch_id, message_id) VALUES (?, ?)", (branch_id, cur.lastrowid))
-        conn.commit()
-
-    def test_reports_partial_coverage(self, tmp_path, capsys):
-        """Two of three embeddable branches embedded → '2/3 branches (67%)'."""
-        db_path = tmp_path / "coverage.db"
-        with get_connection({"db_path": str(db_path)}, load_vec=False) as conn:
-            self._seed_embeddable_branch(conn, 1, embedded=True)
-            self._seed_embeddable_branch(conn, 2, embedded=True)
-            self._seed_embeddable_branch(conn, 3, embedded=False)
-            # An inactive branch must not count toward the embeddable denominator.
-            self._seed_embeddable_branch(conn, 4, embedded=False, is_active=0)
-
-        run(db=db_path)
+        assert exc_info.value.code == 1
         out = capsys.readouterr().out
+        assert "Needs action" in out
+        assert "Fix: ccrecall backfill embeddings" in out
+        assert "List them: ccrecall doctor --list embedding-backlog" in out
 
-        assert "watermark: 2/3 branches" in out
+    def test_exits_one_for_a_missing_database(self, tmp_path):
+        with pytest.raises(SystemExit) as exc_info:
+            run_doctor(db=tmp_path / "missing.db")
 
-    def test_zero_embeddable_branches(self, tmp_path, capsys):
-        """A DB with no embeddable branches reports 0/0 without dividing by zero."""
-        db_path = tmp_path / "empty.db"
-        with get_connection({"db_path": str(db_path)}, load_vec=False):
-            pass
+        assert exc_info.value.code == 1
 
-        run(db=db_path)
-        out = capsys.readouterr().out
+    def test_exits_two_when_the_database_cant_be_read(self, tmp_path, capsys):
+        db_path = tmp_path / "bad.db"
+        db_path.write_text("not a database")
 
-        assert "watermark: 0/0 branches" in out
+        with pytest.raises(SystemExit) as exc_info:
+            run_doctor(db=db_path)
+
+        assert exc_info.value.code == 2
+        assert capsys.readouterr().out == ""
+
+    def test_list_prints_the_sessions_behind_a_finding(self, db_path, capsys):
+        queue_old_session(db_path)
+
+        run_doctor(db=db_path, list_id="embedding-backlog")
+
+        assert capsys.readouterr().out.split() == ["queued", "-", "2026-01-01", "queued"]
+
+    def test_list_json_adds_sessions_to_that_finding_only(self, db_path, capsys):
+        queue_old_session(db_path)
+
+        run_doctor(db=db_path, output_format="json", list_id="embedding-backlog")
+
+        data = json.loads(capsys.readouterr().out)
+        backlog = next(finding for finding in data["findings"] if finding["id"] == "embedding-backlog")
+        assert backlog["sessions"] == [
+            {"session_id": "queued", "project": None, "date": "2026-01-01T10:00:00.000Z", "reason": "queued"}
+        ]
+        assert all("sessions" not in finding for finding in data["findings"] if finding["id"] != "embedding-backlog")
+
+    def test_list_of_an_absent_finding_says_so(self, db_path, capsys):
+        run_doctor(db=db_path, list_id="deleted-transcripts")
+
+        assert "Nothing to list" in capsys.readouterr().out
+
+    def test_list_of_a_finding_that_names_no_sessions_says_so(self, db_path, capsys):
+        run_doctor(db=db_path, list_id="schema-ahead")
+
+        assert "doesn't name sessions" in capsys.readouterr().out
+
+    def test_unknown_list_id_is_a_usage_error_naming_the_valid_ones(self):
+        with pytest.raises(ValueError, match="embedding-backlog"):
+            validate_list_id("nope")
+
+
+class TestRendering:
+    def test_summary_line_leaves_out_what_isnt_known(self):
+        assert summary_line(diagnosis_of(embedded_pct=None)) == "7,514 sessions"
+
+    def test_summary_line_leaves_out_an_unknown_session_count(self):
+        assert summary_line(diagnosis_of(sessions=None)) == "98% embedded"
+
+    def test_summary_line_shows_the_last_sync(self):
+        now = Instant.now()
+        last_sync = now.subtract(minutes=2).format_iso()
+
+        line = summary_line(diagnosis_of(last_sync=last_sync), now=now)
+
+        assert line == "7,514 sessions · 98% embedded · last sync 2 min ago"
+
+    def test_verdict_line_points_to_doctor_only_when_asked_and_not_healthy(self):
+        working = diagnosis_of(Finding(id="x", group=GROUP_WORKING, message="m"))
+        healthy = diagnosis_of(Finding(id="x", group=GROUP_NONE, message="m"))
+
+        assert verdict_line(working, point_to_doctor=True) == "ccrecall: working on it (run `ccrecall doctor`)"
+        assert verdict_line(working) == "ccrecall: working on it"
+        assert verdict_line(healthy, point_to_doctor=True) == "ccrecall: healthy"
+
+    def test_json_omits_a_row_reason_that_isnt_set(self):
+        diagnosis = Diagnosis(
+            findings=(Finding(id="deleted-transcripts", group=GROUP_NONE, message="m", count=1, listable=True),),
+            summary={"sessions": 1, "embedded_pct": None, "last_sync": None},
+            sessions={"deleted-transcripts": (SessionRow("s1", "proj", "2026-01-01"),)},
+        )
+
+        data = diagnosis_json(diagnosis, list_id="deleted-transcripts")
+
+        assert data["findings"][0]["sessions"] == [{"session_id": "s1", "project": "proj", "date": "2026-01-01"}]
+
+    @pytest.mark.parametrize(
+        ("seconds", "expected"),
+        [(10, "just now"), (125, "2 min ago"), (7300, "2 h ago"), (86400, "1 day ago"), (3 * 86400, "3 days ago")],
+    )
+    def test_format_ago(self, seconds, expected):
+        now = Instant.now()
+        assert format_ago(now.subtract(seconds=seconds), now) == expected
+
+
+def test_verdict_group_names_are_the_json_contract():
+    assert (GROUP_ACTION, GROUP_WORKING, GROUP_NONE) == ("action", "working", "none")
+    assert run_history.RUN_KINDS == ("import", "repair", "sync", "backfill")

@@ -3,24 +3,22 @@
 import contextlib
 import json
 import logging
-import os
 import sqlite3
-import subprocess
 import tempfile
 import time
 from pathlib import Path
 
+from ccrecall import job_lock
 from ccrecall.config import (
     DEFAULT_DB_PATH,
-    PID_FILE_MODE,
-    PID_KEY_BACKFILL_SUMMARIES,
-    PID_KEY_IMPORT,
-    PID_KEY_WARM_MODEL,
+    JOB_KEY_BACKFILL_SUMMARIES,
+    JOB_KEY_IMPORT,
+    JOB_KEY_WARM_MODEL,
     SYNC_TEMP_PREFIX,
     ensure_parent_dir,
+    get_db_path,
     load_settings,
     log_hook_exception,
-    pid_file_path,
     setup_logging,
 )
 from ccrecall.db import CONTENT_ERROR_VERSION, get_connection
@@ -32,50 +30,16 @@ from ccrecall.summarizer import SUMMARY_VERSION
 STALE_TEMP_FILE_MAX_AGE_SECONDS = 3600
 
 
-def _spawn_background(argv: list[str], pid_key: str, logger: logging.Logger) -> None:
-    """Spawn an installed entry point as a detached background process.
+def _spawn_background(argv: list[str], job_key: str, logger: logging.Logger, scope: dict | None = None) -> None:
+    """Spawn an installed entry point as a detached background job, unless that job is already running.
 
-    ``argv`` is the command to run (e.g. ``["ccrecall-warm-model"]``); ``pid_key``
-    names the PID file (``.pid-<pid_key>``) and must match the constant the
-    spawned command unlinks on exit.
-
-    Uses an atomic PID-file guard (O_CREAT | O_EXCL) to ensure at most one
-    concurrent instance of the given command is running.  If a stale PID file
-    exists (dead process), it is reaped and the new process is spawned.
+    ``job_key`` names the job's lock (see job_lock.py) and must match the key the
+    spawned command acquires, so the child adopts the lock this spawn hands it.
+    ``scope`` is what the spawn record says the run covers, until the child
+    rewrites it.
     """
-    pid_path = pid_file_path(pid_key)
-
-    while True:
-        try:
-            # Atomic create — fails with FileExistsError if file already exists
-            fd = os.open(str(pid_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, PID_FILE_MODE)
-        except FileExistsError:  # noqa: PERF203 — PID-file liveness/retry loop; the try/except IS the mechanism, not incidental control flow
-            # File exists — check if the owning process is alive
-            try:
-                existing_pid = int(pid_path.read_text().strip())
-                os.kill(existing_pid, 0)  # Signal 0 checks liveness; raises if dead
-                # Process is alive — skip spawning
-                return
-            except (ValueError, OSError):
-                # Dead process (OSError ESRCH) or unreadable PID — reap and retry
-                logger.warning(
-                    "stale PID file, reaping and retrying spawn",
-                    extra={"pid_key": pid_key, "pid_path": str(pid_path)},
-                )
-                with contextlib.suppress(OSError):
-                    pid_path.unlink()
-                continue
-        else:
-            break
-
-    # We hold the exclusive lock (fd is open for writing)
-    kwargs = detached_popen_kwargs()
-    try:
-        proc = subprocess.Popen(argv, **kwargs)  # noqa: S603 — spawns a trusted internal command, not untrusted input
-        # Write child PID so the child process can clean up the file on exit
-        os.write(fd, str(proc.pid).encode())
-    finally:
-        os.close(fd)
+    if not job_lock.spawn(argv, job_key, scope, **detached_popen_kwargs()):
+        logger.debug("background job already running; not spawning", extra={"job_key": job_key})
 
 
 def _needs_reimport(settings: dict | None, logger: logging.Logger) -> bool:
@@ -154,10 +118,15 @@ def main():
         db_absent = not DEFAULT_DB_PATH.exists()
 
         if db_absent or _needs_reimport(settings, logger):
-            _spawn_background(["ccrecall", "import", "--repair-gaps"], PID_KEY_IMPORT, logger)
+            _spawn_background(
+                ["ccrecall", "import", "--repair-gaps"],
+                JOB_KEY_IMPORT,
+                logger,
+                job_lock.import_scope(repair_gaps=True, db=get_db_path(settings)),
+            )
 
         if _needs_backfill(settings, logger):
-            _spawn_background(["ccrecall", "backfill", "summaries"], PID_KEY_BACKFILL_SUMMARIES, logger)
+            _spawn_background(["ccrecall", "backfill", "summaries"], JOB_KEY_BACKFILL_SUMMARIES, logger)
 
         # Note: embedding backfill is NOT auto-spawned. Embeddings are filled
         # forward by embed-on-write (active leaves only); historical seeding is
@@ -165,11 +134,11 @@ def main():
         # embedding the full history never fires unbidden (machines.md thrash risk).
 
         # Pre-warm the fastembed model cache so sync-current's first embed never
-        # triggers an invisible ~120 MB download. PID-guarded via _spawn_background
-        # (O_CREAT|O_EXCL): at most one concurrent warm runs at a time.
+        # triggers an invisible ~120 MB download. Lock-guarded via _spawn_background:
+        # at most one concurrent warm runs at a time.
         # Runs on every SessionStart; fast no-op after the first download since the
         # model is already cached on disk.
-        _spawn_background(["ccrecall-warm-model"], PID_KEY_WARM_MODEL, logger)
+        _spawn_background(["ccrecall-warm-model"], JOB_KEY_WARM_MODEL, logger)
     except Exception:
         # Top-level hook guard: must never crash the session start. Log
         # best-effort (no-op unless logging_enabled) so the failure isn't silent.

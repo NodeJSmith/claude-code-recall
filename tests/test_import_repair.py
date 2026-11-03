@@ -7,6 +7,7 @@ import pytest
 from conftest import (
     age_past_grace_window,
     delete_message,
+    locked_error,
     make_jsonl_entry,
     seed_stale_tail_session,
     write_four_turns,
@@ -17,7 +18,7 @@ from ccrecall import ingestion_status
 from ccrecall.hooks import import_conversations, import_repair
 from ccrecall.hooks.import_repair import repair_sessions
 from ccrecall.import_log_ops import import_log_source_index
-from ccrecall.ingestion_status import find_repairable_sessions
+from ccrecall.ingestion_status import find_repairable_sessions, source_fingerprint
 
 
 class _SavepointFailingConn:
@@ -37,8 +38,10 @@ class _SavepointFailingConn:
         fail_sql: str,
         fail_on_occurrence: int = 1,
         fail_forever: bool = False,
+        error: sqlite3.OperationalError | None = None,
     ) -> None:
         self._real = real
+        self._error = error
         self._fail_sql = fail_sql
         self._fail_on_occurrence = fail_on_occurrence
         self._fail_forever = fail_forever
@@ -50,7 +53,7 @@ class _SavepointFailingConn:
             if self._occurrences == self._fail_on_occurrence or (
                 self._fail_forever and self._occurrences > self._fail_on_occurrence
             ):
-                raise sqlite3.OperationalError(f"simulated failure on: {sql}")
+                raise self._error or sqlite3.OperationalError(f"simulated failure on: {sql}")
         return self._real.execute(sql, *args, **kwargs)
 
     def __getattr__(self, name):
@@ -72,7 +75,7 @@ def test_repair_stale_tail_session_recovers_missing_message(memory_db, project_i
 
     result = repair_sessions(memory_db, candidates)
 
-    assert result == (1, 1, 0, 0)
+    assert result[:4] == (1, 1, 0, 0)
     assert (
         memory_db.execute(
             "SELECT COUNT(*) FROM messages WHERE session_id = ? AND uuid = 'a2'", (session_id,)
@@ -87,7 +90,7 @@ def test_repair_rerun_on_already_fixed_session_is_idempotent(memory_db, project_
 
     candidates = _stale_tail_candidates(memory_db)
     first = repair_sessions(memory_db, candidates)
-    assert first == (1, 1, 0, 0)
+    assert first[:4] == (1, 1, 0, 0)
 
     before_count = memory_db.execute("SELECT COUNT(*) FROM messages WHERE session_id = ?", (session_id,)).fetchone()[0]
 
@@ -97,7 +100,7 @@ def test_repair_rerun_on_already_fixed_session_is_idempotent(memory_db, project_
     # computed candidates once and repairs are attempted from that snapshot.
     second = repair_sessions(memory_db, candidates)
 
-    assert second == (1, 0, 0, 0)
+    assert second[:4] == (1, 0, 0, 0)
     after_count = memory_db.execute("SELECT COUNT(*) FROM messages WHERE session_id = ?", (session_id,)).fetchone()[0]
     assert after_count == before_count, "idempotent re-run must not insert duplicate rows"
 
@@ -128,7 +131,8 @@ def test_unrepairable_candidate_is_not_counted_as_repaired(memory_db, project_id
 
     result = repair_sessions(memory_db, candidates)
 
-    assert result == (0, 1, 0, 1)
+    assert result[:4] == (0, 1, 0, 1)
+    assert result.unfixable == (("sess-unrepairable", source_fingerprint([filepath])),)
 
 
 def test_poison_file_candidate_is_counted_failed_and_batch_continues(
@@ -162,7 +166,7 @@ def test_poison_file_candidate_is_counted_failed_and_batch_continues(
     with caplog.at_level(logging.ERROR, logger="ccrecall"):
         result = repair_sessions(memory_db, candidates)
 
-    sessions_repaired, messages_recovered, sessions_failed, sessions_unrepairable = result
+    sessions_repaired, messages_recovered, sessions_failed, sessions_unrepairable = result[:4]
     assert sessions_failed == 1
     assert sessions_repaired == 1
     assert sessions_unrepairable == 0
@@ -230,7 +234,7 @@ def test_multifile_candidate_repair_preserves_cross_file_link(memory_db, project
 
     result = repair_sessions(memory_db, candidates)
 
-    assert result == (1, 1, 0, 0), "a2 must be recovered and the session reclassified as repaired"
+    assert result[:4] == (1, 1, 0, 0), "a2 must be recovered and the session reclassified as repaired"
     assert _linked_uuids() == {"u1", "a1", "u2", "a2"}, (
         "u1 (only ever derivable from file 1's own entries) must still be linked after repair — "
         "a multi-file repair must not drop a sibling file's link"
@@ -280,7 +284,7 @@ def test_multifile_candidate_failure_rolls_back_atomically(memory_db, project_id
 
     result = repair_sessions(memory_db, candidates)
 
-    sessions_repaired, messages_recovered, sessions_failed, sessions_unrepairable = result
+    sessions_repaired, messages_recovered, sessions_failed, sessions_unrepairable = result[:4]
     assert sessions_failed == 1
     assert sessions_repaired == 0
     assert sessions_unrepairable == 0
@@ -308,7 +312,7 @@ def test_savepoint_release_failure_counts_as_failed_and_batch_continues(memory_d
 
     result = repair_sessions(fake_conn, candidates)
 
-    sessions_repaired, _messages_recovered, sessions_failed, sessions_unrepairable = result
+    sessions_repaired, _messages_recovered, sessions_failed, sessions_unrepairable = result[:4]
     assert sessions_failed == 1, "the candidate whose RELEASE failed must count as failed"
     assert sessions_repaired == 1, "the other candidate must still be repaired — the batch must continue"
     assert sessions_unrepairable == 0
@@ -364,10 +368,26 @@ def test_savepoint_acquisition_failure_counts_as_failed_and_batch_continues(memo
 
     result = repair_sessions(fake_conn, candidates)
 
-    sessions_repaired, _messages_recovered, sessions_failed, sessions_unrepairable = result
+    sessions_repaired, _messages_recovered, sessions_failed, sessions_unrepairable = result[:4]
     assert sessions_failed == 1, "the candidate whose SAVEPOINT failed must count as failed"
     assert sessions_repaired == 1, "the other candidate must still be repaired"
     assert sessions_unrepairable == 0
+    assert result.locked == 0, "a non-lock SAVEPOINT failure isn't a busy database"
+
+
+def test_locked_savepoint_acquisition_counts_as_locked(memory_db, project_id, tmp_path):
+    """A SAVEPOINT that loses a lock wait is a busy database, so the repair reads as busy, not broken."""
+    filepath = tmp_path / "sess-sp-locked.jsonl"
+    seed_stale_tail_session(memory_db, project_id, filepath, uuid="sess-sp-locked")
+    candidates = _stale_tail_candidates(memory_db)
+
+    fake_conn = _SavepointFailingConn(
+        memory_db, "SAVEPOINT import_candidate", fail_on_occurrence=1, error=locked_error()
+    )
+
+    result = repair_sessions(fake_conn, candidates)
+
+    assert (result.failed, result.locked) == (1, 1)
 
 
 def test_project_id_none_candidate_is_unrepairable_not_failed(memory_db, project_id, tmp_path):
@@ -382,7 +402,7 @@ def test_project_id_none_candidate_is_unrepairable_not_failed(memory_db, project
 
     result = repair_sessions(memory_db, candidates)
 
-    sessions_repaired, messages_recovered, sessions_failed, sessions_unrepairable = result
+    sessions_repaired, messages_recovered, sessions_failed, sessions_unrepairable = result[:4]
     assert sessions_unrepairable == 1
     assert sessions_failed == 0
     assert sessions_repaired == 0
@@ -416,7 +436,7 @@ def test_session_id_churn_still_counts_recovered_messages(memory_db, project_id,
 
     result = repair_sessions(memory_db, candidates)
 
-    sessions_repaired, messages_recovered, sessions_failed, _sessions_unrepairable = result
+    sessions_repaired, messages_recovered, sessions_failed, _sessions_unrepairable = result[:4]
     assert sessions_failed == 0
     assert messages_recovered == 4, "recovery must be measured against the re-resolved current session_id"
     assert sessions_repaired == 1
@@ -452,7 +472,7 @@ def test_repair_sessions_logs_periodic_progress(memory_db, project_id, tmp_path,
     with caplog.at_level(logging.INFO, logger="ccrecall"):
         result = repair_sessions(memory_db, candidates)
 
-    assert result == (3, 3, 0, 0)
+    assert result[:4] == (3, 3, 0, 0)
 
     progress_messages = [record.getMessage() for record in caplog.records if "repair progress" in record.message]
     assert any("2/3" in msg for msg in progress_messages), "expected an intermediate progress log at candidate 2"
@@ -514,7 +534,7 @@ def test_reclassify_failure_counts_as_failed_and_batch_continues(memory_db, proj
 
     monkeypatch.setattr("ccrecall.ingestion_status.reclassify_session", _exploding_reclassify)
 
-    repaired, _recovered, failed, _unrepairable = repair_sessions(memory_db, candidates)
+    repaired, _recovered, failed, _unrepairable, *_ = repair_sessions(memory_db, candidates)
 
     assert failed == 1, "the reclassify failure must count as failed"
     assert repaired == 1, "the second candidate must still get repaired"

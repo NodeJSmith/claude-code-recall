@@ -18,15 +18,16 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
+from ccrecall import job_lock, run_history
 from ccrecall.config import (
     DEFAULT_LOG_PATH,
+    JOB_KEY_SYNC,
     LOG_BACKUP_COUNT,
     LOG_MAX_BYTES,
     ensure_parent_dir,
+    get_db_path,
     load_settings,
-    remove_pid_file,
     setup_logging,
-    try_acquire_pid_file,
 )
 from ccrecall.db import DEFAULT_PROJECTS_DIR, get_connection
 from ccrecall.db_base import is_database_locked
@@ -50,9 +51,9 @@ _UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f
 # survives instead of being silently clobbered (#164).
 _VEC_OK_CLEAR_REASONS: set[str | None] = {None, REASON_VEC_UNAVAILABLE}
 
-# PID-file concurrency guard: at most one sync-current at a time.
+# Job-lock concurrency guard: at most one sync-current at a time.
 # Skip (not queue) if another is running — recovered on the next Stop.
-PID_KEY = "ccrecall-sync-current"
+JOB_KEY = JOB_KEY_SYNC
 
 # Dedicated logger for the cold-model warning, kept separate from the main
 # ccrecall logger (LOGGER_NAME) so it fires regardless of logging_enabled (see
@@ -156,16 +157,12 @@ def embed_session_branch(conn: sqlite3.Connection, session_file: Path, settings:
 
 def run(input_file: Path | None = None) -> None:
     """Sync only the current session into the memory DB (Stop-hook helper)."""
-    # Concurrency guard.
-    # At most one sync-current at a time: skip (not queue) if another is alive.
-    # try_acquire_pid_file owns the atomic acquire, the runtime-dir ensure (a
-    # fresh machine can fire Stop before anything else creates ~/.ccrecall/),
-    # and stale-marker reaping. An unreapable marker raises instead of spinning
-    # forever — this process runs detached (stdout/stderr are DEVNULL), so a
-    # fast crash and a hang are equally invisible here, but a hang also
-    # accumulates a stuck process per Stop hook.
-    if not try_acquire_pid_file(PID_KEY):
-        # Another sync-current is alive — skip; recovered on the next Stop
+    # Concurrency guard: at most one sync-current at a time; skip (not queue) if
+    # another holds the lock. job_lock.acquire creates the runtime dir, since a
+    # fresh machine can fire Stop before anything else creates ~/.ccrecall/.
+    lock = job_lock.acquire(JOB_KEY)
+    if lock is None:
+        # Another sync-current is running — skip; recovered on the next Stop
         print(_CONTINUE_OUTPUT)
         return
 
@@ -224,62 +221,66 @@ def run(input_file: Path | None = None) -> None:
         # since detached processes have logging off by default.
         _warn_cold_model()
 
-        try:
-            file_size = session_file.stat().st_size
-            started = time.monotonic()
+        # Recorded only from here: a run that exited above attempted no work.
+        with run_history.record_run(get_db_path(settings), run_history.KIND_SYNC) as recorder:
+            try:
+                file_size = session_file.stat().st_size
+                started = time.monotonic()
 
-            with get_connection(settings, load_vec=True) as conn:
-                project_dir = _project_root_for_session_file(session_file, DEFAULT_PROJECTS_DIR)
+                with get_connection(settings, load_vec=True) as conn:
+                    project_dir = _project_root_for_session_file(session_file, DEFAULT_PROJECTS_DIR)
 
-                # Embedding capability check: sqlite-vec availability determines whether
-                # embedding can run. Record a failure on unavailability; clear on success.
-                # Only the vec check is accessible here — model failures in sync_current
-                # are logged by embed_session_branch and are detected authoritatively
-                # by backfill_embeddings instead.
-                # Both calls are best-effort: a sidecar write failure must never affect
-                # the hook's output or exit behavior.
-                vec_ok = chunk_vec_queryable(conn)
-                if not vec_ok:
-                    with contextlib.suppress(Exception):  # best-effort; must not affect hook behavior
-                        record_embedding_failure(reason=REASON_VEC_UNAVAILABLE)
+                    # Embedding capability check: sqlite-vec availability determines whether
+                    # embedding can run. Record a failure on unavailability; clear on success.
+                    # Only the vec check is accessible here — model failures in sync_current
+                    # are logged by embed_session_branch and are detected authoritatively
+                    # by backfill_embeddings instead.
+                    # Both calls are best-effort: a sidecar write failure must never affect
+                    # the hook's output or exit behavior.
+                    vec_ok = chunk_vec_queryable(conn)
+                    if not vec_ok:
+                        with contextlib.suppress(Exception):  # best-effort; must not affect hook behavior
+                            record_embedding_failure(reason=REASON_VEC_UNAVAILABLE)
 
-                new_messages = sync_session(conn, session_file, project_dir)
-                # Commit here, not at the `with` exit: inference must run with no write lock held.
-                conn.commit()
+                    new_messages = sync_session(conn, session_file, project_dir)
+                    # Commit here, not at the `with` exit: inference must run with no write lock held.
+                    conn.commit()
 
+                    if vec_ok:
+                        embed_session_branch(conn, session_file, settings, logger)
+
+                if new_messages > 0:
+                    logger.info("Synced %s new message(s) from session %s", new_messages, session_id[:8])
+
+                elapsed = time.monotonic() - started
+                logger.info("sync complete", extra={"file_size": file_size, "duration_s": elapsed})
+
+                # Clear the embedding failure sidecar on a clean sync pass.
+                # Only when vec was available — if it wasn't, we already recorded above
+                # and must not clear until the next run where embedding can actually run.
+                # Scoped to _VEC_OK_CLEAR_REASONS: this check only verifies sqlite-vec,
+                # not the embedding model, so a model_unavailable record from backfill
+                # must not be erased here (#164).
                 if vec_ok:
-                    embed_session_branch(conn, session_file, settings, logger)
+                    with contextlib.suppress(Exception):  # best-effort; must not affect hook behavior
+                        clear_embedding_failure(reasons=_VEC_OK_CLEAR_REASONS)
 
-            if new_messages > 0:
-                logger.info("Synced %s new message(s) from session %s", new_messages, session_id[:8])
+                # Output for hook (continue = True means don't block)
+                output = {"continue": True}
+                if new_messages > 0:
+                    output["suppressOutput"] = True  # Don't show in transcript
 
-            elapsed = time.monotonic() - started
-            logger.info("sync complete", extra={"file_size": file_size, "duration_s": elapsed})
+                recorder.finish(run_history.OUTCOME_OK)
+                print(json.dumps(output))
 
-            # Clear the embedding failure sidecar on a clean sync pass.
-            # Only when vec was available — if it wasn't, we already recorded above
-            # and must not clear until the next run where embedding can actually run.
-            # Scoped to _VEC_OK_CLEAR_REASONS: this check only verifies sqlite-vec,
-            # not the embedding model, so a model_unavailable record from backfill
-            # must not be erased here (#164).
-            if vec_ok:
-                with contextlib.suppress(Exception):  # best-effort; must not affect hook behavior
-                    clear_embedding_failure(reasons=_VEC_OK_CLEAR_REASONS)
-
-            # Output for hook (continue = True means don't block)
-            output = {"continue": True}
-            if new_messages > 0:
-                output["suppressOutput"] = True  # Don't show in transcript
-
-            print(json.dumps(output))
-
-        except Exception as e:
-            logger.error("Sync error: %s", e)
-            # Don't block Claude on sync errors
-            print(_CONTINUE_OUTPUT)
-            sys.exit(0)
+            except Exception as e:
+                logger.error("Sync error: %s", e)
+                recorder.finish(run_history.OUTCOME_FAILED, run_history.failure_reason(e))
+                # Don't block Claude on sync errors
+                print(_CONTINUE_OUTPUT)
+                sys.exit(0)
 
     finally:
-        # Best-effort PID-file cleanup — must run on every exit path (normal,
-        # early return, exception) so the next Stop can acquire the lock.
-        remove_pid_file(PID_KEY)
+        # Runs on every exit path (normal, early return, exception, sys.exit) so
+        # the next Stop can acquire the lock and the record doesn't read as killed.
+        lock.release()

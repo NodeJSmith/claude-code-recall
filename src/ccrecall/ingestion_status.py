@@ -1,8 +1,9 @@
 """Transcript-vs-DB ingestion coverage diagnostics.
 
-Diagnostics are read-only except for confirmed-OK cache rows, which let later
-runs skip reparsing unchanged transcript sources. ``summarize_ingestion`` leaves
-committing them to its caller; ``find_repairable_sessions`` commits its own.
+``summarize_ingestion`` is read-only, so ``ccrecall doctor`` and ``status`` can run it
+on a read-only connection. ``find_repairable_sessions`` (the background repair scan)
+records confirmed-OK cache rows, which let every later classification skip
+reparsing unchanged transcript sources, and commits them itself.
 """
 
 import logging
@@ -73,7 +74,7 @@ def _is_contiguous_suffix(indices: list[int], total: int) -> bool:
     return indices == list(range(indices[0], total))
 
 
-def _source_fingerprint(filepaths: list[Path]) -> str | None:
+def source_fingerprint(filepaths: list[Path]) -> str | None:
     """Return a deterministic stat fingerprint, or None if any source is missing.
 
     Any other stat failure raises ``OSError``.
@@ -195,18 +196,18 @@ def classify_sessions(
         session_id = session_row[0]
 
         try:
-            source_fingerprint = _source_fingerprint(filepaths)
+            source_fp = source_fingerprint(filepaths)
         except OSError:
             log.exception("cannot stat transcript source", extra={"session_uuid": session_uuid})
             yield SessionVerdict(session_uuid, "missing_source", session_id, [])
             continue
-        if source_fingerprint is None:
+        if source_fp is None:
             yield SessionVerdict(session_uuid, "missing_source", session_id, [])
             continue
 
         db_coverage_fingerprint = _db_coverage_fingerprint(cursor, session_id)
 
-        if _cached_ok_fingerprint(cursor, session_uuid) == (source_fingerprint, db_coverage_fingerprint):
+        if _cached_ok_fingerprint(cursor, session_uuid) == (source_fp, db_coverage_fingerprint):
             yield SessionVerdict(session_uuid, "ok", session_id, [])
             continue
 
@@ -236,7 +237,7 @@ def classify_sessions(
             expected = _expected_uuids(filepaths)
             missing_indices = [i for i, uuid in enumerate(expected) if uuid not in existing_msg_uuids]
             if not missing_indices:
-                new_ok_row = OkCacheRow(session_uuid, source_fingerprint, db_coverage_fingerprint)
+                new_ok_row = OkCacheRow(session_uuid, source_fp, db_coverage_fingerprint)
                 yield SessionVerdict(session_uuid, "ok", session_id, [], new_ok_row)
                 continue
 
@@ -269,7 +270,7 @@ def summarize_ingestion(
     *,
     stale_tail_seconds: int = STALE_TAIL_SECONDS,
     sources: dict[str, dict[str, list[Path]]] | None = None,
-) -> dict[str, int]:
+) -> dict:
     """Classify transcript ingestion gaps by comparing JSONL UUID order to DB rows.
 
     ``pending_tail`` means the DB is missing only a contiguous suffix from an
@@ -279,12 +280,17 @@ def summarize_ingestion(
     expected active branch and should be recoverable by import/sync. A session
     with import-log rows but no surviving JSONL, or with a JSONL that can't be read,
     is counted as ``missing_source``.
+
+    Returns the counts plus ``sessions``: ``{category: [session_uuid, ...]}`` for
+    every category but ``ok``. Writes nothing: a session the ok-verdict cache
+    doesn't cover is parsed again on the next call, and the background repair scan
+    keeps that cache warm.
     """
     cursor = conn.cursor()
     if sources is None:
         sources = import_log_source_index(cursor)
 
-    summary = {
+    summary: dict = {
         "sessions_checked": 0,
         "ok_sessions": 0,
         "pending_tail_sessions": 0,
@@ -295,7 +301,12 @@ def summarize_ingestion(
         "ingestion_gap_turns": 0,
         "missing_source_sessions": 0,
     }
-    new_ok_rows: list[OkCacheRow] = []
+    sessions: dict[str, list[str]] = {
+        "pending_tail": [],
+        "stale_tail": [],
+        "ingestion_gap": [],
+        "missing_source": [],
+    }
 
     for session_uuid, paths in sources.items():
         if not paths["missing"]:
@@ -303,29 +314,27 @@ def summarize_ingestion(
         if cursor.execute("SELECT 1 FROM sessions WHERE uuid = ?", (session_uuid,)).fetchone() is not None:
             summary["sessions_checked"] += 1
             summary["missing_source_sessions"] += 1
+            sessions["missing_source"].append(session_uuid)
 
     now = Instant.now()
-    for _session_uuid, category, _session_id, missing_indices, new_ok_row in classify_sessions(
+    for session_uuid, category, _session_id, missing_indices, _new_ok_row in classify_sessions(
         cursor, sources, now, stale_tail_seconds
     ):
         summary["sessions_checked"] += 1
 
+        if category == "ok":
+            summary["ok_sessions"] += 1
+            continue
+
+        sessions[category].append(session_uuid)
         if category == "missing_source":
             summary["missing_source_sessions"] += 1
             continue
 
-        if category == "ok":
-            summary["ok_sessions"] += 1
-            if new_ok_row is not None:
-                new_ok_rows.append(new_ok_row)
-            continue
-
-        turns = len(missing_indices)
         summary[f"{category}_sessions"] += 1
-        summary[f"{category}_turns"] += turns
+        summary[f"{category}_turns"] += len(missing_indices)
 
-    _record_ok_rows(cursor, new_ok_rows)
-
+    summary["sessions"] = sessions
     return summary
 
 

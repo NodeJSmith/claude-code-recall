@@ -237,7 +237,7 @@ class TestEmbeddingStatusLocking:
     must serialize through a shared lock, or a concurrent clear's read-then-unlink
     can drop a writer's fresher record written in between."""
 
-    def test_locked_status_file_serializes_concurrent_callers(self, tmp_path):
+    def test_locked_sidecar_serializes_concurrent_callers(self, tmp_path):
         """Prove the lock itself provides real mutual exclusion (via actual flock
         across threads/fds), not just that call order happens to work out."""
         path = tmp_path / "embedding-status.json"
@@ -246,7 +246,7 @@ class TestEmbeddingStatusLocking:
         release_holder = threading.Event()
 
         def holder():
-            with health._locked_status_file(path):
+            with health.locked_sidecar(path):
                 events.append("holder-acquired")
                 holder_acquired.set()
                 release_holder.wait(timeout=2)
@@ -257,7 +257,7 @@ class TestEmbeddingStatusLocking:
         assert holder_acquired.wait(timeout=2), "holder thread must acquire the lock"
 
         # This blocks until the holder thread releases — flock is exclusive.
-        with health._locked_status_file(path):
+        with health.locked_sidecar(path):
             events.append("main-acquired")
         release_holder.set()
         t.join(timeout=2)

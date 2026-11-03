@@ -17,7 +17,7 @@ log = logging.getLogger(LOGGER_NAME)
 
 # The no-pending-sessions shape of classify_pending_sessions's return value, for
 # callers that short-circuit the (expensive, import_log-scanning) classification
-# scan entirely when there's nothing pending — see collect_status/run_tool_content_status.
+# scan entirely when there's nothing pending — see run_tool_content_status.
 EMPTY_CLASSIFICATION = {"missing": 0, "no_usable_branch": 0}
 
 
@@ -97,10 +97,8 @@ def classify_pending_sessions(
             # A path recorded as "existing" by import_log_source_index() can still
             # vanish or become unreadable before we open it here (TOCTOU race, or a
             # permissions change) — treat that the same as a missing source file
-            # instead of letting the exception abort the whole status report (#207
-            # review: it previously reached ccrecall status's top-level
-            # FileNotFoundError handler and was misreported as the database itself
-            # missing).
+            # instead of letting the exception abort the whole status report, where
+            # a FileNotFoundError would read as the database itself missing (#207).
             log.warning(
                 "transcript unreadable during status classification; session will be counted as missing",
                 exc_info=True,

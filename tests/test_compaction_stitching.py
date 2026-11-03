@@ -227,7 +227,7 @@ class TestRepairOfImportedSessions:
         assert linked_uuids(memory_db) == {"s1", "u3", "a3"}
         rows_before = {row[0] for row in memory_db.execute("SELECT uuid FROM messages")}
 
-        repaired, recovered, failed, unrepairable = import_repair.repair_sessions(
+        repaired, recovered, failed, unrepairable, *_ = import_repair.repair_sessions(
             memory_db, find_repairable_sessions(memory_db)
         )
 
@@ -301,7 +301,7 @@ class TestOkVerdictWrites:
 
         assert memory_db.execute("SELECT COUNT(*) FROM ingestion_check_cache").fetchone()[0] == 2
 
-    @pytest.mark.parametrize("failing_read", ["_expected_uuids", "_source_fingerprint"])
+    @pytest.mark.parametrize("failing_read", ["_expected_uuids", "source_fingerprint"])
     def test_one_bad_transcript_does_not_stop_the_others(
         self, memory_db, legacy_session, project_id, tmp_path, monkeypatch, failing_read
     ):

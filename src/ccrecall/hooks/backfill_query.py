@@ -1,12 +1,10 @@
-"""Query construction, constants, and PID cleanup for the embedding backfill.
+"""Query construction and constants for the embedding backfill.
 
 Owns the eligible-branch selection predicate (`build_selection`) and the
 constants that both the orchestrator (`backfill_embeddings.run`) and the
 status reporter (`backfill_status`) need to agree on.
 """
 
-from ccrecall.config import PID_KEY_BACKFILL_EMBEDDINGS as PID_KEY
-from ccrecall.config import remove_pid_file
 from ccrecall.db import CHUNK_DRAFT_QUALITY_FILTER, CHUNK_EMBEDDABLE_BRANCH_FILTER, CONTENT_ERROR_VERSION
 from ccrecall.embeddings import EMBEDDING_MODEL, EMBEDDING_VERSION, MODEL_TOKEN_LIMIT
 from ccrecall.hooks.tool_content_eligibility import days_modifier
@@ -20,11 +18,6 @@ BACKFILL_NICE_LEVEL = 10
 
 EXIT_OK = 0
 EXIT_ABORT = 1
-
-
-def cleanup_pid() -> None:
-    """Remove the self-concurrency PID marker (no-op if absent)."""
-    remove_pid_file(PID_KEY)
 
 
 def build_selection(days: int | None) -> tuple[str, list]:

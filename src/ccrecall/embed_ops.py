@@ -10,7 +10,8 @@ import logging
 import sqlite3
 from typing import NamedTuple
 
-from ccrecall.config import PID_KEY_BACKFILL_EMBEDDINGS, live_pid_holder
+from ccrecall import job_lock
+from ccrecall.config import JOB_KEY_BACKFILL_EMBEDDINGS
 from ccrecall.db_base import commit_single_write, is_database_locked
 from ccrecall.db_vec import fetch_branch_messages, write_chunk_embedding
 from ccrecall.embeddings import (
@@ -178,6 +179,18 @@ def _read_chunks(cursor: sqlite3.Cursor, branch_db_id: int) -> dict[int, dict]:
         }
         for row in cursor.fetchall()
     }
+
+
+def count_exchanges_needing_chunks(cursor: sqlite3.Cursor, branch_db_id: int) -> int:
+    """How many of the branch's exchanges have no chunk, or a chunk embedded from different text.
+
+    Read-only and vec-free: it never touches ``chunk_vec``, so a vector's
+    presence is judged separately.
+    """
+    exchanges = build_exchange_pairs(fetch_branch_messages(cursor, branch_db_id, include_notifications=False))
+    cursor.execute("SELECT exchange_index, content_hash FROM chunks WHERE branch_id = ?", (branch_db_id,))
+    stored = dict(cursor.fetchall())
+    return sum(1 for ex in exchanges if stored.get(ex["index"]) != _content_hash(ex))
 
 
 def _chunk_is_current(chunk: dict, content_hash: str) -> bool:
@@ -437,11 +450,11 @@ def embed_branch_chunks(
     commit_single_write(conn, "UPDATE branches SET embedding_version = 0 WHERE id = ?", (branch_db_id,))
 
     if yield_to_backfill:
-        backfill_pid = live_pid_holder(PID_KEY_BACKFILL_EMBEDDINGS)
-        if backfill_pid is not None:
+        backfill = job_lock.probe(JOB_KEY_BACKFILL_EMBEDDINGS)
+        if backfill is not None and backfill.running:
             log.info(
                 "skipping inference while a backfill runs",
-                extra={"branch_id": branch_db_id, "backfill_pid": backfill_pid},
+                extra={"branch_id": branch_db_id, "backfill_pid": backfill.pid},
             )
             return EmbedOutcome(embedded=0, stamped=False)
 

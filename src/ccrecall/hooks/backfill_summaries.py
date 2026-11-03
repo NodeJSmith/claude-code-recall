@@ -28,8 +28,9 @@ it to match the other two.
 import sqlite3
 from pathlib import Path
 
-from ccrecall.config import DEFAULT_DB_PATH, load_settings_for_db, remove_pid_file, setup_logging
-from ccrecall.config import PID_KEY_BACKFILL_SUMMARIES as PID_KEY
+from ccrecall import job_lock
+from ccrecall.config import DEFAULT_DB_PATH, load_settings_for_db, setup_logging
+from ccrecall.config import JOB_KEY_BACKFILL_SUMMARIES as JOB_KEY
 from ccrecall.db import CONTENT_ERROR_VERSION, get_connection
 from ccrecall.hooks.backfill_query import EXIT_ABORT, EXIT_OK
 from ccrecall.hooks.backfill_runner import run_batch_loop
@@ -42,14 +43,17 @@ _LOG_PREFIX = "Backfill summaries"
 def run(*, verbose: bool = False, db: Path = DEFAULT_DB_PATH) -> int:
     """Backfill context summaries for branches that lack a current one.
 
-    Wraps the ``_main()`` work in PID-file cleanup. ``_main()`` is kept separate
-    so tests can exercise the backfill logic without the PID-file lifecycle.
+    Holds the summaries job lock around the ``_main()`` work, adopting the one
+    ``_spawn_background`` handed over; skips (exit 0) when another run holds it.
+    ``_main()`` is kept separate so tests can exercise the backfill logic without
+    the lock.
     """
-    try:
+    lock = job_lock.acquire(JOB_KEY)
+    if lock is None:
+        print("ccrecall backfill summaries: another instance is already running — skipping")
+        return EXIT_OK
+    with lock:
         return _main(verbose=verbose, db=db)
-    finally:
-        # Delete PID file so _spawn_background can spawn again next session
-        remove_pid_file(PID_KEY)
 
 
 def _main(*, verbose: bool = False, db: Path = DEFAULT_DB_PATH) -> int:

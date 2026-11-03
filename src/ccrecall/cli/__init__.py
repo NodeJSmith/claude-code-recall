@@ -35,7 +35,7 @@ app = App(
     help_epilogue=(
         "Examples:\n"
         "  ccrecall recent --limit 5\n"
-        "  ccrecall status --check-ingestion\n"
+        "  ccrecall doctor\n"
         "  ccrecall --json search -q 'auth bug'\n"
         "  ccrecall tail <session-id>"
     ),

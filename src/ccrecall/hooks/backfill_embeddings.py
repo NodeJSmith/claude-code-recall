@@ -75,7 +75,8 @@ from collections import deque
 from pathlib import Path
 from typing import NamedTuple
 
-from ccrecall.config import DEFAULT_DB_PATH, load_settings_for_db, setup_logging
+from ccrecall import run_history
+from ccrecall.config import DEFAULT_DB_PATH, get_db_path, load_settings_for_db, setup_logging
 from ccrecall.db import CONTENT_ERROR_VERSION, get_connection
 from ccrecall.db_base import commit_single_write, is_database_locked
 from ccrecall.db_vec import chunk_vec_queryable, find_stamped_branches_missing_chunks
@@ -141,6 +142,34 @@ def run(
     if status:
         return run_status(days=days, json_mode=json_mode, settings=settings, logger=logger)
 
+    # Only an unscoped run advances last_ok: a scoped one can finish ok having
+    # worked a sliver of the backlog.
+    scoped = days is not None or limit is not None
+    with run_history.record_run(get_db_path(settings), run_history.KIND_BACKFILL, advances_ok=not scoped) as recorder:
+        return _run(
+            recorder,
+            settings=settings,
+            logger=logger,
+            json_mode=json_mode,
+            days=days,
+            limit=limit,
+            progress_every=progress_every,
+            threads=threads,
+        )
+
+
+def _run(
+    recorder: run_history.RunRecorder,
+    *,
+    settings: dict,
+    logger: logging.Logger,
+    json_mode: bool,
+    days: int | None,
+    limit: int | None,
+    progress_every: int,
+    threads: int,
+) -> int:
+    """Run the backfill, setting the run's recorded outcome on every exit path."""
     # Background CPU job: lower scheduling priority so the bounded inference
     # threads yield to interactive work (machines.md thrash risk).
     lower_scheduling_priority(BACKFILL_NICE_LEVEL)
@@ -151,6 +180,7 @@ def run(
     if not model_available(threads=threads):
         with contextlib.suppress(Exception):  # best-effort; sidecar write must not affect exit behavior
             record_embedding_failure(reason=REASON_MODEL_UNAVAILABLE)
+        recorder.finish(run_history.OUTCOME_FAILED, run_history.REASON_MODEL_UNAVAILABLE)
         logger.error("%s: model not available, aborting (no rows marked)", _LOG_PREFIX)
         print(
             f"{_PRINT_PREFIX}: model not available, aborting (no rows marked)",
@@ -165,6 +195,8 @@ def run(
     work_done = 0
     last_selected_id = 0
     consecutive_lock_timeouts = 0
+    lock_timeouts = 0
+    abort_reason = run_history.REASON_ERROR
     rate_samples: deque[tuple[float, int]] = deque(maxlen=_RATE_WINDOW)
     started = time.monotonic()
 
@@ -182,6 +214,7 @@ def run(
             if not chunk_vec_queryable(conn):
                 with contextlib.suppress(Exception):  # best-effort; sidecar write must not affect exit behavior
                     record_embedding_failure(reason=REASON_VEC_UNAVAILABLE)
+                recorder.finish(run_history.OUTCOME_FAILED, run_history.REASON_VECTOR_UNAVAILABLE)
                 logger.error("%s: sqlite-vec unavailable, aborting (no rows marked)", _LOG_PREFIX)
                 print(
                     f"{_PRINT_PREFIX}: sqlite-vec unavailable, aborting (no rows marked)",
@@ -255,7 +288,7 @@ def run(
 
             def process_batch(rows: list[tuple]) -> bool:
                 nonlocal total_updated, total_processed, total_inferences, last_progress, work_done
-                nonlocal consecutive_lock_timeouts
+                nonlocal consecutive_lock_timeouts, lock_timeouts, abort_reason
                 try:
                     for (branch_id,) in rows:
                         result = _embed_one_branch(conn, branch_id, logger)
@@ -266,7 +299,9 @@ def run(
                         rate_samples.append((time.monotonic(), work_done))
 
                         consecutive_lock_timeouts = consecutive_lock_timeouts + 1 if result.lock_timed_out else 0
+                        lock_timeouts += result.lock_timed_out
                         if consecutive_lock_timeouts >= _MAX_CONSECUTIVE_LOCK_TIMEOUTS:
+                            abort_reason = run_history.REASON_DATABASE_BUSY
                             logger.error(
                                 "%s: %s lock timeouts in a row, aborting after %s branches embedded",
                                 _LOG_PREFIX,
@@ -289,7 +324,12 @@ def run(
                             logger.info("%s: %s", _LOG_PREFIX, msg)
                             print(f"{_PRINT_PREFIX}: {msg}", file=sys.stderr)
                             last_progress = total_processed
-                except Exception:
+                except Exception as exc:
+                    abort_reason = (
+                        run_history.REASON_MODEL_UNAVAILABLE
+                        if isinstance(exc, ModelBrokenError)
+                        else run_history.REASON_ERROR
+                    )
                     # Batch-level abort: an infra error re-raised by
                     # _embed_one_branch (see its docstring), or any other
                     # unexpected failure from the bookkeeping code above
@@ -313,8 +353,10 @@ def run(
                 on_stuck=on_stuck,
                 after_batch=after_batch,
             ):
+                recorder.finish(run_history.OUTCOME_FAILED, abort_reason)
                 return EXIT_ABORT
     except (sqlite3.Error, OSError) as e:
+        recorder.finish(run_history.OUTCOME_FAILED, run_history.failure_reason(e))
         logger.exception("%s: aborted", _LOG_PREFIX)
         print(
             f"{_PRINT_PREFIX}: aborted: {e}",
@@ -356,6 +398,12 @@ def run(
         )
     with contextlib.suppress(Exception):  # best-effort; sidecar clear must not affect exit behavior
         clear_embedding_failure()
+    # A lock timeout leaves its branch for the next run. A content error doesn't
+    # count: it is marked and never retried, so it can never clear.
+    if lock_timeouts:
+        recorder.finish(run_history.OUTCOME_PARTIAL, run_history.REASON_DATABASE_BUSY)
+    else:
+        recorder.finish(run_history.OUTCOME_OK)
     return EXIT_OK
 
 
@@ -375,6 +423,10 @@ def clear_false_watermarks(cursor: sqlite3.Cursor, logger: logging.Logger) -> No
         len(missing),
         sum(missing.values()),
     )
+
+
+class ModelBrokenError(RuntimeError):
+    """The embedding model failed its health probe: the run must abort, not mark the branch."""
 
 
 class _EmbedResult(NamedTuple):
@@ -458,7 +510,7 @@ def _embed_one_branch(
         # broader `except Exception` below and keep an infra failure from
         # poisoning the row.
         raise
-    except Exception:
+    except Exception as exc:
         logger.exception("%s: branch %s failed", _LOG_PREFIX, branch_id)
         if not _model_still_healthy(logger):
             # Model/session failure, not a content error: don't poison this
@@ -469,7 +521,7 @@ def _embed_one_branch(
                 _LOG_PREFIX,
                 branch_id,
             )
-            raise
+            raise ModelBrokenError(f"embedding model failed its health probe after branch {branch_id}") from exc
         marked = _mark_content_error(conn, branch_id, logger)
         return not_updated._replace(lock_timed_out=not marked)
     return _EmbedResult(message_count=message_count, updated=int(outcome.stamped), inferences=outcome.embedded)

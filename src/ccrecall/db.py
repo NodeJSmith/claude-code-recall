@@ -1,7 +1,7 @@
 """Database connection and schema-adjacent utilities.
 
-Schema constants live in ccrecall.schema. Paths, config/settings loading, PID
-files, and logging live in ccrecall.config — imported below for this module's
+Schema constants live in ccrecall.schema. Paths, config/settings loading,
+and logging live in ccrecall.config — imported below for this module's
 own use (get_db_path, ensure_parent_dir, DEFAULT_DB_PATH, ...). Vec (embedding)
 operations live in ccrecall.db_vec — kept out of this module so
 get_connection() stays importable without pulling numpy/fastembed/onnxruntime

@@ -1,271 +1,178 @@
-"""Consolidated health/status reporting for the CLI.
+"""Render `ccrecall status` and `ccrecall doctor` from one set of findings.
 
-Default status reads are read-only; ``--check-ingestion`` also records
-confirmed-OK cache metadata for future deep-check runs.
+`status` is the glance: a verdict line and a line of plain numbers. `doctor` is
+the diagnosis: every finding, grouped by what the user should do, with exact
+commands. Both share one `--json` shape (`verdict`, `findings`, `summary`), and
+what a state means lives in findings.py, so the two can't disagree.
+
+Exit codes: `status` exits 0 for any verdict it can produce from a database, and
+1 when the database is missing or unreadable. `doctor` exits 0 for healthy or
+working on it, 1 for needs attention (a missing database included), and 2 when
+the database exists but can't be read at all.
 """
 
-import contextlib
+import dataclasses
 import json
-import logging
-import sqlite3
 import sys
 from pathlib import Path
 
+from whenever import Instant
+
 from ccrecall.config import DEFAULT_DB_PATH, get_db_path, load_settings_for_db
-from ccrecall.db import get_connection
-from ccrecall.db_vec import branch_embedding_coverage, chunk_vec_queryable, vec_available
-from ccrecall.hooks.backfill_status import count_status as count_embedding_status
-from ccrecall.import_log_ops import import_log_source_index
-from ccrecall.ingestion_status import summarize_ingestion
-from ccrecall.models import LOGGER_NAME
-from ccrecall.tool_content_status import EMPTY_CLASSIFICATION, classify_pending_sessions
-from ccrecall.tool_content_status import count_eligible as count_tool_content_pending
-from ccrecall.tool_content_status import count_total_sessions as count_tool_content_total
+from ccrecall.findings import (
+    FINDING_IDS,
+    GROUP_ACTION,
+    GROUP_NONE,
+    GROUP_WORKING,
+    LISTABLE_IDS,
+    VERDICT_HEALTHY,
+    VERDICT_NEEDS_ATTENTION,
+    VERDICT_WORKING,
+    DatabaseUnreadableError,
+    Diagnosis,
+    diagnose,
+    parse_instant,
+)
 
-log = logging.getLogger(LOGGER_NAME)
+EXIT_NEEDS_ATTENTION = 1
+EXIT_UNREADABLE = 2
 
-
-@contextlib.contextmanager
-def _readonly_connection(db_path: Path, *, load_vec: bool = False):
-    """Open an existing SQLite DB without creating/migrating it."""
-    if not db_path.exists():
-        raise FileNotFoundError(db_path)
-    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-    conn.execute("PRAGMA query_only = ON")
-    try:
-        if load_vec:
-            vec_available(conn)
-        yield conn
-    finally:
-        conn.close()
-
-
-def _db_counts(conn: sqlite3.Connection) -> dict[str, int]:
-    cursor = conn.cursor()
-    projects = cursor.execute("SELECT COUNT(*) FROM projects").fetchone()[0]
-    sessions = cursor.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
-    messages = cursor.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
-    branches = cursor.execute("SELECT COUNT(*) FROM branches").fetchone()[0]
-    active_branches = cursor.execute("SELECT COUNT(*) FROM branches WHERE is_active = 1").fetchone()[0]
-    branch_invariant_violations = count_branch_invariant_violations(conn)
-    return {
-        "projects": projects,
-        "sessions": sessions,
-        "messages": messages,
-        "branches": branches,
-        "active_branches": active_branches,
-        "branch_invariant_violations": branch_invariant_violations,
-    }
+VERDICT_TEXT = {
+    VERDICT_HEALTHY: "healthy",
+    VERDICT_WORKING: "working on it",
+    VERDICT_NEEDS_ATTENTION: "needs attention",
+}
+GROUP_HEADINGS = (
+    (GROUP_ACTION, "Needs action"),
+    (GROUP_WORKING, "Working on it"),
+    (GROUP_NONE, "Nothing to do"),
+)
 
 
-def _has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
-    return any(row[1] == column for row in conn.execute(f"PRAGMA table_info({table})"))
+def validate_list_id(finding_id: str) -> None:
+    """Reject an unknown `--list` id, naming the valid ones (a usage error, exit 2)."""
+    if finding_id not in FINDING_IDS:
+        raise ValueError(f"unknown finding id {finding_id!r}; valid ids: {', '.join(sorted(FINDING_IDS))}")
 
 
-def count_branch_invariant_violations(conn: sqlite3.Connection) -> int:
-    """Count sessions with more than one active branch row."""
-    return len(
-        conn.execute(
-            "SELECT session_id FROM branches WHERE is_active = 1 GROUP BY session_id HAVING COUNT(*) > 1"
-        ).fetchall()
-    )
-
-
-def collect_status(*, db: Path = DEFAULT_DB_PATH, days: int | None = None, check_ingestion: bool = False) -> dict:
-    """Collect status across DB, ingestion, tool content, and embeddings."""
+def run_status(*, db: Path = DEFAULT_DB_PATH, output_format: str = "markdown") -> None:
     settings = load_settings_for_db(db)
     db_path = get_db_path(settings)
-    ingestion = None
-
-    with _readonly_connection(db_path, load_vec=False) as conn:
-        cursor = conn.cursor()
-        db_counts = _db_counts(conn)
-        schema_current = _has_column(conn, "messages", "tool_content")
-
-        if not schema_current:
-            return {
-                "db_path": str(db_path),
-                "db_size_bytes": db_path.stat().st_size if db_path.exists() else 0,
-                "days": days,
-                "database": db_counts,
-                "schema": {"current": False, "reason": "messages.tool_content column missing"},
-                "ingestion": None,
-                "tool_content": {
-                    "total_sessions": None,
-                    "done_sessions": None,
-                    "pending_sessions": None,
-                    "pending_backfillable_sessions": None,
-                    "pending_missing_jsonl_sessions": None,
-                    "pending_no_usable_branch_sessions": None,
-                },
-                "embeddings": {
-                    "watermark": {"embedded_branches": None, "draft_branches": None, "total_branches": None},
-                    "backfill": {
-                        "available": False,
-                        "error": "database schema is out of date; run `ccrecall import` to migrate",
-                        "branches": {"embedded": None, "total": None, "remaining": None, "errored": None},
-                        "chunks": {"done": None, "total": None},
-                    },
-                },
-            }
-
-        tool_pending = count_tool_content_pending(cursor, days)
-        source_index = import_log_source_index(cursor) if tool_pending else None
-        tool_classification = (
-            classify_pending_sessions(cursor, days, source_index) if tool_pending else EMPTY_CLASSIFICATION
-        )
-        tool_missing = tool_classification["missing"]
-        tool_no_usable_branch = tool_classification["no_usable_branch"]
-        tool_total = count_tool_content_total(cursor, days)
-        embedded_watermark, draft_watermark, embeddable_watermark = branch_embedding_coverage(conn)
-
-    if check_ingestion:
-        if not db_path.exists():
-            raise FileNotFoundError(db_path)
-        with get_connection(settings, load_vec=False) as conn:
-            ingestion = summarize_ingestion(conn, sources=import_log_source_index(conn.cursor()))
-
-    embedding_backfill: dict = {
-        "available": False,
-        "error": "sqlite-vec unavailable or not initialized",
-        "branches": {"embedded": None, "total": None, "remaining": None, "errored": None},
-        "chunks": {"done": None, "total": None},
-    }
     try:
-        with _readonly_connection(db_path, load_vec=True) as conn:
-            if chunk_vec_queryable(conn):
-                counts = count_embedding_status(conn.cursor(), days)
-                embedding_backfill = {
-                    "available": True,
-                    "error": None,
-                    "branches": {
-                        "embedded": counts["embedded_branches"],
-                        "total": counts["total_branches"],
-                        "remaining": counts["eligible"],
-                        "errored": counts["errored"],
-                    },
-                    "chunks": {"done": counts["done"], "total": counts["universe"]},
-                }
-    except (sqlite3.Error, OSError) as exc:
-        log.warning(
-            "embedding backfill status query failed; reporting unavailable",
-            exc_info=True,
-            extra={"db_path": str(db_path)},
-        )
-        embedding_backfill["error"] = str(exc)
+        diagnosis = diagnose(db_path, settings)
+    except DatabaseUnreadableError as exc:
+        print(f"ccrecall status: can't read the database at {db_path} ({exc}); run `ccrecall doctor`", file=sys.stderr)
+        raise SystemExit(EXIT_NEEDS_ATTENTION) from exc
 
-    return {
-        "db_path": str(db_path),
-        "db_size_bytes": db_path.stat().st_size if db_path.exists() else 0,
-        "days": days,
-        "database": db_counts,
-        "schema": {"current": True, "reason": None},
-        "ingestion": ingestion,
-        "tool_content": {
-            "total_sessions": tool_total,
-            "done_sessions": tool_total - tool_pending,
-            "pending_sessions": tool_pending,
-            "pending_backfillable_sessions": tool_pending - tool_missing - tool_no_usable_branch,
-            "pending_missing_jsonl_sessions": tool_missing,
-            "pending_no_usable_branch_sessions": tool_no_usable_branch,
-        },
-        "embeddings": {
-            "watermark": {
-                "embedded_branches": embedded_watermark,
-                "draft_branches": draft_watermark,
-                "total_branches": embeddable_watermark,
-            },
-            "backfill": embedding_backfill,
-        },
-    }
+    if output_format == "json":
+        print(json.dumps(diagnosis_json(diagnosis), indent=2))
+    else:
+        print(verdict_line(diagnosis, point_to_doctor=True))
+        if line := summary_line(diagnosis):
+            print(line)
+    if not db_path.exists():
+        raise SystemExit(EXIT_NEEDS_ATTENTION)
 
 
-def print_status_report(status: dict) -> None:
-    """Render collected status in a compact human-readable form."""
-    db = status["database"]
-    print(f"Database: {status['db_path']}")
-    print(f"Size: {status['db_size_bytes'] / (1024 * 1024):.2f} MB")
-    print(f"Projects: {db['projects']}")
-    print(f"Sessions: {db['sessions']}")
-    print(f"Branches: {db['branches']} ({db['active_branches']} active)")
-    print(f"Messages: {db['messages']}")
-    print(f"Branch invariant violations: {db['branch_invariant_violations']} session(s) with multiple active branches")
+def run_doctor(*, db: Path = DEFAULT_DB_PATH, output_format: str = "markdown", list_id: str | None = None) -> None:
+    settings = load_settings_for_db(db)
+    db_path = get_db_path(settings)
+    try:
+        diagnosis = diagnose(db_path, settings)
+    except DatabaseUnreadableError as exc:
+        print(f"ccrecall doctor: can't read the database at {db_path}: {exc}", file=sys.stderr)
+        raise SystemExit(EXIT_UNREADABLE) from exc
 
-    schema = status.get("schema", {"current": True})
-    if not schema["current"]:
-        print(f"Schema: out of date ({schema['reason']})")
-        print("Run `ccrecall import` to apply migrations before checking ingestion/backfill status.")
+    if list_id is not None:
+        if output_format == "json":
+            print(json.dumps(diagnosis_json(diagnosis, list_id=list_id), indent=2))
+        else:
+            print_listing(diagnosis, list_id)
         return
 
-    ingestion = status["ingestion"]
-    if ingestion is None:
-        print("Ingestion: not checked (run `ccrecall status --check-ingestion`)")
-    else:
-        print(
-            "Ingestion: "
-            f"{ingestion['ok_sessions']}/{ingestion['sessions_checked']} sessions up to date; "
-            f"pending tail {ingestion['pending_tail_sessions']} session(s) "
-            f"/{ingestion['pending_tail_turns']} turn(s); "
-            f"stale tail {ingestion['stale_tail_sessions']} session(s) "
-            f"/{ingestion['stale_tail_turns']} turn(s); "
-            f"gaps {ingestion['ingestion_gap_sessions']} session(s) "
-            f"/{ingestion['ingestion_gap_turns']} turn(s); "
-            f"missing or unreadable source {ingestion['missing_source_sessions']} session(s)"
-        )
-
-    tool = status["tool_content"]
-    total = tool["total_sessions"]
-    done = tool["done_sessions"]
-    pct = (done / total * 100) if total else 0.0
-    print(f"Tool content: {done}/{total} sessions backfilled ({pct:.0f}%)")
-    print(
-        f"  remaining: {tool['pending_sessions']} sessions; "
-        f"backfillable: {tool['pending_backfillable_sessions']}; "
-        f"missing JSONL: {tool['pending_missing_jsonl_sessions']}; "
-        f"no usable branch: {tool['pending_no_usable_branch_sessions']}"
-    )
-
-    embeddings = status["embeddings"]
-    backfill = embeddings["backfill"]
-    if backfill["available"]:
-        branches = backfill["branches"]
-        chunks = backfill["chunks"]
-        total = branches["total"]
-        embedded = branches["embedded"]
-        pct = (embedded / total * 100) if total else 0.0
-        print(f"Embeddings: {embedded}/{total} branches embedded ({pct:.0f}%)")
-        draft = embeddings["watermark"]["draft_branches"]
-        if draft:
-            print(f"  draft quality: {draft} branch(es) searchable but not full quality")
-        print(f"  branch backfill: {branches['remaining']} remaining; {branches['errored']} errored")
-        print(f"  chunk coverage: {chunks['done']}/{chunks['total']} chunks at current version")
-    else:
-        watermark = embeddings["watermark"]
-        total = watermark["total_branches"]
-        embedded = watermark["embedded_branches"]
-        draft = watermark["draft_branches"]
-        print(f"Embeddings: unavailable ({backfill['error']})")
-        print(f"  watermark: {embedded}/{total} branches")
-        if draft:
-            print(f"  draft quality: {draft} branch(es) searchable but not full quality")
-
-
-def run(
-    *,
-    db: Path = DEFAULT_DB_PATH,
-    days: int | None = None,
-    check_ingestion: bool = False,
-    output_format: str = "markdown",
-) -> None:
-    try:
-        status = collect_status(db=db, days=days, check_ingestion=check_ingestion)
-    except FileNotFoundError as exc:
-        if output_format == "json":
-            print(json.dumps({"error": "database_not_found", "path": str(exc.filename or exc.args[0])}))
-        else:
-            print(f"ccrecall status: database not found: {exc.filename or exc.args[0]}", file=sys.stderr)
-        raise SystemExit(1) from exc
     if output_format == "json":
-        print(json.dumps(status, indent=2))
+        print(json.dumps(diagnosis_json(diagnosis), indent=2))
     else:
-        print_status_report(status)
+        print_report(diagnosis)
+    if diagnosis.verdict == VERDICT_NEEDS_ATTENTION:
+        raise SystemExit(EXIT_NEEDS_ATTENTION)
+
+
+def diagnosis_json(diagnosis: Diagnosis, *, list_id: str | None = None) -> dict:
+    """The shared `--json` shape. With ``list_id``, that finding also carries a ``sessions`` array."""
+    findings = []
+    for finding in diagnosis.findings:
+        item = dataclasses.asdict(finding)
+        if finding.id == list_id and finding.listable:
+            item["sessions"] = [
+                {key: value for key, value in dataclasses.asdict(row).items() if key != "reason" or value is not None}
+                for row in diagnosis.sessions.get(finding.id, ())
+            ]
+        findings.append(item)
+    return {"verdict": diagnosis.verdict, "findings": findings, "summary": dict(diagnosis.summary)}
+
+
+def verdict_line(diagnosis: Diagnosis, *, point_to_doctor: bool = False) -> str:
+    line = f"ccrecall: {VERDICT_TEXT[diagnosis.verdict]}"
+    if point_to_doctor and diagnosis.verdict != VERDICT_HEALTHY:
+        line += " (run `ccrecall doctor`)"
+    return line
+
+
+def summary_line(diagnosis: Diagnosis, now: Instant | None = None) -> str:
+    """``7,514 sessions · 98% embedded · last sync 2 min ago``, leaving out what isn't known yet.
+
+    Returns an empty string when none of it is known.
+    """
+    summary = diagnosis.summary
+    parts = [] if summary["sessions"] is None else [f"{summary['sessions']:,} sessions"]
+    if summary["embedded_pct"] is not None:
+        parts.append(f"{summary['embedded_pct']}% embedded")
+    last_sync = parse_instant(summary["last_sync"])
+    if last_sync is not None:
+        parts.append(f"last sync {format_ago(last_sync, now or Instant.now())}")
+    return " · ".join(parts)
+
+
+def print_report(diagnosis: Diagnosis) -> None:
+    print(verdict_line(diagnosis))
+    if line := summary_line(diagnosis):
+        print(line)
+    for group, heading in GROUP_HEADINGS:
+        findings = [finding for finding in diagnosis.findings if finding.group == group]
+        if not findings:
+            continue
+        print(f"\n{heading}")
+        for finding in findings:
+            print(f"  - {finding.message}")
+            if finding.fix:
+                print(f"    Fix: {finding.fix}")
+            if finding.listable and finding.count:
+                print(f"    List them: ccrecall doctor --list {finding.id}")
+
+
+def print_listing(diagnosis: Diagnosis, list_id: str) -> None:
+    if list_id not in LISTABLE_IDS:
+        print(f"{list_id} doesn't name sessions, so there's nothing to list.")
+        return
+    rows = diagnosis.sessions.get(list_id, ())
+    if not rows:
+        print(f"Nothing to list: no {list_id} finding right now.")
+        return
+    for row in rows:
+        fields = [row.session_id, row.project or "-", (row.date or "-")[:10]]
+        if row.reason:
+            fields.append(row.reason)
+        print("  ".join(fields))
+
+
+def format_ago(then: Instant, now: Instant) -> str:
+    seconds = max(0.0, (now - then).total("seconds"))
+    if seconds < 60:
+        return "just now"
+    if seconds < 3600:
+        return f"{int(seconds // 60)} min ago"
+    if seconds < 86400:
+        return f"{int(seconds // 3600)} h ago"
+    days = int(seconds // 86400)
+    return f"{days} day ago" if days == 1 else f"{days} days ago"

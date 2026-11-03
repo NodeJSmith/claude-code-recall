@@ -23,7 +23,7 @@ from pathlib import Path
 
 from whenever import Instant
 
-from ccrecall.config import PID_FILE_MODE, RUNTIME_DIR, atomic_write_json, ensure_parent_dir
+from ccrecall.config import PRIVATE_FILE_MODE, RUNTIME_DIR, atomic_write_json, ensure_parent_dir
 from ccrecall.db_base import is_database_locked
 from ccrecall.models import LOGGER_NAME
 
@@ -69,6 +69,17 @@ ALERT_SCHEMA_AHEAD = "schema_ahead"
 # is a plain int literal kept in sync by tests/test_health.py's cross-check.
 FULL_QUALITY_TOKEN_LIMIT = 8192
 
+# Fix commands shared by the SessionStart alerts and `ccrecall doctor`'s findings
+# (findings.py imports these; this module can't import findings.py, which pulls in
+# the vector stack). One source, so the two surfaces never print different commands.
+FIX_IMPORT = "ccrecall import"
+FIX_REPAIR = "ccrecall import --repair-gaps"
+FIX_BACKFILL_EMBEDDINGS = "ccrecall backfill embeddings"
+FIX_BACKFILL_TOOL_CONTENT = "ccrecall backfill tool-content"
+FIX_WARM_MODEL = "ccrecall-warm-model"
+FIX_SCHEDULE_WRITE = "ccrecall backfill schedule write"
+FIX_DISMISS_DRAFTS = "ccrecall backfill embeddings --dismiss"
+
 # Embedding-capability failure reason codes (the sub-protocol the detached embedding
 # process writes into the embedding-status sidecar; the SessionStart hook reads them back). Shared here
 # so the writer (backfill/sync) and any reader agree on the exact strings.
@@ -112,7 +123,7 @@ def probe_filesystem(marker_path: Path | None = None) -> ProbeResult:
     if marker_path is None:
         marker_path = _PROBE_MARKER_PATH
     try:
-        fd = os.open(str(marker_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, PID_FILE_MODE)
+        fd = os.open(str(marker_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, PRIVATE_FILE_MODE)
         try:
             os.write(fd, b"\x00")
         finally:
@@ -173,12 +184,16 @@ def read_embedding_status(path: Path | None = None) -> dict | None:
 
 
 @contextlib.contextmanager
-def _locked_status_file(path: Path) -> Iterator[None]:
+def locked_sidecar(path: Path) -> Iterator[None]:
     """Exclusive advisory lock guarding read-modify-write access to ``path``.
+
+    Shared by every sidecar with more than one writer: this module's
+    embedding-status file and run_history's per-database files. A caller must do
+    its whole read, merge, and write inside the lock.
 
     Both writers of the embedding-status sidecar — the Stop-hook-spawned
     sync-current process and a manually- or scheduler-invoked backfill run —
-    use different PID guards, so both can be alive at once. Without a shared
+    use different job locks, so both can be alive at once. Without a shared
     lock, ``clear_embedding_failure``'s read-then-conditional-unlink is a
     TOCTOU race: a clear can read one writer's record, then unlink a second
     writer's fresher record written in between (#197). ``fcntl.flock`` is
@@ -207,7 +222,7 @@ def record_embedding_failure(reason: str, path: Path | None = None) -> None:
     """
     if path is None:
         path = EMBEDDING_STATUS_PATH
-    with _locked_status_file(path):
+    with locked_sidecar(path):
         atomic_write_json(path, {"reason": reason, "since": Instant.now().format_iso()})
 
 
@@ -256,7 +271,7 @@ def clear_embedding_failure(path: Path | None = None, reasons: set[str | None] |
     """
     if path is None:
         path = EMBEDDING_STATUS_PATH
-    with _locked_status_file(path):
+    with locked_sidecar(path):
         if reasons is not None:
             current = read_embedding_status(path=path)
             if current is not None and current.get("reason") not in reasons:
@@ -481,16 +496,16 @@ _ALERT_PROSE: dict[str, tuple[str, str, str]] = {
     ALERT_TOOL_CONTENT_INCOMPLETE: (
         "ccrecall's tool-content index is incomplete — tool_use content from older sessions is not yet searchable.",
         "sessions synced before tool-content extraction was added have not been backfilled",
-        "run `ccrecall backfill tool-content` to index historical tool_use content (one-time, opt-in)",
+        f"run `{FIX_BACKFILL_TOOL_CONTENT}` to index historical tool_use content (one-time, opt-in)",
     ),
     ALERT_DRAFT_QUALITY_VECTORS: (
         "Some conversations have draft-quality embeddings — semantic search works but may miss context "
         "from long exchanges.",
         "the sync path caps embeddings at 4096 tokens for memory safety; full 8192-token quality requires "
         "a scheduled backfill",
-        "run `ccrecall backfill embeddings` to upgrade existing drafts; to prevent recurrence, set up a "
-        "scheduled job (`ccrecall backfill schedule write`) or dismiss permanently "
-        "(`ccrecall backfill embeddings --dismiss`)",
+        f"run `{FIX_BACKFILL_EMBEDDINGS}` to upgrade existing drafts; to prevent recurrence, set up a "
+        f"scheduled job (`{FIX_SCHEDULE_WRITE}`) or dismiss permanently "
+        f"(`{FIX_DISMISS_DRAFTS}`)",
     ),
     ALERT_SCHEMA_AHEAD: (
         "ccrecall's database was written by a newer version than this install — imports and sync may fail.",
@@ -510,6 +525,11 @@ _REASON_PROSE: dict[str, str] = {
     REASON_VEC_UNAVAILABLE: "vector extension (sqlite-vec) unavailable",
     REASON_MODEL_UNAVAILABLE: "embedding model unavailable or inaccessible",
 }
+
+
+def describe_embedding_reason(reason: str) -> str:
+    """Plain-language cause for an embedding-status reason code; unknown codes pass through."""
+    return _REASON_PROSE.get(reason, reason)
 
 
 def build_alert_block(
@@ -541,7 +561,7 @@ def build_alert_block(
         ALERT_CANT_PERSIST: fault_reason,
         # Translate the embedding reason code to prose here so callers pass the raw
         # code from the sidecar and never have to know the prose mapping.
-        ALERT_EMBEDDINGS_FAILING: _REASON_PROSE.get(embedding_reason, embedding_reason),
+        ALERT_EMBEDDINGS_FAILING: describe_embedding_reason(embedding_reason),
         ALERT_SCHEMA_AHEAD: schema_ahead_cause,
     }
 
