@@ -413,7 +413,7 @@ def import_project_contained(
     exception other than sqlite3.OperationalError (an infrastructure failure
     that would repeat for every project), roll the project's whole transaction
     back — including its import_log rows, so it is retried next run — log it,
-    and return None. A locked database gets the same treatment: another process
+    and return ProjectFailed. A locked database gets the same treatment: another process
     outlasted busy_timeout, which isn't a fault and can clear before the next
     project. The rollback is required, not tidy-up: import_project only
     opens its own BEGIN when no transaction is open, so without it the next

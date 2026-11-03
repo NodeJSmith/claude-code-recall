@@ -130,9 +130,7 @@ def test_pending_no_usable_branch_counts_surviving_jsonl_that_parses_to_nothing(
 def test_missing_and_no_usable_branch_buckets_never_overlap(memory_db, tmp_path):
     """A session with mixed source availability — one sibling file gone, the
     surviving sibling empty/invalid — must land in exactly one bucket, not
-    both. Counting them independently let such a session inflate both
-    `missing` and `no_usable_branch`, driving `pending_backfillable_sessions`
-    negative (caught in PR #207 review)."""
+    both, so `pending_backfillable_sessions` can't go negative (#207)."""
     gone_path = tmp_path / "sess-mixed.jsonl"  # recorded in import_log, deleted before this test runs
     surviving_path = tmp_path / "agent-sess-mixed.jsonl"
     surviving_path.write_text("\n")  # exists, but parses to no entries
@@ -165,7 +163,7 @@ def test_transcript_unreadable_after_index_counts_as_missing(memory_db, tmp_path
     `Path.exists()`; if it vanishes or becomes unopenable before
     `classify_pending_sessions` reads it (TOCTOU race, permissions change), that
     must land in `missing` rather than raising `OSError` and aborting the whole
-    status report (#207 review)."""
+    status report (#207)."""
     unreadable_path = tmp_path / "sess-unreadable.jsonl"
     unreadable_path.mkdir()  # exists per Path.exists(), but open() raises IsADirectoryError
 

@@ -37,12 +37,12 @@ from ccrecall.findings import (
 EXIT_NEEDS_ATTENTION = 1
 EXIT_UNREADABLE = 2
 
-_VERDICT_TEXT = {
+VERDICT_TEXT = {
     VERDICT_HEALTHY: "healthy",
     VERDICT_WORKING: "working on it",
     VERDICT_NEEDS_ATTENTION: "needs attention",
 }
-_GROUP_HEADINGS = (
+GROUP_HEADINGS = (
     (GROUP_ACTION, "Needs action"),
     (GROUP_WORKING, "Working on it"),
     (GROUP_NONE, "Nothing to do"),
@@ -113,7 +113,7 @@ def diagnosis_json(diagnosis: Diagnosis, *, list_id: str | None = None) -> dict:
 
 
 def verdict_line(diagnosis: Diagnosis, *, point_to_doctor: bool = False) -> str:
-    line = f"ccrecall: {_VERDICT_TEXT[diagnosis.verdict]}"
+    line = f"ccrecall: {VERDICT_TEXT[diagnosis.verdict]}"
     if point_to_doctor and diagnosis.verdict != VERDICT_HEALTHY:
         line += " (run `ccrecall doctor`)"
     return line
@@ -138,7 +138,7 @@ def print_report(diagnosis: Diagnosis) -> None:
     print(verdict_line(diagnosis))
     if line := summary_line(diagnosis):
         print(line)
-    for group, heading in _GROUP_HEADINGS:
+    for group, heading in GROUP_HEADINGS:
         findings = [finding for finding in diagnosis.findings if finding.group == group]
         if not findings:
             continue

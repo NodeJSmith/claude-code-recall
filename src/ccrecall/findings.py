@@ -70,33 +70,33 @@ BACKLOG_QUEUED = "queued"
 BACKLOG_REPAIRED = "repaired"
 BACKLOG_MISSING_VECTORS = "missing-vectors"
 
-_KIND_LABELS = {
+KIND_LABELS = {
     run_history.KIND_IMPORT: "import",
     run_history.KIND_REPAIR: "gap repair",
     run_history.KIND_SYNC: "sync",
     run_history.KIND_BACKFILL: "embedding backfill",
 }
 # None: no command reruns it; sync runs again at the end of the next turn.
-_KIND_FIXES: dict[str, str | None] = {
+KIND_FIXES: dict[str, str | None] = {
     run_history.KIND_IMPORT: health.FIX_IMPORT,
     run_history.KIND_REPAIR: health.FIX_REPAIR,
     run_history.KIND_SYNC: None,
     run_history.KIND_BACKFILL: health.FIX_BACKFILL_EMBEDDINGS,
 }
-_KIND_LOGS = {
+KIND_LOGS = {
     run_history.KIND_IMPORT: "ccrecall-import.log",
     run_history.KIND_REPAIR: "ccrecall-import.log",
     run_history.KIND_SYNC: "ccrecall-sync.log",
     run_history.KIND_BACKFILL: "ccrecall-backfill-embed.log",
 }
-_REASON_PROSE = {
+RUN_REASON_PROSE = {
     run_history.REASON_DATABASE_BUSY: "the database was busy; the next run retries",
     run_history.REASON_VECTOR_UNAVAILABLE: "the vector extension (sqlite-vec) couldn't load",
     run_history.REASON_MODEL_UNAVAILABLE: "the embedding model couldn't load",
     run_history.REASON_ERROR: "an error",
 }
 # Kinds whose run is long enough to report as running, or stuck.
-_LONG_RUNNING_KINDS = (run_history.KIND_IMPORT, run_history.KIND_BACKFILL)
+LONG_RUNNING_KINDS = (run_history.KIND_IMPORT, run_history.KIND_BACKFILL)
 
 # Every id a finding can have: the `--json` contract, and what `doctor --list` accepts.
 FINDING_IDS = frozenset(
@@ -119,8 +119,8 @@ FINDING_IDS = frozenset(
         "check-failed",
         *(f"{kind}-failed" for kind in run_history.RUN_KINDS),
         *(f"{kind}-killed" for kind in run_history.KIND_JOB_KEYS),
-        *(f"{kind}-running" for kind in _LONG_RUNNING_KINDS),
-        *(f"{kind}-stuck" for kind in _LONG_RUNNING_KINDS),
+        *(f"{kind}-running" for kind in LONG_RUNNING_KINDS),
+        *(f"{kind}-stuck" for kind in LONG_RUNNING_KINDS),
     }
 )
 LISTABLE_IDS = frozenset(
@@ -189,7 +189,6 @@ class Scan:
     """What every check may read besides the database."""
 
     db_path: Path
-    settings: dict
     now: Instant
     stale_seconds: float
     runs: Mapping[str, dict]
@@ -248,7 +247,6 @@ def diagnose(db_path: Path, settings: dict) -> Diagnosis:
     now = Instant.now()
     scan = Scan(
         db_path=db_path,
-        settings=settings,
         now=now,
         stale_seconds=resolve_backfill_stale_hours(settings.get("backfill_stale_hours")) * health.SECONDS_PER_HOUR,
         runs=run_history.read_runs(db_path),
@@ -401,7 +399,7 @@ def run_findings(scan: Scan) -> list[Found]:
         reason = last.get("reason") or run_history.REASON_ERROR
         busy = reason == run_history.REASON_DATABASE_BUSY
         # Rerunning can't fix a missing sqlite-vec, so that cause gets the reinstall fix.
-        rerun = REINSTALL_FOR_VEC if reason == run_history.REASON_VECTOR_UNAVAILABLE else _KIND_FIXES[kind]
+        rerun = REINSTALL_FOR_VEC if reason == run_history.REASON_VECTOR_UNAVAILABLE else KIND_FIXES[kind]
         how = "failed" if last.get("outcome") == run_history.OUTCOME_FAILED else "finished with failures"
         started = format_when(parse_instant(last.get("started_at")))
         found.append(
@@ -410,10 +408,10 @@ def run_findings(scan: Scan) -> list[Found]:
                     id=f"{kind}-failed",
                     group=GROUP_WORKING if busy else GROUP_ACTION,
                     message=(
-                        f"The last {_KIND_LABELS[kind]}, started {started}, {how}: "
-                        f"{_REASON_PROSE.get(reason, reason)}. See {_KIND_LOGS[kind]}."
+                        f"The last {KIND_LABELS[kind]}, started {started}, {how}: "
+                        f"{RUN_REASON_PROSE.get(reason, reason)}. See {KIND_LOGS[kind]}."
                     ),
-                    fix=None if busy else (rerun or f"check {_KIND_LOGS[kind]}"),
+                    fix=None if busy else (rerun or f"check {KIND_LOGS[kind]}"),
                 )
             )
         )
@@ -421,7 +419,7 @@ def run_findings(scan: Scan) -> list[Found]:
     for kind, state in scan.job_states.items():
         if state is None:
             continue
-        label = _KIND_LABELS[kind]
+        label = KIND_LABELS[kind]
         a_label = f"{'An' if label[0] in 'aeiou' else 'A'} {label}"
         started = "at an unknown time" if state.started_at is None else format_when(state.started_at)
         pid_note = "" if state.pid is None else f" (PID {state.pid})"
@@ -436,11 +434,11 @@ def run_findings(scan: Scan) -> list[Found]:
                             f"{a_label} started {started}{pid_note} was killed before it finished. "
                             "The next run of that kind starts over cleanly."
                         ),
-                        fix=_KIND_FIXES[kind],
+                        fix=KIND_FIXES[kind],
                     )
                 )
             )
-        elif kind in _LONG_RUNNING_KINDS and is_stuck(state, scan):
+        elif kind in LONG_RUNNING_KINDS and is_stuck(state, scan):
             stop = f"kill {state.pid}" if state.pid is not None else f"stop the running {label}"
             found.append(
                 Found(
@@ -451,11 +449,11 @@ def run_findings(scan: Scan) -> list[Found]:
                             f"{a_label} has been running since {started}{pid_note}, "
                             f"longer than backfill_stale_hours. It may still be making progress."
                         ),
-                        fix=f"if it's no longer making progress, {stop}, then run `{_KIND_FIXES[kind]}`",
+                        fix=f"if it's no longer making progress, {stop}, then run `{KIND_FIXES[kind]}`",
                     )
                 )
             )
-        elif kind in _LONG_RUNNING_KINDS:
+        elif kind in LONG_RUNNING_KINDS:
             running_since = "" if state.started_at is None else f", started {started}"
             found.append(
                 Found(
