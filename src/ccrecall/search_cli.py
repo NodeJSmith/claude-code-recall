@@ -1,4 +1,4 @@
-"""CLI entry points for conversation search (Entrypoint A/B) and status.
+"""CLI entry points for conversation search (Entrypoint A/B).
 
 Returns markdown by default (token-efficient), or JSON when output_format="json"
 (the CLI maps the global --json flag onto that argument).
@@ -6,15 +6,11 @@ Returns markdown by default (token-efficient), or JSON when output_format="json"
 
 import json
 import logging
-import sqlite3
-import sys
 from pathlib import Path
 
 from ccrecall.config import DEFAULT_DB_PATH
 from ccrecall.dates import validate_or_exit
 from ccrecall.db import get_connection, parse_project_filter, resolve_db_settings
-from ccrecall.db_vec import branch_embedding_coverage, chunk_vec_queryable
-from ccrecall.embeddings import DEPS_AVAILABLE, EMBEDDING_MODEL, EMBEDDING_VERSION
 from ccrecall.errors import emit_error
 from ccrecall.formatting import (
     apply_scores,
@@ -117,58 +113,13 @@ def run_messages(
             str(exc),
             code="search_error",
             exit_code=1,
-            remediation="Check ccrecall search --status for diagnostics.",
+            remediation="Run ccrecall doctor for diagnostics.",
         )
-
-
-def print_status(settings: dict | None) -> None:
-    """Print diagnostic status and exit 0."""
-    # Open one connection with vec loaded; chunk_vec_queryable probes whether
-    # the vec table is usable — get_connection already loaded the extension
-    # iff it could, so the table-existence probe is sufficient.
-    try:
-        with get_connection(settings, load_vec=True) as conn:
-            is_vec = chunk_vec_queryable(conn)
-            print(f"vec extension: {'yes' if is_vec else 'no'}")
-
-            # Model: name + whether the embedding stack imports. Deliberately does
-            # not call model_available() — that constructs the fastembed model and
-            # would download it (~120 MB) on a cold cache, which a read-only status
-            # must not do.
-            print(f"model: {EMBEDDING_MODEL} (deps {'available' if DEPS_AVAILABLE else 'missing'})")
-
-            # Chunk coverage (current-version chunks / total chunks) and branch watermark
-            try:
-                total_chunks = conn.execute("SELECT count(*) FROM chunks").fetchone()[0]
-                current_chunks = conn.execute(
-                    "SELECT count(*) FROM chunks WHERE embedding_version = ? AND embedding_model = ?",
-                    (EMBEDDING_VERSION, EMBEDDING_MODEL),
-                ).fetchone()[0]
-                print(f"chunk coverage: {current_chunks}/{total_chunks} chunks at current version")
-
-                # Branch watermark: branches whose every current exchange is embedded.
-                embedded_branches, draft_branches, total_branches = branch_embedding_coverage(conn)
-                print(f"embedded branches: {embedded_branches}/{total_branches} (watermark)")
-                if draft_branches:
-                    print(f"draft-quality branches: {draft_branches} (searchable, not full quality)")
-            except sqlite3.Error as exc:
-                log.warning("chunk coverage query failed; reporting degraded status", exc_info=True)
-                print(f"chunk coverage: error ({exc})")
-                print(f"embedded branches: error ({exc})")
-    except (sqlite3.Error, OSError):
-        log.exception("failed to open database for status check")
-        print("vec extension: no")
-        print(f"model: {EMBEDDING_MODEL} (deps {'available' if DEPS_AVAILABLE else 'missing'})")
-        print("chunk coverage: error (could not open database)")
-        print("embedded branches: error (could not open database)")
-
-    sys.exit(0)
 
 
 def run(
     *,
-    query: str | None = None,
-    status: bool = False,
+    query: str,
     keyword_only: bool = False,
     max_results: int = 5,
     session: str | None = None,
@@ -182,21 +133,13 @@ def run(
     db: Path = DEFAULT_DB_PATH,
 ) -> None:
     """Search conversation sessions (keyword + chunk-vector fusion)."""
-    if not status and not query:
+    if not query.strip():
         emit_error(
-            "one of --query/-q or --status is required",
+            "a query is required",
             code="missing_arg",
             exit_code=2,
-            remediation="ccrecall search -q 'your query' or ccrecall search --status",
+            remediation="ccrecall search 'your query'",
         )
-    if status and query:
-        emit_error(
-            "--query and --status are mutually exclusive",
-            code="conflicting_args",
-            exit_code=2,
-            remediation="Use --query to search, or --status to check diagnostics — not both.",
-        )
-
     # Backstop for direct callers; the CLI validator rejects out-of-range
     # --max-results before reaching here. Both sides bound on MAX_SEARCH_RESULTS.
     max_results = max(1, min(MAX_SEARCH_RESULTS, max_results))
@@ -208,12 +151,6 @@ def run(
     before, after = validate_or_exit(before, after)
 
     if not db.exists():
-        if status:
-            print("vec extension: no")
-            print(f"model: {EMBEDDING_MODEL} (deps {'available' if DEPS_AVAILABLE else 'missing'})")
-            print("chunk coverage: error (database not found)")
-            print("embedded branches: error (database not found)")
-            sys.exit(0)
         emit_error(
             "Database not found",
             code="db_not_found",
@@ -225,16 +162,6 @@ def run(
 
     try:
         settings = resolve_db_settings(db)
-
-        if status:
-            print_status(settings)
-            return  # print_status calls sys.exit(0), but be explicit
-
-        # Past the status branch with the xor-validation above satisfied, query is
-        # guaranteed present (status is False, so a missing query already exited 2).
-        assert query is not None  # noqa: S101 — type-checker narrowing; the real guard is the exit above
-        # (the except block below still defends query being None: an exception raised
-        # from the status=True branch above reaches it before this assert ever runs)
 
         with get_connection(settings, load_vec=True) as conn:
             fts_level = detect_fts_support(conn)
@@ -261,10 +188,10 @@ def run(
             print(md)
 
     except Exception as exc:
-        log.exception("session search failed", extra={"query_length": len(query) if query else 0})
+        log.exception("session search failed", extra={"query_length": len(query)})
         emit_error(
             str(exc),
             code="search_error",
             exit_code=1,
-            remediation="Check ccrecall search --status for diagnostics.",
+            remediation="Run ccrecall doctor for diagnostics.",
         )

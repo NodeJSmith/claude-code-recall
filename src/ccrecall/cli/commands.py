@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 from typing import Annotated, Literal
 
-from cyclopts import App, Argument, ArgumentCollection, Group, Parameter
+from cyclopts import App, ArgumentCollection, Group, Parameter
 from cyclopts.validators import Number
 
 from ccrecall import health, job_lock
@@ -64,53 +64,33 @@ _DEFAULT_RECENT_N = 3
 _DEFAULT_SEARCH_MAX_RESULTS = 5
 
 
-# Friendly labels for the query-mode conflict/missing-arg messages below —
-# keyed by each argument's cyclopts-assigned name (the positional query's
-# Parameter(name="QUERY") and the --query/-q and --status flag names).
-_SEARCH_MODE_LABELS = {
+# Friendly labels for the query-mode conflict message below — keyed by each
+# argument's cyclopts-assigned name (the positional query's Parameter(name="QUERY")
+# and the --query/-q flag name).
+_QUERY_MODE_LABELS = {
     "QUERY": "a positional query argument",
     "--query": "--query/-q",
-    "--status": "--status",
 }
 
 
-def _search_mode_conflict_message(provided: list[Argument]) -> str:
-    labels = " and ".join(_SEARCH_MODE_LABELS.get(arg.name, arg.name) for arg in provided)
-    return f"{labels} cannot both be given — provide the query once, positionally or via --query/-q."
-
-
-def _exactly_one_query_or_status(arguments: ArgumentCollection) -> None:
-    """Group validator: search needs exactly one of positional query / --query / --status.
+def _exactly_one_query(arguments: ArgumentCollection) -> None:
+    """Group validator: search and search-messages need exactly one of positional query / --query.
 
     Runs at parse time so the message renders in cyclopts' boxed error style
     (and exits 2 via the entry-point wrapper), matching every other usage error.
-    search_cli.run() keeps the same guard for direct (non-CLI) callers.
     """
     # arg.tokens is non-empty only when that argument was supplied on the CLI.
     provided = [arg for arg in arguments if arg.tokens]
     if not provided:
-        raise ValueError("a query is required: provide it positionally, via --query/-q, or pass --status.")
-    if len(provided) > 1:
-        raise ValueError(_search_mode_conflict_message(provided))
-
-
-# Membership in this group (positional query + --query + --status below) is
-# what triggers the exactly-one validator at parse time — the flags carry no
-# logic themselves.
-_SEARCH_MODE = Group("Search mode", validator=_exactly_one_query_or_status)
-
-
-def _exactly_one_query(arguments: ArgumentCollection) -> None:
-    """Group validator: search-messages needs exactly one of positional query / --query."""
-    provided = [arg for arg in arguments if arg.tokens]
-    if not provided:
         raise ValueError("a query is required: provide it positionally or via --query/-q.")
     if len(provided) > 1:
-        raise ValueError(_search_mode_conflict_message(provided))
+        labels = " and ".join(_QUERY_MODE_LABELS.get(arg.name, arg.name) for arg in provided)
+        raise ValueError(f"{labels} cannot both be given — provide the query once, positionally or via --query/-q.")
 
 
-# Membership in this group (positional query + --query below) triggers the
-# exactly-one validator for search-messages, which has no --status mode.
+# Membership in this group (positional query + --query on search and
+# search-messages) is what triggers the exactly-one validator at parse time —
+# the flags carry no logic themselves.
 _QUERY_MODE = Group("Search mode", validator=_exactly_one_query)
 
 
@@ -265,18 +245,12 @@ def cmd_schedule_status(
 @backfill_app.command(name="embeddings")
 def cmd_backfill_embeddings(
     *,
-    status: Annotated[
-        bool,
-        _FLAG,
-        Parameter(help="Report legacy embedding-only progress and exit; prefer `ccrecall doctor`."),
-    ] = False,
     dismiss: Annotated[
         bool,
         _FLAG,
         Parameter(
             help="Permanently silence the alert about long exchanges embedded at reduced quality, "
-            "without running a backfill. "
-            "Takes precedence over --status if both are given."
+            "without running a backfill."
         ),
     ] = False,
     days: Annotated[
@@ -312,22 +286,16 @@ def cmd_backfill_embeddings(
     # second instance doubles the onnxruntime memory peak on the same machine.
     # Skip (not queue) when another instance holds the lock; exit 0 so a
     # scheduler (systemd timer) doesn't see a failure. The scope tells `doctor`
-    # whether this run drains the whole backlog. --status is read-only: it
-    # neither takes the lock nor disturbs a running backfill's record.
-    lock = None
-    if not status:
-        lock = job_lock.acquire(
-            JOB_KEY_BACKFILL_EMBEDDINGS, scope=job_lock.backfill_scope(days=days, limit=limit, db=db)
+    # whether this run drains the whole backlog.
+    lock = job_lock.acquire(JOB_KEY_BACKFILL_EMBEDDINGS, scope=job_lock.backfill_scope(days=days, limit=limit, db=db))
+    if lock is None:
+        print(
+            "ccrecall backfill embeddings: another instance is already running — skipping",
+            file=sys.stderr,
         )
-        if lock is None:
-            print(
-                "ccrecall backfill embeddings: another instance is already running — skipping",
-                file=sys.stderr,
-            )
-            raise SystemExit(backfill_query_mod.EXIT_OK)
+        raise SystemExit(backfill_query_mod.EXIT_OK)
     try:
         code = backfill_embeddings_mod.run(
-            status=status,
             json_mode=ctx.json_mode,
             days=days,
             limit=limit,
@@ -337,8 +305,7 @@ def cmd_backfill_embeddings(
             db=db,
         )
     finally:
-        if lock is not None:
-            lock.release()
+        lock.release()
     raise SystemExit(code)
 
 
@@ -425,12 +392,11 @@ def cmd_recent(
 def cmd_search(
     query_positional: Annotated[
         str | None,
-        Parameter(name="QUERY", group=_SEARCH_MODE, help="Search keywords (positional form of --query/-q)."),
+        Parameter(name="QUERY", group=_QUERY_MODE, help="Search keywords (positional form of --query/-q)."),
     ] = None,
     /,
     *,
-    query: Annotated[str | None, Parameter(name=["--query", "-q"], group=_SEARCH_MODE, help="Search keywords.")] = None,
-    status: Annotated[bool, _FLAG, Parameter(group=_SEARCH_MODE, help="Print diagnostic status and exit.")] = False,
+    query: Annotated[str | None, Parameter(name=["--query", "-q"], group=_QUERY_MODE, help="Search keywords.")] = None,
     keyword_only: Annotated[bool, _FLAG, Parameter(help="Skip embedding; keyword search only.")] = False,
     max_results: Annotated[
         int,
@@ -458,12 +424,12 @@ def cmd_search(
 
     With --json: {query, ranked, count, results: [{score, session_uuid, handle, project, git_branch, topic, ...}]}
     """
-    # _SEARCH_MODE's group validator already guarantees exactly one of
-    # query_positional / query / status was supplied.
+    # _QUERY_MODE's group validator already guarantees exactly one of
+    # query_positional / query was supplied.
     resolved_query = query_positional if query_positional is not None else query
+    assert resolved_query is not None  # noqa: S101 — type-checker narrowing; the real guard is the group validator
     search_mod.run(
         query=resolved_query,
-        status=status,
         keyword_only=keyword_only,
         max_results=max_results,
         session=session,

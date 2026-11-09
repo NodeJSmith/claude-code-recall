@@ -36,8 +36,8 @@ def days_modifier(days: int) -> str:
     """SQLite datetime() modifier for an N-day lookback (days=7 -> '-7 days').
 
     Single source of truth for the --days recency bound so build_selection()
-    (chunk-embedding eligibility), eligibility_clause() (tool-content
-    eligibility), and count_status() (progress) can't construct it differently.
+    (chunk-embedding eligibility) and eligibility_clause() (tool-content
+    eligibility) can't construct it differently.
     """
     return f"-{days} days"
 

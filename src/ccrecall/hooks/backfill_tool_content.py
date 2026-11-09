@@ -38,15 +38,7 @@ hot path. It doesn't fit ``backfill_query.build_selection`` (the
 chunk-embedding branch universe) either, so only the batch/no-progress-guard
 constants are shared from there.
 
-For the same reason, ``--status`` here doesn't call
-``backfill_status.run_status``/``count_status``: those are hard-wired to the
-chunk-embedding domain (``CHUNK_EMBEDDABLE_BRANCH_FILTER``, ``chunk_vec``,
-``EMBEDDING_VERSION``/``EMBEDDING_MODEL``, the content-error sentinel), none
-of which has a session-grain tool_content equivalent (there's no "errored"
-concept for a re-parse backfill, and the universe is sessions, not chunks).
-Only ``format_duration`` — the one grain-agnostic piece — is shared from
-``backfill_status``; the counting and report shape are re-derived here from
-``tool_content_eligibility``.
+This module's ``--status`` report lives in ``tool_content_status.py``.
 
 The outer batch-loop scaffolding (select → limit cutoff → stuck-batch
 detection → dispatch → trailer), which this module *does* share with
@@ -72,6 +64,7 @@ from ccrecall.content import extract_text_content
 from ccrecall.db import get_connection
 from ccrecall.db_base import is_database_locked
 from ccrecall.db_vec import VEC_BUSY_TIMEOUT_MS
+from ccrecall.formatting import format_duration
 from ccrecall.hooks.backfill_query import (
     BACKFILL_BATCH_DELAY_SECONDS,
     BACKFILL_NICE_LEVEL,
@@ -81,7 +74,6 @@ from ccrecall.hooks.backfill_query import (
     EXIT_OK,
 )
 from ccrecall.hooks.backfill_runner import limit_reached, lower_scheduling_priority, run_batch_loop
-from ccrecall.hooks.backfill_status import format_duration
 from ccrecall.hooks.tool_content_eligibility import ELIGIBILITY_FROM, MAX_SQL_PARAMS, eligibility_clause
 from ccrecall.import_log_ops import import_log_source_index
 from ccrecall.message_ops import insert_new_messages

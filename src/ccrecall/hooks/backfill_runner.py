@@ -4,9 +4,8 @@
 outer batch loop with the same shape: select a batch, stop if the run's
 `--limit` is reached or the batch is empty, detect a re-selected ("stuck")
 batch, dispatch to per-item processing, then run a batch trailer. This module
-owns exactly that shape via `run_batch_loop`, alongside the existing
-`backfill_query.py` (constants/selection) and `backfill_status.py` (status
-reporting) that both `run()` functions already import from.
+owns exactly that shape via `run_batch_loop`; the constants and selection
+both `run()` functions import live in `backfill_query.py`.
 
 Everything domain-specific stays with the caller's callbacks: per-item
 processing (transactions, exception taxonomy, progress-message content),

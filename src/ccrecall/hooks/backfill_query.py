@@ -1,8 +1,7 @@
 """Query construction and constants for the embedding backfill.
 
 Owns the eligible-branch selection predicate (`build_selection`) and the
-constants that both the orchestrator (`backfill_embeddings.run`) and the
-status reporter (`backfill_status`) need to agree on.
+batch, progress and exit-code constants shared by both backfills and the CLI.
 """
 
 from ccrecall.db import CHUNK_DRAFT_QUALITY_FILTER, CHUNK_EMBEDDABLE_BRANCH_FILTER, CONTENT_ERROR_VERSION
