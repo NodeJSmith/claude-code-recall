@@ -62,3 +62,22 @@ jobs:
               run: |
                   uv export --frozen --no-hashes --no-emit-project --no-group dev > requirements.txt
                   uvx pip-audit@2.10.0 -r requirements.txt
+
+    # The one required lint check: branch protection requires this aggregate rather than each
+    # job, so adding or renaming a lint job never needs a ruleset change.
+    lint-complete:
+        needs: [prek, security]
+        if: always()
+        runs-on: ubuntu-latest
+        steps:
+            - name: Report result
+              env:
+                  RESULTS: ${{ join(needs.*.result, ' ') }}
+              run: |
+                  for result in $RESULTS; do
+                      if [[ "$result" != "success" && "$result" != "skipped" ]]; then
+                          echo "One or more lint jobs failed or were cancelled: $RESULTS"
+                          exit 1
+                      fi
+                  done
+                  echo "All lint checks passed"
