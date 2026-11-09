@@ -117,7 +117,8 @@ def cmd_import(
         _FLAG,
         Parameter(
             help="Force-reimport sessions missing messages their transcripts still have "
-            "(see `ccrecall doctor`). The SessionStart background import already does this."
+            "(see `ccrecall doctor`). SessionStart runs this in the background when there's no "
+            "database yet or a session has synced since the last import."
         ),
     ] = False,
     ctx: CLIContextParam = DEFAULT_CLI_CONTEXT,
@@ -180,7 +181,9 @@ def cmd_backfill_summaries(
 
 
 schedule_app = App(
-    name="schedule", help="Manage the backfill-schedule marker (suppresses the draft-quality-vectors alert)."
+    name="schedule",
+    help="Record that you run the embeddings backfill on a schedule, which silences the alert about "
+    "long exchanges embedded at reduced quality.",
 )
 backfill_app.command(schedule_app)
 
@@ -214,7 +217,7 @@ def cmd_schedule_status(
     db: _DB = DEFAULT_DB_PATH,
     ctx: CLIContextParam = DEFAULT_CLI_CONTEXT,
 ) -> None:
-    """Report the backfill-schedule marker state and remaining draft-quality chunks."""
+    """Report whether the schedule marker is set and how many exchanges are still at reduced quality."""
     marker = health.read_schedule_marker()
 
     remaining: int | None = None
@@ -245,7 +248,10 @@ def cmd_backfill_embeddings(
     dismiss: Annotated[
         bool,
         _FLAG,
-        Parameter(help="Permanently dismiss the draft-quality-vectors alert without running a backfill."),
+        Parameter(
+            help="Permanently silence the alert about long exchanges embedded at reduced quality, "
+            "without running a backfill."
+        ),
     ] = False,
     days: Annotated[
         int | None,
@@ -262,7 +268,10 @@ def cmd_backfill_embeddings(
     db: _DB = DEFAULT_DB_PATH,
     ctx: CLIContextParam = DEFAULT_CLI_CONTEXT,
 ) -> None:
-    """Seed historical embeddings for active-leaf branch summaries (opt-in)."""
+    """Embed past conversations for semantic search, at full quality (opt-in).
+
+    Covers each session's current conversation (not abandoned retries).
+    """
     # --dismiss short-circuits before the job lock and any backfill work: it
     # only records a marker so the SessionStart alert stops firing.
     if dismiss:
@@ -462,14 +471,14 @@ def cmd_search_messages(
     db: _DB = DEFAULT_DB_PATH,
     ctx: CLIContextParam = DEFAULT_CLI_CONTEXT,
 ) -> None:
-    """Search matched exchanges by semantic similarity (chunk-KNN, Entrypoint B).
+    """Search individual exchanges by meaning, not exact keywords.
 
     Accepts the query positionally (``ccrecall search-messages "auth bug"``) or
-    via --query/-q — not both. Returns matched exchanges ranked by chunk
-    distance — not rolled up to session, so multiple matches within one
-    session all appear as separate results.
+    via --query/-q — not both. Returns matched exchanges ranked by how
+    closely they match — not rolled up to session, so multiple matches within
+    one session all appear as separate results.
 
-    Date filters (--before/--after) are branch-level (the exchange's session
+    Date filters (--before/--after) are session-level (the exchange's session
     start time), not per-exchange, matching search and recent-chats.
 
     With --json: {query, ranked, count, results: [{score, session_uuid, handle, exchange_index, user, assistant, ...}]}
