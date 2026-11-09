@@ -41,6 +41,18 @@ from ccrecall.session_ops import sync_session
 NOTIF_FIXTURE = FIXTURE_DIR / "with_notifications.jsonl"
 
 
+TEAMMATE_FIXTURE = FIXTURE_DIR / "with_teammate_messages.jsonl"
+# ~31k chars / ~5.7k tokens for the sentence below repeated 300 times, combined
+# with a short assistant reply: over SYNC_PATH_TOKEN_LIMIT (4096) but under
+# both MODEL_TOKEN_LIMIT (8192) and EMBED_CHAR_BUDGET (32000 chars) -- so the
+# exchange is truncated at the sync cap but fits untouched at the backfill cap.
+_LONG_EXCHANGE_SENTENCE = (
+    "The quick brown fox jumps over the lazy dog and continues running through the forest looking for food. "
+)
+_LONG_EXCHANGE_REPEATS = 300
+_LONG_EXCHANGE_ASSISTANT_REPLY = "Understood, here is my response to that long message."
+
+
 def _setup_db_and_import(filepath: Path) -> sqlite3.Connection:
     """Create in-memory DB and import a fixture file, flagging notifications."""
     conn = sqlite3.connect(":memory:")
@@ -224,9 +236,6 @@ class TestNotificationEndToEnd:
         assert notif_count == 2
         assert len(messages) > notif_count  # Should also have regular messages
         conn.close()
-
-
-TEAMMATE_FIXTURE = FIXTURE_DIR / "with_teammate_messages.jsonl"
 
 
 class TestTeammateMessageEndToEnd:
@@ -528,16 +537,6 @@ class TestSearchMessagesToolContentMatch:
 # _should_stamp_watermark, and build_selection with real (unmocked)
 # cap_for_embedding/tokenization -- only embed_batch (the actual onnxruntime
 # inference call) is mocked out.
-
-# ~31k chars / ~5.7k tokens for the sentence below repeated 300 times, combined
-# with a short assistant reply: over SYNC_PATH_TOKEN_LIMIT (4096) but under
-# both MODEL_TOKEN_LIMIT (8192) and EMBED_CHAR_BUDGET (32000 chars) -- so the
-# exchange is truncated at the sync cap but fits untouched at the backfill cap.
-_LONG_EXCHANGE_SENTENCE = (
-    "The quick brown fox jumps over the lazy dog and continues running through the forest looking for food. "
-)
-_LONG_EXCHANGE_REPEATS = 300
-_LONG_EXCHANGE_ASSISTANT_REPLY = "Understood, here is my response to that long message."
 
 
 def _long_exchange_msgs() -> list[dict]:

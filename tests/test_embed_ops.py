@@ -33,6 +33,8 @@ from ccrecall.embeddings import (
 )
 from ccrecall.schema import SCHEMA
 
+_FAKE_VEC = [0.1] * EMBEDDING_DIM
+
 
 def _exchange(
     index: int = 0,
@@ -548,9 +550,6 @@ class TestResolveSyncCap:
     )
     def test_clamps_raw_setting(self, raw, expected):
         assert resolve_sync_cap(raw) == expected
-
-
-_FAKE_VEC = [0.1] * EMBEDDING_DIM
 
 
 def _fake_cap(text, max_tokens=None):

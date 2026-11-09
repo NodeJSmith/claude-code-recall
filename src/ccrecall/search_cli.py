@@ -111,10 +111,10 @@ def run_messages(
         else:
             print(format_messages_markdown(snippets, query, ranked))
 
-    except Exception as e:
+    except Exception as exc:
         log.exception("message search failed", extra={"query_length": len(query)})
         emit_error(
-            str(e),
+            str(exc),
             code="search_error",
             exit_code=1,
             remediation="Check ccrecall search --status for diagnostics.",
@@ -151,10 +151,10 @@ def print_status(settings: dict | None) -> None:
                 print(f"embedded branches: {embedded_branches}/{total_branches} (watermark)")
                 if draft_branches:
                     print(f"draft-quality branches: {draft_branches} (searchable, not full quality)")
-            except sqlite3.Error as e:
+            except sqlite3.Error as exc:
                 log.warning("chunk coverage query failed; reporting degraded status", exc_info=True)
-                print(f"chunk coverage: error ({e})")
-                print(f"embedded branches: error ({e})")
+                print(f"chunk coverage: error ({exc})")
+                print(f"embedded branches: error ({exc})")
     except (sqlite3.Error, OSError):
         log.exception("failed to open database for status check")
         print("vec extension: no")
@@ -260,10 +260,10 @@ def run(
                 md += f"\n\n_{caveat}_"
             print(md)
 
-    except Exception as e:
+    except Exception as exc:
         log.exception("session search failed", extra={"query_length": len(query) if query else 0})
         emit_error(
-            str(e),
+            str(exc),
             code="search_error",
             exit_code=1,
             remediation="Check ccrecall search --status for diagnostics.",

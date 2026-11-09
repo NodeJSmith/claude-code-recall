@@ -35,6 +35,34 @@ from ccrecall.hooks import sync_current as sync_current_mod
 # store_true flags carry no --no-<flag> negation, matching the former argparse.
 _FLAG = Parameter(negative=[])
 
+# Output format is global: the meta launcher's --json fills ctx.json_mode, which
+# read commands map to their run()'s output_format kwd. list_sessions -> --list
+# is renamed to avoid shadowing the list builtin; Parameter(name=...) keeps the
+# user-facing flag intact.
+
+# Shared flag types mirroring the former cm-* read tools.
+_VERBOSE = Annotated[bool, _FLAG, Parameter(name=["--verbose", "-v"], help="Expand files, commits, and tool counts.")]
+_NOTIFS = Annotated[
+    bool, _FLAG, Parameter(name=["--include-notifications"], help="Include task notification messages.")
+]
+_DB = Annotated[Path, Parameter(name=["--db"], help="Database path.")]
+# Shared across recent/search/search-messages so help text and semantics can't drift
+# between commands. Validated by ccrecall.dates.validate_date_boundaries at runtime
+# (accepts YYYY-MM-DD or a full ISO-8601 instant); an unparseable value exits 2
+# rather than silently comparing wrong.
+_BEFORE = Annotated[str | None, Parameter(help="Sessions started before this date/datetime (ISO).")]
+_AFTER = Annotated[str | None, Parameter(help="Sessions started after this date/datetime (ISO).")]
+# Shared across recent/search/search-messages so filter help text can't drift
+# between commands.
+_SESSION = Annotated[str | None, Parameter(help="Filter by session UUID (prefix match).")]
+_PROJECT = Annotated[str | None, Parameter(help="Filter by project name(s), comma-separated.")]
+_PATH = Annotated[str | None, Parameter(help="Filter by cwd substring (e.g. worktree name).")]
+# Default for `tail -n`, sourced from session_tail so the two never drift.
+_TAIL_DEFAULT_N = session_tail_mod.DEFAULT_TAIL_EVENTS
+# Default result counts for the recent/search commands.
+_DEFAULT_RECENT_N = 3
+_DEFAULT_SEARCH_MAX_RESULTS = 5
+
 
 # Friendly labels for the query-mode conflict/missing-arg messages below —
 # keyed by each argument's cyclopts-assigned name (the positional query's
@@ -84,35 +112,6 @@ def _exactly_one_query(arguments: ArgumentCollection) -> None:
 # Membership in this group (positional query + --query below) triggers the
 # exactly-one validator for search-messages, which has no --status mode.
 _QUERY_MODE = Group("Search mode", validator=_exactly_one_query)
-
-
-# Output format is global: the meta launcher's --json fills ctx.json_mode, which
-# read commands map to their run()'s output_format kwd. list_sessions -> --list
-# is renamed to avoid shadowing the list builtin; Parameter(name=...) keeps the
-# user-facing flag intact.
-
-# Shared flag types mirroring the former cm-* read tools.
-_VERBOSE = Annotated[bool, _FLAG, Parameter(name=["--verbose", "-v"], help="Expand files, commits, and tool counts.")]
-_NOTIFS = Annotated[
-    bool, _FLAG, Parameter(name=["--include-notifications"], help="Include task notification messages.")
-]
-_DB = Annotated[Path, Parameter(name=["--db"], help="Database path.")]
-# Shared across recent/search/search-messages so help text and semantics can't drift
-# between commands. Validated by ccrecall.dates.validate_date_boundaries at runtime
-# (accepts YYYY-MM-DD or a full ISO-8601 instant); an unparseable value exits 2
-# rather than silently comparing wrong.
-_BEFORE = Annotated[str | None, Parameter(help="Sessions started before this date/datetime (ISO).")]
-_AFTER = Annotated[str | None, Parameter(help="Sessions started after this date/datetime (ISO).")]
-# Shared across recent/search/search-messages so filter help text can't drift
-# between commands.
-_SESSION = Annotated[str | None, Parameter(help="Filter by session UUID (prefix match).")]
-_PROJECT = Annotated[str | None, Parameter(help="Filter by project name(s), comma-separated.")]
-_PATH = Annotated[str | None, Parameter(help="Filter by cwd substring (e.g. worktree name).")]
-# Default for `tail -n`, sourced from session_tail so the two never drift.
-_TAIL_DEFAULT_N = session_tail_mod.DEFAULT_TAIL_EVENTS
-# Default result counts for the recent/search commands.
-_DEFAULT_RECENT_N = 3
-_DEFAULT_SEARCH_MAX_RESULTS = 5
 
 
 @app.command(name="sync-current")

@@ -31,6 +31,15 @@ from ccrecall.session_tail import (
 _counter = [0]
 
 
+OPTS = [
+    {"label": "Ship it", "description": "commit and PR"},
+    {"label": "Wait", "description": "hold"},
+]
+ANSWERED = 'Your questions have been answered: "How do you want to proceed?"="Ship it"'
+REJECTED = "The user doesn't want to proceed with this tool use. The tool use was rejected."
+INTERRUPT = "[Request interrupted by user for tool use]"
+
+
 def _uuid() -> str:
     _counter[0] += 1
     return f"uuid-{_counter[0]:04d}"
@@ -81,15 +90,6 @@ def ask_question(tool_id: str, question: str, options, sidechain: bool = False) 
         "uuid": _uuid(),
         "isSidechain": sidechain,
     }
-
-
-OPTS = [
-    {"label": "Ship it", "description": "commit and PR"},
-    {"label": "Wait", "description": "hold"},
-]
-ANSWERED = 'Your questions have been answered: "How do you want to proceed?"="Ship it"'
-REJECTED = "The user doesn't want to proceed with this tool use. The tool use was rejected."
-INTERRUPT = "[Request interrupted by user for tool use]"
 
 
 class TestFindPendingQuestion:

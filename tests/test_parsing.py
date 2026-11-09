@@ -17,6 +17,19 @@ from ccrecall.parsing import (
 )
 from ccrecall.schema import SCHEMA
 
+# Verified expected values from real fixture analysis. Every fixture now yields
+# exactly one branch — find_all_branches returns only the active branch, so
+# "branches" is always 1 regardless of rewinds recorded in the fixture.
+EXPECTED = {
+    "linear_3_exchange": {"branches": 1, "active_exchanges": 3},
+    "tool_heavy": {"branches": 1, "active_exchanges": 2},
+    "single_rewind": {"branches": 1, "active_exchanges": 5},
+    "multi_rewind": {"branches": 1, "active_exchanges": 7},
+    "with_notifications": {"branches": 1, "active_exchanges": 2},
+    "with_teammate_messages": {"branches": 1, "active_exchanges": 2},
+    "channel_telegram": {"branches": 1, "active_exchanges": 2},
+}
+
 
 class TestExtractSessionUuid:
     def test_plain_session_file(self):
@@ -35,20 +48,6 @@ class TestExtractSessionUuid:
     def test_extensionless_path(self):
         # Works regardless of extension — stem handles it.
         assert extract_session_uuid(Path("/x/agent-abc")) == "abc"
-
-
-# Verified expected values from real fixture analysis. Every fixture now yields
-# exactly one branch — find_all_branches returns only the active branch, so
-# "branches" is always 1 regardless of rewinds recorded in the fixture.
-EXPECTED = {
-    "linear_3_exchange": {"branches": 1, "active_exchanges": 3},
-    "tool_heavy": {"branches": 1, "active_exchanges": 2},
-    "single_rewind": {"branches": 1, "active_exchanges": 5},
-    "multi_rewind": {"branches": 1, "active_exchanges": 7},
-    "with_notifications": {"branches": 1, "active_exchanges": 2},
-    "with_teammate_messages": {"branches": 1, "active_exchanges": 2},
-    "channel_telegram": {"branches": 1, "active_exchanges": 2},
-}
 
 
 class TestFindAllBranchesBasics:

@@ -84,7 +84,44 @@ dev = [
     "hypothesis>=6.0",
     "pytest-cov>=7.0.0",
     "coverage[toml]>=7.10.7",
+    "house-lint>=0.5.0",
 ]
+
+# house-lint checks the habits AI coding assistants leave behind. Its prek hook replaces
+# this repo's former tools/check_lazy_imports.py, check_llm_cruft.py and check_spec_tokens.py.
+#
+# HSL001 AI-writing tells (divider comments, filler phrases) in comments/docstrings
+# HSL002 imports inside function/method bodies ("lazy imports")
+# HSL003 a top-level TYPE_CHECKING guard followed by a later top-level import
+# HSL004 UPPER_CASE module constants defined after the first class/function
+# HSL101 leaked spec-artifact tokens (AC#/FR#/NFR#/WP#/T##) in comments, docstrings, filenames
+# HSL103 except-handler bindings that aren't named 'exc' or '*_exc'
+[tool.house-lint]
+include = ["src", "tests", "scripts", "tools"]
+select = ["HSL001", "HSL002", "HSL003", "HSL004", "HSL101", "HSL103"]
+
+[tool.house-lint.rules.HSL103]
+# '*_exc' is a suffix wildcard: matches any name ending in "_exc" (retry_exc, inner_exc, ...).
+allowed = ["exc", "*_exc"]
+
+# HSL101's built-in families already cover comments, docstrings, and filenames, but
+# case-sensitively. These add case-insensitive filename matching, since file names are
+# conventionally lowercase. They stay filename-only: case-insensitive matching in prose
+# would flag ordinary lowercase words like "tofu" or "frame".
+[[tool.house-lint.rules.HSL101.tokens]]
+prefixes = ["AC", "FR", "NFR", "WP"]
+separator = "hash-optional"
+min_digits = 1
+suffix = "optional-lower-alpha"
+scopes = ["filenames"]
+case_sensitive = false
+
+# min_digits = 2 keeps ordinary filenames like `t1_fixtures.py` out of scope.
+[[tool.house-lint.rules.HSL101.tokens]]
+prefixes = ["T"]
+min_digits = 2
+scopes = ["filenames"]
+case_sensitive = false
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

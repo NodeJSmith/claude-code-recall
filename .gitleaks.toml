@@ -1,0 +1,8 @@
+# gitleaks config: the default rules plus this repo's triaged false positives.
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Job-lock key constants: generic-api-key reads `JOB_KEY_<NAME>, age_seconds=<n>` in test calls as a key and its value"
+regexTarget = "match"
+regexes = ['''JOB_KEY_[A-Z_]+,\s*age_seconds=''']

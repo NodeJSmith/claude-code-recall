@@ -312,9 +312,9 @@ def run(
                 after_batch=after_batch,
             ):
                 return EXIT_ABORT
-    except (sqlite3.Error, OSError) as e:
+    except (sqlite3.Error, OSError) as exc:
         logger.exception("%s: aborted", _LOG_PREFIX)
-        print(f"{_PRINT_PREFIX}: aborted: {e}", file=sys.stderr)
+        print(f"{_PRINT_PREFIX}: aborted: {exc}", file=sys.stderr)
         return EXIT_ABORT
 
     elapsed = time.monotonic() - started
@@ -603,9 +603,9 @@ def run_tool_content_status(
             pending_missing = classification["missing"]
             pending_no_usable_branch = classification["no_usable_branch"]
             total = count_total_sessions(cursor, days)
-    except (sqlite3.Error, OSError) as e:
+    except (sqlite3.Error, OSError) as exc:
         logger.exception("%s: status aborted", _LOG_PREFIX)
-        print(f"{_PRINT_PREFIX}: aborted: {e}", file=sys.stderr)
+        print(f"{_PRINT_PREFIX}: aborted: {exc}", file=sys.stderr)
         return EXIT_ABORT
 
     done = total - pending
