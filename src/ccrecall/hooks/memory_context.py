@@ -140,7 +140,9 @@ def main():
         # ── Proactive alert evaluation ──────────────────────────────────────────
         # Must run before ALL early-return gates so alerts fire even when sessions
         # is empty or the DB is inaccessible.
-        proactive_block = proactive_alert_block(settings, conn, db_available, schema_ahead_cause=schema_ahead_cause)
+        proactive_block = proactive_alert_block(
+            settings, conn, db_available, schema_ahead_cause=schema_ahead_cause, db_path=db_path
+        )
 
         # ── Gate: context injection disabled ─────────────────────────────────────
         if not settings.get("auto_inject_context", True):

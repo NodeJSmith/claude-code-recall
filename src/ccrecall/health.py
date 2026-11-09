@@ -63,6 +63,7 @@ ALERT_EMBEDDINGS_FAILING = "embeddings_failing"
 ALERT_TOOL_CONTENT_INCOMPLETE = "tool_content_incomplete"
 ALERT_DRAFT_QUALITY_VECTORS = "draft_quality_vectors"
 ALERT_SCHEMA_AHEAD = "schema_ahead"
+ALERT_IMPORT_FAILED = "import_failed"
 
 # Deliberate duplication of embeddings.MODEL_TOKEN_LIMIT: health.py must never
 # import from embeddings.py (see module docstring's hot-path invariant), so this
@@ -516,6 +517,11 @@ _ALERT_PROSE: dict[str, tuple[str, str, str]] = {
         "upgrade ccrecall the way you installed it; with more than one install (such as a dev checkout), "
         "the older one is the one running here",
     ),
+    ALERT_IMPORT_FAILED: (
+        "ccrecall's last import did not finish cleanly — recent conversations may be missing from search and recall.",
+        "the import aborted on an error",
+        f"check ~/.ccrecall/ccrecall-import.log for the traceback and run `ccrecall doctor`; `{FIX_IMPORT}` retries it",
+    ),
 }
 
 
@@ -539,6 +545,7 @@ def build_alert_block(
     fault_reason: str = "",
     embedding_reason: str = "",
     schema_ahead_cause: str = "",
+    import_failed_cause: str = "",
 ) -> str:
     """Build a single Markdown alert block for all active, un-snoozed alerts.
 
@@ -565,6 +572,7 @@ def build_alert_block(
         # code from the sidecar and never have to know the prose mapping.
         ALERT_EMBEDDINGS_FAILING: describe_embedding_reason(embedding_reason),
         ALERT_SCHEMA_AHEAD: schema_ahead_cause,
+        ALERT_IMPORT_FAILED: import_failed_cause,
     }
 
     for key in keys_to_fire:

@@ -802,6 +802,23 @@ class TestImportPoisonContainment:
             "an uncaught exception in run() must be logged with a traceback before the process exits"
         )
 
+    def test_run_leaves_database_errors_to_the_cli_boundary(self, tmp_path, caplog, monkeypatch):
+        """run() re-raises a database error without logging it: the CLI launcher logs
+        it once, so logging here too would put the traceback in the log twice."""
+
+        def _raise(**_kwargs):
+            raise sqlite3.DatabaseError("file is not a database")
+
+        monkeypatch.setattr("ccrecall.hooks.import_conversations._run", _raise)
+
+        with (
+            caplog.at_level(logging.ERROR, logger="ccrecall"),
+            pytest.raises(sqlite3.DatabaseError),
+        ):
+            run(db=tmp_path / "memory.db", projects_dir=tmp_path)
+
+        assert not [record for record in caplog.records if record.levelno >= logging.ERROR]
+
     def test_operational_error_propagates_instead_of_being_swallowed(self, memory_db, tmp_path, caplog, monkeypatch):
         """A database-level failure (full disk, corrupt DB, incompatible schema) must
         not be treated as a poison transcript — that would repeat the same failure

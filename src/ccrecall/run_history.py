@@ -23,7 +23,7 @@ import contextlib
 import json
 import logging
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -64,6 +64,19 @@ REASON_DATABASE_BUSY = "database_busy"
 REASON_VECTOR_UNAVAILABLE = "vector_unavailable"
 REASON_MODEL_UNAVAILABLE = "model_unavailable"
 REASON_ERROR = "error"
+
+# Shared by `ccrecall doctor` and the SessionStart failed-import alert.
+REASON_PROSE = {
+    REASON_DATABASE_BUSY: "the database was busy; the next run retries",
+    REASON_VECTOR_UNAVAILABLE: "the vector extension (sqlite-vec) couldn't load",
+    REASON_MODEL_UNAVAILABLE: "the embedding model couldn't load",
+    REASON_ERROR: "an error",
+}
+
+
+def describe_reason(reason: str) -> str:
+    """Plain-language cause for a run's reason code; unknown codes pass through."""
+    return REASON_PROSE.get(reason, reason)
 
 
 def runs_path(db_path: Path) -> Path:
@@ -166,6 +179,28 @@ def read_runs(db_path: Path) -> dict[str, dict]:
     """Return ``{kind: {"last": record | None, "last_ok": record | None}}`` for every recorded kind."""
     runs = read_json_object(runs_path(db_path))
     return {kind: value for kind, value in runs.items() if isinstance(value, dict)}
+
+
+def failed_run(runs: Mapping[str, dict], kind: str) -> dict | None:
+    """The kind's last run record if it failed or finished with failures, else None."""
+    last = runs.get(kind, {}).get("last")
+    if not isinstance(last, dict) or last.get("outcome") not in (OUTCOME_FAILED, OUTCOME_PARTIAL):
+        return None
+    return last
+
+
+def is_busy(record: dict) -> bool:
+    """A run that failed only because the database was busy: the next run retries it."""
+    return record.get("reason") == REASON_DATABASE_BUSY
+
+
+def alertable_import_failure(db_path: Path) -> dict | None:
+    """The last import's record when it failed for a reason the SessionStart alert should raise.
+
+    A busy database isn't one: `ccrecall doctor` reports it as working, not as needing action.
+    """
+    record = failed_run(read_runs(db_path), KIND_IMPORT)
+    return None if record is None or is_busy(record) else record
 
 
 def read_json_object(path: Path) -> dict:

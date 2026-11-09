@@ -457,6 +457,10 @@ def run(
         total_failures = _run(
             db=db, projects_dir=projects_dir, project=project, verbose=verbose, repair_gaps=repair_gaps
         )
+    except (sqlite3.Error, OSError):
+        # The CLI's error boundary (cli.launcher) logs these with a traceback and
+        # prints one line, so logging here too would put every traceback in the log twice.
+        raise
     except Exception:
         # Top-level catch (#170): this process is detached and spawned with
         # stdout/stderr redirected to DEVNULL (see memory_setup._spawn_background),

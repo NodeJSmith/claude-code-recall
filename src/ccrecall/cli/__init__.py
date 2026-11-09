@@ -6,8 +6,12 @@ this module triggers that registration).
 """
 
 import inspect
+import logging
+import sqlite3
 import sys
 from importlib.metadata import PackageNotFoundError, version
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 from typing import Annotated
 
 from cyclopts import App, Group, Parameter
@@ -16,6 +20,8 @@ from cyclopts.exceptions import CycloptsError
 from ccrecall.cli.context import CLIContext
 from ccrecall.config import DEFAULT_DB_PATH, get_db_path, load_settings, load_settings_for_db, setup_logging
 from ccrecall.db_base import describe_schema_ahead
+from ccrecall.errors import classify_failure, emit_failure
+from ccrecall.models import LOGGER_NAME
 
 try:
     _version = version("ccrecall")
@@ -92,7 +98,30 @@ def launcher(
         print(
             f"ccrecall: warning: {schema_ahead_cause}. Upgrade ccrecall; commands may fail until then.", file=sys.stderr
         )
-    command(*bound.args, **bound.kwargs)
+    try:
+        command(*bound.args, **bound.kwargs)
+    except BrokenPipeError:
+        # A reader that closed the pipe early (`ccrecall recent | head`) is normal use, not a failure.
+        raise
+    except (sqlite3.Error, OSError) as exc:
+        # One actionable line instead of a traceback; the traceback goes to the
+        # log of whichever process this command set up (import, sync, cli, ...).
+        log = logging.getLogger(LOGGER_NAME)
+        operation = "ccrecall " + " ".join(app.parse_commands(tokens)[0])
+        log.exception("command failed", extra={"operation": operation})
+        emit_failure(
+            classify_failure(
+                exc, operation=operation, schema_ahead_cause=schema_ahead_cause, log_path=active_log_path(log)
+            )
+        )
+
+
+def active_log_path(logger: logging.Logger) -> Path | None:
+    """The file this logger writes to, or None when logging is disabled."""
+    for handler in logger.handlers:
+        if isinstance(handler, RotatingFileHandler):
+            return Path(handler.baseFilename)
+    return None
 
 
 def main() -> None:
