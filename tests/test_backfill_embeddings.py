@@ -1181,6 +1181,7 @@ def test_run_forwards_custom_db_path_to_load_settings():
     mock_load.assert_called_once_with(custom_path)
 
 
+@_VEC_SKIP
 class TestBackfillInferencesCounter:
     def test_json_output_includes_inferences(self):
         """The JSON completion output includes 'inferences' alongside 'embedded'."""
