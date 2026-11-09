@@ -50,13 +50,13 @@ a `sqlite3.Error`/`OSError` (`run()` returns `EXIT_ABORT`). Branches finished
 earlier in the run stay committed, and the row that triggered the failure stays
 eligible for retry on the next run.
 
-Built to run unattended (systemd timer): `--status [--json]` reports progress
-without embedding, progress lines carry elapsed/ETA, and abort paths exit
-non-zero so the scheduler sees the failure.
+Built to run unattended (systemd timer): progress lines carry elapsed/ETA,
+and abort paths exit non-zero so the scheduler sees the failure. Embedding
+coverage and backlog are reported by `ccrecall status` and `ccrecall doctor`.
 
-Query construction/constants live in `backfill_query.py`; status reporting
-lives in `backfill_status.py`; the outer batch-loop scaffolding shared with
-`backfill_tool_content.run()` lives in `backfill_runner.py`. This module
+Query construction/constants live in `backfill_query.py`; the outer
+batch-loop scaffolding shared with `backfill_tool_content.run()` lives in
+`backfill_runner.py`. This module
 keeps the `run()` orchestrator (progress reporting wired into
 `run_batch_loop`'s callbacks) plus the shared `reclaim_memory` helper from
 `subprocess_utils` (gc + malloc_trim between batches, the same RSS
@@ -87,6 +87,7 @@ from ccrecall.embeddings import (
     embed_batch,
     model_available,
 )
+from ccrecall.formatting import format_duration
 from ccrecall.health import (
     REASON_MODEL_UNAVAILABLE,
     REASON_VEC_UNAVAILABLE,
@@ -103,7 +104,6 @@ from ccrecall.hooks.backfill_query import (
     build_selection,
 )
 from ccrecall.hooks.backfill_runner import limit_reached, lower_scheduling_priority, run_batch_loop
-from ccrecall.hooks.backfill_status import format_duration, run_status
 from ccrecall.hooks.subprocess_utils import reclaim_memory, try_load_libc
 
 _PRINT_PREFIX = "ccrecall backfill embeddings"
@@ -117,7 +117,6 @@ _MAX_CONSECUTIVE_LOCK_TIMEOUTS = 3
 
 def run(
     *,
-    status: bool = False,
     json_mode: bool = False,
     days: int | None = None,
     limit: int | None = None,
@@ -138,9 +137,6 @@ def run(
 
     settings = load_settings_for_db(db)
     logger = setup_logging(settings, process_name="backfill-embed", verbose=verbose)
-
-    if status:
-        return run_status(days=days, json_mode=json_mode, settings=settings, logger=logger)
 
     # Only an unscoped run advances last_ok: a scoped one can finish ok having
     # worked a sliver of the backlog.

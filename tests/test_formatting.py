@@ -4,12 +4,15 @@ import json
 import re
 from pathlib import Path
 
+import pytest
+
 from ccrecall.formatting import (
     MAX_FILES_DISPLAYED,
     build_envelope,
     extract_project_name,
     format_card_json,
     format_card_markdown,
+    format_duration,
     format_markdown_session,
     format_result_list_markdown,
     format_snippet_json,
@@ -22,6 +25,23 @@ from ccrecall.formatting import (
     normalize_scores,
     parse_project_key,
 )
+
+
+@pytest.mark.parametrize(
+    ("seconds", "expected"),
+    [
+        (0, "0s"),
+        (45, "45s"),
+        (59.9, "59s"),
+        (60, "1m00s"),
+        (723, "12m03s"),
+        (3599, "59m59s"),
+        (3600, "1h00m"),
+        (4020, "1h07m"),
+    ],
+)
+def test_format_duration(seconds, expected):
+    assert format_duration(seconds) == expected
 
 
 class TestFormatTime:

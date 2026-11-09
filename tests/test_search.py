@@ -21,7 +21,7 @@ from ccrecall.formatting import apply_scores, format_snippet_json, format_snippe
 from ccrecall.fusion import rrf_scored
 from ccrecall.recent_chats import get_recent_sessions
 from ccrecall.schema import SCHEMA, SCHEMA_CORE, detect_fts_support
-from ccrecall.search_cli import MAX_SEARCH_RESULTS, format_markdown, print_status, run, run_messages
+from ccrecall.search_cli import MAX_SEARCH_RESULTS, format_markdown, run, run_messages
 from ccrecall.search_conversations import OVERFETCH_FLOOR, compute_caveat, search_messages, search_sessions
 from ccrecall.search_hydrate import dedup_by_session, hydrate_cards
 from ccrecall.search_query import ScopeFilter
@@ -1541,88 +1541,31 @@ class TestSessionDedup:
         conn.close()
 
 
-# --status flag
+class TestSearchErrorExit:
+    """An unexpected error during search exits 1 through emit_error."""
 
-
-class TestStatusFlag:
-    """--status prints diagnostic info and exits 0 without requiring --query."""
-
-    def test_status_exits_zero(self, tmp_path, capsys):
-        """--status exits 0 and outputs all diagnostic fields (vec, model, chunk coverage, branches)."""
-        db_path = tmp_path / "test.db"
-        # Create a minimal DB so status can read branch/chunk counts
-        c = sqlite3.connect(str(db_path))
-        c.executescript(SCHEMA_CORE)
-        c.commit()
-        c.close()
-
-        settings = {"db_path": str(db_path)}
-
+    def test_blank_query_is_a_usage_error(self, tmp_path):
         with pytest.raises(SystemExit) as exc:
-            print_status(settings)
+            run(query="  ", db=tmp_path / "conv.db")
+        assert exc.value.code == 2
 
-        assert exc.value.code == 0
-        captured = capsys.readouterr()
-        assert "vec extension:" in captured.out
-        assert "model:" in captured.out
-        assert "chunk coverage:" in captured.out
-        assert "embedded branches:" in captured.out
-
-    def test_status_does_not_require_query(self, tmp_path):
-        """--status works without --query."""
+    def test_unexpected_exception_exits_with_search_error(self, tmp_path, capsys):
         db_path = tmp_path / "conv.db"
         c = sqlite3.connect(str(db_path))
         c.executescript(SCHEMA_CORE)
         c.commit()
         c.close()
 
-        with pytest.raises(SystemExit) as exc:
-            run(status=True, db=db_path)
-        assert exc.value.code == 0
-
-    def test_status_ignores_keyword_only(self, tmp_path):
-        """--status combined with --keyword-only still exits 0."""
-        db_path = tmp_path / "conv2.db"
-        c = sqlite3.connect(str(db_path))
-        c.executescript(SCHEMA_CORE)
-        c.commit()
-        c.close()
-
-        with pytest.raises(SystemExit) as exc:
-            run(status=True, keyword_only=True, db=db_path)
-        assert exc.value.code == 0
-
-    def test_run_errors_without_query_or_status(self, tmp_path):
-        """run() errors when neither --query nor --status is provided."""
-        db_path = tmp_path / "conv3.db"
-
-        with pytest.raises(SystemExit) as exc:
-            run(db=db_path)
-        # run() exits 2 when neither --query nor --status is given
-        assert exc.value.code != 0
-
-    def test_status_unexpected_exception_exits_cleanly(self, tmp_path, capsys):
-        """An unexpected (non-DB) exception during --status must not crash with
-        TypeError from `len(query)` on a None query — it should exit 1 via
-        emit_error like any other unhandled error in run()."""
-        db_path = tmp_path / "conv4.db"
-        c = sqlite3.connect(str(db_path))
-        c.executescript(SCHEMA_CORE)
-        c.commit()
-        c.close()
-
-        # print_status only catches (sqlite3.Error, OSError) internally; a
-        # ValueError from get_connection propagates up into run()'s outer
-        # except Exception, where query is still None.
         with (
             patch("ccrecall.search_cli.get_connection", side_effect=ValueError("boom")),
             pytest.raises(SystemExit) as exc,
         ):
-            run(status=True, db=db_path)
+            run(query="anything", db=db_path)
 
         assert exc.value.code == 1
         captured = capsys.readouterr()
         assert "search_error" in captured.err
+        assert "ccrecall doctor" in captured.err
 
 
 class TestExceptionNarrowing:

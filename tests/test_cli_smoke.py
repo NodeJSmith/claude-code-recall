@@ -212,7 +212,6 @@ class TestCmdSearch:
         with patch("ccrecall.cli.commands.search_mod.run") as mock_run:
             cmd_search(
                 query="test query",
-                status=False,
                 keyword_only=False,
                 max_results=5,
                 session=None,
@@ -227,7 +226,6 @@ class TestCmdSearch:
             )
         mock_run.assert_called_once_with(
             query="test query",
-            status=False,
             keyword_only=False,
             max_results=5,
             session=None,
@@ -246,7 +244,6 @@ class TestCmdSearch:
         with patch("ccrecall.cli.commands.search_mod.run") as mock_run:
             cmd_search(
                 "test query",
-                status=False,
                 keyword_only=False,
                 max_results=5,
                 session=None,
@@ -261,7 +258,6 @@ class TestCmdSearch:
             )
         mock_run.assert_called_once_with(
             query="test query",
-            status=False,
             keyword_only=False,
             max_results=5,
             session=None,
@@ -292,9 +288,14 @@ class TestCmdSearch:
         with pytest.raises(ValidationError, match="cannot both be given"):
             app(["search", "positional query", "-q", "flagged query"], exit_on_error=False, print_error=False)
 
-    def test_app_rejects_no_query_and_no_status(self):
+    def test_app_rejects_missing_query(self):
         with pytest.raises(ValidationError, match="a query is required"):
             app(["search"], exit_on_error=False, print_error=False)
+
+    def test_removed_status_flag_is_usage_error(self):
+        with patch("ccrecall.cli.commands.search_mod.run") as mock_run, pytest.raises(CycloptsError):
+            app(["search", "--status"], exit_on_error=False, print_error=False)
+        mock_run.assert_not_called()
 
     def test_app_accepts_max_results_of_20(self):
         with patch("ccrecall.cli.commands.search_mod.run") as mock_run, pytest.raises(SystemExit) as exc_info:
@@ -305,6 +306,13 @@ class TestCmdSearch:
     def test_app_rejects_max_results_above_20(self):
         with pytest.raises(ValidationError):
             app(["search", "-q", "test", "-n", "21"], exit_on_error=False, print_error=False)
+
+
+class TestCmdBackfillEmbeddingsFlags:
+    def test_removed_status_flag_is_usage_error(self):
+        with patch("ccrecall.cli.commands.backfill_embeddings_mod.run") as mock_run, pytest.raises(CycloptsError):
+            app(["backfill", "embeddings", "--status"], exit_on_error=False, print_error=False)
+        mock_run.assert_not_called()
 
 
 class TestCmdSearchMessages:

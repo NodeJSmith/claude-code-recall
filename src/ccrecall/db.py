@@ -21,10 +21,7 @@ from ccrecall.config import DEFAULT_PROJECTS_DIR as DEFAULT_PROJECTS_DIR
 SCHEMA_VERSION = db_base.SCHEMA_VERSION
 
 # Shared SQL predicate for "branches that are candidates to embed": active
-# leaves (the query path only returns is_active=1) with a usable summary. This
-# is the single source of truth for the embedding universe — build_selection()
-# (eligibility), count_status() (backfill progress), and search_cli
-# print_status() (diagnostics) all build on it so their counts can't drift.
+# leaves (the query path only returns is_active=1) with a usable summary.
 EMBEDDABLE_BRANCH_FILTER = "is_active = 1 AND context_summary IS NOT NULL AND context_summary != ''"
 # Chunk-path universe: active leaf with at least one message. Wider than
 # EMBEDDABLE_BRANCH_FILTER because chunk embedding reads raw exchange text, not
@@ -37,8 +34,8 @@ CHUNK_EMBEDDABLE_BRANCH_FILTER = "is_active = 1 AND EXISTS(SELECT 1 FROM branch_
 # "errored".
 CONTENT_ERROR_VERSION = -1
 # Chunk-grain draft-quality predicate: a chunk embedded under a cap below the
-# model's full token limit. Single source of truth for backfill_query,
-# backfill_status, and db_vec — binds MODEL_TOKEN_LIMIT as a parameter (?).
+# model's full token limit. Single source of truth for backfill_query, db_vec
+# and findings — binds MODEL_TOKEN_LIMIT as a parameter (?).
 # health.py deliberately uses its own literal (FULL_QUALITY_TOKEN_LIMIT) to
 # avoid importing embeddings.py on the hot path; a cross-check test keeps them
 # in sync.

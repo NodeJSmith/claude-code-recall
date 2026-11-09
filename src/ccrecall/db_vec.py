@@ -216,14 +216,12 @@ def branch_embedding_coverage(conn: sqlite3.Connection) -> tuple[int, int, int]:
     Vec-free — reads only the branches/chunks tables so coverage reports work
     even where sqlite-vec can't load. The ``cap_tokens`` column (v8 migration)
     may be absent on a read-only connection that skips migrations; when missing,
-    ``embedded_draft`` is reported as 0. Shared by ``compute_caveat`` and
-    search's ``print_status`` so the surfaces can't
-    drift (see CHUNK_EMBEDDABLE_BRANCH_FILTER).
+    ``embedded_draft`` is reported as 0. Built on CHUNK_EMBEDDABLE_BRANCH_FILTER
+    so its counts can't drift from the other embedding surfaces.
 
-    This is the watermark view. `backfill embeddings --status` reports a
-    stricter, heal-aware count (its eligible set also flags watermark-current
-    branches that lost a chunk_vec row), so on a DB with orphaned vectors that
-    surface can show slightly fewer embedded branches than this one.
+    This is the watermark view: a watermark-current branch that lost a
+    chunk_vec row still counts as embedded here, though ``build_selection``
+    treats it as eligible for backfill.
     """
     total = conn.execute(f"SELECT COUNT(*) FROM branches WHERE {CHUNK_EMBEDDABLE_BRANCH_FILTER}").fetchone()[0]
     embedded_full = conn.execute(

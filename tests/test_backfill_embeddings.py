@@ -1168,125 +1168,19 @@ class TestHistoryPreservation:
         assert after["branch_messages"] == before["branch_messages"]
 
 
-# --status: read-only chunk-coverage progress reporter
-
-
-def _run_status(conn: sqlite3.Connection, capsys, *, json_mode=False, days=None):
-    """Invoke run(status=True, ...) against conn; return captured stdout."""
-    with (
-        patch("ccrecall.hooks.backfill_status.get_connection", return_value=_NoCloseConn(conn)),
-        patch("ccrecall.hooks.backfill_embeddings.load_settings_for_db", return_value={}),
-    ):
-        code = run(status=True, json_mode=json_mode, days=days)
-    assert code == 0
-    return capsys.readouterr().out
-
-
 def test_run_forwards_custom_db_path_to_load_settings():
     """A custom db= argument reaches load_settings_for_db unchanged — regression
     guard against silently routing work to the default database."""
-    conn = make_vec_conn()
     custom_path = Path("/tmp/custom-embed.db")
     with (
-        patch("ccrecall.hooks.backfill_status.get_connection", return_value=_NoCloseConn(conn)),
+        patch("ccrecall.hooks.backfill_embeddings.model_available", return_value=False),
+        patch("ccrecall.hooks.backfill_embeddings.record_embedding_failure"),
         patch("ccrecall.hooks.backfill_embeddings.load_settings_for_db", return_value={}) as mock_load,
     ):
-        run(status=True, json_mode=True, db=custom_path)
+        run(db=custom_path)
     mock_load.assert_called_once_with(custom_path)
 
 
-@_VEC_SKIP
-class TestBackfillStatus:
-    def _seed_mixed(self, conn: sqlite3.Connection) -> None:
-        """3 done branches (embedded), 2 eligible, 1 errored — 6 total branches."""
-        for _ in range(3):
-            _insert_branch_with_messages(conn)
-        _run_backfill_with_stub(conn)  # marks those 3 done (3 chunk_vec rows)
-        for _ in range(2):
-            _insert_branch_with_messages(conn)
-        errored = _insert_branch_with_messages(conn)
-        conn.execute("UPDATE branches SET embedding_version = -1 WHERE id = ?", (errored,))
-        conn.commit()
-
-    def test_json_counts(self, capsys):
-        conn = make_vec_conn()
-        self._seed_mixed(conn)
-
-        out = _run_status(conn, capsys, json_mode=True)
-        data = json.loads(out)
-
-        # universe = total chunks (3 done branches x 1 exchange = 3 chunks)
-        assert data["universe"] == 3
-        # done = current-version chunks with chunk_vec (the 3 embedded above)
-        assert data["done"] == 3
-        # eligible = branches still needing work (the 2 new eligible ones)
-        assert data["eligible"] == 2
-        # errored = branches with content-error sentinel (1)
-        assert data["errored"] == 1
-        # branch grain: 6 embeddable total, 3 embedded (= total - eligible - errored)
-        assert data["total_branches"] == 6
-        assert data["embedded_branches"] == 3
-        assert data["days"] is None
-
-    def test_human_output_reports_branch_coverage(self, capsys):
-        conn = make_vec_conn()
-        self._seed_mixed(conn)
-
-        out = _run_status(conn, capsys)
-
-        # Honest branch-grain coverage, not the misleading partial-universe chunk %.
-        assert "3 / 6 embedded" in out
-        assert "remaining: 2 branches" in out
-        assert "errored" in out
-        assert "chunks" not in out
-
-    def test_days_filters_counts(self, capsys):
-        """--status --days N bounds universe/eligible/errored by recency."""
-        conn = make_vec_conn()
-        recent = _insert_branch_with_messages(conn)
-        recent_err = _insert_branch_with_messages(conn)
-        old = _insert_branch_with_messages(conn)  # ended 60d ago → out of window
-        _insert_branch_with_messages(conn)  # NULL ended_at → out of window
-
-        conn.execute(
-            "UPDATE branches SET ended_at = datetime('now') WHERE id IN (?, ?)",
-            (recent, recent_err),
-        )
-        conn.execute(
-            "UPDATE branches SET ended_at = datetime('now', '-60 days') WHERE id = ?",
-            (old,),
-        )
-        conn.execute("UPDATE branches SET embedding_version = -1 WHERE id = ?", (recent_err,))
-        conn.commit()
-
-        out = _run_status(conn, capsys, json_mode=True, days=30)
-        data = json.loads(out)
-
-        # Only recent (eligible) and recent_err (errored) are within the window.
-        # universe = chunks in those branches = 0 (neither has been embedded yet,
-        # but universe counts existing chunks; recent has none since not yet run)
-        assert data["eligible"] == 1
-        assert data["errored"] == 1
-        # Branch grain is recency-bounded too: 2 in-window branches, 0 embedded.
-        assert data["total_branches"] == 2
-        assert data["embedded_branches"] == 0
-        assert data["days"] == 30
-
-    def test_status_does_not_embed(self, capsys):
-        """--status is read-only: it must not write any vectors."""
-        conn = make_vec_conn()
-        _insert_branch_with_messages(conn)
-
-        before = _chunk_count(conn)
-        _run_status(conn, capsys, json_mode=True)
-
-        assert _chunk_count(conn) == before == 0
-
-
-# Total inferences counter: reported alongside branches
-
-
-@_VEC_SKIP
 class TestBackfillInferencesCounter:
     def test_json_output_includes_inferences(self):
         """The JSON completion output includes 'inferences' alongside 'embedded'."""
@@ -1325,11 +1219,7 @@ class TestBackfillInferencesCounter:
 
 
 class TestBackfillEmbeddingStatusRecording:
-    """backfill_embeddings.run() records capability failures and clears on success.
-
-    Only the points inside run() (not run_status()) are instrumented — do NOT
-    instrument run_status(), which is a read-only diagnostic.
-    """
+    """backfill_embeddings.run() records capability failures and clears on success."""
 
     def test_model_unavailable_records_reason(self, tmp_path):
         """model_available() → False inside run() writes 'model_unavailable' to sidecar."""
@@ -1399,33 +1289,6 @@ class TestBackfillEmbeddingStatusRecording:
 
         assert not sidecar.exists(), "sidecar must be absent (cleared) after a successful embedding run"
 
-    def test_run_status_does_not_record(self, tmp_path):
-        """run(status=True) (run_status) must NOT record to the sidecar even when vec is unavailable.
-
-        Recording inside run_status() would fire a false alert every time the user
-        runs `ccrecall backfill embeddings --status` — a design violation (Edge Cases).
-        """
-        mock_conn = MagicMock()
-        mock_conn.__enter__.return_value = mock_conn
-        mock_conn.__exit__.return_value = False
-
-        record_calls = []
-
-        with (
-            patch("ccrecall.hooks.backfill_status.get_connection", return_value=mock_conn),
-            patch("ccrecall.hooks.backfill_status.chunk_vec_queryable", return_value=False),
-            patch("ccrecall.hooks.backfill_embeddings.load_settings_for_db", return_value={}),
-            patch(
-                "ccrecall.hooks.backfill_embeddings.record_embedding_failure",
-                side_effect=lambda reason: record_calls.append(reason),
-            ),
-        ):
-            run(status=True)
-
-        assert record_calls == [], (
-            f"run_status() (--status path) must never call record_embedding_failure; got calls: {record_calls}"
-        )
-
 
 class TestBackfillJobLock:
     """Self-concurrency guard for the manual embeddings backfill.
@@ -1433,7 +1296,7 @@ class TestBackfillJobLock:
     The CLI takes the job lock before run() and releases it on exit, so a second
     instance (a systemd timer firing while a previous run is alive, or a
     double-invoked manual run) skips instead of doubling the onnxruntime memory
-    peak. --status is read-only and never touches the lock.
+    peak.
     """
 
     def test_cli_skips_when_another_instance_holds_the_lock(self, capsys, hold_job_lock):
@@ -1477,19 +1340,6 @@ class TestBackfillJobLock:
             cmd_backfill_embeddings()
 
         assert job_lock.probe(JOB_KEY) is None
-
-    def test_cli_status_never_touches_the_lock(self, hold_job_lock):
-        holder = hold_job_lock(JOB_KEY)
-        with (
-            patch("ccrecall.cli.commands.backfill_embeddings_mod.run", return_value=EXIT_OK) as mock_run,
-            pytest.raises(SystemExit),
-        ):
-            cmd_backfill_embeddings(status=True)
-
-        mock_run.assert_called_once()
-        state = job_lock.probe(JOB_KEY)
-        assert state is not None
-        assert (state.running, state.pid) == (True, holder)
 
 
 class TestBackfillETAProgress:
@@ -1672,12 +1522,3 @@ class TestBackfillRunRecording:
 
         last = _backfill_runs()["last"]
         assert (last["outcome"], last["reason"]) == ("failed", "model_unavailable")
-
-    def test_status_records_nothing(self):
-        with (
-            patch("ccrecall.hooks.backfill_embeddings.load_settings_for_db", return_value={}),
-            patch("ccrecall.hooks.backfill_embeddings.run_status", return_value=EXIT_OK),
-        ):
-            run(status=True)
-
-        assert _backfill_runs() == {}

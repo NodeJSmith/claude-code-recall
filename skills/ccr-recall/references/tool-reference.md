@@ -33,8 +33,7 @@ ccrecall search --query "keyword"
 
 | Option | Effect |
 |--------|--------|
-| `--query/-q` | Required (unless `--status`) — substantive keywords |
-| `--status` | Print diagnostic info and exit 0 |
+| `--query/-q` | Required (or pass the query positionally) — substantive keywords |
 | `--keyword-only` | Skip embedding, use keyword search only |
 | `--max-results N` | Limit results (1-10, default 5) |
 | `--session UUID` | Filter by session UUID (prefix match) |
@@ -100,16 +99,7 @@ When a branch has no cached summary (`context_summary_json`), the card falls bac
 
 JSON always carries the full `files_modified`, `commits`, and `tool_counts` lists regardless of `--verbose`.
 
-### `--status` output
-
-```
-vec extension: yes
-model: jina-v2-small-en-v1.5 (deps available)
-chunk coverage: 312/318 chunks at current version
-embedded branches: 14/15 (watermark)
-```
-
-`chunk coverage` counts exchange-level chunk vectors at the current embedding version. `embedded branches` is the branch watermark — branches where every chunk is at the current version.
+For index health (embedding coverage, backlog, import failures), run `ccrecall status` or `ccrecall doctor`.
 
 ## ccrecall search-messages
 

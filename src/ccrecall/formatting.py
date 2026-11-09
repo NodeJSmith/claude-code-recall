@@ -41,6 +41,18 @@ def format_time(ts_str: str | None, fmt: str = "%H:%M") -> str:
         return ts_str[:16] if ts_str else "??:??"
 
 
+def format_duration(seconds: float) -> str:
+    """Compact human duration: '45s', '12m03s', '1h07m'."""
+    s = int(seconds)
+    if s < 60:
+        return f"{s}s"
+    m, s = divmod(s, 60)
+    if m < 60:
+        return f"{m}m{s:02d}s"
+    h, m = divmod(m, 60)
+    return f"{h}h{m:02d}m"
+
+
 def format_tool_counts(tool_counts: dict[str, int]) -> str:
     """Render tool usage as a count-descending "name: count, ..." string."""
     sorted_tools = sorted(tool_counts.items(), key=lambda kv: kv[1], reverse=True)
