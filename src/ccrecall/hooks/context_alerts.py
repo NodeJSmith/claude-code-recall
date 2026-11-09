@@ -10,11 +10,13 @@ import logging
 import sqlite3
 from pathlib import Path
 
+from ccrecall import run_history
 from ccrecall.config import DEFAULT_SETTINGS
 from ccrecall.health import (
     ALERT_CANT_PERSIST,
     ALERT_DRAFT_QUALITY_VECTORS,
     ALERT_EMBEDDINGS_FAILING,
+    ALERT_IMPORT_FAILED,
     ALERT_SCHEMA_AHEAD,
     ALERT_TOOL_CONTENT_INCOMPLETE,
     build_alert_block,
@@ -37,6 +39,7 @@ def proactive_alert_block(
     db_available: bool,
     *,
     schema_ahead_cause: str = "",
+    db_path: Path | None = None,
     marker_path: Path | None = None,
     snooze_path: Path | None = None,
     status_path: Path | None = None,
@@ -55,6 +58,9 @@ def proactive_alert_block(
       schedule or an explicit dismiss suppresses the alert entirely.
     - Schema-ahead cause, read by main() before it opened the connection, so it
       is reported even when an ahead database makes that connection fail.
+    - The last import's outcome in ``<db_path>.runs.json`` (a plain file read):
+      a failed or partial background import would otherwise be visible only in
+      its log. None skips the check.
 
     Passes active keys through the snooze ledger (fire / suppress / auto-clear)
     and builds ONE combined block for whatever fires.
@@ -109,6 +115,12 @@ def proactive_alert_block(
         if schema_ahead_cause:
             active_keys.add(ALERT_SCHEMA_AHEAD)
 
+        import_failed_cause = ""
+        import_failure = run_history.alertable_import_failure(db_path) if db_path is not None else None
+        if import_failure is not None:
+            active_keys.add(ALERT_IMPORT_FAILED)
+            import_failed_cause = describe_import_failure(import_failure)
+
         # 5. Evaluate snooze ledger: fire / suppress / auto-clear.
         # load_settings() always carries alert_snooze_hours from DEFAULT_SETTINGS;
         # fall back to the canonical default only for sparse (test) settings dicts.
@@ -121,6 +133,7 @@ def proactive_alert_block(
             fault_reason=fault_reason,
             embedding_reason=embedding_reason,
             schema_ahead_cause=schema_ahead_cause,
+            import_failed_cause=import_failed_cause,
         )
 
     except Exception:
@@ -129,6 +142,20 @@ def proactive_alert_block(
         # logging_enabled) so the failure isn't silently lost.
         logging.getLogger(LOGGER_NAME).exception("proactive alert block failed")
         return ""
+
+
+def describe_import_failure(record: dict) -> str:
+    """The "Likely cause" clause for the failed-import alert, from the import's runs.json record.
+
+    Lives here rather than beside health.describe_embedding_reason because it needs
+    run_history, which imports health.
+    """
+    reason = record.get("reason") or run_history.REASON_ERROR
+    if reason != run_history.REASON_ERROR:
+        return run_history.describe_reason(reason)
+    if record.get("outcome") == run_history.OUTCOME_PARTIAL:
+        return "one or more projects failed to import and were skipped"
+    return "the import aborted on an error"
 
 
 def has_draft_quality_chunks(conn: sqlite3.Connection) -> bool:

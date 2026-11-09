@@ -95,12 +95,6 @@ KIND_LOGS = {
     run_history.KIND_SYNC: "ccrecall-sync.log",
     run_history.KIND_BACKFILL: "ccrecall-backfill-embed.log",
 }
-RUN_REASON_PROSE = {
-    run_history.REASON_DATABASE_BUSY: "the database was busy; the next run retries",
-    run_history.REASON_VECTOR_UNAVAILABLE: "the vector extension (sqlite-vec) couldn't load",
-    run_history.REASON_MODEL_UNAVAILABLE: "the embedding model couldn't load",
-    run_history.REASON_ERROR: "an error",
-}
 # Kinds whose run is long enough to report as running, or stuck.
 LONG_RUNNING_KINDS = (run_history.KIND_IMPORT, run_history.KIND_BACKFILL)
 
@@ -410,14 +404,11 @@ def run_findings(scan: Scan) -> list[Found]:
     """Failed, killed, running and stuck runs, from the run history and the job locks."""
     found: list[Found] = []
     for kind in run_history.RUN_KINDS:
-        last = scan.runs.get(kind, {}).get("last")
-        if not isinstance(last, dict) or last.get("outcome") not in (
-            run_history.OUTCOME_FAILED,
-            run_history.OUTCOME_PARTIAL,
-        ):
+        last = run_history.failed_run(scan.runs, kind)
+        if last is None:
             continue
         reason = last.get("reason") or run_history.REASON_ERROR
-        busy = reason == run_history.REASON_DATABASE_BUSY
+        busy = run_history.is_busy(last)
         # Rerunning can't fix a missing sqlite-vec, so that cause gets the reinstall fix.
         rerun = REINSTALL_FOR_VEC if reason == run_history.REASON_VECTOR_UNAVAILABLE else kind_fix(kind, scan)
         how = "failed" if last.get("outcome") == run_history.OUTCOME_FAILED else "finished with failures"
@@ -429,7 +420,7 @@ def run_findings(scan: Scan) -> list[Found]:
                     group=GROUP_WORKING if busy else GROUP_ACTION,
                     message=(
                         f"The last {KIND_LABELS[kind]}, started {started}, {how}: "
-                        f"{RUN_REASON_PROSE.get(reason, reason)}. See {KIND_LOGS[kind]}."
+                        f"{run_history.describe_reason(reason)}. See {KIND_LOGS[kind]}."
                     ),
                     fix=None if busy else (rerun or f"check {KIND_LOGS[kind]}"),
                 )

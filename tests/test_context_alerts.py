@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from ccrecall import run_history
 from ccrecall.health import write_schedule_marker
 from ccrecall.hooks.context_alerts import (
     _TOOL_CONTENT_SAMPLE_SIZE,
@@ -384,3 +385,65 @@ class TestSchemaAheadAlertWiring:
             schedule_path=tmp_path / "backfill-schedule.json",
         )
         assert block == ""
+
+
+class TestImportFailedAlertWiring:
+    """ALERT_IMPORT_FAILED: the last import's outcome in <db>.runs.json, read as a plain file."""
+
+    def _block(self, tmp_path, *, snooze_hours: float = 0) -> str:
+        return proactive_alert_block(
+            {"alert_snooze_hours": snooze_hours},
+            None,
+            db_available=False,
+            db_path=tmp_path / "conversations.db",
+            marker_path=tmp_path / ".write-probe",
+            snooze_path=tmp_path / "snooze.json",
+            status_path=tmp_path / "embedding-status.json",
+            schedule_path=tmp_path / "backfill-schedule.json",
+        )
+
+    def _record_import(self, tmp_path, outcome: str, reason: str | None = None) -> None:
+        with run_history.record_run(tmp_path / "conversations.db", run_history.KIND_IMPORT) as recorder:
+            recorder.finish(outcome, reason)
+
+    def test_aborted_import_fires(self, tmp_path):
+        self._record_import(tmp_path, run_history.OUTCOME_FAILED, run_history.REASON_ERROR)
+
+        block = self._block(tmp_path)
+        assert "last import did not finish cleanly" in block
+        assert "the import aborted on an error" in block
+        assert "ccrecall-import.log" in block
+
+    def test_partial_import_fires(self, tmp_path):
+        self._record_import(tmp_path, run_history.OUTCOME_PARTIAL, run_history.REASON_ERROR)
+
+        assert "one or more projects failed to import" in self._block(tmp_path)
+
+    def test_specific_reason_names_its_cause(self, tmp_path):
+        self._record_import(tmp_path, run_history.OUTCOME_FAILED, run_history.REASON_VECTOR_UNAVAILABLE)
+
+        assert "sqlite-vec" in self._block(tmp_path)
+
+    def test_busy_database_does_not_fire(self, tmp_path):
+        self._record_import(tmp_path, run_history.OUTCOME_PARTIAL, run_history.REASON_DATABASE_BUSY)
+
+        assert self._block(tmp_path) == ""
+
+    def test_successful_import_does_not_fire(self, tmp_path):
+        self._record_import(tmp_path, run_history.OUTCOME_OK)
+
+        assert self._block(tmp_path) == ""
+
+    def test_no_run_history_does_not_fire(self, tmp_path):
+        assert self._block(tmp_path) == ""
+
+    def test_told_once_then_cleared_by_a_successful_import(self, tmp_path):
+        self._record_import(tmp_path, run_history.OUTCOME_FAILED, run_history.REASON_ERROR)
+        assert "the import aborted on an error" in self._block(tmp_path, snooze_hours=24)
+        assert self._block(tmp_path, snooze_hours=24) == ""
+
+        self._record_import(tmp_path, run_history.OUTCOME_OK)
+        assert self._block(tmp_path, snooze_hours=24) == ""
+
+        self._record_import(tmp_path, run_history.OUTCOME_FAILED, run_history.REASON_ERROR)
+        assert "the import aborted on an error" in self._block(tmp_path, snooze_hours=24)
