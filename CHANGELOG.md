@@ -3,44 +3,28 @@
 ## [0.27.0](https://github.com/NodeJSmith/claude-code-recall/compare/v0.26.3...v0.27.0) (2026-11-09)
 
 
-### ⚠ BREAKING CHANGES
+### Breaking Changes
 
-* `ccrecall search --status` and `ccrecall backfill embeddings --status` (including its `--json` output) are removed; passing either flag is now a usage error. Use `ccrecall status` for a one-line verdict, `ccrecall doctor` for the full report, and `ccrecall --json status` / `ccrecall --json doctor` for machine-readable output.
-    #### What doctor does not carry over
-    - Embedding counts are per session, not per branch or chunk, and there
-    is no
-      direct equivalent of the old `remaining` branch count.
-    - There is no `--days` window; doctor always reports the whole database.
-* `ccrecall status --json` now returns `verdict`, `findings` and `summary`, the same shape as `ccrecall doctor --json`.
-    #### Removed fields
-    - `database`, `schema`, `ingestion`, `tool_content` and `embeddings` are
-    gone, along with `db_path`, `db_size_bytes` and `days`. Nothing replaces
-    the path or the size. The session count, percent embedded and last sync
-    are in `summary`.
-    - A missing database no longer prints `{"error": "database_not_found",
-    ...}`. It now reports a `no-database` finding with verdict
-    `needs-attention`, and still exits 1. Scripts testing `.error` should
-    test for that finding instead.
-    #### Removed flags
-    - `ccrecall status --days` and `--check-ingestion` are removed, and
-    passing either one is an unknown-option error. Run `ccrecall doctor` for
-    the ingestion check.
+- **`ccrecall status --json` has a new shape.** It now returns `verdict`, `findings` and `summary`, the same shape as `ccrecall doctor --json`. The `database`, `schema`, `ingestion`, `tool_content`, `embeddings`, `db_path`, `db_size_bytes` and `days` fields are gone. The session count, percent embedded and last sync are in `summary`; nothing replaces the path or the size. A missing database no longer prints `{"error": "database_not_found", ...}`: it reports a `no-database` finding with verdict `needs-attention` and still exits 1, so scripts testing `.error` should test for that finding instead. (#247)
+- **`ccrecall status --days` and `--check-ingestion` are removed.** Passing either one is an unknown-option error. Run `ccrecall doctor` for the ingestion check. (#247)
+- **`ccrecall search --status` and `ccrecall backfill embeddings --status` are removed,** including the latter's `--json` output, and passing either flag is now a usage error. Use `ccrecall status` for a one-line verdict, `ccrecall doctor` for the full report, and `ccrecall --json status` / `ccrecall --json doctor` for machine-readable output. `doctor` counts embeddings per session rather than per branch or chunk, has no equivalent of the old `remaining` branch count, and has no `--days` window. `backfill tool-content --status` is unchanged. (#256)
 
-### Features
+### Health and Diagnostics
 
-* add ccrecall doctor, a terse status, and a record of background runs ([#247](https://github.com/NodeJSmith/claude-code-recall/issues/247)) ([73cb44f](https://github.com/NodeJSmith/claude-code-recall/commit/73cb44fb3ee8ba8229c808369b351162b83dc25c))
-* replace database tracebacks with one-line errors and alert on failed imports ([#254](https://github.com/NodeJSmith/claude-code-recall/issues/254)) ([13643c3](https://github.com/NodeJSmith/claude-code-recall/commit/13643c357488ae815bc893e3d503551acb380bee))
+- **New `ccrecall doctor` command tells you what's wrong and how to fix it.** It lists every finding under what to do about it (needs action, working on it, nothing to do), and each needs-action finding comes with a command that fixes it. It exits 0 when healthy or working, 1 when something needs attention and 2 when the database is unreadable, so scripts can gate on it. `doctor --list <id>` names the sessions behind a finding. It opens the database read-only and changes nothing. (#247)
+- **`ccrecall status` is now a one-glance verdict.** It prints the verdict and one line of numbers, such as `7,514 sessions · 98% embedded · last sync 2 min ago`, drawn from the same findings as `doctor`, so the two can't disagree. (#247)
+- **Background runs now leave a record.** Import, repair, sync and embedding backfill each record how they finished in `<db>.runs.json`, beside the database. `doctor` reads it to report runs that failed, got stuck or were killed. (#247)
+- **Duplicate background jobs no longer stack up.** Each background job holds a lock while it runs, so a second copy skips instead of starting. A second embedding backfill, for example, can no longer add another ~8 GB memory peak on top of the first. (#247)
 
+### Errors and Alerts
 
-### Refactoring
-
-* retire search --status and backfill embeddings --status ([#256](https://github.com/NodeJSmith/claude-code-recall/issues/256)) ([6c44bf0](https://github.com/NodeJSmith/claude-code-recall/commit/6c44bf0ba0a25af8a56992370d31d905e4faee8f))
-
+- **Database errors print one line instead of a traceback.** When a database or file error escapes any command, ccrecall writes one JSON error line to stderr naming the cause (database newer than this install, locked, disk full, damaged file, or other) with a fix, logs the full traceback to that process's log file, and exits 1. (#254)
+- **A failed background import now raises a SessionStart alert.** It fires when the last import aborted or skipped projects, names the cause, and points to `ccrecall-import.log`, `ccrecall doctor` and `ccrecall import`. A busy database doesn't trigger it, and it clears after the next clean import. (#254)
 
 ### Documentation
 
-* explain what runs when and how to tell when it fails ([#250](https://github.com/NodeJSmith/claude-code-recall/issues/250)) ([a46f8d2](https://github.com/NodeJSmith/claude-code-recall/commit/a46f8d280e125501e419af6164ec3b697b37a5ae))
-* use plain wording in CLI help instead of internal terms ([#255](https://github.com/NodeJSmith/claude-code-recall/issues/255)) ([a5d88e9](https://github.com/NodeJSmith/claude-code-recall/commit/a5d88e9a0c45a95ce13befadd916cf423b77d887))
+- **The README explains what runs when and how you'd notice a failure.** A new table lists each background job, what triggers it, and whether a failure shows up in `doctor`, as a SessionStart alert, or only in its log. It also corrects when sync runs (after every response, not at session end) and covers what ccrecall doesn't store. (#250)
+- **CLI help uses plain wording.** Help for `search-messages`, `backfill embeddings`, `backfill schedule` and `import --repair-gaps` says what each command does instead of using internal terms like "watermark" or "chunk-KNN". (#255)
 
 ## [0.26.3](https://github.com/NodeJSmith/claude-code-recall/compare/v0.26.2...v0.26.3) (2026-11-02)
 
