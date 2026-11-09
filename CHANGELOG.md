@@ -1,5 +1,47 @@
 # Changelog
 
+## [0.27.0](https://github.com/NodeJSmith/claude-code-recall/compare/v0.26.3...v0.27.0) (2026-11-09)
+
+
+### ⚠ BREAKING CHANGES
+
+* `ccrecall search --status` and `ccrecall backfill embeddings --status` (including its `--json` output) are removed; passing either flag is now a usage error. Use `ccrecall status` for a one-line verdict, `ccrecall doctor` for the full report, and `ccrecall --json status` / `ccrecall --json doctor` for machine-readable output.
+    #### What doctor does not carry over
+    - Embedding counts are per session, not per branch or chunk, and there
+    is no
+      direct equivalent of the old `remaining` branch count.
+    - There is no `--days` window; doctor always reports the whole database.
+* `ccrecall status --json` now returns `verdict`, `findings` and `summary`, the same shape as `ccrecall doctor --json`.
+    #### Removed fields
+    - `database`, `schema`, `ingestion`, `tool_content` and `embeddings` are
+    gone, along with `db_path`, `db_size_bytes` and `days`. Nothing replaces
+    the path or the size. The session count, percent embedded and last sync
+    are in `summary`.
+    - A missing database no longer prints `{"error": "database_not_found",
+    ...}`. It now reports a `no-database` finding with verdict
+    `needs-attention`, and still exits 1. Scripts testing `.error` should
+    test for that finding instead.
+    #### Removed flags
+    - `ccrecall status --days` and `--check-ingestion` are removed, and
+    passing either one is an unknown-option error. Run `ccrecall doctor` for
+    the ingestion check.
+
+### Features
+
+* add ccrecall doctor, a terse status, and a record of background runs ([#247](https://github.com/NodeJSmith/claude-code-recall/issues/247)) ([73cb44f](https://github.com/NodeJSmith/claude-code-recall/commit/73cb44fb3ee8ba8229c808369b351162b83dc25c))
+* replace database tracebacks with one-line errors and alert on failed imports ([#254](https://github.com/NodeJSmith/claude-code-recall/issues/254)) ([13643c3](https://github.com/NodeJSmith/claude-code-recall/commit/13643c357488ae815bc893e3d503551acb380bee))
+
+
+### Refactoring
+
+* retire search --status and backfill embeddings --status ([#256](https://github.com/NodeJSmith/claude-code-recall/issues/256)) ([6c44bf0](https://github.com/NodeJSmith/claude-code-recall/commit/6c44bf0ba0a25af8a56992370d31d905e4faee8f))
+
+
+### Documentation
+
+* explain what runs when and how to tell when it fails ([#250](https://github.com/NodeJSmith/claude-code-recall/issues/250)) ([a46f8d2](https://github.com/NodeJSmith/claude-code-recall/commit/a46f8d280e125501e419af6164ec3b697b37a5ae))
+* use plain wording in CLI help instead of internal terms ([#255](https://github.com/NodeJSmith/claude-code-recall/issues/255)) ([a5d88e9](https://github.com/NodeJSmith/claude-code-recall/commit/a5d88e9a0c45a95ce13befadd916cf423b77d887))
+
 ## [0.26.3](https://github.com/NodeJSmith/claude-code-recall/compare/v0.26.2...v0.26.3) (2026-11-02)
 
 
