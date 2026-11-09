@@ -73,6 +73,9 @@ JOB_KEY_WARM_MODEL = "ccrecall-warm-model"
 JOB_KEY_SYNC = "ccrecall-sync-current"
 
 
+_LOG_RECORD_RESERVED_FIELDS = frozenset(logging.makeLogRecord({}).__dict__) | {"message", "asctime"}
+
+
 def ensure_parent_dir(path: Path) -> None:
     """Create ``path``'s parent directory (idempotent) before writing to it.
 
@@ -153,9 +156,6 @@ def get_db_path(settings: dict | None = None) -> Path:
     if settings and "db_path" in settings:
         return Path(settings["db_path"]).expanduser()
     return DEFAULT_DB_PATH
-
-
-_LOG_RECORD_RESERVED_FIELDS = frozenset(logging.makeLogRecord({}).__dict__) | {"message", "asctime"}
 
 
 class _ExtraFieldsFormatter(logging.Formatter):

@@ -233,8 +233,8 @@ def _migrate_to_v3(conn: sqlite3.Connection) -> None:
     for column, decl in (("file_size", "INTEGER"), ("file_mtime", "REAL")):
         try:
             conn.execute(f"ALTER TABLE import_log ADD COLUMN {column} {decl}")
-        except sqlite3.OperationalError as e:  # noqa: PERF203
-            if "duplicate column name" not in str(e):
+        except sqlite3.OperationalError as exc:  # noqa: PERF203
+            if "duplicate column name" not in str(exc):
                 raise
 
 
@@ -242,8 +242,8 @@ def _migrate_to_v4(conn: sqlite3.Connection) -> None:
     """Version-4 migration: add tool_content column and eligibility index to messages."""
     try:
         conn.execute("ALTER TABLE messages ADD COLUMN tool_content TEXT")
-    except sqlite3.OperationalError as e:
-        if "duplicate column name" not in str(e):
+    except sqlite3.OperationalError as exc:
+        if "duplicate column name" not in str(exc):
             raise
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_messages_tool_content_null ON messages(session_id) WHERE tool_content IS NULL"
@@ -266,8 +266,8 @@ def _migrate_to_v6(conn: sqlite3.Connection) -> None:
     """Version-6 migration: add DB coverage fingerprint to ingestion cache."""
     try:
         conn.execute("ALTER TABLE ingestion_check_cache ADD COLUMN db_coverage_fingerprint TEXT NOT NULL DEFAULT ''")
-    except sqlite3.OperationalError as e:
-        if "duplicate column name" not in str(e):
+    except sqlite3.OperationalError as exc:
+        if "duplicate column name" not in str(exc):
             raise
 
 
@@ -282,8 +282,8 @@ def _migrate_to_v7(conn: sqlite3.Connection) -> None:
             continue
         try:
             conn.execute(f"ALTER TABLE branches ADD COLUMN {column} {decl}")
-        except sqlite3.OperationalError as e:
-            if "duplicate column name" not in str(e):
+        except sqlite3.OperationalError as exc:
+            if "duplicate column name" not in str(exc):
                 raise
 
 
@@ -291,8 +291,8 @@ def _migrate_to_v8(conn: sqlite3.Connection) -> None:
     """Version-8 migration: add cap_tokens column and its partial index to chunks."""
     try:
         conn.execute("ALTER TABLE chunks ADD COLUMN cap_tokens INTEGER")
-    except sqlite3.OperationalError as e:
-        if "duplicate column name" not in str(e):
+    except sqlite3.OperationalError as exc:
+        if "duplicate column name" not in str(exc):
             raise
     conn.execute("CREATE INDEX IF NOT EXISTS idx_chunks_cap_tokens ON chunks(cap_tokens) WHERE cap_tokens IS NOT NULL")
 

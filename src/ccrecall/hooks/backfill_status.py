@@ -163,9 +163,9 @@ def run_status(
                 print("ccrecall backfill embeddings: sqlite-vec unavailable", file=sys.stderr)
                 return EXIT_ABORT
             counts = count_status(conn.cursor(), days)
-    except (sqlite3.Error, OSError) as e:
+    except (sqlite3.Error, OSError) as exc:
         logger.exception("Backfill status: aborted")
-        print(f"ccrecall backfill embeddings: aborted: {e}", file=sys.stderr)
+        print(f"ccrecall backfill embeddings: aborted: {exc}", file=sys.stderr)
         return EXIT_ABORT
 
     if json_mode:

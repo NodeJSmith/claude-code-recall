@@ -39,33 +39,6 @@ SUBSTANTIVE_EXCHANGE_THRESHOLD = 2
 _CANDIDATE_LIMIT = 20
 
 
-def _row_to_entry(row) -> dict:
-    """Convert a candidate row to an entry dict."""
-    (
-        _session_id,
-        uuid,
-        started_at,
-        ended_at,
-        exchange_count,
-        files_json,
-        commits_json,
-        git_branch,
-        branch_db_id,
-        context_summary,
-    ) = row
-    return {
-        "uuid": uuid,
-        "started_at": started_at,
-        "ended_at": ended_at,
-        "exchange_count": exchange_count,
-        "files_modified": decode_json_column(files_json, []),
-        "commits": decode_json_column(commits_json, []),
-        "git_branch": git_branch,
-        "branch_db_id": branch_db_id,
-        "context_summary": context_summary,
-    }
-
-
 _CANDIDATE_BASE = """
     SELECT s.id, s.uuid, b.started_at, b.ended_at, b.exchange_count,
            b.files_modified, b.commits, s.git_branch, b.id as branch_db_id,
@@ -94,6 +67,33 @@ _SESSION_BY_UUID_QUERY = """
     ORDER BY b.ended_at DESC
     LIMIT 1
 """
+
+
+def _row_to_entry(row) -> dict:
+    """Convert a candidate row to an entry dict."""
+    (
+        _session_id,
+        uuid,
+        started_at,
+        ended_at,
+        exchange_count,
+        files_json,
+        commits_json,
+        git_branch,
+        branch_db_id,
+        context_summary,
+    ) = row
+    return {
+        "uuid": uuid,
+        "started_at": started_at,
+        "ended_at": ended_at,
+        "exchange_count": exchange_count,
+        "files_modified": decode_json_column(files_json, []),
+        "commits": decode_json_column(commits_json, []),
+        "git_branch": git_branch,
+        "branch_db_id": branch_db_id,
+        "context_summary": context_summary,
+    }
 
 
 def _filter_candidates(rows: list, max_sessions: int) -> list[dict]:

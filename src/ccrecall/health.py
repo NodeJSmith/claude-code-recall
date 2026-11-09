@@ -87,6 +87,9 @@ REASON_VEC_UNAVAILABLE = "vec_unavailable"
 REASON_MODEL_UNAVAILABLE = "model_unavailable"
 
 
+_RELAY_INSTRUCTION = "Surface this to the user in prose; do not hard-code how prominently to raise it."
+
+
 # ── Probe result ───────────────────────────────────────────────────────────────
 @dataclass(frozen=True)
 class ProbeResult:
@@ -515,7 +518,6 @@ _ALERT_PROSE: dict[str, tuple[str, str, str]] = {
     ),
 }
 
-_RELAY_INSTRUCTION = "Surface this to the user in prose; do not hard-code how prominently to raise it."
 
 # Maps machine-readable embedding-status reason codes to user-facing cause prose,
 # so the alert never shows a raw code like "vec_unavailable". Unknown codes pass

@@ -23,6 +23,8 @@ from ccrecall.config import JOB_KEY_BACKFILL_EMBEDDINGS as JOB_KEY
 from ccrecall.db import get_connection
 from ccrecall.hooks.backfill_query import EXIT_OK
 
+JSON_CTX = CLIContext(json_mode=True)
+
 
 @pytest.fixture(autouse=True)
 def _isolated_schedule_path(tmp_path, monkeypatch):
@@ -138,9 +140,6 @@ class TestBackfillEmbeddingsDismiss:
         )
         mock_run.assert_called_once()
         assert not health.BACKFILL_SCHEDULE_PATH.exists()
-
-
-JSON_CTX = CLIContext(json_mode=True)
 
 
 class TestScheduleJsonMode:

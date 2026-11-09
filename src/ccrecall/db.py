@@ -107,7 +107,7 @@ def _apply_migrations(conn: sqlite3.Connection) -> None:
     def _prepare_vec(c: sqlite3.Connection) -> bool:
         # Deferred so this only fires on a version-bump migration, not on
         # every connection (hook hot-path invariant, CLAUDE.md #3).
-        # lazy-import: db_vec imports numpy transitively
+        # house-lint: ignore-next[HSL002] - db_vec imports numpy transitively
         from ccrecall.db_vec import vec_available
 
         return vec_available(c)
@@ -139,7 +139,7 @@ def _open_connection(settings: dict | None = None, load_vec: bool = False) -> sq
     if load_vec:
         # Deferred so get_connection() itself stays numpy-free for callers
         # that don't opt into vec (hook hot-path invariant, CLAUDE.md #3).
-        # lazy-import: db_vec imports numpy transitively
+        # house-lint: ignore-next[HSL002] - db_vec imports numpy transitively
         from ccrecall.db_vec import ensure_vec
 
         ensure_vec(conn)

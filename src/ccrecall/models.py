@@ -32,8 +32,8 @@ def is_valid(model: type[BaseModel], data: object, label: str) -> bool:
     """
     try:
         model.model_validate(data)
-    except ValidationError as e:
-        _LOG.info("Skipping malformed %s: %s", label, e)
+    except ValidationError as exc:
+        _LOG.info("Skipping malformed %s: %s", label, exc)
         return False
     return True
 

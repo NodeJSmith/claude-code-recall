@@ -178,9 +178,9 @@ def run(
         else:
             print(format_markdown(sessions, verbose=verbose))
 
-    except Exception as e:
+    except Exception as exc:
         emit_error(
-            str(e),
+            str(exc),
             code="query_error",
             exit_code=1,
             remediation="Run `ccrecall doctor` to check database health.",

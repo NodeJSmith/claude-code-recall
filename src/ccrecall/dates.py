@@ -82,11 +82,11 @@ def validate_or_exit(before: str | None, after: str | None) -> tuple[str | None,
     """
     try:
         return validate_date_boundaries(before, after)
-    except ValueError as e:
+    except ValueError as exc:
         emit_error(
-            str(e),
+            str(exc),
             code="invalid_date",
             exit_code=2,
             remediation="Use YYYY-MM-DD or a full ISO-8601 timestamp like 2026-08-03T12:00:00Z.",
         )
-        raise AssertionError("unreachable — emit_error always raises SystemExit") from e
+        raise AssertionError("unreachable — emit_error always raises SystemExit") from exc

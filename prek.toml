@@ -59,6 +59,20 @@ hooks = [
     { id = "pyright", pass_filenames = false, stages = ["pre-push"] },
 ]
 
+[[repos]]
+repo = "https://github.com/gitleaks/gitleaks"
+rev = "v8.30.1"
+hooks = [
+    # The upstream hook runs `gitleaks git --staged`, which scans only the index. At pre-push
+    # or in CI's clean checkout nothing is staged, so it would pass vacuously — keep it
+    # pre-commit only rather than show a green check that scanned nothing.
+    { id = "gitleaks", stages = ["pre-commit"] },
+    # Whole-tree scan for pre-push and CI (lint.yml runs `--stage pre-push`), so a commit made
+    # without local hooks still gets scanned before merge. Reuses this hook repo's gitleaks
+    # binary. Triaged false positives are allowlisted in .gitleaks.toml.
+    { id = "gitleaks", alias = "gitleaks-tree", name = "Detect hardcoded secrets (tracked tree)", entry = "./tools/scan_tracked_secrets.sh", pass_filenames = false, always_run = true, stages = ["pre-push"] },
+]
+
 # ---------------------------------------------------------------------------
 # Local hooks — security and config validity
 # ---------------------------------------------------------------------------
@@ -107,29 +121,15 @@ language = "pygrep"
 types = ["python"]
 entry = "^from __future__ import annotations"
 
+# house-lint catches the habits AI coding assistants leave behind (lazy imports, AI-writing
+# tells, leaked spec tokens, constant placement, exception names); rules and options live
+# in pyproject.toml's [tool.house-lint]. `uv run` uses the version pinned in uv.lock.
 [[repos.hooks]]
-id = "check-spec-tokens"
-name = "Ban leaked spec-artifact tokens (AC#/FR#/T##/WP#)"
+id = "house-lint"
+name = "house-lint"
 language = "system"
-entry = "./tools/check_spec_tokens.py"
-pass_filenames = false
+entry = "uv run house-lint check"
+require_serial = true
+types = ["python"]
 files = '^(src|tests|scripts|tools)/.*\.py$'
-stages = ["pre-push"]
-
-[[repos.hooks]]
-id = "check-llm-cruft"
-name = "Ban AI-writing tells (section dividers, filler phrases)"
-language = "system"
-entry = "./tools/check_llm_cruft.py"
-pass_filenames = false
-files = '^(src|tests|scripts|tools)/.*\.py$'
-stages = ["pre-push"]
-
-[[repos.hooks]]
-id = "check-lazy-imports"
-name = "Ban lazy imports (use '# lazy-import:' to defend circular-import or heavy-hot-path cases)"
-language = "system"
-entry = "./tools/check_lazy_imports.py"
-pass_filenames = false
-files = '^(src|tests|scripts|tools)/.*\.py$'
-stages = ["pre-push"]
+stages = ["pre-commit", "pre-push"]

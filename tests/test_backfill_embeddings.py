@@ -38,6 +38,9 @@ _FIXED_VEC = [0.001] * EMBEDDING_DIM
 pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
 
 
+_VEC_SKIP = VEC_SKIP
+
+
 @pytest.fixture(autouse=True)
 def _isolate_embedding_status(monkeypatch):
     """Keep every test in this module off the real ~/.ccrecall sidecar.
@@ -52,9 +55,6 @@ def _isolate_embedding_status(monkeypatch):
 
 # Monotonic counter for unique IDs across test helpers.
 _branch_counter = [0]
-
-
-_VEC_SKIP = VEC_SKIP
 
 
 # Helpers
@@ -1032,7 +1032,7 @@ class TestBackfillFailureModes:
         assert call_count[0] == 0
 
     def test_content_error_vs_batch_abort(self):
-        """T1: sqlite3.Error from fetch_branch_messages is a batch-abort (EXIT_ABORT),
+        """sqlite3.Error from fetch_branch_messages is a batch-abort (EXIT_ABORT),
         NOT a per-row content-error sentinel — the two must not be conflated."""
         conn = make_vec_conn()
         bid = _insert_branch_with_messages(conn)

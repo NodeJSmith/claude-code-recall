@@ -355,11 +355,11 @@ def _run(
             ):
                 recorder.finish(run_history.OUTCOME_FAILED, abort_reason)
                 return EXIT_ABORT
-    except (sqlite3.Error, OSError) as e:
-        recorder.finish(run_history.OUTCOME_FAILED, run_history.failure_reason(e))
+    except (sqlite3.Error, OSError) as exc:
+        recorder.finish(run_history.OUTCOME_FAILED, run_history.failure_reason(exc))
         logger.exception("%s: aborted", _LOG_PREFIX)
         print(
-            f"{_PRINT_PREFIX}: aborted: {e}",
+            f"{_PRINT_PREFIX}: aborted: {exc}",
             file=sys.stderr,
         )
         return EXIT_ABORT

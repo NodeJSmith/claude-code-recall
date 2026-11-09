@@ -31,6 +31,25 @@ FIXTURE_DIR = Path(__file__).parent / "fixtures"
 GRACE_MARGIN_SECONDS = 3600
 
 
+# Holds a job lock from another process until killed: flocks the file, writes
+# the record (filling in its own PID when the record has none), then sleeps.
+_HOLD_LOCK_SCRIPT = """
+import fcntl, json, os, sys, time
+fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o600)
+fcntl.flock(fd, fcntl.LOCK_EX)
+content = sys.argv[2]
+if content.startswith("{"):
+    record = json.loads(content)
+    if "pid" not in record:
+        record["pid"] = os.getpid()
+    content = json.dumps(record)
+os.ftruncate(fd, 0)
+os.write(fd, content.encode())
+print("held", flush=True)
+time.sleep(120)
+"""
+
+
 @pytest.fixture(autouse=True)
 def _isolated_runtime_dir(tmp_path, monkeypatch) -> None:
     """Redirect the known ccrecall runtime-dir write sites to this test's tmp_path.
@@ -173,25 +192,6 @@ def project_id(memory_db):
 def jsonl_fixture(request):
     """Parameterized fixture yielding each JSONL file path."""
     return request.param
-
-
-# Holds a job lock from another process until killed: flocks the file, writes
-# the record (filling in its own PID when the record has none), then sleeps.
-_HOLD_LOCK_SCRIPT = """
-import fcntl, json, os, sys, time
-fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o600)
-fcntl.flock(fd, fcntl.LOCK_EX)
-content = sys.argv[2]
-if content.startswith("{"):
-    record = json.loads(content)
-    if "pid" not in record:
-        record["pid"] = os.getpid()
-    content = json.dumps(record)
-os.ftruncate(fd, 0)
-os.write(fd, content.encode())
-print("held", flush=True)
-time.sleep(120)
-"""
 
 
 def job_record(key: str, *, age_seconds: float = 0, scope: dict | None = None, **fields) -> dict:

@@ -14,6 +14,11 @@ log = logging.getLogger(LOGGER_NAME)
 MAX_FILES_DISPLAYED = 10
 
 
+_WORKTREE_MARKER = "/.claude/worktrees/"
+_WORKTREE_KEY_MARKER = "--claude-worktrees-"
+_TOPIC_FALLBACK = "(topic unavailable)"
+
+
 def format_time(ts_str: str | None, fmt: str = "%H:%M") -> str:
     """Format an offset-aware ISO timestamp (Z or +HH:MM) to the given strftime
     format in the local timezone. Default: HH:MM.
@@ -45,10 +50,6 @@ def format_tool_counts(tool_counts: dict[str, int]) -> str:
 def format_time_full(ts_str: str | None) -> str:
     """Format ISO timestamp to YYYY-MM-DD HH:MM."""
     return format_time(ts_str, "%Y-%m-%d %H:%M")
-
-
-_WORKTREE_MARKER = "/.claude/worktrees/"
-_WORKTREE_KEY_MARKER = "--claude-worktrees-"
 
 
 def split_worktree_path(cwd: str) -> tuple[str, str] | None:
@@ -224,8 +225,6 @@ def apply_scores(results: list[dict], ranked: bool) -> list[dict]:
 #   Topic:  {topic}
 #   {exchange_count} exchanges · {n_files} files · {n_commits} commits
 #   Handle: {handle}   → ccrecall tail {handle}
-
-_TOPIC_FALLBACK = "(topic unavailable)"
 
 
 def format_card_markdown(card: dict, verbose: bool = False) -> str:

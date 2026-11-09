@@ -526,10 +526,10 @@ def run_repair(
 
         try:
             counts = import_repair.repair_sessions(conn, candidates, on_reclaim=on_reclaim)
-        except import_repair.RepairAborted as aborted:
-            report_repair(logger, len(candidates), aborted.counts)
-            if aborted.counts.unfixable:
-                run_history.write_unfixable(db_path, dict(aborted.counts.unfixable), replace=False)
+        except import_repair.RepairAborted as aborted_exc:
+            report_repair(logger, len(candidates), aborted_exc.counts)
+            if aborted_exc.counts.unfixable:
+                run_history.write_unfixable(db_path, dict(aborted_exc.counts.unfixable), replace=False)
             raise
         report_repair(logger, len(candidates), counts)
         run_history.write_unfixable(db_path, dict(counts.unfixable), replace=counts.failed == 0)

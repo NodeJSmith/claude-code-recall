@@ -273,9 +273,9 @@ def run(input_file: Path | None = None) -> None:
                 recorder.finish(run_history.OUTCOME_OK)
                 print(json.dumps(output))
 
-            except Exception as e:
-                logger.error("Sync error: %s", e)
-                recorder.finish(run_history.OUTCOME_FAILED, run_history.failure_reason(e))
+            except Exception as exc:
+                logger.error("Sync error: %s", exc)
+                recorder.finish(run_history.OUTCOME_FAILED, run_history.failure_reason(exc))
                 # Don't block Claude on sync errors
                 print(_CONTINUE_OUTPUT)
                 sys.exit(0)
