@@ -48,7 +48,7 @@ dependencies = [
     "whenever==0.10.0",
     # Pin pydantic exactly so its native (Rust) pydantic-core dep resolves to a
     # known ABI — same rationale as the native wheels above.
-    "pydantic==2.13.4",
+    "pydantic==2.14.3",
     "cyclopts>=4.16",
     # Security floor: transitive via httpx → anyio
     "anyio>=4.14.2",
