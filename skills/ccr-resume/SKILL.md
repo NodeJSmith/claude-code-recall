@@ -1,80 +1,45 @@
 ---
 name: ccr-resume
-description: "Use when picking up a fresh session after /clear, a stop, or an unanswered AskUserQuestion — reconstructs the prior session's intent from its transcript tail and surfaces any unresolved decision. User-invoked only (never auto-fired); for a hand-written end-of-day handoff use /mine-good-morning instead."
+description: "Use when picking up after the previous session in this project ended: a /clear to free up context, a crash or shutdown, or to get a standing summary of a session that's done and waiting on CI or review. Reads the prior session's transcript tail, checks it against the repo, and surfaces any decision it left open. User-invoked only."
 user-invocable: true
 disable-model-invocation: true
 ---
 
 # Resume
 
-Pick up work in a fresh session after the previous one ended — via `/clear` (to avoid resending a large uncached context), after being stopped, or after a question the prior session left open (a rejected `AskUserQuestion` *or* one asked in prose). `/clear` starts a **new session with a new transcript file**; the prior session's transcript stays on disk. This skill reads its **tail** to recover what the disk can't tell you: the user's last instruction and any decision that was never resolved.
+The previous session in this project ended, and this one starts with none of its context. Recover where it stood: what the user last asked for, what got done, what was still in flight, and any question it was waiting on the user to answer. Then continue the work or give the user a summary, whichever they asked for.
 
-## Why this exists — the failure mode it prevents
+$ARGUMENTS is the user's direction for this pickup ("keep going but skip the test rewrite", "just summarize"). It is not a session selector.
 
-On pickup, the instinct is to read on-disk artifacts (git state, task files, design docs) and infer "what's left," then act. That misses the one thing artifacts never record: **the pending decision**. A real case — an orchestration finished, asked a ship-or-not question, the user rejected the tool call, and the next session shipped a PR from the artifacts without ever seeing that the question was still open. Disk state said "done"; the transcript said "waiting on the user." **Read the tail before you touch anything.**
+## The trap
 
-## How this differs from neighbors
+Disk state (git, files, PRs) shows what landed. It never shows that the prior session was waiting on the user. A session can finish its work, ask "ship it?", and end. A next session that reads only the repo sees "done" and ships. So read the transcript tail before acting on what's on disk.
 
-- `mine-good-morning` reads a hand-written end-of-day handoff. This needs no handoff — it reconstructs from the transcript automatically.
-- `mine-status` reports branch/tasks/last-commit. This recovers *intent and pending decisions*, not just current state.
+A question the prior session left open belongs to the user. It might be an unanswered `AskUserQuestion` or a question asked in prose at the end of the last message. Surface it, don't pick an answer, and don't do the work it gates. $ARGUMENTS says how to proceed, not how to answer that question. If $ARGUMENTS plainly answers it anyway, confirm your reading with the user before acting on it.
 
-## Arguments
+Once you've read the tail, check what actually landed (the working tree, commits, the PR) against what the tail says was in flight, and name any mismatch. After a crash, an edit or commit may already be done, or a file may be half-written. Redoing it or skipping it both cause damage.
 
-$ARGUMENTS — optional. A natural-language directive for how to follow up on the prior session — e.g. "keep going with the refactor but skip the test rewrite", "just summarize where we left off", "did the migration finish?". This is *intent*, not a session selector: it does not get passed to `ccrecall tail`; it shapes how you proceed in Phase 3. Omit it to get a plain orientation and a "how do you want to proceed?" prompt.
+## Reading the prior session
 
-To target a session other than the auto-picked prior one (rare), run `ccrecall tail --list`, then `ccrecall tail <id-substring>` directly.
+`ccrecall tail` picks the prior session (the second-newest transcript for this directory, since the newest is this one) and prints:
 
----
+- its last user instruction
+- its last few events
+- how it ended: the last assistant message, or a PENDING QUESTION block if it ended on an unanswered `AskUserQuestion`
+- the skills it invoked
 
-## Phase 1: Recover the transcript tail (do this first, always)
+`--lines N` shows more events. `--full` replaces the event list with the untruncated messages. For the whole conversation, run `ccrecall recent --session <id>`.
 
-Run the lever — it auto-picks the prior session, locates its JSONL, and prints the tail, the last typed instruction, the last assistant message, any **unanswered** `AskUserQuestion`, and the skills the session loaded:
+The SessionStart context may also name the prior session. After a `/clear` (its `Source:` line says `clear`), that block names exactly the session that was cleared, while `tail` guesses by recency. When it disagrees with `tail`'s pick, trust it: run `ccrecall tail --list` (which marks this session `<- current`) and then `ccrecall tail <id-substring>`. If `tail` finds nothing, the transcript is gone or the directory moved. `ccrecall recent --path <dir>` still has the stored conversation. Don't fill the gap from disk state. Say what you couldn't recover.
 
-```bash
-ccrecall tail
-```
+Anything the prior session was watching or running may have stopped with it, especially after a crash or shutdown. That covers CI watches, a PR it meant to merge when green, background jobs, and dev servers. Check where each one stands now instead of assuming it finished or is still being watched.
 
-Do **not** pass $ARGUMENTS here — it's a follow-up directive, not a session id (see Arguments).
+SKILLS INVOKED lists skills the session started, not ones it finished. To continue inside one, invoke it again so its steps are back in context. Don't work from memory of what it says.
 
-- Auto-detect picks the second-newest session (the newest is *this* one, live). If the wrong session comes up or you need to choose, run `ccrecall tail --list` and re-run with the right id substring.
-- **Cross-check against injected context:** The SessionStart hook may have already injected a "Session Origin" block at the top of context naming a specific prior session (look for `Session:` followed by a UUID). If `ccrecall tail` returns a *different* session ID, the injected context is more likely correct (it uses DB-backed cwd matching). Re-run with the injected session's ID: `ccrecall tail <id-substring>`.
-- If `ccrecall tail` finds nothing (no project dir, only the current session, or a moved cwd), fall back to `/ccr-recall` to retrieve the tail — never substitute disk artifacts for the transcript.
-- A clear/startup may already have surfaced an "Unresolved Decision From Prior Session" block at the top of context — if so, this confirms and expands it; reconcile and proceed to Phase 2.
+## Done looks like
 
-Read the output fully before doing anything else.
+An open decision is re-asked alongside whichever outcome below applies, after the summary or status. For a PENDING QUESTION, use `AskUserQuestion` with the original option labels. Don't do the work it gates until the user answers.
 
-## Phase 2: Reconcile intent against disk state
-
-Now — and only now — check the on-disk reality and line it up with what the transcript says was intended:
-
-- `git status` / `git -C <root> log --oneline -5` — what actually landed vs. what the tail says was in flight.
-- Task/spec files, background-job notifications in the tail (a job may have finished after the session ended).
-- The `SKILLS INVOKED` block, most recent first. A workflow skill near the top (`/mine-orchestrate`, `/mine-define`, a review loop) usually means the prior session was working inside that skill's phases. The transcript records that a skill *started*, never that it finished, so check the tail and disk state to judge whether it looks complete. Say "the prior session was in `<skill>` as of `<time>`", not "`<skill>` is still running."
-
-Name any mismatch between "what the transcript wanted" and "what the disk shows." Do not paper over it.
-
-## Phase 3: Surface — never auto-resolve
-
-The prior session may have ended on an **open decision** it was waiting on the user for. It takes two forms — treat them identically:
-
-1. **Structured** — `ccrecall tail` printed a PENDING QUESTION block (an `AskUserQuestion` the user never answered). The lever detects this for you.
-2. **Prose** — no PENDING QUESTION block, but the LAST ASSISTANT MESSAGE excerpt ends by asking the user something or offering a choice ("Want me to also update the tests?", "Should I do X or Y?"). The harness records this as ordinary text, so the lever *cannot* flag it — you have to read the excerpt and judge whether it left a question hanging.
-
-**If either form is present, surface it — do not resolve it:**
-- Structured: re-present with `AskUserQuestion`, reusing the exact option labels and descriptions from the tail block (the picker appends "Other" automatically).
-- Prose: pose the question the assistant left open — as `AskUserQuestion` if it maps to clear choices, otherwise as a plain question.
-
-Then **stop** — do not pick an option, and do not act on the work the decision gates.
-
-**If there is no open decision:** give a 3–5 line orientation — where things stand, the last instruction, what's reconciled vs. mismatched, and which workflow skill (if any) the prior session was in.
-
-**Continuing inside a skill means re-invoking it.** This session starts with none of the prior session's skill bodies loaded. If the way forward is to continue a workflow skill from `SKILLS INVOKED`, invoke that skill (with the args shown, adjusted as needed) so its phases and gates are back in context. Do not carry on from memory of what the skill probably says. Don't pre-load skills just because they're in the list either. The list tells you what the prior session was doing; it doesn't tell you what this one needs.
-
-**Folding in the $ARGUMENTS directive (if given):** it is the user's answer to "how do we proceed" — but it does *not* override an open decision the prior session was waiting on *from them*. So:
-- Open decision present, and the directive plainly answers it → confirm that reading with the user, then proceed. Otherwise surface the decision first; the directive resolves what comes after.
-- No open decision → act on the directive directly instead of asking how to proceed.
-- No directive → ask how the user wants to proceed before taking any action.
-
-## The one rule
-
-An unanswered, rejected, or interrupted question — structured (`AskUserQuestion`) *or* prose left hanging in the last assistant message — is an open decision, not an invitation to choose. Surface it; let the user decide. A $ARGUMENTS directive answers "how do we proceed," never a decision the prior session was still waiting on.
+- **A summary**, because the user asked for one or the work is done and waiting on someone else: the user will leave it on their terminal and read it later, so it has to stand on its own. Cover what the session set out to do and what landed: commits, the PR, and whether it merged. Then say what's outstanding, what's waiting on CI or a reviewer, and anything that stopped partway.
+- **A directive to continue:** say in a line or two where things stand and what you're picking up, then do it.
+- **No directive and nothing open:** give that short status and ask how the user wants to proceed.

@@ -154,7 +154,7 @@ In all cases, search falls back to keyword-only and returns results normally. Wh
 | Skill | Trigger | What it does |
 |---|---|---|
 | `/ccr-recall` | "what did we discuss", "continue where we left off", "search my conversations" | Lets Claude search or browse your past sessions on demand |
-| `/ccr-resume` | "pick up where we left off after /clear", a stop, or an unanswered question | Reconstructs the prior session's intent from its transcript tail and surfaces any unresolved decision |
+| `/ccr-resume` | After a `/clear`, a crash or shutdown, or to get a summary of a finished session while you wait on CI or review | Reconstructs where the prior session stood from its transcript tail, checks it against the repo, and surfaces any decision it left open |
 
 ## Entry points
 
@@ -194,7 +194,8 @@ These are the `ccrecall` subcommands the `/ccr-*` skills invoke. You can run the
 |---|---|
 | `ccrecall recent` | Prints recent sessions from the DB in markdown (default) or JSON. Used by `/ccr-recall` |
 | `ccrecall search` | Searches sessions by keyword fused with vector similarity (FTS5 → FTS4 → LIKE fallback, RRF-fused with jina embeddings when available). Used by `/ccr-recall` |
-| `ccrecall tail` | Reads the tail of a prior session's transcript to recover the last instruction and any unanswered question. Used by `/ccr-resume` |
+| `ccrecall search-messages` | Searches individual exchanges by semantic similarity and returns short excerpts with their session handle. Used by `/ccr-recall` |
+| `ccrecall tail` | Reads the tail of a prior session's transcript to recover the last instruction and any unanswered question. Used by `/ccr-resume` and `/ccr-recall` |
 | `ccrecall backfill embeddings` | Opt-in seeding of embeddings for historical active-leaf branches (jina-v2-small-en via fastembed). Not auto-spawned. Supports `--days N` / `--limit N` / `--threads N`; throttled via `nice` + a single inference thread by default. Resumable |
 | `ccrecall backfill tool-content` | Opt-in re-parse of already-synced sessions' JSONL files to populate `messages.tool_content` for rows synced before tool-content extraction existed. Not auto-spawned. Supports `--days N` / `--limit N`; resets `embedding_version` on touched branches so `backfill embeddings` re-embeds them. Resumable |
 
