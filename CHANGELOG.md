@@ -2,16 +2,11 @@
 
 ## [0.27.1](https://github.com/NodeJSmith/claude-code-recall/compare/v0.27.0...v0.27.1) (2026-11-14)
 
+### Skills
 
-### Bug Fixes
-
-* **deps:** update dependency pydantic to v2.14.3 ([#259](https://github.com/NodeJSmith/claude-code-recall/issues/259)) ([edbda90](https://github.com/NodeJSmith/claude-code-recall/commit/edbda90047f2b10b3d80ccc9b56448331b3f79a7))
-* **deps:** update dependency whenever to v0.11.0 ([#260](https://github.com/NodeJSmith/claude-code-recall/issues/260)) ([03fc310](https://github.com/NodeJSmith/claude-code-recall/commit/03fc310289e82e12091968deaf688d8a8693808b))
-
-
-### Documentation
-
-* rewrite recall and resume skills around their goals ([#263](https://github.com/NodeJSmith/claude-code-recall/issues/263)) ([197a7a4](https://github.com/NodeJSmith/claude-code-recall/commit/197a7a476ec641c839499efe7e846eaa3cc60320))
+- **`/ccr-resume` handles the three common pickups.** It covers resuming after a `/clear`, after a crash or shutdown, and producing a standing summary of a session that's done and waiting on CI or review. That summary is written to make sense on its own hours later. It now checks what actually landed in the repo against what the prior session was doing, and anything the prior session was watching, such as a CI run or a merge-when-green, is checked again instead of assumed finished. A question the prior session left open is still asked again rather than answered for you, and it no longer suppresses the summary. (#263)
+- **`/ccr-recall` answers at the size of the question.** A "what did we decide about X" lookup gets the decision and the session it came from, not a fixed four-section report. The lens modes and their canned searches are gone, and the skill tells Claude to search ccrecall instead of grepping transcript files, which Claude Code eventually deletes. (#263)
+- **The skills no longer refer to skills outside this plugin.** (#263)
 
 ## [0.27.0](https://github.com/NodeJSmith/claude-code-recall/compare/v0.26.3...v0.27.0) (2026-11-09)
 
