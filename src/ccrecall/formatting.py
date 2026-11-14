@@ -4,7 +4,7 @@ import json
 import logging
 from pathlib import Path
 
-from whenever import Instant
+from whenever import SYSTEM_TZ, Instant
 
 from ccrecall.models import LOGGER_NAME
 
@@ -31,7 +31,7 @@ def format_time(ts_str: str | None, fmt: str = "%H:%M") -> str:
     try:
         # whenever owns the parse/tz-convert; strftime needs a stdlib datetime,
         # so cross back at the boundary for the caller's custom format string.
-        local = Instant.parse_iso(ts_str).to_system_tz()
+        local = Instant.parse_iso(ts_str).to_tz(SYSTEM_TZ)
         return local.to_stdlib().strftime(fmt)
     except ValueError:
         log.warning(

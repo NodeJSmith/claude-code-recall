@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple, TypeVar
 
-from whenever import Instant
+from whenever import SYSTEM_TZ, Instant
 
 from ccrecall import config, health, job_lock, run_history
 from ccrecall.config import resolve_backfill_stale_hours
@@ -969,7 +969,7 @@ def format_when(instant: Instant | None) -> str:
     """A local time a reader can place: ``Nov 03 07:59``."""
     if instant is None:
         return "at an unknown time"
-    return instant.to_system_tz().to_stdlib().strftime("%b %d %H:%M")
+    return instant.to_tz(SYSTEM_TZ).to_stdlib().strftime("%b %d %H:%M")
 
 
 def plural(count: int, noun: str) -> str:
