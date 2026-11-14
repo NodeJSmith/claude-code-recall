@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.27.1](https://github.com/NodeJSmith/claude-code-recall/compare/v0.27.0...v0.27.1) (2026-11-14)
+
+
+### Bug Fixes
+
+* **deps:** update dependency pydantic to v2.14.3 ([#259](https://github.com/NodeJSmith/claude-code-recall/issues/259)) ([edbda90](https://github.com/NodeJSmith/claude-code-recall/commit/edbda90047f2b10b3d80ccc9b56448331b3f79a7))
+* **deps:** update dependency whenever to v0.11.0 ([#260](https://github.com/NodeJSmith/claude-code-recall/issues/260)) ([03fc310](https://github.com/NodeJSmith/claude-code-recall/commit/03fc310289e82e12091968deaf688d8a8693808b))
+
+
+### Documentation
+
+* rewrite recall and resume skills around their goals ([#263](https://github.com/NodeJSmith/claude-code-recall/issues/263)) ([197a7a4](https://github.com/NodeJSmith/claude-code-recall/commit/197a7a476ec641c839499efe7e846eaa3cc60320))
+
 ## [0.27.0](https://github.com/NodeJSmith/claude-code-recall/compare/v0.26.3...v0.27.0) (2026-11-09)
 
 
