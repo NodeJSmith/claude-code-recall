@@ -9,12 +9,12 @@
 
 A session-restore picker (or any tool listing past sessions) needs one or two lines per session that jog the user's memory: what the session was for and where it stopped. Two earlier attempts built far more than that (`design/specs/008-llm-summary-enrichment`, deleted in #134; `design/specs/010-session-recaps`, abandoned unmerged, see its `retrospective.md`). This attempt keeps only the recap.
 
-Claude Code already writes such a recap into transcripts as `{"type":"system","subtype":"away_summary","content":...}`, but only when the terminal loses focus for 3 minutes after a turn, so about half of interactive sessions have one and about a third have a current one. ccrecall will use that recap when it's current and generate its own otherwise. `evaluation.md` in this directory carries the probe evidence: recaps generated from ccrecall's own database are recognizable 34 times out of 35, and the post-compaction input is better and cheaper than the full history.
+Claude Code already writes such a recap into transcripts as `{"type":"system","subtype":"away_summary","content":...}`, but only when the terminal loses focus for 3 minutes after a turn, so about half of interactive sessions have one and about a third have a current one. ccrecall will use that recap when it's current and generate its own otherwise. `evaluation.md` in this directory carries the probe evidence: recaps generated from ccrecall's own database are recognizable 34 times out of 35, and a prose-only input of the whole branch matches the reference as well as any slice of it (run 3).
 
 The change:
 
-- **Parse boundary (`parsing.py`, `models.py`).** The branch dict that `find_all_branches` returns gains the latest compaction (boundary timestamp and summary text) and the latest `away_summary` on the active chain (text with Claude Code's " (disable recaps in /config)" suffix stripped, and its timestamp). `active_chain`'s returned entries do not change.
-- **Stored facts (`schema.py`, `db_base.py`, `branch_ops.py`).** Where those facts live is D1 and D2. One new `recaps` table holds generated recaps (D3, D5).
+- **Parse boundary (`parsing.py`, `models.py`).** The branch dict that `find_all_branches` returns gains the latest `away_summary` on the active chain (text with Claude Code's " (disable recaps in /config)" suffix stripped, and its timestamp). `active_chain`'s returned entries do not change.
+- **Stored facts (`schema.py`, `db_base.py`, `branch_ops.py`).** Where the `away_summary` lives is D2; D1 settles that compaction facts are not stored. One new `recaps` table holds generated recaps (D3, D5).
 - **Generation (`recaps.py` new; `hooks/backfill_recaps.py` new; `cli/commands.py`).** `ccrecall backfill recaps [--days N] [--limit N] [--idle-minutes N]` imports first (D9), selects sessions (D3, D4), builds the input from imported rows, makes one Claude Agent SDK call per session, and writes the result. It takes its own job lock and records its runs (D8). Generation never runs on a hook path or at read time.
 - **Read surface (`cli/commands.py`, D6).** A cache-only read that returns each session's best recap with its source and whether it's current. It never calls Claude.
 - **Packaging (`pyproject.toml`, D7).** How the SDK is packaged and imported is D7.
@@ -32,25 +32,26 @@ Out of scope: SessionStart injection, search cards, shipping a timer or schedule
 
 ## Decisions
 
-### D1: Where does the latest compaction (boundary time and summary) live?
+### D1: Does the latest compaction (boundary time and summary) get stored for the input?
 
 **Situation:** The post-compaction input needs the compaction summary plus the turns after the boundary. `parsing.active_chain` crosses a `compact_boundary` through `logicalParentUuid` and, when that hop resolves, drops the `isCompactSummary` entry from the chain, so the summary never reaches the database. `compact_boundary` is a `system` entry, and `message_ops.build_message_row` only stores user and assistant rows, so the boundary's timestamp isn't stored either. Today the database cannot tell a compacted session from an uncompacted one.
 
 **Deciding factor:** get the two facts into the database without changing what search, FTS, or embeddings see.
 
-| | A: Two nullable columns on `branches` | B: Keep the summary on the chain as a flagged message | C: A `compactions` table, one row per boundary | D: Store only the boundary time |
-|---|---|---|---|---|
-| What's stored | `compact_summary`, `compact_boundary_at` for the latest compaction | The summary as a `messages` row with a new `is_compact_summary` flag | Every boundary with its summary | `compact_boundary_at` only; input is the turns after it, no summary |
-| Effect on search and embeddings | None | The summary text joins `aggregated_content` (FTS) and an exchange chunk, duplicating content already indexed | None | None |
-| `ACTIVE_CHAIN_VERSION` bump | No | Yes: the chain's membership changes, invalidating every cached ok verdict and triggering a repair pass | No | No |
-| Fit | `branches` already holds derived per-branch facts (`files_modified`, `context_summary`) | Reuses existing message storage | Cleanest model, but only the latest row is ever read | Smallest |
-| Recap quality | As probed | As probed | As probed | Not probed; the summary carries the session's goal |
-| Moving parts | One delta migration, one upsert change | Flag column, chain change, every consumer must skip the flag | New table, its writes and pruning | One column |
+| | A: Two nullable columns on `branches` | B: Keep the summary on the chain as a flagged message | C: A `compactions` table, one row per boundary | D: Store only the boundary time | E: Store nothing; the input is the whole branch |
+|---|---|---|---|---|---|
+| What's stored | `compact_summary`, `compact_boundary_at` for the latest compaction | The summary as a `messages` row with a new `is_compact_summary` flag | Every boundary with its summary | `compact_boundary_at` only; input is the turns after it, no summary | Nothing new |
+| Effect on search and embeddings | None | The summary text joins `aggregated_content` (FTS) and an exchange chunk, duplicating content already indexed | None | None | None |
+| `ACTIVE_CHAIN_VERSION` bump | No | Yes: the chain's membership changes, invalidating every cached ok verdict and triggering a repair pass | No | No | No |
+| Fit | `branches` already holds derived per-branch facts (`files_modified`, `context_summary`) | Reuses existing message storage | Cleanest model, but only the latest row is ever read | Smallest | No new state |
+| Recap quality (prose-only input, 8 compacted sessions, `evaluation.md` run 4) | Goal 7/8, next 7/8, recognizable 8/8 | Same input as A | Same input as A | Not probed; the summary carries the session's goal | Goal 7/8, next 6/8, recognizable 8/8; no drift to earlier work |
+| Cost per compacted session | ~0.7× of E | ~0.7× of E | ~0.7× of E | Below A | 1.00× ($0.04–0.09 per call) |
+| Moving parts | One delta migration, one upsert change, two input paths, a null-column fallback | Flag column, chain change, every consumer must skip the flag | New table, its writes and pruning | One column | None; one input path |
 
-**Recommendation:** A, because it stores exactly what the input needs with no change to search or chain membership, in the table that already holds per-branch derived facts.
-**Pick C instead if** something will need older compactions too. **Pick D instead if** you'd rather not store summary text twice and accept an unprobed input for compacted sessions. **Pick B instead if** you want the summary to be searchable.
-**Reversibility:** easy (nullable columns; dropping them later waits on a `branches` rebuild like the other dead columns)
-**Ratified:** Chose two nullable `branches` columns (`compact_summary`, `compact_boundary_at`) over a flagged chain message, a `compactions` table, or the boundary time alone, to give the probed post-compaction input with no change to search or chain membership, accepting that branches not synced since the change keep null columns and use the whole-branch input.
+**Recommendation:** E. With the prose-only input (Assumed), a compacted session's whole branch is 25–66k characters and recapped as well as the post-compaction slice, so the columns buy only about 30% lower cost on compacted sessions. A was preferred while the input included `tool_content`, where whole branches were several times larger and drifted to earlier work (`evaluation.md` run 1). Challenge Finding 9.
+**Pick A instead if** compacted sessions grow far past today's sizes, since its saving grows with history length.
+**Reversibility:** easy (adding A later is an additive migration plus a parse change)
+**Ratified:** Chose storing nothing and sending the whole branch's prose over two nullable `branches` columns for a post-compaction input, after a head-to-head on 8 compacted sessions showed equal quality, to keep one input path with no schema or parse change for compaction, accepting about 30% more input cost on compacted sessions.
 
 ### D2: Where does Claude Code's `away_summary` live, and who decides which recap to show?
 
@@ -131,7 +132,7 @@ A harness recap is current when nothing on the chain comes after it; that test i
 **Reversibility:** easy
 **Failure classes:** a run-level failure (not logged in, rate limited, the `claude` CLI missing, as reported by the SDK's error types) ends the run `failed` at once and writes no cooldown, so the scheduler's next run is the retry. Any other failure is per-session: it records `error` and `attempted_at`, the session is skipped for 24 hours, and the run continues. Three consecutive per-session failures still abort the run, as a backstop for a run-level failure the mapping misses.
 
-**Ratified:** Chose splitting failures into run-level (abort, no cooldown) and per-session (24-hour cooldown, run continues), with the 3-consecutive abort kept as a backstop, over one failure class with a cooldown on every failure, so a lapsed login or rate limit recovers on the next run while a session that always fails costs one call a day, accepting an error-kind mapping that can misclassify.
+**Ratified:** Chose splitting failures into run-level (abort, no cooldown) and per-session (24-hour cooldown, run continues), with the 3-consecutive abort kept as a backstop, over one failure class with a cooldown on every failure, so a lapsed login or rate limit recovers on the next run while a session that always fails costs one call a day, accepting an error-kind mapping that can misclassify, and that a refusal or apology from the model is stored as the recap until the session changes (0 of 68 probe recaps refused; Claude Code's own recap has no validator either; challenge Finding 14).
 
 ### D6: What does the read surface look like? (named `show-recaps` at ratification)
 
@@ -203,10 +204,12 @@ Ids are full session UUIDs or the 8-character prefixes ccrecall prints elsewhere
 
 ## Assumed
 
-- Generation input comes from imported rows only, never transcript files: user and assistant `content` plus `tool_content`, in timestamp order, filtered to after `compact_boundary_at` and led by `compact_summary` when the branch is compacted (D1), otherwise the whole branch. Evidence: `evaluation.md` (both runs); `../010-session-recaps/evaluation.md`.
-- A branch with null compaction columns (synced before this change and never since) uses the whole-branch input. Evidence: run 1's whole-branch input was recognizable 19/20 (`evaluation.md`).
+- Generation input comes from imported rows only, never transcript files: the `content` of the branch's user and assistant rows, in timestamp order, across any compaction boundary (D1). Notification rows (`is_notification`, i.e. `<task-notification>` subagent reports) and `tool_content` are left out: the recap prompt asks for the goal, the current task and the next action, which live in the prose, while notifications are reports the assistant restates and tool markers are inputs with no results (1% of sessions end on an assistant turn with no prose). There are no per-message caps. Evidence: `evaluation.md` (both runs, which included `tool_content`); `../010-session-recaps/evaluation.md`; `evaluation.md` runs 3 and 4 (prose-only input matched the reference on goal and next step in every probed notification-heavy session, at 30% of the unshaped input's cost, and the whole branch of a compacted session recapped as well as its post-compaction slice).
+- The whole input is capped at 400,000 characters (about 100k tokens, well inside the model's context window). Over the cap, it keeps the first user turn and then the most recent rows that fit, with a marker where the middle was dropped. The cap never triggers on current data: across all 9,088 stored sessions the largest prose-only branch is 137k characters (p99 52k, p95 29k). A test must pin the whole-branch input (including a compacted branch) and the cap. Evidence: measured against `~/.ccrecall/conversations.db` on 2026-11-15; challenge Finding 8.
+- A recap's covered-through time is read in the same read as its input and written with its text, so messages synced during the call are never counted as covered. A failed regeneration records `error` and `attempted_at` and never clears or replaces an existing `text`; a success clears `error`. A test must pin both. Evidence: D3's stored last-message time and D5's stored `error`/`attempted_at` share the session's `recaps` row; challenge Finding 10.
 - The generation call uses `claude-sonnet-5-5`, Claude Code's recap prompt verbatim ("The user stepped away and is coming back. Recap in under 40 words, 1-2 plain sentences, no markdown. Lead with the overall goal and current task, then the one next action. Skip root-cause narrative, fix internals, secondary to-dos, and em-dash tangents."), a short system prompt casting the model as the session's assistant, one turn, `tools=[]`, `setting_sources=[]`, `strict_mcp_config=True`, and output truncated to 400 characters. Evidence: `evaluation.md`; Claude Code 2.1.322 source (prompt text and 400-character cap).
 - Every generation call passes `--no-session-persistence` through the SDK's `extra_args`, so it leaves no transcript for ccrecall to import. A test must pin this. Evidence: `claude --help` ("Disable session persistence ... only works with --print"); the probe's 146 imported copies (`evaluation.md`).
+- Every generation call runs with `cwd` set to one fixed directory under `~/.ccrecall/`, and import always skips the Claude Code project that directory maps to. If a Claude Code or SDK release stops honoring `--no-session-persistence`, the stray transcripts land in a project nothing imports instead of duplicating session content into search. A test must pin the skip. Evidence: the probe's 146 imported copies had to be purged by hand and no purge command exists (`evaluation.md`); challenge Finding 13.
 - The call doesn't set `ANTHROPIC_API_KEY`, so it authenticates with the user's Claude Code login. Evidence: the probe ran this way; the CLI prefers an API key when one is set.
 - Recaps are keyed per session. `branches` is `UNIQUE(session_id)` with one active row per session. Evidence: CLAUDE.md invariant 4; `branch_ops.upsert_branch`.
 - Claude Code's `away_summary` text may end with " (disable recaps in /config)" on a session's first three recaps; the parse boundary strips it. Evidence: Claude Code 2.1.322 source; observed in transcripts.
