@@ -124,8 +124,13 @@ def claude_project_dir_name(cwd: Path) -> str:
 
 
 def is_recap_call_project(project_dir: Path) -> bool:
-    """True for the Claude Code project directory recap-generation calls run in."""
-    return project_dir.name == claude_project_dir_name(RECAP_CALL_DIR)
+    """True for the Claude Code project directory recap-generation calls run in.
+
+    Matches the name built from the resolved path too: with a symlinked home or
+    runtime directory, Claude Code may name the directory from either form.
+    """
+    names = {claude_project_dir_name(RECAP_CALL_DIR), claude_project_dir_name(RECAP_CALL_DIR.resolve())}
+    return project_dir.name in names
 
 
 def resolve_backfill_stale_hours(raw_setting: object) -> float:

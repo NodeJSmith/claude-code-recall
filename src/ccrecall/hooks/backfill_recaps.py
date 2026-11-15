@@ -1,6 +1,7 @@
 """Generate recaps for sessions that have stopped (`ccrecall backfill recaps`).
 
-Built to run unattended on a timer, so each run is bounded and fails loudly:
+Built to run unattended on a timer, so each run is bounded (``limit`` defaults to
+``recaps.DEFAULT_LIMIT`` calls) and fails loudly:
 
   - It imports first, so idleness and currency are judged against what the
     transcripts hold now, not what the last hook happened to sync. When another
@@ -14,7 +15,12 @@ Built to run unattended on a timer, so each run is bounded and fails loudly:
     Code not starting) ends the run ``failed`` at once and cools nothing down, so
     the next scheduled run is the retry. ``MAX_CONSECUTIVE_FAILURES`` per-session
     failures in a row also end it ``failed``, as a backstop for a run-level failure
-    the mapping misses; those sessions have each recorded their cooldown.
+    the mapping misses.
+  - A streak of per-session failures holds its cooldowns until something shows the
+    failures really were per-session: a success after them, or the run ending
+    without stopping early. A run that stops on the backstop or a run-level failure
+    discards the streak's cooldowns, so a cause the mapping misses (a boot run
+    before the network is up, a retired model) never cools the newest sessions.
 
 The caller (the CLI command) holds this job's lock.
 """
@@ -55,6 +61,19 @@ class Counts:
 
 
 @dataclass(frozen=True)
+class SessionFailure:
+    """A failed attempt: what to record as the session's cooldown, and why the run may stop.
+
+    ``run_reason`` is None for a failure that is this session's alone.
+    """
+
+    session_id: int
+    error: str
+    attempted_at: Instant
+    run_reason: str | None
+
+
+@dataclass(frozen=True)
 class RunResult:
     outcome: str
     reason: str | None
@@ -64,7 +83,7 @@ class RunResult:
 def run(
     *,
     days: int = recaps.DEFAULT_DAYS,
-    limit: int | None = None,
+    limit: int | None = recaps.DEFAULT_LIMIT,
     idle_minutes: int = recaps.DEFAULT_IDLE_MINUTES,
     json_mode: bool = False,
     verbose: bool = False,
@@ -117,7 +136,9 @@ def generate_recaps(
 ) -> RunResult:
     """Select and recap sessions, committing each result on its own."""
     counts = Counts()
-    consecutive_failures = 0
+    # Per-session failures awaiting proof they really were per-session: written on a
+    # later success or a normal end of the run, dropped when the run stops early.
+    streak: list[SessionFailure] = []
     with get_connection(settings) as conn:
         candidates = recaps.select_candidates(
             conn,
@@ -132,29 +153,40 @@ def generate_recaps(
         for candidate in candidates:
             failure = attempt(conn, logger, candidate, counts)
             if failure is None:
-                consecutive_failures = 0
+                record_cooldowns(conn, streak)
                 continue
             if failure.run_reason is not None:
                 logger.error(
-                    "recap call failed in a way every session would; stopping", extra={"reason": failure.run_reason}
+                    "recap call failed in a way every session would; stopping",
+                    extra={"reason": failure.run_reason, "cooldowns_discarded": len(streak)},
                 )
                 return RunResult(run_history.OUTCOME_FAILED, failure.run_reason, counts)
-            consecutive_failures += 1
-            if consecutive_failures >= recaps.MAX_CONSECUTIVE_FAILURES:
-                logger.error("recap calls failed %d times in a row; stopping", consecutive_failures)
+            streak.append(failure)
+            if len(streak) >= recaps.MAX_CONSECUTIVE_FAILURES:
+                logger.error(
+                    "recap calls failed %d times in a row; stopping without cooling those sessions down", len(streak)
+                )
                 return RunResult(run_history.OUTCOME_FAILED, run_history.REASON_REPEATED_FAILURES, counts)
+        record_cooldowns(conn, streak)
     if counts.failed:
         return RunResult(run_history.OUTCOME_PARTIAL, run_history.REASON_ERROR, counts)
     return RunResult(run_history.OUTCOME_OK, None, counts)
 
 
+def record_cooldowns(conn: sqlite3.Connection, failures: list[SessionFailure]) -> None:
+    """Store each failure with its time, which starts that session's cooldown, and empty the list."""
+    for failure in failures:
+        recaps.write_failure(conn, failure.session_id, failure.error, failure.attempted_at)
+    failures.clear()
+
+
 def attempt(
     conn: sqlite3.Connection, logger: logging.Logger, candidate: recaps.Candidate, counts: Counts
-) -> recaps.RecapCallError | None:
-    """Recap one session and record the result; return the failure, if any.
+) -> SessionFailure | None:
+    """Recap one session, storing a success; return the failure, if any, unstored.
 
-    A per-session failure is stored with its time, which starts its cooldown. A
-    run-level one is not stored, so the session stays eligible for the next run.
+    The caller decides whether a per-session failure becomes a cooldown. A run-level
+    one never does, so the session stays eligible for the next run.
     """
     recap_input = recaps.build_input(conn, candidate.branch_id)
     if recap_input is None:
@@ -170,9 +202,7 @@ def attempt(
             "recap failed",
             extra={"session": candidate.session_uuid, "error": str(exc), "run_reason": exc.run_reason},
         )
-        if exc.run_reason is None:
-            recaps.write_failure(conn, candidate.session_id, str(exc), attempted_at)
-        return exc
+        return SessionFailure(candidate.session_id, str(exc), attempted_at, exc.run_reason)
     recaps.write_success(conn, candidate.session_id, text, recap_input.as_of, attempted_at)
     counts.generated += 1
     logger.info("recap generated", extra={"session": candidate.session_uuid})

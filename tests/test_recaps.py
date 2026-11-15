@@ -7,7 +7,7 @@ import sqlite3
 from pathlib import Path
 
 import pytest
-from claude_agent_sdk import AssistantMessage, CLINotFoundError, ResultMessage, TextBlock
+from claude_agent_sdk import AssistantMessage, CLINotFoundError, ProcessError, ResultMessage, TextBlock
 from conftest import make_jsonl_entry, write_jsonl
 from whenever import Instant, TimeDelta
 
@@ -228,6 +228,14 @@ class TestSelection:
         assert select(memory_db) == []
         assert select(memory_db, idle_minutes=0) == [UUID_A]
 
+    def test_a_session_busy_with_tool_calls_is_not_idle(self, memory_db, tmp_path):
+        entries = conversation(3, end_minutes_ago=60)
+        tool_use = [{"type": "tool_use", "id": "x", "name": "Bash", "input": {}}]
+        tool_only = make_jsonl_entry("t1", entries[-1]["uuid"], ago(5), "assistant", tool_use)
+        seed(memory_db, tmp_path, UUID_A, [*entries, tool_only])
+        assert select(memory_db) == []
+        assert select(memory_db, idle_minutes=0) == [UUID_A]
+
     def test_sessions_older_than_the_window_are_left_out(self, memory_db, tmp_path):
         seed(memory_db, tmp_path, UUID_A, conversation(3, end_minutes_ago=8 * 24 * 60))
         assert select(memory_db) == []
@@ -291,6 +299,9 @@ class TestCall:
             (None, None, 503, run_history.REASON_API_UNAVAILABLE),
             (None, "invalid_request", 400, None),
             (TimeoutError(), None, None, None),
+            # Unmapped kinds stay per-session; the run loop's streak handling covers a systemic one.
+            (ProcessError("exited", exit_code=1), None, None, None),
+            (None, "unknown", None, None),
         ],
     )
     def test_classify_failure_separates_run_level_from_per_session(self, exc, assistant_error, status, expected):
@@ -437,6 +448,58 @@ class TestBackfillRun:
         ids = {finding.id for finding in diagnose(db, {"exclude_projects": []}).findings}
         assert "recaps-failed" in ids
 
+    def test_a_held_import_lock_selects_from_what_is_already_imported(self, env, monkeypatch, capsys, hold_job_lock):
+        db, projects, _stopped = env
+        hold_job_lock(config.JOB_KEY_IMPORT)
+        monkeypatch.setattr(recaps, "generate", lambda prompt: pytest.fail("nothing is imported to recap"))
+        assert self.run(db, projects, json_mode=True) == backfill_recaps.EXIT_OK
+        assert json.loads(capsys.readouterr().out)["selected"] == 0
+
+    def scripted(self, monkeypatch, answers):
+        """Make ``recaps.generate`` return or raise each answer in turn."""
+        script = iter(answers)
+
+        def answer(prompt):
+            value = next(script)
+            if isinstance(value, Exception):
+                raise value
+            return value
+
+        monkeypatch.setattr(recaps, "generate", answer)
+
+    def cooldowns(self, db) -> int:
+        with get_connection({"db_path": str(db)}) as conn:
+            return conn.execute("SELECT COUNT(*) FROM recaps WHERE error IS NOT NULL").fetchone()[0]
+
+    def test_a_success_after_a_failure_streak_records_the_streaks_cooldowns(self, env, monkeypatch):
+        db, projects, stopped = env
+        stopped(UUID_B)
+        stopped("cccccccc-3")
+        self.scripted(monkeypatch, [recaps.RecapCallError("bad"), recaps.RecapCallError("bad"), "fine"])
+        assert self.run(db, projects) == backfill_recaps.EXIT_FAILED
+        assert self.cooldowns(db) == 2
+
+    def test_a_run_level_failure_after_a_streak_discards_its_cooldowns(self, env, monkeypatch):
+        db, projects, stopped = env
+        stopped(UUID_B)
+        stopped("cccccccc-3")
+        run_level = recaps.RecapCallError("outage", run_history.REASON_API_UNAVAILABLE)
+        self.scripted(monkeypatch, [recaps.RecapCallError("bad"), recaps.RecapCallError("bad"), run_level])
+        assert self.run(db, projects) == backfill_recaps.EXIT_FAILED
+        assert self.cooldowns(db) == 0
+
+    def test_a_failure_at_the_end_of_a_run_that_finished_records_its_cooldown(self, env, monkeypatch):
+        db, projects, _stopped = env
+
+        def fail(prompt):
+            raise recaps.RecapCallError("bad answer")
+
+        monkeypatch.setattr(recaps, "generate", fail)
+        assert self.run(db, projects) == backfill_recaps.EXIT_FAILED
+        with get_connection({"db_path": str(db)}) as conn:
+            assert conn.execute("SELECT text, error FROM recaps").fetchall() == [(None, "bad answer")]
+        assert run_history.read_runs(db)[run_history.KIND_RECAPS]["last"]["outcome"] == "partial"
+
     def test_three_per_session_failures_in_a_row_stop_the_run(self, env, monkeypatch):
         db, projects, stopped = env
         for uuid in ("cccccccc-3", "dddddddd-4", "eeeeeeee-5"):
@@ -452,6 +515,22 @@ class TestBackfillRun:
         assert len(calls) == recaps.MAX_CONSECUTIVE_FAILURES
         last = run_history.read_runs(db)[run_history.KIND_RECAPS]["last"]
         assert last["reason"] == run_history.REASON_REPEATED_FAILURES
+        # The streak may be a cause the mapping missed, so none of its sessions cool down.
+        with get_connection({"db_path": str(db)}) as conn:
+            assert conn.execute("SELECT COUNT(*) FROM recaps").fetchone()[0] == 0
+
+    def test_the_cli_caps_calls_per_run_by_default(self, tmp_path, monkeypatch):
+        seen = {}
+
+        def fake_run(**kwargs):
+            seen.update(kwargs)
+            return backfill_recaps.EXIT_OK
+
+        monkeypatch.setattr(backfill_recaps, "run", fake_run)
+        with pytest.raises(SystemExit) as exited:
+            app.meta(["backfill", "recaps", "--db", str(tmp_path / "conversations.db")])
+        assert exited.value.code == backfill_recaps.EXIT_OK
+        assert seen["limit"] == recaps.DEFAULT_LIMIT
 
 
 class TestImportSkipsRecapCalls:
@@ -462,6 +541,16 @@ class TestImportSkipsRecapCalls:
         assert import_conversations.import_project(memory_db, project_dir) == (0, 0, 0)
         assert memory_db.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 0
         assert memory_db.execute("SELECT COUNT(*) FROM projects").fetchone()[0] == 0
+
+    def test_a_symlinked_runtime_directory_is_skipped_under_either_name(self, tmp_path, monkeypatch):
+        real = tmp_path / "real-runtime"
+        real.mkdir()
+        link = tmp_path / "linked-runtime"
+        link.symlink_to(real)
+        monkeypatch.setattr(config, "RECAP_CALL_DIR", link / "recap-calls")
+        for cwd in (link / "recap-calls", real / "recap-calls"):
+            assert config.is_recap_call_project(tmp_path / config.claude_project_dir_name(cwd))
+        assert not config.is_recap_call_project(tmp_path / config.claude_project_dir_name(real / "other"))
 
     def test_the_directory_name_matches_claude_codes_encoding(self):
         assert config.claude_project_dir_name(Path("/home/u/.ccrecall/recap-calls")) == "-home-u--ccrecall-recap-calls"

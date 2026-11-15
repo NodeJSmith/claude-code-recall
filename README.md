@@ -103,12 +103,12 @@ Claude Code deletes old transcripts on its own schedule (its `cleanupPeriodDays`
 A recap is one or two sentences saying what a session was for and where it stopped, for a session picker or anything else that lists past sessions. Claude Code writes its own when you step away from a session, and ccrecall stores the latest one. `ccrecall backfill recaps` writes one for sessions that lack a current recap:
 
 ```bash
-ccrecall backfill recaps                   # sessions idle 30+ minutes, active in the last 7 days
-ccrecall backfill recaps --limit 20        # at most 20 Claude calls this run
+ccrecall backfill recaps                   # up to 20 sessions idle 30+ minutes, active in the last 7 days
+ccrecall backfill recaps --limit 100       # at most 100 Claude calls this run (default 20)
 ccrecall backfill recaps --idle-minutes 0  # at boot: catch sessions a shutdown cut off
 ```
 
-It imports first, then makes one Claude call per session through your Claude Code login (the bundled `claude` CLI; ccrecall sets no API key, though one already in your environment takes precedence). A session is recapped once it has at least three user turns, has been idle for `--idle-minutes`, and has moved on since its last recap. Each call sends the session's prose (your messages and Claude's replies, without tool calls or subagent reports) to Anthropic, the same party that received it when the session ran. Sessions in projects listed in `exclude_projects` are never sent, including ones stored before the project was excluded.
+It imports first, then makes one Claude call per session, newest first and at most `--limit` (default 20) per run, through your Claude Code login (the bundled `claude` CLI; ccrecall sets no API key, though one already in your environment takes precedence). A session is recapped once it has at least three user turns, has been idle for `--idle-minutes`, and has moved on since its last recap. Each call sends the session's prose (your messages and Claude's replies, without tool calls or subagent reports) to Anthropic, the same party that received it when the session ran. Sessions in projects listed in `exclude_projects` are never sent, including ones stored before the project was excluded.
 
 A failure that would hit every session, such as being logged out or rate limited, stops the run, and the next run retries. A failure specific to one session skips that session for a day. The run exits 1 when any session failed, and `doctor` reports `recaps-failed` until a later run finishes cleanly. A typical timer runs it every 20 minutes, plus once at boot with `--idle-minutes 0`.
 

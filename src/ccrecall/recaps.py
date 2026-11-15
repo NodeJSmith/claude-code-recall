@@ -49,6 +49,9 @@ SOURCE_GENERATED = "generated"
 
 DEFAULT_DAYS = 7
 DEFAULT_IDLE_MINUTES = 30
+# Calls per run. Bounds a run (and the shared Claude quota it spends) without a time budget;
+# newest-first selection lets successive scheduled runs work through a backlog.
+DEFAULT_LIMIT = 20
 MIN_USER_TURNS = 3
 COOLDOWN = TimeDelta(hours=24)
 MAX_CONSECUTIVE_FAILURES = 3
@@ -192,7 +195,8 @@ def select_candidates(
     """Sessions that need a generated recap, newest last message first.
 
     A session qualifies when it has at least ``MIN_USER_TURNS`` user turns, its
-    last message is within ``days`` and at least ``idle_minutes`` old, its project
+    last message is within ``days``, it has no timestamped entry of any kind (tool
+    calls and subagent reports included) in the last ``idle_minutes``, its project
     isn't excluded, the recap it would show isn't current, and its last attempt
     didn't fail within ``COOLDOWN``.
     """
@@ -202,7 +206,7 @@ def select_candidates(
     prefilter = (window_start - PREFILTER_SLACK).format_iso()
     rows = conn.execute(
         f"""
-        SELECT s.id, s.uuid, b.id, b.away_summary, b.away_summary_at, p.name, p.key,
+        SELECT s.id, s.uuid, b.id, b.ended_at, b.away_summary, b.away_summary_at, p.name, p.key,
                r.text, r.as_of, r.error, r.attempted_at, agg.last_at, agg.user_turns
         FROM branches b
         JOIN sessions s ON s.id = b.session_id
@@ -228,6 +232,7 @@ def select_candidates(
         session_id,
         session_uuid,
         branch_id,
+        ended_at,
         harness_text,
         harness_at,
         project_name,
@@ -240,7 +245,12 @@ def select_candidates(
         user_turns,
     ) in rows:
         last = parse_instant(last_at)
-        if last is None or last < window_start or last > idle_cutoff or user_turns < MIN_USER_TURNS:
+        if last is None or last < window_start or user_turns < MIN_USER_TURNS:
+            continue
+        # Idleness counts every entry: a session busy with tool calls or subagents writes
+        # no prose row for a while, but hasn't stopped. The max covers a missing ended_at.
+        active_until = max(last, parse_instant(ended_at) or last)
+        if active_until > idle_cutoff:
             continue
         # Stored rows don't record whether import fell back to the lossy key, so check it too.
         if is_excluded_project(project_name, project_key, exclude_projects, lossy=True):

@@ -361,9 +361,13 @@ def cmd_backfill_recaps(
         Parameter(validator=Number(gte=1), help="Only sessions whose last message is within the last N days (>= 1)."),
     ] = recaps_mod.DEFAULT_DAYS,
     limit: Annotated[
-        int | None,
-        Parameter(validator=Number(gte=1), help="Make at most N Claude calls this run (>= 1)."),
-    ] = None,
+        int,
+        Parameter(
+            validator=Number(gte=1),
+            help="Make at most N Claude calls this run (>= 1). Calls use your Claude Code login's usage "
+            "limits; later runs pick up the rest, newest sessions first.",
+        ),
+    ] = recaps_mod.DEFAULT_LIMIT,
     idle_minutes: Annotated[
         int,
         Parameter(
