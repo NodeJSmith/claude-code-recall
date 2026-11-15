@@ -234,7 +234,7 @@ Ids are full session UUIDs or the 8-character prefixes ccrecall prints elsewhere
 - Claude Code's `away_summary` text may end with " (disable recaps in /config)" on a session's first three recaps; the parse boundary strips it. Evidence: Claude Code 2.1.322 source; observed in transcripts.
 - Adding fields to the branch dict without changing `active_chain`'s returned entries needs no `ACTIVE_CHAIN_VERSION` bump. Evidence: `parsing.active_chain` docstring; `ingestion_status.ACTIVE_CHAIN_VERSION`.
 - New columns go in as additive, unconditional delta migrations like v3/v4/v8 (`SCHEMA_VERSION` 9 → 10), and the `recaps` table as `CREATE TABLE IF NOT EXISTS`. Evidence: `db_base._migrate_to_v8`; CLAUDE.md invariant 4.
-- Nothing in this change runs on a hook's hot path; the hooks never import `recaps.py`. Evidence: CLAUDE.md invariants 2 and 3.
+- Nothing in this change runs on a hook's hot path. The hook entry points (`ccrecall-setup`, `ccrecall-sync`, `ccrecall-context`, `ccrecall-clear-handoff`, `ccrecall-warm-model`) and the modules they import never import `recaps.py`; `hooks/backfill_recaps.py` is a helper run only from the CLI, like `hooks/backfill_embeddings.py`. Evidence: CLAUDE.md invariants 2 and 3 and its `hooks/` description.
 
 ## Build
 
