@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.28.0](https://github.com/NodeJSmith/claude-code-recall/compare/v0.27.1...v0.28.0) (2026-11-15)
+
+
+### Session Recaps
+
+- **New `ccrecall backfill recaps` writes a short recap for each session.** A recap is one or two sentences saying what a session was for and where it stopped, for a session picker or anything else that lists past sessions. The command is opt-in: it imports first, then makes one Claude call per session that has at least three user turns, has been idle for `--idle-minutes` (default 30; `0` for a run at boot) and was active in the last `--days` (default 7). Each run makes at most `--limit` calls (default 20), newest sessions first. Calls go through your Claude Code login and send only the session's prose, never tool calls or subagent reports, and never a project listed in `exclude_projects`. A failure that would hit every session, such as being logged out or rate limited, stops the run and the next run retries; a failure in one session skips it for a day. (#264)
+- **Claude Code's own recaps are now stored.** Claude Code writes a recap when you step away from a session, and ccrecall now keeps the latest one for each session. The database upgrades to schema v10 automatically; an older ccrecall pointed at it afterwards prints a schema warning but still runs. (#264)
+- **New `ccrecall show-recaps <id>...` reads recaps without calling Claude.** It takes full session ids or 8-character prefixes and shows whichever recap is newer, Claude Code's or the generated one. With `--json` it prints `{"recaps": [{"session_id", "text", "source", "current", "as_of"}]}`, where `current` is false once the session has moved past its recap. (#264)
+- **`ccrecall doctor` reports failed recap runs** as `recaps-failed` or `recaps-killed`, with the reason. (#264)
+- **ccrecall now depends on `claude-agent-sdk`,** pinned to one exact version because recap isolation relies on the behavior of the `claude` CLI it bundles. It may conflict with another version installed in the same environment; installing ccrecall as its own tool (`uv tool install`) or plugin avoids that. (#264)
+
 ## [0.27.1](https://github.com/NodeJSmith/claude-code-recall/compare/v0.27.0...v0.27.1) (2026-11-14)
 
 ### Skills
