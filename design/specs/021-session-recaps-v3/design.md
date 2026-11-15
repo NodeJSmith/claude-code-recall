@@ -1,7 +1,7 @@
 # Design: Session Recaps (attempt 3)
 
 **Date:** 2026-11-15
-**Status:** ratified
+**Status:** built
 **Mode:** sketch
 **Prior art:** design/specs/021-session-recaps-v3/prior-art.md
 
@@ -240,7 +240,7 @@ Ids are full session UUIDs or the 8-character prefixes ccrecall prints elsewhere
 
 - [x] Implementation and tests committed
 - [x] Docs: README.md's "no data leaves it" (opening paragraph) and "ccrecall is local-only. Nothing it stores or derives is sent anywhere." (the config section's closing note), and CLAUDE.md's frontmatter `data-sensitivity`, which says transcripts are "never transmitted", all say that `backfill recaps` sends session content to Anthropic, the same party that received it when the session ran, and that excluded projects are never sent
-- [ ] Ship-time challenge
+- [x] Ship-time challenge
 
 **Calls made during the build:**
 - Failure-class mapping (D5): run-level is `CLINotFoundError`/`CLIConnectionError` (`claude_unavailable`), an assistant error of `authentication_failed`/`billing_error` or HTTP 401/402/403 (`claude_auth`), `rate_limit` or 429 (`rate_limited`), and `server_error` or any 5xx (`api_unavailable`). Everything else is per-session, including `invalid_request`, a malformed or empty answer, and a crash with no status. An API outage hits every session the same way a rate limit does, so it's run-level rather than a day of cooldowns.
