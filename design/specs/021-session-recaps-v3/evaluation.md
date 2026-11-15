@@ -45,13 +45,19 @@ Eight compacted sessions across six repos, each ending on a current `away_summar
 | Whole branch | 7 | 6 | 8 | 1.00 |
 | First user turn + most recent turns to 30k characters | 6 | 6 | 8 | 0.59 |
 
-Whole-branch inputs were 25k–66k characters. The whole branch never drifted to earlier work; the tight head-plus-tail input did once, pulled there by the session's opening goal. The one next-step difference between post-compaction and whole branch was a partial match, not a wrong step.
+Whole-branch inputs were 25k–66k characters and cost $0.04–0.10 per call. The whole branch never drifted to earlier work; the tight head-plus-tail input did once, pulled there by the session's opening goal. The one next-step difference between post-compaction and whole branch was a partial match, not a wrong step.
+
+## Population (measured 2026-11-15)
+
+- Of 233 interactive sessions with 3 or more user turns in the previous 30 days, 69% have an `away_summary` and 28% have a current one.
+- Of 1,661 sessions active in the previous 14 days, 17 end on an assistant turn with no prose.
+- 131 sessions with 3 or more user turns were active in the previous 7 days, the most a first run would select.
 
 ## Decisions this supports
 
 - Imported SQLite is a sufficient recap input (consistent with `../010-session-recaps/evaluation.md`).
-- Post-compaction input was adopted on runs 1–2 (inputs with `tool_content`), then dropped after run 4: with prose-only input the whole branch recaps as well, so storing compaction facts isn't worth the schema change.
+- With prose-only input the whole branch recaps a compacted session as well as its post-compaction slice, so compaction facts are not stored (run 4).
 - The prompt hint is dropped: no gain, and it once dropped the session's overall goal.
-- `claude-sonnet-5-5` with the harness prompt met the 400-character cap on every generated recap in both runs. Calls run one at a time took about 3 s each; latency is not a design constraint because generation is unattended.
+- `claude-sonnet-5-5` with the harness prompt met the 400-character cap on every generated recap in all four runs. Calls run one at a time took about 3 s each; latency is not a design constraint because generation is unattended.
 - Each SDK call is a headless Claude Code session. Without `--no-session-persistence`, each one is saved as a transcript containing its whole input, which ccrecall then imports. The probe produced 146 such sessions, which had to be purged by hand.
 - Generation input is user and assistant prose only, with no per-message caps and a 400,000-character whole-input cap (run 3).
