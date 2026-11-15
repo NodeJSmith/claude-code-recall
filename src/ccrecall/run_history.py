@@ -4,8 +4,8 @@ Two small JSON sidecars live beside the database they describe, so runs against
 one database never appear in another's history:
 
   - ``<db>.runs.json``: per run kind, the newest finished run (``last``) and the
-    newest successful one (``last_ok``). Written by import, repair, sync and the
-    embedding backfill when a run finishes.
+    newest successful one (``last_ok``). Written by import, repair, sync, the
+    embedding backfill and recap generation when a run finishes.
   - ``<db>.unrepairable.json``: sessions repair tried and couldn't fix, each with
     the source fingerprint it was tested against. Written only by repair, and
     present only while non-empty.
@@ -31,6 +31,7 @@ from whenever import Instant
 
 from ccrecall.config import (
     JOB_KEY_BACKFILL_EMBEDDINGS,
+    JOB_KEY_BACKFILL_RECAPS,
     JOB_KEY_IMPORT,
     JOB_KEY_SYNC,
     atomic_write_json,
@@ -46,7 +47,8 @@ KIND_REPAIR = "repair"
 KIND_SYNC = "sync"
 # Embedding backfill only: `backfill tool-content` and `backfill summaries` record nothing.
 KIND_BACKFILL = "backfill"
-RUN_KINDS = (KIND_IMPORT, KIND_REPAIR, KIND_SYNC, KIND_BACKFILL)
+KIND_RECAPS = "recaps"
+RUN_KINDS = (KIND_IMPORT, KIND_REPAIR, KIND_SYNC, KIND_BACKFILL, KIND_RECAPS)
 
 # Kinds with a job lock of their own. Repair runs inside `import --repair-gaps`,
 # so a killed repair reads as a killed import.
@@ -54,6 +56,7 @@ KIND_JOB_KEYS = {
     KIND_IMPORT: JOB_KEY_IMPORT,
     KIND_SYNC: JOB_KEY_SYNC,
     KIND_BACKFILL: JOB_KEY_BACKFILL_EMBEDDINGS,
+    KIND_RECAPS: JOB_KEY_BACKFILL_RECAPS,
 }
 
 OUTCOME_OK = "ok"
@@ -64,6 +67,12 @@ REASON_DATABASE_BUSY = "database_busy"
 REASON_VECTOR_UNAVAILABLE = "vector_unavailable"
 REASON_MODEL_UNAVAILABLE = "model_unavailable"
 REASON_ERROR = "error"
+# Recap generation's run-level failures: each affects every session, so the run stops.
+REASON_CLAUDE_UNAVAILABLE = "claude_unavailable"
+REASON_CLAUDE_AUTH = "claude_auth"
+REASON_RATE_LIMITED = "rate_limited"
+REASON_API_UNAVAILABLE = "api_unavailable"
+REASON_REPEATED_FAILURES = "repeated_failures"
 
 # Shared by `ccrecall doctor` and the SessionStart failed-import alert.
 REASON_PROSE = {
@@ -71,6 +80,11 @@ REASON_PROSE = {
     REASON_VECTOR_UNAVAILABLE: "the vector extension (sqlite-vec) couldn't load",
     REASON_MODEL_UNAVAILABLE: "the embedding model couldn't load",
     REASON_ERROR: "an error",
+    REASON_CLAUDE_UNAVAILABLE: "Claude Code couldn't be started",
+    REASON_CLAUDE_AUTH: "Claude Code isn't logged in, or its account can't be used",
+    REASON_RATE_LIMITED: "Claude's rate or usage limit was reached; the next run retries",
+    REASON_API_UNAVAILABLE: "Claude's API was unavailable; the next run retries",
+    REASON_REPEATED_FAILURES: "three sessions in a row failed",
 }
 
 

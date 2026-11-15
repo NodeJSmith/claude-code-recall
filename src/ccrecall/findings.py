@@ -29,6 +29,7 @@ from whenever import SYSTEM_TZ, Instant
 
 from ccrecall import config, health, job_lock, run_history
 from ccrecall.config import resolve_backfill_stale_hours
+from ccrecall.dates import parse_instant
 from ccrecall.db import CHUNK_DRAFT_QUALITY_FILTER, CHUNK_EMBEDDABLE_BRANCH_FILTER, CONTENT_ERROR_VERSION
 from ccrecall.db_base import SCHEMA_VERSION, describe_schema_ahead
 from ccrecall.db_vec import (
@@ -81,6 +82,7 @@ KIND_LABELS = {
     run_history.KIND_REPAIR: "gap repair",
     run_history.KIND_SYNC: "sync",
     run_history.KIND_BACKFILL: "embedding backfill",
+    run_history.KIND_RECAPS: "recap generation",
 }
 # None: no command reruns it; sync runs again at the end of the next turn.
 KIND_FIXES: dict[str, str | None] = {
@@ -88,12 +90,14 @@ KIND_FIXES: dict[str, str | None] = {
     run_history.KIND_REPAIR: health.FIX_REPAIR,
     run_history.KIND_SYNC: None,
     run_history.KIND_BACKFILL: health.FIX_BACKFILL_EMBEDDINGS,
+    run_history.KIND_RECAPS: health.FIX_BACKFILL_RECAPS,
 }
 KIND_LOGS = {
     run_history.KIND_IMPORT: "ccrecall-import.log",
     run_history.KIND_REPAIR: "ccrecall-import.log",
     run_history.KIND_SYNC: "ccrecall-sync.log",
     run_history.KIND_BACKFILL: "ccrecall-backfill-embed.log",
+    run_history.KIND_RECAPS: "ccrecall-backfill-recaps.log",
 }
 # Kinds whose run is long enough to report as running, or stuck.
 LONG_RUNNING_KINDS = (run_history.KIND_IMPORT, run_history.KIND_BACKFILL)
@@ -954,15 +958,6 @@ def duplicate_branch_findings(conn: sqlite3.Connection) -> list[Found]:
             )
         )
     ]
-
-
-def parse_instant(value: object) -> Instant | None:
-    if not isinstance(value, str) or not value:
-        return None
-    try:
-        return Instant.parse_iso(value)
-    except ValueError:
-        return None
 
 
 def format_when(instant: Instant | None) -> str:

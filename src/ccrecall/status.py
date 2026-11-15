@@ -19,6 +19,7 @@ from pathlib import Path
 from whenever import Instant
 
 from ccrecall.config import DEFAULT_DB_PATH, get_db_path, load_settings_for_db
+from ccrecall.dates import parse_instant
 from ccrecall.findings import (
     FINDING_IDS,
     GROUP_ACTION,
@@ -31,7 +32,6 @@ from ccrecall.findings import (
     DatabaseUnreadableError,
     Diagnosis,
     diagnose,
-    parse_instant,
 )
 
 EXIT_NEEDS_ATTENTION = 1

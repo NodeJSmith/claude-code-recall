@@ -19,6 +19,9 @@ from ccrecall.models import LOGGER_NAME, TranscriptEntry, is_valid
 
 log = logging.getLogger(LOGGER_NAME)
 
+# Claude Code appends this to a session's first few `away_summary` recaps.
+AWAY_SUMMARY_SUFFIX = " (disable recaps in /config)"
+
 
 def _warn_skipped_lines(skipped: int, source: str | None) -> None:
     """Log a per-call summary of skipped malformed JSONL lines, shared by the
@@ -272,6 +275,26 @@ def extract_session_metadata(entries: list[dict]) -> dict:
     return metadata
 
 
+def latest_away_summary(chain: list[dict]) -> tuple[str | None, str | None]:
+    """The newest Claude Code ``away_summary`` recap on a chain, as ``(text, timestamp)``.
+
+    Claude Code writes it as a ``system`` entry whose ``content`` is the recap
+    text. The suffix it appends to early recaps is stripped. An entry with no
+    usable text or timestamp is ignored.
+    """
+    for entry in reversed(chain):
+        if entry.get("type") != "system" or entry.get("subtype") != "away_summary":
+            continue
+        content = entry.get("content")
+        timestamp = entry.get("timestamp")
+        if not isinstance(content, str) or not isinstance(timestamp, str):
+            continue
+        text = content.removesuffix(AWAY_SUMMARY_SUFFIX).strip()
+        if text:
+            return text, timestamp
+    return None, None
+
+
 def find_all_branches(all_entries: list[dict]) -> list[dict]:
     """
     Find the active conversation branch.
@@ -280,6 +303,8 @@ def find_all_branches(all_entries: list[dict]) -> list[dict]:
       - leaf_uuid: UUID of the last message in this branch
       - uuids: set of all UUIDs on this branch path
       - is_active: always True
+      - away_summary, away_summary_at: the newest Claude Code recap on the
+        branch and its timestamp, or None (see ``latest_away_summary``)
 
     The path itself comes from ``active_chain``.
     """
@@ -287,11 +312,14 @@ def find_all_branches(all_entries: list[dict]) -> list[dict]:
     if not chain:
         return []
 
+    away_summary, away_summary_at = latest_away_summary(chain)
     return [
         {
             "leaf_uuid": chain[-1]["uuid"],
             "uuids": {entry["uuid"] for entry in chain},
             "is_active": True,
+            "away_summary": away_summary,
+            "away_summary_at": away_summary_at,
         }
     ]
 

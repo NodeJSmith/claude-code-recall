@@ -89,6 +89,20 @@ def upsert_project(
     return cursor.fetchone()[0], used_lossy_fallback
 
 
+def is_excluded_project(name: str | None, key: str | None, exclude_projects: list[str], *, lossy: bool) -> bool:
+    """Whether a project matches ``exclude_projects``: by name, or by its key when ``lossy``.
+
+    ``lossy`` means the name may have come from the lossy key decoding, so the
+    key is checked too. Import knows whether it used that fallback; a stored
+    row doesn't record it, so callers reading stored rows pass ``lossy=True``.
+    """
+    if not exclude_projects:
+        return False
+    if name is not None and name in exclude_projects:
+        return True
+    return lossy and key is not None and key_could_match_excluded(key, exclude_projects)
+
+
 def key_could_match_excluded(key: str, exclude_projects: list[str]) -> bool:
     """Check whether a normalized project key could encode any excluded project name.
 

@@ -674,6 +674,8 @@ def test_finding_id_catalog_matches_the_pinned_list():
         "import-stuck",
         "no-database",
         "not-writable",
+        "recaps-failed",
+        "recaps-killed",
         "repair-failed",
         "schema-ahead",
         "schema-behind",

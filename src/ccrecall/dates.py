@@ -22,6 +22,16 @@ from whenever import Date, Instant
 from ccrecall.errors import emit_error
 
 
+def parse_instant(value: object) -> Instant | None:
+    """A stored ISO-8601 instant, or None for a missing or unparseable value."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return Instant.parse_iso(value)
+    except ValueError:
+        return None
+
+
 def parse_date_boundary(value: str, flag: str) -> str:
     """Validate a --before/--after value; return the string to use in SQL.
 

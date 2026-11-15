@@ -1742,7 +1742,7 @@ class TestImportRepairGapsEndToEnd:
             assert job_lock.probe(JOB_KEY_IMPORT) is not None
             raise RuntimeError("simulated failure mid-import")
 
-        monkeypatch.setattr("ccrecall.hooks.import_conversations._import_locked", _raise_after_acquisition)
+        monkeypatch.setattr("ccrecall.hooks.import_conversations.import_locked", _raise_after_acquisition)
 
         with pytest.raises(RuntimeError, match="simulated failure"):
             run(db=tmp_path / "memory.db", projects_dir=tmp_path, repair_gaps=True)

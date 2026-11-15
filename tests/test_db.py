@@ -726,6 +726,8 @@ def _seed_genuine_db(db_path, target_version: int) -> None:
           cap_tokens (v8 adds it)
       v8: chunks has cap_tokens and idx_chunks_cap_tokens; projects.path is still
           UNIQUE (v9 rebuilds projects without it)
+      v9: projects.path is not UNIQUE; branches lacks away_summary/away_summary_at
+          (v10 adds them)
 
     Note: SCHEMA_CORE runs before _apply_migrations in open_connection, using
     CREATE TABLE IF NOT EXISTS — so tables that already exist keep their genuine
@@ -740,7 +742,7 @@ def _seed_genuine_db(db_path, target_version: int) -> None:
     if target_version == 1:
         _seed_v1_db_with_orphan_messages(db_path)
         return
-    if target_version > 8:
+    if target_version > 9:
         raise AssertionError(
             f"_seed_genuine_db has no genuine schema for v{target_version}; add it when SCHEMA_VERSION increases"
         )
@@ -748,8 +750,10 @@ def _seed_genuine_db(db_path, target_version: int) -> None:
     conn = sqlite3.connect(db_path)
     conn.execute("PRAGMA foreign_keys = ON")
 
-    # Static tables (unchanged across v2-v6)
-    conn.execute(PRE_V9_PROJECTS_DDL)
+    # projects: UNIQUE on path until v9 rebuilt it without
+    conn.execute(
+        PRE_V9_PROJECTS_DDL if target_version < 9 else PRE_V9_PROJECTS_DDL.replace("path TEXT UNIQUE", "path TEXT")
+    )
     conn.execute("CREATE INDEX idx_projects_key ON projects(key)")
 
     conn.execute(
@@ -1576,6 +1580,7 @@ class TestMigrationVersionMatrix:
         assert "fork_point_uuid" not in branch_cols
         assert "summary_enrichment_json" in branch_cols
         assert "summary_source_hash" in branch_cols
+        assert {"away_summary", "away_summary_at"} <= branch_cols
 
         msg_cols = {row[1] for row in conn.execute("PRAGMA table_info(messages)").fetchall()}
         assert "tool_content" in msg_cols
@@ -1601,11 +1606,12 @@ class TestMigrationVersionMatrix:
         assert "projects_new" not in fk_targets
 
     @staticmethod
-    def _project_rows(db_path) -> list[tuple]:
-        """Read projects rows, asserting the seed really is pre-v9 (UNIQUE path)."""
+    def _project_rows(db_path, start_version: int) -> list[tuple]:
+        """Read projects rows, asserting a pre-v9 seed really has UNIQUE path."""
         raw = sqlite3.connect(db_path)
         try:
-            assert _path_is_unique(raw), "the seed must start with UNIQUE path, or the v9 assertions are vacuous"
+            if start_version < 9:
+                assert _path_is_unique(raw), "the seed must start with UNIQUE path, or the v9 assertions are vacuous"
             return raw.execute("SELECT id, path, key, name, created_at FROM projects ORDER BY id").fetchall()
         finally:
             raw.close()
@@ -1615,7 +1621,7 @@ class TestMigrationVersionMatrix:
         """Every starting version migrates to SCHEMA_VERSION with data preserved."""
         db_path = tmp_path / f"v{start_version}.db"
         self._build_db_at_version(db_path, start_version)
-        projects_before = self._project_rows(db_path)
+        projects_before = self._project_rows(db_path, start_version)
 
         with get_connection(settings={"db_path": str(db_path)}) as conn:
             self._assert_post_migration(conn, start_version)
@@ -1778,6 +1784,7 @@ class TestSchemaEquivalencePin:
         "ingestion_check_cache",
         "messages",
         "projects",
+        "recaps",
         "sessions",
     ]
 
@@ -1812,6 +1819,8 @@ class TestSchemaEquivalencePin:
             (21, "summary_enrichment_error", "TEXT", 0, None, 0),
             (22, "summary_enrichment_updated_at", "DATETIME", 0, None, 0),
             (23, "summary_source_hash", "TEXT", 0, None, 0),
+            (24, "away_summary", "TEXT", 0, None, 0),
+            (25, "away_summary_at", "TEXT", 0, None, 0),
         ],
         "branches_fts": [
             (0, "aggregated_content", "", 0, None, 0),
@@ -1866,6 +1875,13 @@ class TestSchemaEquivalencePin:
             (2, "key", "TEXT", 1, None, 0),
             (3, "name", "TEXT", 0, None, 0),
             (4, "created_at", "DATETIME", 0, "CURRENT_TIMESTAMP", 0),
+        ],
+        "recaps": [
+            (0, "session_id", "INTEGER", 0, None, 1),
+            (1, "text", "TEXT", 0, None, 0),
+            (2, "as_of", "TEXT", 0, None, 0),
+            (3, "error", "TEXT", 0, None, 0),
+            (4, "attempted_at", "TEXT", 0, None, 0),
         ],
         "sessions": [
             (0, "id", "INTEGER", 0, None, 1),
@@ -1964,7 +1980,7 @@ class TestEmbeddingDDLInSchema:
         cursor = conn.cursor()
         cursor.execute("PRAGMA table_info(branches)")
         rows = cursor.fetchall()
-        tail_columns = [(row[1], row[2], row[4], row[5]) for row in rows[-10:]]
+        tail_columns = [(row[1], row[2], row[4], row[5]) for row in rows[-12:]]
         assert tail_columns == [
             ("embedding_version", "INTEGER", "0", 0),
             ("embedding_model", "TEXT", None, 0),
@@ -1976,6 +1992,8 @@ class TestEmbeddingDDLInSchema:
             ("summary_enrichment_error", "TEXT", None, 0),
             ("summary_enrichment_updated_at", "DATETIME", None, 0),
             ("summary_source_hash", "TEXT", None, 0),
+            ("away_summary", "TEXT", None, 0),
+            ("away_summary_at", "TEXT", None, 0),
         ], f"Tail columns were: {tail_columns}"
 
         conn.close()
@@ -2333,6 +2351,26 @@ assert not found, f'Heavy modules loaded: {{found}}'
 
     def test_config_does_not_import_heavy_deps(self):
         self._assert_no_heavy_imports("ccrecall.config")
+
+    @pytest.mark.parametrize(
+        "module_name",
+        [
+            "ccrecall.hooks.memory_setup",
+            "ccrecall.hooks.memory_sync",
+            "ccrecall.hooks.memory_context",
+            "ccrecall.hooks.clear_handoff",
+            "ccrecall.hooks.warm_model",
+        ],
+    )
+    def test_hook_entry_points_never_load_recap_generation(self, module_name):
+        """Recap generation and the Agent SDK it imports stay off every hook's path."""
+        code = (
+            f"import {module_name}\nimport sys\n"
+            "found = {'ccrecall.recaps', 'claude_agent_sdk'} & set(sys.modules)\n"
+            "assert not found, f'Loaded: {found}'\n"
+        )
+        result = _run_subprocess_probe(code)
+        assert result.returncode == 0, result.stderr
 
     def test_job_lock_does_not_import_heavy_deps(self):
         """Every hook takes or probes a job lock, so job_lock.py stays off the vector stack."""
