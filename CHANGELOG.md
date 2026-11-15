@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.28.0](https://github.com/NodeJSmith/claude-code-recall/compare/v0.27.1...v0.28.0) (2026-11-15)
+
+
+### Features
+
+* add session recaps for restore pickers (backfill recaps, show-recaps) ([#264](https://github.com/NodeJSmith/claude-code-recall/issues/264)) ([fe1c2ef](https://github.com/NodeJSmith/claude-code-recall/commit/fe1c2ef9c0b5d0783c4a7fda98806169848dbac7))
+
 ## [0.27.1](https://github.com/NodeJSmith/claude-code-recall/compare/v0.27.0...v0.27.1) (2026-11-14)
 
 ### Skills
