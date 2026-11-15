@@ -10,7 +10,8 @@ and raise? Compare against the `(entry.get("message") or {})` idiom in
 ## Hook Hot Path
 Does any module imported by a hook entry point (`src/ccrecall/hooks/`,
 `src/ccrecall/health.py`, `src/ccrecall/config.py`) now import, even
-transitively, `db_vec.py`, `embeddings.py`, fastembed, numpy, or onnxruntime?
+transitively, `db_vec.py`, `embeddings.py`, `recaps.py`, fastembed, numpy,
+onnxruntime, or `claude_agent_sdk`?
 Does any hook path print anything to stdout besides its JSON envelope?
 
 ## Active-Branch Filtering
