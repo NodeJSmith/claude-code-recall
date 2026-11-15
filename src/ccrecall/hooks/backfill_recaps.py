@@ -26,12 +26,11 @@ The caller (the CLI command) holds this job's lock.
 """
 
 import contextlib
-import dataclasses
 import json
 import logging
 import sqlite3
 import sys
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from whenever import Instant
@@ -107,7 +106,7 @@ def run(
     report(result, json_mode=json_mode)
     logger.info(
         "recap run finished",
-        extra={"outcome": result.outcome, "reason": result.reason, **dataclasses.asdict(result.counts)},
+        extra={"outcome": result.outcome, "reason": result.reason, **asdict(result.counts)},
     )
     return EXIT_OK if result.outcome == run_history.OUTCOME_OK else EXIT_FAILED
 
@@ -164,7 +163,8 @@ def generate_recaps(
             streak.append(failure)
             if len(streak) >= recaps.MAX_CONSECUTIVE_FAILURES:
                 logger.error(
-                    "recap calls failed %d times in a row; stopping without cooling those sessions down", len(streak)
+                    "recap calls failed repeatedly; stopping without cooling those sessions down",
+                    extra={"consecutive_failures": len(streak)},
                 )
                 return RunResult(run_history.OUTCOME_FAILED, run_history.REASON_REPEATED_FAILURES, counts)
         record_cooldowns(conn, streak)
@@ -212,7 +212,7 @@ def attempt(
 def report(result: RunResult, *, json_mode: bool) -> None:
     counts = result.counts
     if json_mode:
-        print(json.dumps({"outcome": result.outcome, "reason": result.reason, **dataclasses.asdict(counts)}))
+        print(json.dumps({"outcome": result.outcome, "reason": result.reason, **asdict(counts)}))
         return
     line = f"Recaps: {counts.generated} generated, {counts.failed} failed, {counts.selected} selected"
     if result.outcome == run_history.OUTCOME_FAILED and result.reason is not None:

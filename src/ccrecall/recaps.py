@@ -386,10 +386,10 @@ async def generate_async(prompt: str) -> str:
             f"Claude returned an error: {result.result_error or result.assistant_error}",
             classify_failure(None, result.assistant_error, result.api_status),
         )
-    recap = result.text.strip()[:OUTPUT_CAP_CHARS].strip()
-    if not recap:
+    text = result.text.strip()[:OUTPUT_CAP_CHARS].strip()
+    if not text:
         raise RecapCallError("Claude returned an empty recap")
-    return recap
+    return text
 
 
 def generate(prompt: str) -> str:
@@ -465,7 +465,7 @@ def read_recaps(conn: sqlite3.Connection, ids: list[str]) -> list[SessionRecap]:
         if not rows:
             results.append(SessionRecap(session_id, None))
             continue
-        for uuid, harness_text, harness_at, generated_text, generated_as_of, last_at in rows:
+        for session_uuid, harness_text, harness_at, generated_text, generated_as_of, last_at in rows:
             recap = pick_recap(
                 harness_text=harness_text,
                 harness_at=harness_at,
@@ -473,7 +473,7 @@ def read_recaps(conn: sqlite3.Connection, ids: list[str]) -> list[SessionRecap]:
                 generated_as_of=generated_as_of,
                 last_message_at=last_at,
             )
-            results.append(SessionRecap(uuid, recap))
+            results.append(SessionRecap(session_uuid, recap))
     return results
 
 
