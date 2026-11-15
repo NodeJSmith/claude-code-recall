@@ -1,7 +1,7 @@
 # Design: Session Recaps (attempt 3)
 
 **Date:** 2026-11-15
-**Status:** draft
+**Status:** ratified
 **Mode:** sketch
 **Prior art:** design/specs/021-session-recaps-v3/prior-art.md
 
