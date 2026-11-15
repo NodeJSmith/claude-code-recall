@@ -16,17 +16,24 @@ from cyclopts import App, ArgumentCollection, Group, Parameter
 from cyclopts.validators import Number
 
 from ccrecall import health, job_lock
+from ccrecall import recaps as recaps_mod
 from ccrecall import recent_chats as recent_chats_mod
 from ccrecall import search_cli as search_mod
 from ccrecall import session_tail as session_tail_mod
 from ccrecall import status as status_mod
 from ccrecall.cli import app, backfill_app
 from ccrecall.cli.context import DEFAULT_CLI_CONTEXT, CLIContextParam
-from ccrecall.config import DEFAULT_DB_PATH, JOB_KEY_BACKFILL_EMBEDDINGS, load_settings_for_db
+from ccrecall.config import (
+    DEFAULT_DB_PATH,
+    JOB_KEY_BACKFILL_EMBEDDINGS,
+    JOB_KEY_BACKFILL_RECAPS,
+    load_settings_for_db,
+)
 from ccrecall.db import DEFAULT_PROJECTS_DIR, get_connection
 from ccrecall.embeddings import DEFAULT_EMBED_THREADS
 from ccrecall.hooks import backfill_embeddings as backfill_embeddings_mod
 from ccrecall.hooks import backfill_query as backfill_query_mod
+from ccrecall.hooks import backfill_recaps as backfill_recaps_mod
 from ccrecall.hooks import backfill_summaries as backfill_summaries_mod
 from ccrecall.hooks import backfill_tool_content as backfill_tool_content_mod
 from ccrecall.hooks import import_conversations as import_mod
@@ -344,6 +351,80 @@ def cmd_backfill_tool_content(
         db=db,
     )
     raise SystemExit(code)
+
+
+@backfill_app.command(name="recaps")
+def cmd_backfill_recaps(
+    *,
+    days: Annotated[
+        int,
+        Parameter(validator=Number(gte=1), help="Only sessions whose last message is within the last N days (>= 1)."),
+    ] = recaps_mod.DEFAULT_DAYS,
+    limit: Annotated[
+        int | None,
+        Parameter(validator=Number(gte=1), help="Make at most N Claude calls this run (>= 1)."),
+    ] = None,
+    idle_minutes: Annotated[
+        int,
+        Parameter(
+            validator=Number(gte=0),
+            help="Only sessions idle at least this long; pass 0 on a boot-time run to catch sessions a "
+            "shutdown cut off.",
+        ),
+    ] = recaps_mod.DEFAULT_IDLE_MINUTES,
+    db: _DB = DEFAULT_DB_PATH,
+    ctx: CLIContextParam = DEFAULT_CLI_CONTEXT,
+) -> None:
+    """Generate a one-or-two-sentence recap for each session that has stopped (opt-in).
+
+    Imports first, then makes one Claude call per session that needs a recap, using your
+    Claude Code login. This sends the session's prose to Anthropic, which received it when
+    the session ran; projects in exclude_projects are never sent. Read recaps with
+    `ccrecall show-recaps`.
+
+    With --json: {outcome, reason, selected, generated, failed}
+    """
+    # One run at a time: skip, not queue, so a timer firing over a slow run is harmless.
+    lock = job_lock.acquire(JOB_KEY_BACKFILL_RECAPS, scope=job_lock.backfill_scope(days=days, limit=limit, db=db))
+    if lock is None:
+        print("ccrecall backfill recaps: another instance is already running — skipping", file=sys.stderr)
+        raise SystemExit(backfill_recaps_mod.EXIT_OK)
+    with lock:
+        code = backfill_recaps_mod.run(
+            days=days, limit=limit, idle_minutes=idle_minutes, json_mode=ctx.json_mode, verbose=ctx.debug, db=db
+        )
+    raise SystemExit(code)
+
+
+@app.command(name="show-recaps")
+def cmd_show_recaps(
+    ids: Annotated[
+        list[str],
+        Parameter(help="Session UUIDs, or the 8-character prefixes ccrecall prints elsewhere."),
+    ],
+    /,
+    *,
+    db: _DB = DEFAULT_DB_PATH,
+    ctx: CLIContextParam = DEFAULT_CLI_CONTEXT,
+) -> None:
+    """Show each session's recap from the database, without calling Claude.
+
+    The recap is Claude Code's own when it is the newer one, otherwise the one
+    `ccrecall backfill recaps` generated. `current` is false when the session has
+    moved on since the recap. A prefix matching several sessions shows each; an
+    unknown id shows a row with no recap.
+
+    With --json: {recaps: [{session_id, text, source, current, as_of}]}, where
+    source is "claude_code" or "generated", and text, source and as_of are null
+    when the session has no recap.
+    """
+    with get_connection(load_settings_for_db(db)) as conn:
+        rows = recaps_mod.read_recaps(conn, ids)
+    if ctx.json_mode:
+        print(json.dumps({"recaps": [row.to_json() for row in rows]}))
+        return
+    for row in rows:
+        print(recaps_mod.format_line(row))
 
 
 @app.command(name="recent")

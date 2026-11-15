@@ -33,6 +33,8 @@ def update_branch_row(
     files_json: str | None,
     commits_json: str | None,
     tool_counts_json: str | None,
+    away_summary: str | None,
+    away_summary_at: str | None,
 ) -> None:
     """UPDATE an existing branches row in place."""
     cursor.execute(
@@ -45,7 +47,9 @@ def update_branch_row(
             exchange_count = ?,
             files_modified = ?,
             commits = ?,
-            tool_counts = ?
+            tool_counts = ?,
+            away_summary = ?,
+            away_summary_at = ?
         WHERE id = ?
         """,
         (
@@ -57,6 +61,8 @@ def update_branch_row(
             files_json,
             commits_json,
             tool_counts_json,
+            away_summary,
+            away_summary_at,
             branch_db_id,
         ),
     )
@@ -72,14 +78,17 @@ def insert_branch_row(
     files_json: str | None,
     commits_json: str | None,
     tool_counts_json: str | None,
+    away_summary: str | None,
+    away_summary_at: str | None,
 ) -> int | None:
     """INSERT a new branches row; return lastrowid (None only if the INSERT did not run)."""
     cursor.execute(
         """
         INSERT INTO branches
             (session_id, leaf_uuid, is_active,
-             started_at, ended_at, exchange_count, files_modified, commits, tool_counts)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+             started_at, ended_at, exchange_count, files_modified, commits, tool_counts,
+             away_summary, away_summary_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             session_id,
@@ -91,6 +100,8 @@ def insert_branch_row(
             files_json,
             commits_json,
             tool_counts_json,
+            away_summary,
+            away_summary_at,
         ),
     )
     return cursor.lastrowid
@@ -116,6 +127,8 @@ def upsert_branch(
     """
     leaf_uuid = branch["leaf_uuid"]
     is_active = branch["is_active"]
+    away_summary = branch.get("away_summary")
+    away_summary_at = branch.get("away_summary_at")
 
     cursor.execute(
         "SELECT id FROM branches WHERE session_id = ? AND is_active = 1",
@@ -135,6 +148,8 @@ def upsert_branch(
             files_json,
             commits_json,
             tool_counts_json,
+            away_summary,
+            away_summary_at,
         )
     else:
         branch_db_id = insert_branch_row(
@@ -147,6 +162,8 @@ def upsert_branch(
             files_json,
             commits_json,
             tool_counts_json,
+            away_summary,
+            away_summary_at,
         )
     # branch_db_id is set on both paths above: row[0] (UPDATE) or lastrowid (INSERT,
     # non-None after a successful insert). Narrow for the type checker.

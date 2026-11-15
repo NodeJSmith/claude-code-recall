@@ -228,4 +228,4 @@ def test_module_imports_no_vector_or_embedding_modules():
 
 
 def test_run_history_module_exposes_every_kind_with_a_job_lock():
-    assert set(run_history.KIND_JOB_KEYS) == {KIND_IMPORT, KIND_SYNC, KIND_BACKFILL}
+    assert set(run_history.KIND_JOB_KEYS) == {KIND_IMPORT, KIND_SYNC, KIND_BACKFILL, run_history.KIND_RECAPS}

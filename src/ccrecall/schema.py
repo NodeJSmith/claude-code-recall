@@ -65,6 +65,8 @@ CREATE TABLE IF NOT EXISTS branches (
   summary_enrichment_error TEXT,
   summary_enrichment_updated_at DATETIME,
   summary_source_hash TEXT,
+  away_summary TEXT,
+  away_summary_at TEXT,
   UNIQUE(session_id, leaf_uuid)
 );
 CREATE INDEX IF NOT EXISTS idx_branches_session ON branches(session_id);
@@ -150,6 +152,17 @@ CREATE INDEX IF NOT EXISTS idx_chunks_version ON chunks(embedding_version);
 -- upgrade the chunks table already exists WITHOUT cap_tokens, so a CREATE INDEX
 -- referencing that column in SCHEMA_CORE would crash before the migration gets
 -- a chance to ADD COLUMN.
+
+-- Generated session recaps (`ccrecall backfill recaps`), one row per session.
+-- text/as_of are null until a call succeeds; error/attempted_at record the
+-- latest failed attempt and are cleared by the next success.
+CREATE TABLE IF NOT EXISTS recaps (
+  session_id   INTEGER PRIMARY KEY REFERENCES sessions(id),
+  text         TEXT,
+  as_of        TEXT,
+  error        TEXT,
+  attempted_at TEXT
+);
 
 """
 

@@ -2,7 +2,7 @@
 
 **Conversation history and semantic search for Claude Code.**
 
-ccrecall stores your Claude Code sessions in a local SQLite database so you can recall past conversations, search across them by keyword and meaning, and get automatic context on session start. Storage, sync, summaries, and semantic search all run entirely on your machine — no data leaves it.
+ccrecall stores your Claude Code sessions in a local SQLite database so you can recall past conversations, search across them by keyword and meaning, and get automatic context on session start. Storage, sync, summaries, and semantic search all run entirely on your machine, and no data leaves it. The one exception is opt-in: `ccrecall backfill recaps` sends a session's prose to Anthropic, the same party that received it when the session ran, to write a short recap. Projects in `exclude_projects` are never sent.
 
 > ccrecall is an independent, community project for [Claude Code](https://docs.anthropic.com/en/docs/claude-code). It is not affiliated with, endorsed by, or sponsored by Anthropic.
 
@@ -54,14 +54,14 @@ Queued embedding work counts as overdue once no full backfill has succeeded in `
 
 - **`verdict`**: `healthy`, `working`, or `needs-attention`. It is the worst `group` present.
 - **`group`**: `action` (needs action), `working` (working on it), or `none` (nothing to do). A finding's `id` is stable, but its `group` can change with circumstances. For example, `embedding-backlog` is `working` while a backfill drains it and `action` once it is overdue, and `<kind>-failed` is `working` when the cause was a busy database.
-- **`id`**: one of `no-database`, `schema-behind`, `schema-ahead`, `not-writable`, `embedding-unavailable`, `embedding-backlog`, `fixable-sessions`, `unfixable-sessions`, `sessions-in-progress`, `deleted-transcripts`, `draft-sessions`, `unembeddable-sessions`, `tool-content-pending`, `skipped-by-design`, `duplicate-active-branch`, `check-failed`, and per background run `<kind>-failed` (`import`, `repair`, `sync`, `backfill`), `<kind>-killed` (`import`, `sync`, `backfill`), and `<kind>-running` / `<kind>-stuck` (`import`, `backfill`). `check-failed` can appear more than once, one per check that raised.
+- **`id`**: one of `no-database`, `schema-behind`, `schema-ahead`, `not-writable`, `embedding-unavailable`, `embedding-backlog`, `fixable-sessions`, `unfixable-sessions`, `sessions-in-progress`, `deleted-transcripts`, `draft-sessions`, `unembeddable-sessions`, `tool-content-pending`, `skipped-by-design`, `duplicate-active-branch`, `check-failed`, and per background run `<kind>-failed` (`import`, `repair`, `sync`, `backfill`, `recaps`), `<kind>-killed` (`import`, `sync`, `backfill`, `recaps`), and `<kind>-running` / `<kind>-stuck` (`import`, `backfill`). `check-failed` can appear more than once, one per check that raised.
 - **`fix`**: a command, a sentence of instructions, or `null` when there's nothing to do. Don't execute it blindly.
 - **`summary`**: `sessions`, `embedded_pct`, and `last_sync` are each `null` when unknown (for example, `sessions` before a pending schema upgrade has run). With no database, `sessions` is `0`.
 - **`sessions`**: present only with `doctor --list <id>`, on that finding, when the finding is present and `listable`. A missing array means the finding isn't there or names no sessions.
 
 ## What runs when
 
-Everything below runs in the background, started by a Claude Code hook, except the two backfills, which run only when you start them. Each background job holds a lock while it runs, so a second copy skips instead of running twice. Logs go to `~/.ccrecall/ccrecall-<process>.log`.
+Everything below runs in the background, started by a Claude Code hook, except the backfills and recap generation, which run only when you start them. Each background job holds a lock while it runs, so a second copy skips instead of running twice. Logs go to `~/.ccrecall/ccrecall-<process>.log`.
 
 | Work | When it runs | How you'd know it failed |
 |---|---|---|
@@ -72,6 +72,7 @@ Everything below runs in the background, started by a Claude Code hook, except t
 | **Model warm-up** (`ccrecall-warm-model`) | Every SessionStart. Downloads the embedding model the first time, then returns at once | Its log, `ccrecall-warm-model.log`. If the model stays unavailable, sync's embedding fails and raises the alert above |
 | **Embedding backfill** (`ccrecall backfill embeddings`) | Only when you run it. It embeds imported history, which sync never embedded, and upgrades draft-quality vectors to full quality | `doctor` reports `backfill-failed`, `backfill-killed` or `backfill-stuck`, and `embedding-backlog` turns into needs-action once it's overdue (see `backfill_stale_hours`). Log: `ccrecall-backfill-embed.log` |
 | **Tool-content backfill** (`ccrecall backfill tool-content`) | Only when you run it. A one-time pass over sessions synced before ccrecall indexed tool calls | A SessionStart alert while sessions are left, and `doctor`'s `tool-content-pending`. Log: `ccrecall-backfill-tool-content.log` |
+| **Recap generation** (`ccrecall backfill recaps`) | Only when you run it or schedule it. See [Session recaps](#session-recaps) | `doctor` reports `recaps-failed` or `recaps-killed`. Log: `ccrecall-backfill-recaps.log` |
 
 `ccrecall backfill schedule write` doesn't schedule anything. It records that you have set up your own scheduled embedding backfill (cron, a systemd timer), which silences the draft-quality alert. `backfill schedule clear` removes that record and `backfill schedule status` shows it, along with how many draft-quality vectors remain.
 
@@ -96,6 +97,22 @@ When any of these holds, the next session injects a short alert for Claude to re
 ### Deleted transcripts
 
 Claude Code deletes old transcripts on its own schedule (its `cleanupPeriodDays` setting). Once a session is stored, deleting its transcript doesn't remove it from ccrecall: its messages stay stored and searchable, and `doctor` lists it under `deleted-transcripts` with nothing to do. What you lose is anything that reads the transcript itself: the session can't be re-imported or repaired, and `/ccr-resume` can't read its tail.
+
+## Session recaps
+
+A recap is one or two sentences saying what a session was for and where it stopped, for a session picker or anything else that lists past sessions. Claude Code writes its own when you step away from a session, and ccrecall stores the latest one. `ccrecall backfill recaps` writes one for sessions that lack a current recap:
+
+```bash
+ccrecall backfill recaps                   # sessions idle 30+ minutes, active in the last 7 days
+ccrecall backfill recaps --limit 20        # at most 20 Claude calls this run
+ccrecall backfill recaps --idle-minutes 0  # at boot: catch sessions a shutdown cut off
+```
+
+It imports first, then makes one Claude call per session through your Claude Code login (the bundled `claude` CLI; ccrecall sets no API key, though one already in your environment takes precedence). A session is recapped once it has at least three user turns, has been idle for `--idle-minutes`, and has moved on since its last recap. Each call sends the session's prose (your messages and Claude's replies, without tool calls or subagent reports) to Anthropic, the same party that received it when the session ran. Sessions in projects listed in `exclude_projects` are never sent, including ones stored before the project was excluded.
+
+A failure that would hit every session, such as being logged out or rate limited, stops the run, and the next run retries. A failure specific to one session skips that session for a day. The run exits 1 when any session failed, and `doctor` reports `recaps-failed` until a later run finishes cleanly. A typical timer runs it every 20 minutes, plus once at boot with `--idle-minutes 0`.
+
+`ccrecall show-recaps <id>...` reads recaps from the database without calling Claude. It takes full session ids or 8-character prefixes. With `--json` it prints `{"recaps": [{"session_id", "text", "source", "current", "as_of"}]}`, where `source` is `claude_code` or `generated`, the newer of the two wins (Claude Code's on a tie), and `current` is false once the session has moved past the recap. An unknown id, or a session with no recap, gets a row with `text`, `source` and `as_of` null.
 
 ## Semantic search
 
@@ -197,6 +214,8 @@ These are the `ccrecall` subcommands the `/ccr-*` skills invoke. You can run the
 | `ccrecall search-messages` | Searches individual exchanges by semantic similarity and returns short excerpts with their session handle. Used by `/ccr-recall` |
 | `ccrecall tail` | Reads the tail of a prior session's transcript to recover the last instruction and any unanswered question. Used by `/ccr-resume` and `/ccr-recall` |
 | `ccrecall backfill embeddings` | Opt-in seeding of embeddings for historical active-leaf branches (jina-v2-small-en via fastembed). Not auto-spawned. Supports `--days N` / `--limit N` / `--threads N`; throttled via `nice` + a single inference thread by default. Resumable |
+| `ccrecall backfill recaps` | Opt-in recap generation for stopped sessions (one Claude call each, through your Claude Code login). Supports `--days N` / `--limit N` / `--idle-minutes N`. See [Session recaps](#session-recaps) |
+| `ccrecall show-recaps` | Prints each given session's recap from the database, without calling Claude |
 | `ccrecall backfill tool-content` | Opt-in re-parse of already-synced sessions' JSONL files to populate `messages.tool_content` for rows synced before tool-content extraction existed. Not auto-spawned. Supports `--days N` / `--limit N`; resets `embedding_version` on touched branches so `backfill embeddings` re-embeds them. Resumable |
 
 ## Data flow
@@ -249,7 +268,7 @@ Example config:
 }
 ```
 
-> ccrecall is local-only. Nothing it stores or derives is sent anywhere.
+> ccrecall is local-only, with one opt-in exception: `ccrecall backfill recaps` sends session prose to Anthropic, which received it when the session ran, to write recaps. It never sends a project listed in `exclude_projects`. Nothing else it stores or derives is sent anywhere.
 
 ## Database
 

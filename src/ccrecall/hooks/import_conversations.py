@@ -18,6 +18,7 @@ from ccrecall import ingestion_status, job_lock, run_history
 from ccrecall.config import (
     DEFAULT_DB_PATH,
     get_db_path,
+    is_recap_call_project,
     load_settings,
     setup_logging,
 )
@@ -34,7 +35,7 @@ from ccrecall.hooks.subprocess_utils import reclaim_memory, try_load_libc
 from ccrecall.import_log_ops import has_pending_tool_content, unchanged_since_import
 from ccrecall.models import LOGGER_NAME
 from ccrecall.parsing import extract_session_uuid, sort_session_files
-from ccrecall.project_ops import key_could_match_excluded, upsert_project
+from ccrecall.project_ops import is_excluded_project, upsert_project
 from ccrecall.session_ops import sync_session, sync_session_group
 from ccrecall.transcript_sources import discover_project_transcript_files, is_safe_project_dir
 
@@ -279,7 +280,13 @@ def import_project(
     """
     Import all sessions from a project directory.
     Returns: (sessions_imported, messages_imported, sessions_skipped)
+
+    The directory recap-generation calls run in is never imported: those calls
+    copy other sessions' content, so importing one would duplicate it in search.
     """
+    if is_recap_call_project(project_dir):
+        return 0, 0, 0
+
     cursor = conn.cursor()
 
     project_key = normalize_project_key(project_dir.name)
@@ -292,10 +299,7 @@ def import_project(
     project_row = cursor.fetchone()
     project_name = project_row[0] if project_row else extract_project_name(str(project_dir))
 
-    if exclude_projects and (
-        project_name in exclude_projects
-        or (used_lossy_fallback and key_could_match_excluded(project_key, exclude_projects))
-    ):
+    if is_excluded_project(project_name, project_key, exclude_projects or [], lossy=used_lossy_fallback):
         return 0, 0, 0
 
     sessions_imported = 0
@@ -571,12 +575,12 @@ def _run(
         logger.info("Import skipped — another import holds the import job lock")
         return 0
     with lock:
-        return _import_locked(
+        return import_locked(
             settings, logger, db=db, projects_dir=projects_dir, project=project, repair_gaps=repair_gaps
         )
 
 
-def _import_locked(
+def import_locked(
     settings: dict,
     logger: logging.Logger,
     *,

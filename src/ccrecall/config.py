@@ -10,6 +10,7 @@ import contextlib
 import json
 import logging
 import os
+import re
 import sys
 import tempfile
 from logging.handlers import RotatingFileHandler
@@ -28,6 +29,11 @@ CONFIG_PATH = RUNTIME_DIR / "config.json"
 
 # Claude Code transcript directory
 DEFAULT_PROJECTS_DIR = CLAUDE_CONFIG_DIR / "projects"
+
+# The fixed cwd every recap-generation call runs from. Import always skips the
+# Claude Code project directory this maps to, so a call that leaves a transcript
+# behind (if --no-session-persistence ever stops working) is never imported.
+RECAP_CALL_DIR = RUNTIME_DIR / "recap-calls"
 
 # Hook filenames/prefixes — writer and reader live in different modules and must agree.
 CLEAR_HANDOFF_FILENAME = "clear-handoff.json"
@@ -71,6 +77,7 @@ JOB_KEY_BACKFILL_SUMMARIES = "ccrecall-backfill-summaries"
 JOB_KEY_BACKFILL_EMBEDDINGS = "ccrecall-backfill-embeddings"
 JOB_KEY_WARM_MODEL = "ccrecall-warm-model"
 JOB_KEY_SYNC = "ccrecall-sync-current"
+JOB_KEY_BACKFILL_RECAPS = "ccrecall-backfill-recaps"
 
 
 _LOG_RECORD_RESERVED_FIELDS = frozenset(logging.makeLogRecord({}).__dict__) | {"message", "asctime"}
@@ -104,6 +111,21 @@ def atomic_write_json(path: Path, data: dict) -> None:
     except Exception:
         Path(tmp).unlink(missing_ok=True)
         raise
+
+
+def claude_project_dir_name(cwd: Path) -> str:
+    """The directory name Claude Code stores a cwd's transcripts under.
+
+    Claude Code replaces every character that isn't an ASCII letter or digit with
+    a hyphen. This is the raw directory name, not ccrecall's project key, which
+    also folds worktrees into their repo.
+    """
+    return re.sub(r"[^A-Za-z0-9]", "-", str(cwd))
+
+
+def is_recap_call_project(project_dir: Path) -> bool:
+    """True for the Claude Code project directory recap-generation calls run in."""
+    return project_dir.name == claude_project_dir_name(RECAP_CALL_DIR)
 
 
 def resolve_backfill_stale_hours(raw_setting: object) -> float:

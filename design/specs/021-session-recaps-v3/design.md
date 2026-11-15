@@ -238,8 +238,19 @@ Ids are full session UUIDs or the 8-character prefixes ccrecall prints elsewhere
 
 ## Build
 
-- [ ] Implementation and tests committed
-- [ ] Docs: README.md's "no data leaves it" (opening paragraph) and "ccrecall is local-only. Nothing it stores or derives is sent anywhere." (the config section's closing note), and CLAUDE.md's frontmatter `data-sensitivity`, which says transcripts are "never transmitted", all say that `backfill recaps` sends session content to Anthropic, the same party that received it when the session ran, and that excluded projects are never sent
+- [x] Implementation and tests committed
+- [x] Docs: README.md's "no data leaves it" (opening paragraph) and "ccrecall is local-only. Nothing it stores or derives is sent anywhere." (the config section's closing note), and CLAUDE.md's frontmatter `data-sensitivity`, which says transcripts are "never transmitted", all say that `backfill recaps` sends session content to Anthropic, the same party that received it when the session ran, and that excluded projects are never sent
 - [ ] Ship-time challenge
 
 **Calls made during the build:**
+- Failure-class mapping (D5): run-level is `CLINotFoundError`/`CLIConnectionError` (`claude_unavailable`), an assistant error of `authentication_failed`/`billing_error` or HTTP 401/402/403 (`claude_auth`), `rate_limit` or 429 (`rate_limited`), and `server_error` or any 5xx (`api_unavailable`). Everything else is per-session, including `invalid_request`, a malformed or empty answer, and a crash with no status. An API outage hits every session the same way a rate limit does, so it's run-level rather than a day of cooldowns.
+- Per-call timeout: 300 s, and its expiry is a per-session failure. The largest prose-only input is 137k characters, so a normal call finishes well inside it.
+- New run-history reason codes `claude_unavailable`, `claude_auth`, `rate_limited`, `api_unavailable` and `repeated_failures`, with prose in `REASON_PROSE`, so `doctor`'s `recaps-failed` message says why the run stopped.
+- `recaps.session_id` is `sessions.id` with a foreign key, not the UUID: it matches every other table's key, and `show-recaps` resolves UUIDs and prefixes through `sessions`.
+- `models.py` is unchanged. The `away_summary` entry is read from the raw entry dict in `parsing.latest_away_summary`, with `isinstance` guards. Giving `TranscriptEntry` a typed top-level `content` would reject valid lines from other entry types that carry a different `content` shape.
+- `_migrate_to_v10` also runs inside the version gate after the v1/v2/v9 rebuilds, because the v1/v2 `branches` rebuilds drop columns they don't name. The migration matrix caught this, and its genuine-schema seeder now covers v9.
+- D9's import reuses `import_conversations.import_locked`, renamed from `_import_locked`, under the import job lock with the recap run's logger. Its progress output goes to stderr so `--json` stdout stays one object. An import that fails some projects doesn't stop the recap run, since import records its own run.
+- Exit codes: 0 when every attempted session succeeded, or when another recap run holds the lock; 1 for `partial` or `failed`, matching `ccrecall import`.
+- The `--days` window and the idle test use the branch's last message (D2). `branches.ended_at`, widened by a day, only prefilters the SQL.
+- `show-recaps` echoes an unknown id as the row's `session_id`, and its markdown output is one line per session: the 8-character id, the text, and its source and currency.
+- The generation-call exception is `recaps.RecapCallError`. Its `run_reason` names the run-level reason, and is None for a per-session failure.

@@ -253,4 +253,4 @@ class TestRendering:
 
 def test_verdict_group_names_are_the_json_contract():
     assert (GROUP_ACTION, GROUP_WORKING, GROUP_NONE) == ("action", "working", "none")
-    assert run_history.RUN_KINDS == ("import", "repair", "sync", "backfill")
+    assert run_history.RUN_KINDS == ("import", "repair", "sync", "backfill", "recaps")

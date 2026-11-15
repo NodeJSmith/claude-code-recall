@@ -22,7 +22,7 @@ log = logging.getLogger(LOGGER_NAME)
 
 # Current schema version. Bump when adding a migration and wire the new DDL
 # delta into _apply_migrations (see _migrate_to_v1 for the version-1 shape).
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 V7_BRANCH_COLUMNS = {
     "summary_enrichment_json": "TEXT",
@@ -324,6 +324,20 @@ def _migrate_to_v9(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_projects_key ON projects(key)")
 
 
+def _migrate_to_v10(conn: sqlite3.Connection) -> None:
+    """Version-10 migration: add Claude Code's latest away_summary recap to branches.
+
+    Unconditional like v3-v8, and run again after the gated rebuilds, since the
+    v1/v2 rebuilds of branches don't carry these columns.
+    """
+    for column in ("away_summary", "away_summary_at"):
+        try:
+            conn.execute(f"ALTER TABLE branches ADD COLUMN {column} TEXT")
+        except sqlite3.OperationalError as exc:  # noqa: PERF203
+            if "duplicate column name" not in str(exc):
+                raise
+
+
 def _warn_if_schema_ahead(current: int) -> None:
     """Log a WARNING if the database's stored version exceeds this code's SCHEMA_VERSION.
 
@@ -338,7 +352,7 @@ def _warn_if_schema_ahead(current: int) -> None:
         "database schema is ahead of this code's SCHEMA_VERSION — this install is "
         "probably older than the one that last migrated the database, so upgrade it. "
         "Version-gated reshape migrations (v1/v2/v9) are skipped; guarded additive "
-        "checks (v3-v8) still run. Queries written for the older schema may fail",
+        "checks (v3-v8, v10) still run. Queries written for the older schema may fail",
         extra={"db_user_version": current, "code_schema_version": SCHEMA_VERSION},
     )
 
@@ -380,6 +394,7 @@ def _apply_migrations(
     _migrate_to_v6(conn)
     _migrate_to_v7(conn)
     _migrate_to_v8(conn)
+    _migrate_to_v10(conn)
     conn.commit()
 
     if current >= SCHEMA_VERSION:
@@ -406,6 +421,8 @@ def _apply_migrations(
                     migrate_to_v2(conn)
                 if current < 9:
                     _migrate_to_v9(conn)
+                # The v1/v2 rebuilds recreate branches without these columns.
+                _migrate_to_v10(conn)
                 conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             conn.execute("COMMIT")
             if current < SCHEMA_VERSION:
