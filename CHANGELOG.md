@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.28.1](https://github.com/NodeJSmith/claude-code-recall/compare/v0.28.0...v0.28.1) (2026-11-21)
+
+
+### Bug Fixes
+
+* **deps:** update dependency claude-agent-sdk to v0.2.183 ([#266](https://github.com/NodeJSmith/claude-code-recall/issues/266)) ([29b51e4](https://github.com/NodeJSmith/claude-code-recall/commit/29b51e490df78b4e1e7846b6e0ae53f9ce601b0a))
+* **deps:** update dependency claude-agent-sdk to v0.2.184 ([#268](https://github.com/NodeJSmith/claude-code-recall/issues/268)) ([2481f58](https://github.com/NodeJSmith/claude-code-recall/commit/2481f586ad0fe837acde25731b4d967a796c0adf))
+
 ## [0.28.0](https://github.com/NodeJSmith/claude-code-recall/compare/v0.27.1...v0.28.0) (2026-11-15)
 
 
