@@ -5,7 +5,7 @@
     "chore(deps) commits keep dependency bumps out of the release-please changelog.",
     "customManagers tracks each GitHub-hosted hook repo's rev in prek.toml against its tags: Renovate's built-in pre-commit manager only reads .pre-commit-config.yaml, so prek.toml pins would otherwise go stale silently.",
     "Renovate runs daily and may open PRs on any run. prHourlyLimit is 0 because a run lasts minutes: the preset's 2/hour cap meant about 2 new PRs per run and a months-long queue. prConcurrentLimit still bounds how many are open at once.",
-    "Non-major updates automerge through GitHub auto-merge once the required checks pass, after minimumReleaseAge holds each release for 3 days. Updates with no release timestamp skip that hold (minimumReleaseAgeBehaviour timestamp-optional): Renovate has none for digest updates, which is how the SHA-pinned GitHub Actions tracking a major tag update, and the default timestamp-required would hold those forever. Major updates and the Python runtime never automerge.",
+    "Non-major updates automerge through GitHub auto-merge once the required checks pass, after minimumReleaseAge holds each release for 3 days. Updates with no release timestamp skip that hold (minimumReleaseAgeBehaviour timestamp-optional): Renovate has none for digest updates, which is how the SHA-pinned GitHub Actions tracking a major tag update, and the default timestamp-required would hold those forever. Major updates also automerge for dev tooling only (Python dependency-groups, GitHub Actions action/workflow refs): a break fails CI and nothing ships to users. Majors of runtime dependencies and the Python runtime never automerge.",
     "Groups keep related bumps in one PR: prek, prek-action and every prek.toml hook rev move together; GitHub Actions non-major updates are batched."
   ],
   "extends": ["config:recommended"],
@@ -31,6 +31,12 @@
     {
       "description": "Automerge non-major updates once the required checks pass",
       "matchUpdateTypes": ["minor", "patch", "digest", "pinDigest"],
+      "automerge": true
+    },
+    {
+      "description": "Automerge major updates of dev tooling once the required checks pass; runtime dependency majors stay manual",
+      "matchUpdateTypes": ["major"],
+      "matchDepTypes": ["dependency-groups", "action", "workflow"],
       "automerge": true
     },
     {
