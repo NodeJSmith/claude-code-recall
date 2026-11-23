@@ -54,7 +54,7 @@ dependencies = [
     "anyio>=4.14.2",
     # Exact pin: it also fixes the bundled `claude` CLI, whose --no-session-persistence
     # behavior recap generation relies on; bump it deliberately.
-    "claude-agent-sdk==0.2.185",
+    "claude-agent-sdk==0.2.186",
 ]
 
 [project.urls]
