@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.28.1](https://github.com/NodeJSmith/claude-code-recall/compare/v0.28.0...v0.28.1) (2026-11-28)
+
+
+### Bug Fixes
+
+* **deps:** update dependency claude-agent-sdk to v0.2.183 ([#266](https://github.com/NodeJSmith/claude-code-recall/issues/266)) ([29b51e4](https://github.com/NodeJSmith/claude-code-recall/commit/29b51e490df78b4e1e7846b6e0ae53f9ce601b0a))
+* **deps:** update dependency claude-agent-sdk to v0.2.184 ([#268](https://github.com/NodeJSmith/claude-code-recall/issues/268)) ([2481f58](https://github.com/NodeJSmith/claude-code-recall/commit/2481f586ad0fe837acde25731b4d967a796c0adf))
+* **deps:** update dependency claude-agent-sdk to v0.2.185 ([#269](https://github.com/NodeJSmith/claude-code-recall/issues/269)) ([d56cb8e](https://github.com/NodeJSmith/claude-code-recall/commit/d56cb8ef147234721d70a9ed3c1fe3bcfe0ede37))
+* **deps:** update dependency claude-agent-sdk to v0.2.186 ([#271](https://github.com/NodeJSmith/claude-code-recall/issues/271)) ([b6ef0d1](https://github.com/NodeJSmith/claude-code-recall/commit/b6ef0d1f1b2b4706c11ecddc965459cb5c5e9b3c))
+* **deps:** update dependency claude-agent-sdk to v0.2.187 ([#273](https://github.com/NodeJSmith/claude-code-recall/issues/273)) ([66b5c7d](https://github.com/NodeJSmith/claude-code-recall/commit/66b5c7dbb61c2f8bb3f7dd9d87bed17aaf1c5d9c))
+* **deps:** update dependency claude-agent-sdk to v0.2.188 ([#275](https://github.com/NodeJSmith/claude-code-recall/issues/275)) ([41cb69d](https://github.com/NodeJSmith/claude-code-recall/commit/41cb69d8f70c8d16a0b502c2aef60412403a1ade))
+* **deps:** update dependency claude-agent-sdk to v0.2.189 ([#276](https://github.com/NodeJSmith/claude-code-recall/issues/276)) ([ae3848f](https://github.com/NodeJSmith/claude-code-recall/commit/ae3848f36da937e0ef0a4e781bb03f541d7cbd55))
+* **deps:** update dependency pydantic to v2.14.4 ([#272](https://github.com/NodeJSmith/claude-code-recall/issues/272)) ([b3f5755](https://github.com/NodeJSmith/claude-code-recall/commit/b3f5755aa624215e6453fdac42e2ed14efe57f90))
+
 ## [0.28.0](https://github.com/NodeJSmith/claude-code-recall/compare/v0.27.1...v0.28.0) (2026-11-15)
 
 
