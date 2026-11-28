@@ -1678,6 +1678,18 @@ class TestCardFields:
         assert "abc123" in card["commits"]
         conn.close()
 
+    def test_inactive_branch_not_hydrated(self):
+        """hydrate_cards skips branches with is_active = 0."""
+        conn = sqlite3.connect(":memory:")
+        conn.executescript(SCHEMA)
+        conn.commit()
+        branch_id = self._seed_with_summary(conn)
+        conn.execute("UPDATE branches SET is_active = 0 WHERE id = ?", (branch_id,))
+        conn.commit()
+
+        assert hydrate_cards(conn.cursor(), [branch_id]) == []
+        conn.close()
+
     def test_card_handle_is_first_8_chars_of_uuid(self):
         """handle = session_uuid[:8]."""
         conn = sqlite3.connect(":memory:")

@@ -69,7 +69,7 @@ def hydrate_cards(
         FROM branches b
         JOIN sessions s ON b.session_id = s.id
         JOIN projects p ON s.project_id = p.id
-        WHERE b.id IN ({placeholders})
+        WHERE b.id IN ({placeholders}) AND b.is_active = 1
         """,
         branch_ids,
     ).fetchall()
